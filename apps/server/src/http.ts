@@ -68,12 +68,12 @@ import {
 
 const OTLP_TRACES_PROXY_PATH = "/api/observability/v1/traces";
 const LOOPBACK_HOSTNAMES = new Set(["127.0.0.1", "::1", "localhost"]);
-const SVG_CONTENT_SECURITY_POLICY = "default-src 'none'; style-src 'unsafe-inline'; sandbox";
+export const SVG_CONTENT_SECURITY_POLICY = "default-src 'none'; style-src 'unsafe-inline'; sandbox";
 // The sandbox gives the document an opaque origin: scripts run, but same-origin
 // cookies, storage, and API calls are out of reach. No modals: agent HTML can
 // open without a click (inline renders, and mobile loads it as the top document),
 // and must not raise blocking dialogs.
-const HTML_CONTENT_SECURITY_POLICY =
+export const HTML_CONTENT_SECURITY_POLICY =
   "sandbox allow-scripts allow-forms allow-popups allow-downloads";
 
 // Types a browser may render as a document if a proxy strips the disposition

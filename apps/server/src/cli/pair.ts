@@ -1,6 +1,7 @@
 import { GOAT_ENVIRONMENT_PATH, LEGACY_ENVIRONMENT_PATH } from "@goat/contracts/legacyT3Names";
 import {
   type AuthEnvironmentScope,
+  AuthHubProxyScope,
   AuthStandardClientScopes,
   ExecutionEnvironmentDescriptor,
   PortSchema,
@@ -464,6 +465,13 @@ const tailscaleServePortFlag = Flag.Int("tailscale-serve-port").pipe(
   Flag.withDefault(DEFAULT_TAILSCALE_SERVE_PORT),
 );
 
+const hubProxyFlag = Flag.Boolean("hub-proxy").pipe(
+  Flag.withDescription(
+    "Also let the paired device open this server's hub nodes (adds the hub:proxy scope).",
+  ),
+  Flag.withDefault(false),
+);
+
 export const pairCommand = Command.make("pair", {
   baseDir: baseDirFlag,
   scopes: authScopesFlag(AuthStandardClientScopes),
@@ -471,6 +479,7 @@ export const pairCommand = Command.make("pair", {
   label: labelFlag,
   tailscale: tailscaleFlag,
   tailscaleServePort: tailscaleServePortFlag,
+  hubProxy: hubProxyFlag,
 }).pipe(
   Command.withDescription(
     "Mint a pairing token for a running GOAT server and print it as a QR code.",
@@ -508,7 +517,7 @@ export const pairCommand = Command.make("pair", {
       const config = yield* makePairServerConfig({ target, logLevel });
       const issued = yield* mintPairingLink({
         config,
-        scopes: flags.scopes,
+        scopes: flags.hubProxy ? [...new Set([...flags.scopes, AuthHubProxyScope])] : flags.scopes,
         ttl: flags.ttl,
         label: flags.label,
       });

@@ -24,6 +24,15 @@ export function useEnvironmentShellSync(environmentId: EnvironmentId | null) {
   );
 }
 
+/** When the shell shown for this environment was captured, if that is known for it. */
+export function useEnvironmentSnapshotCapturedAt(environmentId: EnvironmentId | null) {
+  return useAtomValue(
+    environmentId === null
+      ? emptyShellSyncAtom
+      : environmentShell.offlineSnapshotAge(environmentId),
+  );
+}
+
 export const environmentPresentations = createEnvironmentPresentationAtoms({
   catalogValueAtom: environmentCatalog.catalogValueAtom,
   stateAtom: environmentCatalog.stateAtom,

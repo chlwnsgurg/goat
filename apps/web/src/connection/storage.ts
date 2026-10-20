@@ -2,7 +2,9 @@ import { goatStorageKey } from "@goat/contracts/legacyT3Names";
 import { createMigratingDatabaseOpener } from "../lib/indexedDbMigration";
 import { migratingStorage } from "@goat/client-runtime/storage-migration";
 import {
-  ConnectionCatalogDocument,
+  decodeConnectionCatalogStorage,
+  encodeConnectionCatalogStorage,
+  isFutureConnectionCatalog,
   type ConnectionCatalogDocument as ConnectionCatalogDocumentType,
   EMPTY_CONNECTION_CATALOG_DOCUMENT,
   ORCHESTRATION_CACHE_SCHEMA_VERSION,
@@ -75,9 +77,11 @@ const StoredVcsRefs = Schema.Struct({
   refs: VcsListRefsResult,
 });
 const StoredVcsRefsJson = Schema.fromJsonString(StoredVcsRefs);
-const ConnectionCatalogDocumentJson = Schema.fromJsonString(ConnectionCatalogDocument);
-const decodeConnectionCatalogDocument = Schema.decodeUnknownEffect(ConnectionCatalogDocumentJson);
-const encodeConnectionCatalogDocument = Schema.encodeEffect(ConnectionCatalogDocumentJson);
+const decodeConnectionCatalogDocument = decodeConnectionCatalogStorage;
+const encodeConnectionCatalogDocument = encodeConnectionCatalogStorage;
+const ShellMetaJson = Schema.fromJsonString(Persistence.ShellSnapshotMeta);
+const decodeShellMeta = Schema.decodeUnknownEffect(ShellMetaJson);
+const encodeShellMeta = Schema.encodeEffect(ShellMetaJson);
 const decodeStoredShellSnapshot = Schema.decodeUnknownEffect(StoredShellSnapshotJson);
 const decodeStoredThreadSnapshot = Schema.decodeUnknownEffect(StoredThreadSnapshotJson);
 const encodeStoredThreadSnapshot = Schema.encodeEffect(StoredThreadSnapshotJson);
@@ -468,6 +472,8 @@ export const makeCatalogStore = Effect.fn("web.connectionStorage.makeCatalogStor
     persistEmpty: boolean,
   ) {
     if (raw === null || raw.trim() === "") return EMPTY_CONNECTION_CATALOG_DOCUMENT;
+    if (isFutureConnectionCatalog(raw))
+      return yield* catalogError("decode", "This catalog requires a newer client.");
     return yield* decodeCatalog(raw).pipe(
       Effect.catch((error) =>
         Effect.gen(function* () {
@@ -785,6 +791,20 @@ export const layer = Layer.effectContext(
         })),
     });
     const cacheStore = Persistence.EnvironmentCacheStore.of({
+      loadShellMeta: (environmentId) =>
+        readDatabaseValue(database, SHELL_STORE_NAME, `${environmentId}:meta`).pipe(
+          Effect.flatMap((raw) =>
+            typeof raw === "string" ? decodeShellMeta(raw).pipe(Effect.asSome) : Effect.succeedNone,
+          ),
+          Effect.mapError((cause) => persistenceError("load-shell", cause)),
+        ),
+      saveShellMeta: (environmentId, meta) =>
+        encodeShellMeta(meta).pipe(
+          Effect.flatMap((raw) =>
+            writeDatabaseValue(database, SHELL_STORE_NAME, `${environmentId}:meta`, raw),
+          ),
+          Effect.mapError((cause) => persistenceError("save-shell", cause)),
+        ),
       loadShell: (environmentId) =>
         readDatabaseValue(database, SHELL_STORE_NAME, environmentId).pipe(
           Effect.tap(() => Effect.promise(() => projectFaviconCache.hydrate())),
@@ -969,6 +989,7 @@ export const layer = Layer.effectContext(
           [
             Effect.promise(() => projectFaviconCache.clearEnvironment(environmentId)),
             removeDatabaseValue(database, SHELL_STORE_NAME, environmentId),
+            removeDatabaseValue(database, SHELL_STORE_NAME, `${environmentId}:meta`),
             removeDatabaseValuesInRange(
               database,
               THREAD_STORE_NAME,

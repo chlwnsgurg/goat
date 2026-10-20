@@ -1,4 +1,9 @@
-import { SourceControlProviderKind } from "@goat/contracts";
+import {
+  AuthOrchestrationOperateScope,
+  SourceControlProviderKind,
+  WS_METHODS,
+  hubProxyAdmitsMethod,
+} from "@goat/contracts";
 import { describe, expect, it } from "vite-plus/test";
 import { EnvironmentId, ProjectId, CommandId, SourceControlDiscoveryResult } from "@goat/contracts";
 import * as Option from "effect/Option";
@@ -264,6 +269,7 @@ describe("add project shared logic", () => {
         commandId: CommandId.make("command"),
         projectId: ProjectId.make("project"),
         workspaceRoot: "/work/repo",
+        proxiedByHub: false,
       }),
     ).toMatchObject({
       type: "project.create",
@@ -274,6 +280,22 @@ describe("add project shared logic", () => {
       createWorkspaceRootIfMissing: true,
       defaultModelSelection: null,
     });
+  });
+
+  it("registers a folder through a hub only in the form the hub forwards", () => {
+    const build = (proxiedByHub: boolean) =>
+      buildProjectCreateCommand({
+        commandId: CommandId.make("command"),
+        projectId: ProjectId.make("project"),
+        workspaceRoot: "/work/repo",
+        proxiedByHub,
+      });
+    const forwarded = (payload: unknown) =>
+      hubProxyAdmitsMethod(WS_METHODS.projectsMutate, payload, [AuthOrchestrationOperateScope]);
+    expect(forwarded(build(true))).toBe(true);
+    expect(build(true).createWorkspaceRootIfMissing).toBe(false);
+    // A direct connection may still make the folder, which the hub would refuse.
+    expect(forwarded(build(false))).toBe(false);
   });
 });
 

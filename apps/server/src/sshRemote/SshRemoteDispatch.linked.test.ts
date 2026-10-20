@@ -91,6 +91,7 @@ const withLinkedHost = <A, E>(
       forgetEnvironment: noSsh,
       disconnectEnvironment: noSsh,
       revalidateTunnels: () => Effect.void,
+      issueClientSession: () => Effect.die("unused"),
       issueMcpClientSession: noSsh,
       runRemoteScript: noSsh,
     });

@@ -158,6 +158,9 @@ import * as McpSessionRegistry from "./mcp/McpSessionRegistry.ts";
 import * as PreviewAutomationBroker from "./mcp/PreviewAutomationBroker.ts";
 import * as DeviceService from "./device/DeviceService.ts";
 import * as DeviceHubProxy from "./device/DeviceHubProxy.ts";
+import * as HubProxyHttp from "./hubProxy/http.ts";
+import * as HubProxyNodes from "./hubProxy/HubProxyNodes.ts";
+import * as HubProxySessions from "./hubProxy/HubProxySessions.ts";
 import * as PreviewManager from "./preview/Manager.ts";
 import * as PortScanner from "./preview/PortScanner.ts";
 import * as ServerBrowser from "./preview/ServerBrowser.ts";
@@ -527,6 +530,14 @@ const layerDevice = DeviceService.layer.pipe(
   Layer.provide(layerServerSettings),
   Layer.provide(ProcessRunner.layer),
   Layer.provide(NetService.layer),
+);
+
+// One proxy session service for the /hub/nodes routes and the hubProxy RPCs, so unenrolling or
+// removing a node ends every socket open to it. It reads the runtime's one HubNodes, and the same
+// SshRemoteDispatch layer reference as the MCP tools, so the proxy shares their tunnel manager.
+const layerHubProxy = HubProxySessions.layer.pipe(
+  Layer.provideMerge(HubProxyNodes.layerFromHubNodes),
+  Layer.provide(SshRemoteDispatch.layer),
 );
 
 const layerWorkspaceEntries = WorkspaceEntries.layer.pipe(Layer.provide(WorkspacePaths.layer));
@@ -1134,6 +1145,7 @@ const layerRuntimeCoreDependenciesBase = Layer.mergeAll(
       Layer.provide(Layer.merge(layerMemoryService, layerMemorySync)),
     ),
   ),
+  Layer.provideMerge(layerHubProxy),
   Layer.provideMerge(
     HubNodes.layer.pipe(
       Layer.provide(HubNodeRepository.layer),
@@ -1286,6 +1298,7 @@ const layerMakeRoutes = Layer.mergeAll(
     ServerHttp.layerAssetRoute,
     ServerHttp.layerAttachmentUploadRoute,
     DeviceHubProxy.layer,
+    HubProxyHttp.layer,
     ServerBrowserStream.routeLayer,
     ServerHttp.layerStaticAndDevRoute,
     Ws.layer,

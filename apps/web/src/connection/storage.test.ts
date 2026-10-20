@@ -41,6 +41,29 @@ afterEach(() => {
 });
 
 describe("ConnectionStorage.makeCatalogStore", () => {
+  it.effect("refuses a future catalog without quarantining or overwriting it", () =>
+    Effect.gen(function* () {
+      const raw = JSON.stringify({ ...emptyCatalog, schemaVersion: 99 });
+      const writes: string[] = [];
+      const store = yield* ConnectionStorage.makeCatalogStore({
+        read: Effect.succeed(raw),
+        write: (value) =>
+          Effect.sync(() => {
+            writes.push(value);
+          }),
+        quarantine: (value) =>
+          Effect.sync(() => {
+            writes.push(value);
+          }),
+      });
+      expect(yield* Effect.flip(store.read)).toMatchObject({ _tag: "ConnectionTransientError" });
+      expect(yield* Effect.flip(store.update((document) => document))).toMatchObject({
+        _tag: "ConnectionTransientError",
+      });
+      expect(writes).toEqual([]);
+    }),
+  );
+
   it.effect("quarantines malformed catalogs and starts from an empty document", () =>
     Effect.gen(function* () {
       const writes: string[] = [];
@@ -515,5 +538,52 @@ describe("browser GitHub routing permissions", () => {
       );
       expect(yield* second.get(entry)).toBe("off");
     }).pipe(Effect.scoped),
+  );
+});
+
+describe("IndexedDB shell capture metadata", () => {
+  it.effect("round-trips capture time with its sequence", () =>
+    Effect.gen(function* () {
+      vi.stubGlobal("window", {});
+      const values = new Map<IDBValidKey, unknown>();
+      const database = Object.assign(new EventTarget(), {
+        transaction: () => {
+          const transaction = Object.assign(new EventTarget(), {
+            error: null,
+            objectStore: () => ({
+              get: (key: IDBValidKey) => {
+                const request = Object.assign(new EventTarget(), {
+                  result: values.get(key),
+                  error: null,
+                });
+                queueMicrotask(() => request.dispatchEvent(new Event("success")));
+                return request;
+              },
+              put: (value: unknown, key: IDBValidKey) => {
+                values.set(key, value);
+                queueMicrotask(() => transaction.dispatchEvent(new Event("complete")));
+              },
+            }),
+          });
+          return transaction;
+        },
+        close: vi.fn(),
+      });
+      vi.stubGlobal("indexedDB", {
+        open: () => {
+          const request = Object.assign(new EventTarget(), { result: database, error: null });
+          queueMicrotask(() => request.dispatchEvent(new Event("success")));
+          return request;
+        },
+      });
+      yield* Effect.gen(function* () {
+        const cache = yield* Persistence.EnvironmentCacheStore;
+        const id = EnvironmentId.make("node");
+        const meta = { snapshotSequence: 7, capturedAt: "2026-10-19T12:00:00.000Z" };
+        expect(yield* cache.loadShellMeta(id)).toEqual(Option.none());
+        yield* cache.saveShellMeta(id, meta);
+        expect(yield* cache.loadShellMeta(id)).toEqual(Option.some(meta));
+      }).pipe(Effect.provide(ConnectionStorage.layer));
+    }),
   );
 });

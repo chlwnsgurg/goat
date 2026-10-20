@@ -1,4 +1,7 @@
 import { vi } from "vite-plus/test";
+import { HubProxyAuthSource } from "./hubProxyAuthSource.ts";
+import { HubProxyConnectionTarget } from "./model.ts";
+import { HubProxyConnectionProfile } from "./catalog.ts";
 
 vi.mock("@goat/shared/goatConnect", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@goat/shared/goatConnect")>()),
@@ -84,6 +87,7 @@ function collectingTracer(spans: Array<string>): Tracer.Tracer {
 }
 
 const makeDependencies = Effect.fn("TestConnectionResolver.makeDependencies")((options?: {
+  readonly hubAuth?: HubProxyAuthSource["Service"];
   readonly profiles?: ReadonlyArray<ConnectionProfile>;
   readonly profileStore?: ConnectionProfileStore.ConnectionProfileStore["Service"];
   readonly credentials?: ReadonlyArray<readonly [string, ConnectionCredential]>;
@@ -159,6 +163,9 @@ const makeDependencies = Effect.fn("TestConnectionResolver.makeDependencies")((o
   });
 
   const layerDependencies = Layer.mergeAll(
+    options?.hubAuth === undefined
+      ? Layer.empty
+      : Layer.succeed(HubProxyAuthSource, options.hubAuth),
     RpcHttp.layerRemoteHttpClient(
       options?.fetch ??
         ((() =>
@@ -815,6 +822,113 @@ describe("ConnectionResolver", () => {
       const error = yield* Effect.flip(broker.prepare(catalogEntry(target)));
 
       expect(error).toBe(authorizationError);
+    }),
+  );
+});
+
+describe("hub proxy preparation", () => {
+  const target = new HubProxyConnectionTarget({
+    environmentId: ENVIRONMENT_ID,
+    label: "Node",
+    connectionId: "hub:hub:node",
+  });
+  const profile = new HubProxyConnectionProfile({
+    connectionId: target.connectionId,
+    environmentId: ENVIRONMENT_ID,
+    label: "Node",
+    hubEnvironmentId: EnvironmentId.make("hub"),
+    hubConnectionId: "primary",
+    nodeId: "node/path",
+  });
+  const descriptor = {
+    environmentId: ENVIRONMENT_ID,
+    label: "Node",
+    platform: { os: "linux", arch: "x64" },
+    serverVersion: "0.0.0-test",
+    orchestrationProtocolVersion: ORCHESTRATION_PROTOCOL_VERSION,
+    capabilities: {},
+  };
+
+  it.effect.each([null, { _tag: "Bearer" as const, token: "hub-token" }])(
+    "authenticates the descriptor and ticket exactly once, reuses the descriptor and preserves the node prefix (%j)",
+    (authorization) =>
+      Effect.gen(function* () {
+        const requests: { url: string; init: RequestInit }[] = [];
+        const layer = yield* makeDependencies({
+          hubAuth: {
+            resolve: () => Effect.succeed({ httpBaseUrl: "https://hub.test/", authorization }),
+          },
+          fetch: ((url, init) => {
+            requests.push({ url: String(url), init: init ?? {} });
+            return Promise.resolve(
+              String(url).includes("websocket-ticket")
+                ? Response.json({ ticket: "hub-ticket", expiresAt: "2026-10-20T00:00:00.000Z" })
+                : Response.json(descriptor),
+            );
+          }) satisfies typeof fetch,
+        });
+        const resolver = yield* ConnectionResolver.ConnectionResolver.pipe(Effect.provide(layer));
+        const prepared = yield* resolver.prepare(catalogEntry(target, Option.some(profile)));
+        expect(prepared.httpBaseUrl).toBe("https://hub.test/hub/nodes/node%2Fpath/");
+        expect(prepared.httpAuthorization).toEqual(authorization);
+        expect(requests.map((request) => request.url)).toEqual([
+          "https://hub.test/hub/nodes/node%2Fpath/.well-known/goat/environment",
+          "https://hub.test/hub/nodes/node%2Fpath/api/auth/websocket-ticket",
+        ]);
+        for (const request of requests) {
+          expect(new Headers(request.init.headers).get("authorization")).toBe(
+            authorization === null ? null : "Bearer hub-token",
+          );
+          if (authorization === null) expect(request.init.credentials).toBe("include");
+        }
+        const socket = new URL(prepared.socketUrl);
+        expect(socket.pathname).toBe("/hub/nodes/node%2Fpath/ws");
+        expect(socket.searchParams.get("wsTicket")).toBe("hub-ticket");
+        expect(socket.searchParams.get("connectionMethod")).toBe("direct");
+        expect(socket.searchParams.get("clientSurface")).toBe("web");
+        expect(socket.searchParams.get("orchestrationProtocol")).toBe(
+          String(ORCHESTRATION_PROTOCOL_VERSION),
+        );
+      }),
+  );
+
+  it.effect("refuses an identity mismatch before issuing a ticket", () =>
+    Effect.gen(function* () {
+      let calls = 0;
+      const layer = yield* makeDependencies({
+        hubAuth: {
+          resolve: () => Effect.succeed({ httpBaseUrl: "https://hub.test", authorization: null }),
+        },
+        fetch: (() => {
+          calls++;
+          return Promise.resolve(Response.json({ ...descriptor, environmentId: "wrong-node" }));
+        }) satisfies typeof fetch,
+      });
+      const resolver = yield* ConnectionResolver.ConnectionResolver.pipe(Effect.provide(layer));
+      expect(
+        yield* Effect.flip(resolver.prepare(catalogEntry(target, Option.some(profile)))),
+      ).toMatchObject({ _tag: "ConnectionBlockedError", reason: "configuration" });
+      expect(calls).toBe(1);
+    }),
+  );
+
+  it.effect.each([401, 403, 503])("classifies hub status %i", (status) =>
+    Effect.gen(function* () {
+      const layer = yield* makeDependencies({
+        hubAuth: {
+          resolve: () => Effect.succeed({ httpBaseUrl: "https://hub.test", authorization: null }),
+        },
+        fetch: (() =>
+          Promise.resolve(
+            Response.json({ message: "Unavailable" }, { status }),
+          )) satisfies typeof fetch,
+      });
+      const resolver = yield* ConnectionResolver.ConnectionResolver.pipe(Effect.provide(layer));
+      expect(
+        yield* Effect.flip(resolver.prepare(catalogEntry(target, Option.some(profile)))),
+      ).toMatchObject({
+        _tag: status === 503 ? "ConnectionTransientError" : "ConnectionBlockedError",
+      });
     }),
   );
 });

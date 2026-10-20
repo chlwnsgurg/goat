@@ -3,6 +3,7 @@ import {
   MEMORY_ADMINISTRATION_MCP_TOOLS,
   AttachmentCreateUploadUrlInput,
   AttachmentCreateUploadUrlResult,
+  type AuthEnvironmentScope,
   ChatAttachmentId,
   ChatFileAttachment,
   ChatImageAttachment,
@@ -336,6 +337,22 @@ export class SshRemoteDispatch extends Context.Service<
     ) => Effect.Effect<unknown, SshRemoteDispatchError | E, R>;
     /** Hosts this process holds an SSH tunnel to, and every linked host, sorted. */
     readonly connectedHosts: Effect.Effect<ReadonlyArray<string>>;
+    /**
+     * Forwards a node's GOAT server to a local port for the hub proxy, starting the runtime when
+     * needed. Takes the full target so a node's own user, host name and port win over the alias.
+     * Never wakes a stopped cloud machine.
+     */
+    readonly proxyEndpoint: (
+      target: DesktopSshEnvironmentTarget,
+    ) => Effect.Effect<
+      { readonly httpBaseUrl: string; readonly wsBaseUrl: string },
+      SshRemoteDispatchError
+    >;
+    /** Issues a node client session holding exactly `scopes`, for the hub proxy's own use. */
+    readonly issueProxySession: (
+      target: DesktopSshEnvironmentTarget,
+      scopes: ReadonlyArray<AuthEnvironmentScope>,
+    ) => Effect.Effect<SshTunnel.RemoteClientSession, SshRemoteDispatchError>;
   }
 >()("goat/sshRemote/SshRemoteDispatch") {}
 
@@ -1811,6 +1828,34 @@ const make = Effect.gen(function* () {
           ),
     );
 
+  const proxyEndpoint: SshRemoteDispatch["Service"]["proxyEndpoint"] = (target) =>
+    Effect.gen(function* () {
+      yield* readyCloudTarget(target, false);
+      const bootstrap = yield* withRuntime(
+        manager.ensureEnvironment(target, { ...AGENT_CONNECTION, keyOnly: true }),
+      ).pipe(unavailable(target.alias));
+      if ("type" in bootstrap)
+        return yield* failure(
+          "host_unavailable",
+          pendingRuntimeMessage(target.alias, bootstrap.pending),
+        );
+      connected.add(target.alias);
+      return { httpBaseUrl: bootstrap.httpBaseUrl, wsBaseUrl: bootstrap.wsBaseUrl };
+    });
+
+  const issueProxySession: SshRemoteDispatch["Service"]["issueProxySession"] = (target, scopes) =>
+    Effect.gen(function* () {
+      yield* readyCloudTarget(target, false);
+      return yield* withRuntime(
+        manager.issueClientSession(target, {
+          subject: "hub-proxy",
+          label: "GOAT hub proxy",
+          ttl: SESSION_TTL,
+          scopes,
+        }),
+      ).pipe(unavailable(target.alias));
+    });
+
   /**
    * callHostTool for a linked host: the saved session instead of one issued
    * over SSH. It cannot narrow that session to the caller, so a write needs a
@@ -2056,6 +2101,8 @@ const make = Effect.gen(function* () {
     runHostScript,
     preflightTarget,
     identifyTarget,
+    proxyEndpoint,
+    issueProxySession,
   });
 });
 

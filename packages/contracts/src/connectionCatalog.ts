@@ -30,6 +30,12 @@ export const SavedConnectionRoute = Schema.Union([
   }),
   Schema.Struct({ kind: Schema.Literal("direct"), httpBaseUrl: Schema.String }),
   Schema.Struct({ kind: Schema.Literal("t3-connect") }),
+  /** Through another environment acting as the hub; the hub holds the node's session. */
+  Schema.Struct({
+    kind: Schema.Literal("hub-proxy"),
+    hubEnvironmentId: EnvironmentId,
+    nodeId: Schema.String,
+  }),
 ]);
 export type SavedConnectionRoute = typeof SavedConnectionRoute.Type;
 

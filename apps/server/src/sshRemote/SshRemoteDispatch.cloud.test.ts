@@ -51,6 +51,7 @@ const withDispatch = <A, E>(
       disconnectEnvironment: (target) =>
         Effect.sync(() => void events.push(`disconnect:${target.alias}`)),
       revalidateTunnels: () => Effect.void,
+      issueClientSession: () => Effect.die("unused"),
       issueMcpClientSession: () => Effect.die("unused"),
       runRemoteScript: (target, input) =>
         Effect.sync(() => {

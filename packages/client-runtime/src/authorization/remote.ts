@@ -9,7 +9,7 @@ import {
 } from "@goat/contracts";
 import { encodeOAuthScope } from "@goat/shared/oauthScope";
 import * as Effect from "effect/Effect";
-import { environmentEndpointUrl } from "../environment/endpoint.ts";
+import { environmentEndpointUrl, environmentRoutePrefix } from "../environment/endpoint.ts";
 import {
   executeEnvironmentHttpRequest,
   makeEnvironmentHttpApiGroupClient,
@@ -224,8 +224,10 @@ export const resolveRemoteWebSocketConnectionUrl = Effect.fn(
   });
 
   const url = new URL(input.wsBaseUrl);
-  if (url.pathname === "" || url.pathname === "/") {
-    url.pathname = "/ws";
+  const routePrefix = environmentRoutePrefix(new URL(input.httpBaseUrl));
+  const socketPath = url.pathname.replace(/\/+$/, "");
+  if (socketPath === "" || (routePrefix !== "" && socketPath === routePrefix)) {
+    url.pathname = `${socketPath}/ws`;
   }
   url.searchParams.set("wsTicket", issued.ticket);
   appendClientConnectionParams(url, input.clientMetadata, input.connectionMethod);
@@ -250,8 +252,10 @@ export const resolveRemoteDpopWebSocketConnectionUrl = Effect.fn(
     ...(input.timeoutMs ? { timeoutMs: input.timeoutMs } : {}),
   });
   const url = new URL(input.wsBaseUrl);
-  if (url.pathname === "" || url.pathname === "/") {
-    url.pathname = "/ws";
+  const routePrefix = environmentRoutePrefix(new URL(input.httpBaseUrl));
+  const socketPath = url.pathname.replace(/\/+$/, "");
+  if (socketPath === "" || (routePrefix !== "" && socketPath === routePrefix)) {
+    url.pathname = `${socketPath}/ws`;
   }
   url.searchParams.set("wsTicket", issued.ticket);
   appendClientConnectionParams(url, input.clientMetadata, input.connectionMethod);

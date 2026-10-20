@@ -194,6 +194,8 @@ export const ExecutionEnvironmentCapabilities = Schema.Struct({
   serverBrowser: Schema.optionalKey(Schema.Boolean),
   /** Server exposes the bounded SSH runtime activity probe. */
   sshActivity: Schema.optionalKey(Schema.Boolean),
+  /** Server proxies its nodes' APIs below `/hub/nodes` for clients holding `hub:proxy`. */
+  hubProxy: Schema.optionalKey(Schema.Boolean),
   /** Server answers `POST /.well-known/goat/runtime/drain`: it can stop admitting turns, drain,
       and exit on its own for a replacement. Servers without it are attach-only. */
   drainRestart: Schema.optionalKey(Schema.Boolean),

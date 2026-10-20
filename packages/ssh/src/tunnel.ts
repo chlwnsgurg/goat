@@ -9,6 +9,7 @@ import {
   LEGACY_SSH_NODE_SCRIPT_PATH_KEY,
 } from "@goat/contracts/legacyT3Names";
 import type {
+  AuthEnvironmentScope,
   DesktopSshEnvironmentReadyOrPending,
   DesktopSshRuntimePendingResult,
   SshRuntimePendingReplacement,
@@ -21,6 +22,7 @@ import type {
   SshRuntimePhase,
 } from "@goat/contracts";
 import {
+  AuthEnvironmentScopes,
   SshRuntimePendingReplacementSchema,
   ORCHESTRATION_PROTOCOL_VERSION,
   RUNTIME_DRAIN_DEFAULT_GRACE_SECONDS,
@@ -673,6 +675,10 @@ export interface SshEnvironmentManagerShape {
     SshEnvironmentEffectError,
     SshEnvironmentEffectContext
   >;
+  readonly issueClientSession: (
+    target: DesktopSshEnvironmentTarget,
+    options: RemoteClientSessionOptions,
+  ) => Effect.Effect<RemoteClientSession, SshEnvironmentEffectError, SshEnvironmentEffectContext>;
   /** Runs a POSIX `sh` script on the remote host with this manager's SSH auth. */
   readonly runRemoteScript: (
     target: DesktopSshEnvironmentTarget,
@@ -706,6 +712,19 @@ export interface RemoteMcpClientSession {
   readonly runtimeModeCeilingApplied: boolean;
 }
 
+export interface RemoteClientSessionOptions {
+  readonly subject: string;
+  readonly label: string;
+  readonly ttl: string;
+  readonly scopes: ReadonlyArray<AuthEnvironmentScope>;
+}
+
+export interface RemoteClientSession {
+  readonly token: string;
+  readonly expiresAt: string | null;
+  readonly scopes: ReadonlyArray<AuthEnvironmentScope>;
+}
+
 const RemoteLaunchResult = Schema.Union([
   Schema.Struct({
     status: Schema.Literal("ready"),
@@ -727,9 +746,18 @@ const RemoteMcpSessionResult = Schema.Struct({
   expiresAt: Schema.optional(Schema.NullOr(Schema.String)),
 });
 
+const RemoteClientSessionResult = Schema.Struct({
+  token: Schema.String,
+  expiresAt: Schema.optional(Schema.NullOr(Schema.String)),
+  scopes: AuthEnvironmentScopes,
+});
+
 const decodeRemoteLaunchResult = Schema.decodeEffect(fromLenientJson(RemoteLaunchResult));
 const decodeRemotePairingResult = Schema.decodeEffect(fromLenientJson(RemotePairingResult));
 const decodeRemoteMcpSessionResult = Schema.decodeEffect(fromLenientJson(RemoteMcpSessionResult));
+const decodeRemoteClientSessionResult = Schema.decodeEffect(
+  fromLenientJson(RemoteClientSessionResult),
+);
 
 const decodeRemoteJsonOutput = <A, E>(
   stdout: string,
@@ -2480,6 +2508,14 @@ else
 fi
 `;
 
+const REMOTE_CLIENT_SESSION_SCRIPT = `set -eu
+STATE_DIR="$HOME/.goat/ssh-launch/@@GOAT_STATE_KEY@@"
+DEFAULT_SERVER_HOME="$HOME/.goat"
+@@GOAT_RUNNER_SETUP@@
+recheck_selected_before_use
+"$RUNNER_FILE" auth session issue --base-dir "$DEFAULT_SERVER_HOME" --subject @@GOAT_SUBJECT@@ @@GOAT_SCOPES@@ --ttl @@GOAT_TTL@@ --label @@GOAT_LABEL@@ --json
+`;
+
 const REMOTE_STOP_SCRIPT = `set -eu
 DEFAULT_SERVER_HOME="$HOME/.goat"
 STATE_DIR="$HOME/.goat/ssh-launch/@@GOAT_STATE_KEY@@"
@@ -2761,6 +2797,69 @@ export function buildRemoteMcpSessionScript(
     }),
   });
 }
+
+export function buildRemoteClientSessionScript(
+  stateKey: string,
+  options: RemoteClientSessionOptions,
+  input?: RemoteGoatRunnerOptions,
+  selection = requestedRuntime(input),
+): string {
+  if (options.scopes.length === 0) {
+    throw new Error("A remote client session requires explicit scopes.");
+  }
+  if (options.subject === "mcp-client") {
+    throw new Error("The mcp-client subject cannot access client HTTP or WebSocket endpoints.");
+  }
+  return applyScriptPlaceholders(REMOTE_CLIENT_SESSION_SCRIPT, {
+    GOAT_STATE_KEY: stateKey,
+    GOAT_SUBJECT: shellSingleQuote(options.subject),
+    GOAT_SCOPES: options.scopes.map((scope) => `--scope ${shellSingleQuote(scope)}`).join(" "),
+    GOAT_TTL: shellSingleQuote(options.ttl),
+    GOAT_LABEL: shellSingleQuote(options.label),
+    GOAT_RUNNER_SETUP: buildRemoteRunnerSetupScript(input, {
+      ...selection,
+      mayUpgradeOwnedServer: false,
+    }),
+  });
+}
+
+export const decodeRemoteClientSessionOutput = Effect.fn(
+  "ssh/tunnel.decodeRemoteClientSessionOutput",
+)(function* (stdout: string, requestedScopes: ReadonlyArray<AuthEnvironmentScope>) {
+  const session = yield* decodeRemoteJsonOutput(stdout, decodeRemoteClientSessionResult).pipe(
+    Effect.mapError(
+      (cause) =>
+        new SshPairingError({
+          message: "The remote GOAT CLI did not return a client session with explicit scopes.",
+          stdout,
+          cause,
+        }),
+    ),
+  );
+  if (session.token.trim().length === 0) {
+    return yield* new SshPairingError({
+      message: "The remote GOAT CLI returned an empty client session token.",
+      stdout,
+    });
+  }
+  const requested = new Set(requestedScopes);
+  const granted = new Set(session.scopes);
+  if (
+    requested.size === 0 ||
+    granted.size !== requested.size ||
+    !session.scopes.every((scope) => requested.has(scope))
+  ) {
+    return yield* new SshPairingError({
+      message: "The remote GOAT CLI returned client session scopes that differ from the request.",
+      stdout,
+    });
+  }
+  return {
+    token: session.token,
+    expiresAt: session.expiresAt ?? null,
+    scopes: session.scopes,
+  } satisfies RemoteClientSession;
+});
 
 /** The session script's refusal when the remote CLI cannot issue requested memory scopes. */
 const MEMORY_SCOPES_UNSUPPORTED = /^GOAT_SESSION_ERROR=memory_scopes_unsupported runtime=(\S+)$/m;
@@ -4764,6 +4863,49 @@ export const issueRemoteMcpClientSession = Effect.fn("ssh/tunnel.issueRemoteMcpC
     return session;
   },
 );
+
+export const issueRemoteClientSession = Effect.fn("ssh/tunnel.issueRemoteClientSession")(function* (
+  target: DesktopSshEnvironmentTarget,
+  sessionOptions: RemoteClientSessionOptions,
+  input?: SshAuth.SshAuthOptions,
+  runner?: RemoteGoatRunnerOptions,
+  prepared?: PreparedRemoteRuntime,
+): Effect.fn.Return<
+  RemoteClientSession,
+  SshCommandError | SshInvalidTargetError | SshPairingError | SshLaunchError,
+  ChildProcessSpawner.ChildProcessSpawner | Crypto.Crypto | FileSystem.FileSystem | Path.Path
+> {
+  const stateKey = REMOTE_RUNTIME_STATE_KEY;
+  const selected =
+    prepared ??
+    (yield* prepareRemoteRuntime(
+      target,
+      input ?? {},
+      { ...runner, keepExistingRunner: true },
+      stateKey,
+    ));
+  const result = yield* runSshCommand(target, {
+    remoteCommandArgs: ["sh", "-s"],
+    timeoutStage: "pairing",
+    stdin: buildRemoteClientSessionScript(stateKey, sessionOptions, selected.runner, {
+      ...selected,
+      mayUpgradeOwnedServer: false,
+    }),
+    ...(isNodeScriptRunner(selected.runner) ? {} : { timeoutMs: REMOTE_ARCHIVE_LAUNCH_TIMEOUT_MS }),
+    ...(input?.authSecret === undefined ? {} : { authSecret: input.authSecret }),
+    ...(input?.batchMode === undefined ? {} : { batchMode: input.batchMode }),
+    ...(input?.interactiveAuth === undefined ? {} : { interactiveAuth: input.interactiveAuth }),
+  });
+  const session = yield* decodeRemoteClientSessionOutput(result.stdout, sessionOptions.scopes);
+  yield* Effect.logInfo("ssh.remoteServer.clientSession.issued", {
+    selectedVersion: selected.version,
+    requestedVersion: selected.requestedVersion,
+    source: selected.source,
+    ...sshTargetLogFields(target),
+    stateKey,
+  });
+  return session;
+});
 
 const stopRemoteServer = Effect.fn("ssh/tunnel.stopRemoteServer")(function* (
   target: DesktopSshEnvironmentTarget,
@@ -7600,6 +7742,37 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
     );
   });
 
+  const issueClientSession: SshEnvironmentManagerShape["issueClientSession"] = Effect.fn(
+    "ssh/tunnel.issueClientSession",
+  )(function* (target, sessionOptions) {
+    const { resolvedTarget, key } = yield* resolveManagedTarget(target);
+    yield* validateManagedPin(resolvedTarget);
+    const runner =
+      options.resolveCliRunner === undefined ? undefined : yield* options.resolveCliRunner;
+    if (pendingReplacements.has(key) && !tunnels.has(key)) {
+      return yield* new SshLaunchError({
+        message: "Remote runtime will be replaced when its work finishes.",
+        stdout: "",
+      });
+    }
+    return yield* withTargetLock(
+      key,
+      runWithSshAuth({
+        key,
+        keyOnly: managedAliases.has(resolvedTarget.alias),
+        target: resolvedTarget,
+        operation: (authOptions) =>
+          issueRemoteClientSession(
+            resolvedTarget,
+            sessionOptions,
+            authOptions,
+            runner,
+            tunnels.get(key)?.selectedRuntime,
+          ),
+      }),
+    );
+  });
+
   const runRemoteScript = Effect.fn("ssh/tunnel.runRemoteScript")(function* (
     target: DesktopSshEnvironmentTarget,
     input: { readonly script: string; readonly timeoutMs?: number },
@@ -7839,6 +8012,7 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
     disconnectEnvironment: withSharing(disconnectEnvironment),
     revalidateTunnels: withSharing(revalidateTunnels),
     issueMcpClientSession: withSharing(issueMcpClientSession),
+    issueClientSession: withSharing(issueClientSession),
     runRemoteScript: withSharing(runRemoteScript),
   });
 });

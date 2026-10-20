@@ -38,11 +38,20 @@ export class SshConnectionTarget extends Schema.TaggedClass<SshConnectionTarget>
   },
 ) {}
 
+export class HubProxyConnectionTarget extends Schema.TaggedClass<HubProxyConnectionTarget>()(
+  "HubProxyConnectionTarget",
+  { ...ConnectionTargetBase, connectionId: Schema.String },
+) {}
+
+export const hubProxyConnectionId = (hubEnvironmentId: string, nodeId: string): string =>
+  `hub:${hubEnvironmentId}:${encodeURIComponent(nodeId)}`;
+
 export const ConnectionTarget = Schema.Union([
   PrimaryConnectionTarget,
   BearerConnectionTarget,
   RelayConnectionTarget,
   SshConnectionTarget,
+  HubProxyConnectionTarget,
 ]);
 export type ConnectionTarget = typeof ConnectionTarget.Type;
 
@@ -50,6 +59,7 @@ export const PersistedConnectionTarget = Schema.Union([
   BearerConnectionTarget,
   RelayConnectionTarget,
   SshConnectionTarget,
+  HubProxyConnectionTarget,
 ]);
 export type PersistedConnectionTarget = typeof PersistedConnectionTarget.Type;
 

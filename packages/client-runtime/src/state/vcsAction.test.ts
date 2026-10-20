@@ -102,6 +102,8 @@ function progress<T extends GitActionProgressEvent>(event: T): T {
 
 function cacheStore(onClearVcsRefs: (environmentId: EnvironmentId) => void) {
   return Persistence.EnvironmentCacheStore.of({
+    loadShellMeta: () => Effect.succeedNone,
+    saveShellMeta: () => Effect.void,
     loadShell: () => Effect.succeedNone,
     saveShell: () => Effect.void,
     loadThread: () => Effect.succeedNone,
