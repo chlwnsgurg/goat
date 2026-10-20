@@ -183,9 +183,13 @@ const runtimeBase = Layer.effect(
 
 const peer = (
   overrides: Partial<Client.MemoryHubClient["Service"]> = {},
-  // The Hub ends a lease on release, so a released attempt can no longer renew.
-  { releaseEndsLease = false }: { releaseEndsLease?: boolean } = {},
+  // The Hub ends a lease on release, so a released attempt can no longer renew or release again.
+  {
+    releaseEndsLease = false,
+    lostReleaseResponses = 0,
+  }: { releaseEndsLease?: boolean; lostReleaseResponses?: number } = {},
 ) => {
+  let lost = lostReleaseResponses;
   const issued = new Map<string, M.MemoryResolutionLease>();
   const defaultClaim: Client.MemoryHubClient["Service"]["claim"] = (
     _c,
@@ -219,9 +223,13 @@ const peer = (
         })),
       }),
     release: (_c, i) =>
-      Effect.sync(() => {
-        if (releaseEndsLease) issued.delete(i.attemptId);
-        return { released: true };
+      Effect.suspend(() => {
+        if (!releaseEndsLease) return Effect.succeed({ released: true });
+        if (!issued.delete(i.attemptId))
+          return Effect.fail(new M.MemoryHubError({ code: "fenced" }));
+        // The Hub committed the release, but its answer never arrived.
+        if (lost-- > 0) return Effect.fail(new M.MemoryHubError({ code: "unavailable" }));
+        return Effect.succeed({ released: true });
       }),
     ...overrides,
     claim: (c, i) =>
@@ -3908,9 +3916,13 @@ const refusals = [
     }),
   },
 ];
-it.effect.each(refusals)(
+it.effect.each([
+  ...refusals.map((refusal) => ({ ...refusal, lostReleaseResponses: 0 })),
+  // The Hub ended the lease but its release answer was lost: the attempt still retires.
+  { ...refusals[0]!, shape: "a refusal whose release answer is lost", lostReleaseResponses: 1 },
+])(
   "$shape retires the attempt unreported and claims the conflict again once the model is due",
-  ({ error }) =>
+  ({ error, lostReleaseResponses }) =>
     Effect.gen(function* () {
       let calls = 0;
       let claims = 0;
@@ -3935,7 +3947,7 @@ it.effect.each(refusals)(
               };
             }),
         },
-        { releaseEndsLease: true },
+        { releaseEndsLease: true, lostReleaseResponses },
       );
       yield* Effect.scoped(
         Effect.gen(function* () {
@@ -3962,11 +3974,81 @@ it.effect.each(refusals)(
           // Once the hold is due the conflict is claimed afresh, with a new lease.
           yield* TestClock.adjust("1 minute");
           yield* attempt;
+          if (lostReleaseResponses > 0) {
+            // Recovery first retires the stranded attempt (its lease is fenced), then the
+            // conflict waits its ordinary 30 seconds before the next claim.
+            assert.strictEqual(claims, 1);
+            yield* TestClock.adjust("35 seconds");
+            yield* attempt;
+          }
           assert.deepStrictEqual([calls, claims], [2, 2]);
           yield* sync.shutdown;
         }).pipe(Effect.provide(fixture(client, model).pipe(Layer.provideMerge(Hold.layer)))),
       );
     }),
+);
+
+it.effect("a claim frozen to a healthy model is not blocked by a held default", () =>
+  Effect.gen(function* () {
+    let claims = 0;
+    const frozenModels: string[] = [];
+    const client = peer({
+      claim: (_c, { protocolVersion: _protocol, ...claim }) =>
+        Effect.suspend(() => {
+          claims++;
+          frozenModels.push(claim.frozenDefaultModelSelection.model);
+          // The Hub's answer to the first claim never arrives; the claim stays frozen.
+          if (claims === 1) return Effect.fail(new M.MemoryHubError({ code: "unavailable" }));
+          return Effect.succeed({
+            ...claim,
+            fencingToken: claims,
+            claimedAtHubTime: timestamp,
+            expiresAtHubTime: "1970-01-01T00:02:00.000Z",
+            attemptDeadlineHubTime: "1970-01-01T00:10:00.000Z",
+          });
+        }),
+    });
+    const model = realGeneration({ resolveMemoryConflict: () => Effect.never });
+    yield* Effect.scoped(
+      Effect.gen(function* () {
+        yield* ready;
+        yield* conflict();
+        const sync = yield* Sync.MemorySyncService;
+        const hold = yield* Hold.MemoryGenerationHold;
+        yield* sync.syncOnce;
+        yield* sync.scheduleConflictResolution;
+        assert.strictEqual(claims, 1);
+        // The default moves to a model the provider refuses.
+        const next = M.MemoryModelSelection.make({
+          instanceId: M.ProviderInstanceId.make("Q"),
+          model: "Q",
+        });
+        yield* (yield* Settings.ServerSettingsService).updateSettings({
+          memoryModelSelection: next,
+        });
+        yield* hold
+          .guard(
+            yield* hold.keyFor(next),
+            Effect.fail(
+              new M.TextGenerationError({
+                operation: "resolveMemoryConflict",
+                detail: 'Codex CLI command failed: {"code":"invalid_json_schema","status":400}',
+              }),
+            ),
+          )
+          .pipe(Effect.flip);
+        // Still inside the hold on the new default (its first probe is a minute away).
+        yield* TestClock.adjust("40 seconds");
+        yield* sync.syncOnce;
+        yield* sync.scheduleConflictResolution;
+        // The frozen claim retries with its own model while the new default is held.
+        assert.strictEqual(claims, 2);
+        assert.deepStrictEqual(frozenModels, [frozenModels[0], frozenModels[0]]);
+        assert.notStrictEqual(frozenModels[0], "Q");
+        yield* sync.shutdown;
+      }).pipe(Effect.provide(fixture(client, model).pipe(Layer.provideMerge(Hold.layer)))),
+    );
+  }),
 );
 
 it.effect(
