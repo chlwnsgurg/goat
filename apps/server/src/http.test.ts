@@ -164,6 +164,55 @@ describe("untraced requests", () => {
 });
 
 describe("browser API CORS", () => {
+  it.each(["goat://app", "t3code://app", "goat-dev://app", "t3code-dev://app"])(
+    "accepts credentialed desktop preflight and GET from %s in dev",
+    async (origin) => {
+      const layerRoute = Layer.effectDiscard(
+        Effect.gen(function* () {
+          const router = yield* HttpRouter.HttpRouter;
+          yield* router.add("GET", "/api/environment", HttpServerResponse.empty());
+        }),
+      );
+      const config = Layer.effect(
+        ServerConfig.ServerConfig,
+        Effect.gen(function* () {
+          const config = yield* ServerConfig.ServerConfig;
+          return { ...config, devUrl: new URL("http://localhost:5733") };
+        }),
+      ).pipe(
+        Layer.provide(ServerConfig.layerTest(process.cwd(), { prefix: "http-desktop-cors-" })),
+      );
+      const layerApp = Layer.merge(layerRoute, ServerHttp.layerBrowserApiCors).pipe(
+        Layer.provide(config),
+        Layer.provide(NodeServices.layer),
+      );
+      const { handler, dispose } = HttpRouter.toWebHandler(layerApp, { disableLogger: true });
+      try {
+        for (const method of ["OPTIONS", "GET"]) {
+          const response = await handler(
+            new Request("http://localhost:3773/api/environment", {
+              method,
+              headers: {
+                origin,
+                ...(method === "OPTIONS"
+                  ? {
+                      "access-control-request-method": "GET",
+                      "access-control-request-headers": "authorization, dpop",
+                    }
+                  : {}),
+              },
+            }),
+          );
+          expect(response.status).toBe(204);
+          expect(response.headers.get("access-control-allow-origin")).toBe(origin);
+          expect(response.headers.get("access-control-allow-credentials")).toBe("true");
+        }
+      } finally {
+        await dispose();
+      }
+    },
+  );
+
   it("accepts protocol negotiation with authenticated browser headers", async () => {
     const layerRoute = Layer.effectDiscard(
       Effect.gen(function* () {
