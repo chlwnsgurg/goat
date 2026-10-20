@@ -46,6 +46,7 @@ it.effect(
         [84, "MemoryHubAdministered"],
         [85, "MemoryCheckpointLifecycle"],
         [86, "FleetGoals"],
+        [87, "FleetHealth"],
       ]);
       yield* ProjectionTurnItemRequestIndex;
       assert.deepStrictEqual(yield* runMigrations(), []);

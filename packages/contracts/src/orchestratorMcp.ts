@@ -51,6 +51,7 @@ import {
   OrchestrationV2RuntimeRequest,
   OrchestrationV2UserInputQuestion,
   OrchestrationV2CreationSource,
+  OrchestrationV2ProviderFailureClass,
   OrchestrationV2RunStatus,
   OrchestrationV2TurnItemStatus,
 } from "./orchestrationV2.ts";
@@ -892,6 +893,8 @@ export const OrchestratorMcpThreadStatusResult = Schema.Struct({
   ),
   /** The thread's last error, cut to 500 characters. */
   lastError: Schema.NullOr(Schema.String),
+  /** What kind of failure lastError was, when the provider classified it. Older hosts omit it. */
+  lastErrorClass: Schema.optional(Schema.NullOr(OrchestrationV2ProviderFailureClass)),
   /**
    * The caller's own launch watch on this thread: runs that will still be
    * reported, and whether its launch asked for completion webhook reports.
