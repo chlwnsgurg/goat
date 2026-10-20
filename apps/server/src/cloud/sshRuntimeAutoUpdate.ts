@@ -26,6 +26,7 @@ import * as ServerConfig from "../config.ts";
 import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
 import * as RuntimeAdmission from "../runtimeAdmission.ts";
 import * as RuntimeDrain from "../runtimeDrain.ts";
+import * as ServerSettings from "../serverSettings.ts";
 import { SSH_REPLACEMENT_ID_ENV } from "../serverOwnerLock.ts";
 import { automaticUpdateChannel, arbitrateAutomaticTargets } from "./autoUpdatePolicy.ts";
 import { decodeServicePreflightResult } from "./servicePreflight.ts";
@@ -164,7 +165,9 @@ export class SshRuntimeAutoUpdate extends Context.Service<
 
 const decodeJson = Schema.decodeUnknownOption(Schema.fromJsonString(Schema.Unknown));
 const decodeLaunchResult = Schema.decodeUnknownOption(
-  Schema.fromJsonString(Schema.Struct({ status: Schema.String })),
+  Schema.fromJsonString(
+    Schema.Struct({ status: Schema.String, pending: Schema.optionalKey(Schema.Unknown) }),
+  ),
 );
 
 const lastLine = (stdout: string) =>
@@ -184,6 +187,7 @@ export const make = Effect.fn("server.ssh_runtime_auto_update.make")(function* (
   const host = yield* SshRuntimeHost;
   const admission = yield* RuntimeAdmission.RuntimeAdmission;
   const projections = yield* ProjectionStore.ProjectionStoreV2;
+  const settings = yield* ServerSettings.ServerSettingsService;
   const releaseBaseUrl = Option.getOrUndefined(
     yield* Config.String(CLI_RELEASE_BASE_URL_ENV).pipe(Config.option),
   );
@@ -201,6 +205,8 @@ export const make = Effect.fn("server.ssh_runtime_auto_update.make")(function* (
     NodePath.resolve(config.baseDir) === NodePath.resolve(defaultHome);
   const inFlight = yield* Ref.make(false);
   const pending = yield* Ref.make<string | undefined>(undefined);
+  // The protocol each prepared target speaks, read from its own binary.
+  const protocols = new Map<string, { readonly ssh: number; readonly orchestration: number }>();
   const fail = (reason: string) => new ServerSelfUpdateError({ reason });
   const { [SSH_REPLACEMENT_ID_ENV]: _replacementId, ...inherited } = process.env;
   const env: NodeJS.ProcessEnv = { ...inherited, HOME: homeDir };
@@ -279,6 +285,16 @@ export const make = Effect.fn("server.ssh_runtime_auto_update.make")(function* (
       if (result === undefined || result.version !== targetVersion)
         return yield* fail(`goat@${targetVersion} failed its preflight.`);
       if (result.status === "blocked") return yield* fail(result.reason);
+      const own = yield* host.run({
+        command: NodePath.join(versionsDir, targetVersion, "goat"),
+        args: ["__ssh-helper", "protocol", "--shell"],
+        env,
+        timeoutMs: PREFLIGHT_TIMEOUT_MS,
+      });
+      const tokens = /^(\S+) (\d+) (\d+) \d+ \d+$/u.exec(lastLine(own.stdout));
+      if (own.code !== 0 || tokens?.[1] !== targetVersion)
+        return yield* fail(`goat@${targetVersion} did not report its protocol.`);
+      protocols.set(targetVersion, { ssh: Number(tokens[2]), orchestration: Number(tokens[3]) });
       yield* Ref.set(pending, targetVersion);
     });
 
@@ -303,7 +319,11 @@ export const make = Effect.fn("server.ssh_runtime_auto_update.make")(function* (
             if (liveRunnerSha256 === undefined)
               return yield* fail("The SSH runtime's run-t3.sh is missing.");
             const installedExecutableSha256 = yield* verifiedExecutableSha256(targetVersion);
-            const options = runner(targetVersion);
+            const candidateProtocol = protocols.get(targetVersion);
+            if (candidateProtocol === undefined)
+              return yield* fail(`goat@${targetVersion} was not prepared.`);
+            // The script is written on the target's behalf, so it checks the target's protocol.
+            const options = { ...runner(targetVersion), candidateProtocol };
             const selection: PreparedRemoteRuntime = {
               runner: options,
               version: targetVersion,
@@ -323,10 +343,10 @@ export const make = Effect.fn("server.ssh_runtime_auto_update.make")(function* (
               env,
               cwd: homeDir,
             });
-            const status = Option.getOrUndefined(
-              decodeLaunchResult(lastLine(result.stdout)),
-            )?.status;
-            if (status === "pending") return "busy" as const;
+            const launched = Option.getOrUndefined(decodeLaunchResult(lastLine(result.stdout)));
+            const status = launched?.status;
+            // "ready" with a pending replacement means the script kept this server attached.
+            if (status === "pending" || launched?.pending !== undefined) return "busy" as const;
             if (result.code === 0 && status === "ready") return "requested" as const;
             return yield* fail(
               `The SSH runtime replacement for goat@${targetVersion} failed (exit ${result.code ?? "signal"}).`,
@@ -343,6 +363,17 @@ export const make = Effect.fn("server.ssh_runtime_auto_update.make")(function* (
     Effect.gen(function* () {
       if (request.automatic !== true || automaticUpdateChannel(ownVersion) === undefined)
         return true;
+      const enabled = yield* settings.getSettings.pipe(
+        Effect.map((value) => value.automaticServerUpdates),
+        Effect.orElseSucceed(() => false),
+      );
+      if (!enabled) {
+        yield* Effect.logInfo("server.auto_update.request-dropped", {
+          targetVersion: request.targetVersion,
+          reason: "disabled",
+        });
+        return false;
+      }
       const own = yield* Ref.get(pending);
       const chosen = arbitrateAutomaticTargets({
         ownVersion,

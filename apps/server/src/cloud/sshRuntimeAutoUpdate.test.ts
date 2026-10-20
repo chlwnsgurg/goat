@@ -7,7 +7,9 @@ import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
+import { DEFAULT_SERVER_SETTINGS } from "@goat/contracts";
 import * as ServerConfig from "../config.ts";
+import * as ServerSettings from "../serverSettings.ts";
 import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
 import * as RuntimeAdmission from "../runtimeAdmission.ts";
 import { SSH_REPLACEMENT_ID_ENV } from "../serverOwnerLock.ts";
@@ -36,6 +38,8 @@ const makeHarness = Effect.fn("test.ssh_runtime_auto_update.harness")(function* 
   ]);
   const state = {
     activity: "idle" as "idle" | "busy",
+    enabled: true,
+    protocol: { ssh: 2, orchestration: 9 },
     installCode: 0,
     executableSha256: "exe-sha",
     preflight: undefined as Record<string, unknown> | undefined,
@@ -65,8 +69,16 @@ const makeHarness = Effect.fn("test.ssh_runtime_auto_update.harness")(function* 
           );
           return { code: 0, stdout: `goat v${version}\n`, stderr: "" };
         }
-        state.preflights.push([input.command, ...input.args]);
         const version = NodePath.basename(NodePath.dirname(input.command));
+        if (input.args[0] === "__ssh-helper") {
+          const { ssh, orchestration } = state.protocol;
+          return {
+            code: 0,
+            stdout: version + " " + ssh + " " + orchestration + " 0 0\n",
+            stderr: "",
+          };
+        }
+        state.preflights.push([input.command, ...input.args]);
         const preflight = state.preflight ?? { status: "ready", version, launcherProtocol: 3 };
         return { code: 0, stdout: JSON.stringify(preflight), stderr: "" };
       }),
@@ -116,6 +128,14 @@ const makeHarness = Effect.fn("test.ssh_runtime_auto_update.harness")(function* 
       }),
     ),
     Effect.provideService(SshRuntimeAutoUpdate.SshRuntimeHost, host),
+    Effect.provide(
+      Layer.mock(ServerSettings.ServerSettingsService)({
+        getSettings: Effect.sync(() => ({
+          ...DEFAULT_SERVER_SETTINGS,
+          automaticServerUpdates: state.enabled,
+        })),
+      }),
+    ),
     Effect.provideService(ServerConfig.ServerConfig, config),
     Effect.provideService(RuntimeAdmission.RuntimeAdmission, admission),
     Effect.provideService(ProjectionStore.ProjectionStoreV2, {
@@ -206,6 +226,8 @@ it.layer(NodeServices.layer)("SSH runtime auto-update", (it) => {
       expect(launch?.script).toContain("REFRESH_IF_IDLE=1");
       expect(launch?.script).toContain("DRAIN_AUTOMATIC=1");
       expect(launch?.script).toContain("EXPECTED_INSTALLED_SHA256='exe-sha'");
+      // The script checks the candidate against the target's protocol, not this build's.
+      expect(launch?.script).toContain('[ "$2" = "2" ] && [ "$3" = "9" ] && return 0');
       expect(launch?.env.HOME).toBe(h.home);
       // The supervisor and its rollback must not reuse this server's replacement identity.
       expect(launch?.env[SSH_REPLACEMENT_ID_ENV]).toBeUndefined();
@@ -218,6 +240,25 @@ it.layer(NodeServices.layer)("SSH runtime auto-update", (it) => {
       yield* h.runtime.prepare(target);
       h.state.launchOutput = '{"status":"pending","pending":{"reason":"busy"}}\n';
       expect(yield* h.runtime.activate(target)).toBe("busy");
+    }),
+  );
+
+  it.effect("a ready launch that kept a pending replacement is a busy deferral", () =>
+    Effect.gen(function* () {
+      const h = yield* makeHarness();
+      yield* h.runtime.prepare(target);
+      h.state.launchOutput =
+        '{"status":"ready","remotePort":3773,"serverKind":"managed","selectedVersion":"1.0.0","pending":{"reason":"busy"}}\n';
+      expect(yield* h.runtime.activate(target)).toBe("busy");
+    }),
+  );
+
+  it.effect("drops automatic refreshes while automatic updates are off", () =>
+    Effect.gen(function* () {
+      const h = yield* makeHarness();
+      h.state.enabled = false;
+      expect(yield* h.runtime.admitDrain({ targetVersion: "1.3.0", automatic: true })).toBe(false);
+      expect(yield* h.runtime.admitDrain({ targetVersion: "1.3.0" })).toBe(true);
     }),
   );
 
@@ -301,3 +342,18 @@ it.layer(NodeServices.layer)("SSH runtime auto-update", (it) => {
     }),
   );
 });
+
+it.effect("the detached launcher returns the script's output through files", () =>
+  Effect.gen(function* () {
+    const host = yield* SshRuntimeAutoUpdate.SshRuntimeHost;
+    const result = yield* host.runDetached({
+      script: ['printf "%s\\n" "$1"', 'printf "%s\\n" "$GOAT_TEST_MARKER" >&2', "exit 3"].join(
+        "\n",
+      ),
+      args: ["runtime"],
+      env: { PATH: process.env.PATH, GOAT_TEST_MARKER: "marker" },
+      cwd: process.cwd(),
+    });
+    expect(result).toEqual({ code: 3, stdout: "runtime\n", stderr: "marker\n" });
+  }).pipe(Effect.provide(SshRuntimeAutoUpdate.layerHost)),
+);

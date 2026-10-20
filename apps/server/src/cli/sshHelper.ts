@@ -850,7 +850,15 @@ const spawnWindowsDetached = (
 export const superviseSshRuntimeReplacement = async (
   input: SshRuntimeSupervisorInput,
 ): Promise<SshRuntimeSupervisorResult> => {
-  const result = await superviseReplacement(input);
+  let result: SshRuntimeSupervisorResult;
+  try {
+    result = await superviseReplacement(input);
+  } catch (cause) {
+    result = {
+      status: "failed",
+      reason: cause instanceof Error ? cause.message : "Replacement supervisor failed.",
+    };
+  }
   if (result.status !== "old-alive") {
     try {
       writeAtomically(
@@ -862,8 +870,11 @@ export const superviseSshRuntimeReplacement = async (
           at: new Date().toISOString(),
         }) + "\n",
       );
-    } catch {
-      // The record only stops automatic retries; the replacement result stands without it.
+    } catch (cause) {
+      // The replacement result stands; without the record the runtime may retry this target.
+      process.stderr.write(
+        `Could not record the replacement outcome: ${cause instanceof Error ? cause.message : String(cause)}\n`,
+      );
     }
   }
   return result;

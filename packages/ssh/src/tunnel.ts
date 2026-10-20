@@ -196,6 +196,11 @@ export interface RemoteGoatRunnerOptions {
    * `confirmReplacement`, are automatic and let the runtime arbitrate the target.
    */
   readonly manualRefresh?: boolean;
+  /**
+   * The protocol the candidate build speaks, when it is not this build's own: a runtime that
+   * replaces itself with a newer release builds the launch script on that release's behalf.
+   */
+  readonly candidateProtocol?: { readonly ssh: number; readonly orchestration: number };
 }
 
 export interface PreparedRemoteRuntime {
@@ -2649,8 +2654,10 @@ capture_reconnect_baseline() {
     GOAT_PROTOCOL_TOKENS: REMOTE_PROTOCOL_TOKEN_SCRIPT,
     GOAT_RUNNER_SCRIPT: stripTrailingNewlines(buildRemoteGoatRunnerScript(input)),
     GOAT_PROTOCOL_GUARD: applyScriptPlaceholders(REMOTE_PROTOCOL_GUARD_SCRIPT, {
-      GOAT_SSH_PROTOCOL: String(SSH_RUNTIME_PROTOCOL_VERSION),
-      GOAT_ORCHESTRATION_PROTOCOL: String(ORCHESTRATION_PROTOCOL_VERSION),
+      GOAT_SSH_PROTOCOL: String(input?.candidateProtocol?.ssh ?? SSH_RUNTIME_PROTOCOL_VERSION),
+      GOAT_ORCHESTRATION_PROTOCOL: String(
+        input?.candidateProtocol?.orchestration ?? ORCHESTRATION_PROTOCOL_VERSION,
+      ),
       GOAT_RECONNECT_LIVE_GUARD: reconnect
         ? `  # A folded reconnect may only attach to the owned selection; a race must re-enter preparation.
   if [ "$LIVE_STATUS" != live ] || [ "$LIVE_VERSION" != "$SELECTED_VERSION" ] ||
