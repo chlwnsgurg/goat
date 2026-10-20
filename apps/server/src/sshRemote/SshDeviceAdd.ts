@@ -2,6 +2,10 @@ import {
   EnvironmentAuthorizationError,
   HandoffError,
   HandoffSummary,
+  HubNode,
+  HubNodeImportProfile,
+  type HubNodesAddResult,
+  type HubNodesError,
   SshHostStatus,
   OrchestratorMcpFailure,
   PortSchema,
@@ -16,9 +20,12 @@ import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import * as Broker from "../connections/ConnectionCatalogBroker.ts";
 import * as Sessions from "../auth/SessionStore.ts";
+import * as HubNodes from "../hubNodes/HubNodes.ts";
+import { hubNodesFailure, legacyConnection } from "../hubNodes/legacyConnection.ts";
 import * as Threads from "../orchestration-v2/ThreadManagementService.ts";
 import * as Invocation from "../mcp/McpInvocationContext.ts";
 import { assertFullAccess, assertLiveCaller, readCaller } from "../mcp/threadAccess.ts";
@@ -35,7 +42,8 @@ export const SshDeviceAddInput = Schema.Struct({
   user: Schema.optional(TrimmedNonEmptyString),
   port: Schema.optional(PortSchema),
   alias: Schema.optional(SshHostAlias),
-  label: Schema.optional(TrimmedNonEmptyString),
+  // The hub's node label limit, so a label the desktop accepts is never refused by the hub.
+  label: Schema.optional(HubNodeImportProfile.fields.label),
   identityFile: Schema.optional(TrimmedNonEmptyString),
 }).check(
   Schema.makeFilter((input) => (input.host === undefined) !== (input.address === undefined)),
@@ -46,6 +54,11 @@ const unsaved = {
   saved: Schema.Literal(false),
   reason: Schema.String,
 };
+// Whether this hub's node list gained the device; the desktop catalog may have saved it anyway.
+const HubRegistration = Schema.Union([
+  Schema.Struct({ saved: Schema.Literal(true), node: HubNode }),
+  Schema.Struct({ saved: Schema.Literal(false), reason: Schema.String }),
+]);
 export const SshDeviceAddResult = Schema.Union([
   Schema.Struct({ outcome: Schema.Literal("failed"), preflight: SshPreflightReport }),
   Schema.Struct({
@@ -70,6 +83,8 @@ export const SshDeviceAddResult = Schema.Union([
     preflight: SshPreflightReport,
     connection: SavedConnection,
     created: Schema.Boolean,
+    hub: HubRegistration,
+    desktopCatalog: Schema.Literals(["saved", "not_attached"]),
   }),
   Schema.Struct({ ...SshHostResult.members[0].fields, ...unsaved }),
   Schema.Struct({ ...SshHostResult.members[1].fields, ...unsaved }),
@@ -100,6 +115,7 @@ const make = Effect.gen(function* () {
   const broker = yield* Broker.ConnectionCatalogBroker;
   const sessions = yield* Sessions.SessionStore;
   const threads = yield* Threads.ThreadManagementService;
+  const hub = yield* HubNodes.HubNodes;
   const addDevice: SshDeviceAdd["Service"]["addDevice"] = (input, caller) =>
     Effect.gen(function* () {
       if (caller.kind !== "mcp")
@@ -183,28 +199,84 @@ const make = Effect.gen(function* () {
         );
         const current = yield* liveCaller;
         let reason = "Saving a desktop connection needs full access.";
+        // Set once the caller may save; a successful prepare then retries the hub registration.
+        let register:
+          | (() => Effect.Effect<HubNodesAddResult, HubNodesError | OrchestratorMcpFailure>)
+          | undefined;
+        // None while the hub cannot read the host's identity yet: GOAT has not run there.
+        const tryRegister = (
+          registration: Effect.Effect<HubNodesAddResult, HubNodesError | OrchestratorMcpFailure>,
+        ) =>
+          Effect.gen(function* () {
+            const outcome = yield* registration.pipe(
+              Effect.map(Option.some),
+              Effect.catchTags({
+                HubNodesError: (error) =>
+                  error.reason === "invalid_request"
+                    ? Effect.succeed(Option.none())
+                    : Effect.fail(hubNodesFailure(error)),
+              }),
+            );
+            if (Option.isNone(outcome)) return Option.none();
+            const result = outcome.value;
+            const connection = legacyConnection(result.node);
+            if (connection === undefined)
+              return yield* new OrchestratorMcpFailure({
+                code: "orchestration_error",
+                message: "The hub did not identify the saved SSH node.",
+              });
+            return Option.some({
+              outcome: "connected" as const,
+              preflight,
+              connection,
+              created: result.created,
+              hub: { saved: true as const, node: result.node },
+              desktopCatalog: "not_attached" as const,
+            });
+          });
         if (
           current.limits.runtimeMode === "full-access" &&
           current.limits.interactionMode === "default"
         ) {
           const at = DateTime.formatIso(yield* DateTime.now);
+          const addedBy = {
+            kind: "agent" as const,
+            ...(scope.thread ? { threadId: scope.thread.threadId } : {}),
+            ...(scope.client ? { client: scope.client.label } : {}),
+            at,
+          };
+          const fullAccessMessage =
+            "Saving a desktop connection needs a live full-access/default calling thread or a full-access client.";
           const latest = yield* liveCaller;
-          yield* assertFullAccess(
-            latest,
-            "Saving a desktop connection needs a live full-access/default calling thread or a full-access client.",
-          );
+          yield* assertFullAccess(latest, fullAccessMessage);
+          const alias = resolved.host;
+          const nodeRegistration = () =>
+            hub.add(
+              {
+                kind: "ssh",
+                alias,
+                hostname: null,
+                username: null,
+                port: null,
+                ...(input.label ? { label: input.label } : {}),
+              },
+              {
+                addedBy,
+                // The identity read can be slow; the caller must still hold full access when saving.
+                beforeSave: liveCaller.pipe(
+                  Effect.flatMap((caller) => assertFullAccess(caller, fullAccessMessage)),
+                ),
+                requireIdentity: true,
+              },
+            );
+          register = nodeRegistration;
           const response = yield* broker
             .invoke(
               {
                 type: "add_ssh",
                 host: resolved.host,
                 ...(input.label ? { label: input.label } : {}),
-                addedBy: {
-                  kind: "agent",
-                  ...(scope.thread ? { threadId: scope.thread.threadId } : {}),
-                  ...(scope.client ? { client: scope.client.label } : {}),
-                  at,
-                },
+                addedBy,
               },
               10 * 60_000,
             )
@@ -229,13 +301,26 @@ const make = Effect.gen(function* () {
                   ),
               }),
             );
-          if (response?.type === "add_ssh")
+          if (response?.type === "add_ssh") {
+            // The desktop already saved it; a hub failure is reported, not turned into a failed add.
+            const hubResult = yield* nodeRegistration().pipe(
+              Effect.map(({ node }) => ({ saved: true as const, node })),
+              Effect.catchTags({
+                HubNodesError: (error) =>
+                  Effect.succeed({ saved: false as const, reason: error.message }),
+                OrchestratorMcpFailure: (error) =>
+                  Effect.succeed({ saved: false as const, reason: error.message }),
+              }),
+            );
             return {
               outcome: "connected" as const,
               preflight,
               connection: response.connection,
               created: response.created,
+              hub: hubResult,
+              desktopCatalog: "saved" as const,
             };
+          }
           if (response !== null)
             return yield* new OrchestratorMcpFailure({
               code:
@@ -247,13 +332,20 @@ const make = Effect.gen(function* () {
                   ? response.message.slice(0, 2000)
                   : "The desktop returned a different operation's response.",
             });
-          reason =
-            "No desktop connection catalog is attached; this environment cannot save a desktop connection.";
+          // No desktop catalog: this hub's node list is where the device is saved.
+          const connected = yield* tryRegister(nodeRegistration());
+          if (Option.isSome(connected)) return connected.value;
+          reason = `GOAT has not run on ${resolved.host} yet, so this hub cannot identify it. Call this tool again once preparation finishes.`;
         }
         saveBlocked = reason;
         if (!resolved.managed) return yield* requestTrust();
         yield* authorizeSshHost(sessions, caller, "environment:maintain");
         const result = yield* setup.prepare({ host: resolved.host }, caller);
+        // Preparation may finish before it returns; otherwise the next call registers the node.
+        if (result.kind === "ok" && register !== undefined) {
+          const connected = yield* tryRegister(register());
+          if (Option.isSome(connected)) return connected.value;
+        }
         return { ...result, preflight, saved: false as const, reason };
       }).pipe(
         Effect.catchTags({

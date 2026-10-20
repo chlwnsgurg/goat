@@ -23,6 +23,8 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
+import * as PubSub from "effect/PubSub";
+import * as Stream from "effect/Stream";
 import * as Semaphore from "effect/Semaphore";
 import * as Crypto from "effect/Crypto";
 
@@ -84,9 +86,20 @@ export interface EnsureReadyOptions {
   readonly wake: boolean;
 }
 
+/**
+ * Why an alias's SSH caches were dropped: `endpoint` when a running machine got a new address or
+ * host key, `lifecycle` when it was stopped, deleted, forgotten or its key was disconnected.
+ */
+export type CloudAliasInvalidation = "endpoint" | "lifecycle";
+
 export class CloudMachineService extends Context.Service<
   CloudMachineService,
   {
+    readonly changes: Stream.Stream<void>;
+    readonly catalog: Effect.Effect<
+      ReadonlyArray<{ readonly alias: CloudMachineAlias; readonly label: string }>,
+      CloudMachineError
+    >;
     readonly list: () => Effect.Effect<CloudMachinesListResult, CloudMachineError>;
     readonly configure: (
       input: CloudMachinesConfigureInput,
@@ -121,7 +134,7 @@ export class CloudMachineService extends Context.Service<
      * or disconnected, so SSH caches for that alias are dropped before the next connection.
      */
     readonly onAliasInvalidated: (
-      listener: (alias: string) => Effect.Effect<void>,
+      listener: (alias: string, cause: CloudAliasInvalidation) => Effect.Effect<void>,
     ) => Effect.Effect<void>;
   }
 >()("goat/cloudMachines/CloudMachineService") {}
@@ -139,12 +152,14 @@ export const make = Effect.gen(function* () {
 
   const catalogPath = path.join(config.stateDir, CATALOG_FILE);
   const catalogLock = yield* Semaphore.make(1);
+  const signals = yield* PubSub.unbounded<void>();
   const aliasLocks = yield* KeyedLock.make<string>();
   const readyAt = new Map<string, number>();
   // Counts completed waking ensures, so a caller that queued behind one reuses its result.
   const wakeGenerations = new Map<string, number>();
   const lastErrors = new Map<string, CloudMachineErrorReason>();
-  const listeners: Array<(alias: string) => Effect.Effect<void>> = [];
+  const listeners: Array<(alias: string, cause: CloudAliasInvalidation) => Effect.Effect<void>> =
+    [];
 
   const readCatalog = fs.exists(catalogPath).pipe(
     Effect.flatMap((exists) =>
@@ -166,7 +181,10 @@ export const make = Effect.gen(function* () {
         Effect.andThen(fs.rename(temp, catalogPath)),
         Effect.onError(() => fs.remove(temp, { force: true }).pipe(Effect.ignore)),
       );
-    }).pipe(Effect.mapError(() => fail("storage_failed")));
+    }).pipe(
+      Effect.mapError(() => fail("storage_failed")),
+      Effect.tap(() => PubSub.publish(signals, undefined)),
+    );
 
   /** Serializes read-modify-write of the catalog. */
   const updateCatalog = <A>(f: (catalog: Catalog) => readonly [Catalog, A]) =>
@@ -203,9 +221,11 @@ export const make = Effect.gen(function* () {
       }),
     );
 
-  const invalidate = (alias: string) =>
+  const invalidate = (alias: string, cause: CloudAliasInvalidation) =>
     Effect.sync(() => readyAt.delete(alias)).pipe(
-      Effect.andThen(Effect.forEach(listeners, (listener) => listener(alias), { discard: true })),
+      Effect.andThen(
+        Effect.forEach(listeners, (listener) => listener(alias, cause), { discard: true }),
+      ),
     );
 
   const view = (
@@ -363,7 +383,7 @@ export const make = Effect.gen(function* () {
           const { publicKey } = yield* ssh.ensureKey;
           const endpoint = yield* boat.authorizeSshKey(key, machine.sandboxId, publicKey);
           const { changed } = yield* ssh.writeHost(alias, endpoint);
-          if (changed) yield* invalidate(alias);
+          if (changed) yield* invalidate(alias, "endpoint");
           // Only an explicit action pushes the auto-stop deadline out.
           if (options.wake)
             yield* boat.update(key, machine.sandboxId, { ttlSeconds: machine.ttlSeconds });
@@ -441,7 +461,7 @@ export const make = Effect.gen(function* () {
       const catalog = yield* readCatalog;
       for (const machine of catalog.machines) {
         yield* ssh.removeHost(machine.alias);
-        yield* invalidate(machine.alias);
+        yield* invalidate(machine.alias, "lifecycle");
       }
       return { configured: false as const };
     });
@@ -474,7 +494,7 @@ export const make = Effect.gen(function* () {
       const machine = yield* owned(alias);
       const key = yield* apiKey;
       yield* boat.stop(key, machine.sandboxId);
-      yield* invalidate(alias);
+      yield* invalidate(alias, "lifecycle");
       return view(machine, yield* remoteOf(key, machine));
     });
 
@@ -499,7 +519,7 @@ export const make = Effect.gen(function* () {
         undefined,
       ]);
       yield* ssh.removeHost(alias);
-      yield* invalidate(alias);
+      yield* invalidate(alias, "lifecycle");
       return view(pending, yield* remoteOf(key, pending));
     });
 
@@ -517,12 +537,21 @@ export const make = Effect.gen(function* () {
         undefined,
       ]);
       yield* ssh.removeHost(alias);
-      yield* invalidate(alias);
+      yield* invalidate(alias, "lifecycle");
       lastErrors.delete(alias);
       return { forgotten: true as const };
     });
 
   return CloudMachineService.of({
+    changes: Stream.fromPubSub(signals),
+    catalog: readCatalog.pipe(
+      Effect.map((catalog) =>
+        catalog.machines.map(({ alias, label, sandboxId }) => ({
+          alias,
+          label: label || sandboxId,
+        })),
+      ),
+    ),
     list,
     configure,
     disconnect,

@@ -1,3 +1,4 @@
+import { SettingsHubNodesRouteScreen } from "./features/settings/SettingsHubNodesRouteScreen";
 import { NotesRouteScreen } from "./features/notes/NotesRouteScreen";
 import { NoteRouteScreen } from "./features/notes/NoteRouteScreen";
 import { NoteConflictRouteScreen } from "./features/notes/NoteConflictRouteScreen";
@@ -352,6 +353,11 @@ const SettingsContentStack = createV5SheetStackNavigator({
       options: {
         title: "Follow-ups",
       },
+    }),
+    SettingsHubNodes: createNativeStackScreen({
+      screen: SettingsHubNodesRouteScreen,
+      linking: "hub-devices",
+      options: { title: "Devices on this hub" },
     }),
     SettingsScheduledTasks: createNativeStackScreen({
       screen: SettingsScheduledTasksRouteScreen,

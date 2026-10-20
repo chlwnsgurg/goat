@@ -1,4 +1,5 @@
 import { installRelayClient } from "./cloud/installRelayClient.ts";
+import * as HubNodes from "./hubNodes/HubNodes.ts";
 import * as NotesService from "./notes/NotesService.ts";
 import * as NoteWorkService from "./notes/NoteWorkService.ts";
 import * as CodexRoutes from "./provider/CodexRouteService.ts";
@@ -126,6 +127,7 @@ import {
   MemoryMutationReceipt,
   MemoryImportRpcError,
   WsMemoryCoreRpcGroup,
+  WsHubNodesRpcGroup,
   WsMemoryAdministrationRpcGroup,
   WsMemoryImportRpcGroup,
 } from "@goat/contracts";
@@ -1444,6 +1446,7 @@ const layerWsRpc = (
       const memorySource = memoryPermit(["memory:read", "orchestration:read"]);
       const memorySettings = memoryPermit(["settings:write"]);
       const ownerSettings = memorySettings.pipe(Effect.mapError(memoryError));
+      const hubNodesHandlers = yield* makeHubNodesHandlers;
       const memoryHandlers = WsMemoryCoreRpcGroup.middleware(RpcInstrumentation).of({
         [WS_METHODS.memoryProjectBindingGet]: (input) =>
           memory.getProjectBinding(input, memoryWrite).pipe(Effect.mapError(memoryError)),
@@ -3436,6 +3439,7 @@ const layerWsRpc = (
       });
       // toLayer derives services from every handler key, so narrow each part with Pick.
       return Layer.mergeAll(
+        WsHubNodesRpcGroup.middleware(RpcInstrumentation).toLayer(hubNodesHandlers),
         WsMemoryImportRpcGroup.middleware(RpcInstrumentation).toLayer(importHandlers),
         WsMemoryCoreRpcGroup.middleware(RpcInstrumentation).toLayer(memoryHandlers),
         WsMemoryAdministrationRpcGroup.middleware(RpcInstrumentation).toLayer(ownerHandlers),
@@ -3450,6 +3454,25 @@ const layerWsRpc = (
       );
     }),
   );
+
+export const makeHubNodesHandlers = Effect.gen(function* () {
+  const hubNodes = yield* HubNodes.HubNodes;
+  return WsHubNodesRpcGroup.middleware(RpcInstrumentation).of({
+    [WS_METHODS.hubNodesList]: () => hubNodes.snapshot,
+    [WS_METHODS.hubNodesSubscribe]: () => hubNodes.changes,
+    [WS_METHODS.hubNodesAdd]: (input) =>
+      Effect.flatMap(DateTime.now, (now) =>
+        hubNodes.add(input, {
+          addedBy: { kind: "user", at: DateTime.formatIso(now) },
+          beforeSave: Effect.void,
+        }),
+      ),
+    [WS_METHODS.hubNodesRemove]: (input) => hubNodes.remove(input),
+    [WS_METHODS.hubNodesCheck]: (input) => hubNodes.check(input),
+    [WS_METHODS.hubNodesImport]: (input) => hubNodes.importProfiles(input),
+    [WS_METHODS.hubNodesDismissNotice]: (input) => hubNodes.dismissNotice(input.id),
+  });
+});
 
 // RpcServer's default sends a socket-level Defect frame instead, and the client
 // ends every pending request on the socket with it.

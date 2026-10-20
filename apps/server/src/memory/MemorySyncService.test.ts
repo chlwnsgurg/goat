@@ -2179,6 +2179,7 @@ it.effect.each([
               [88, "ThreadRunObservedChecks"],
               [89, "RemoteDispatchObservation"],
               [90, "MemoryRevisionCheckpointSize"],
+              [91, "HubNodes"],
             ]);
             const adapter = yield* statusRuntime;
             const result = yield* Effect.scoped(

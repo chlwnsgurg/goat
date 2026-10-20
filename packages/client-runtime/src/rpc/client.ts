@@ -27,6 +27,7 @@ import { createCommandPermissions } from "../state/commandPermissions.ts";
 
 import * as EnvironmentSupervisor from "../connection/supervisor.ts";
 import type { WsRpcProtocolClient } from "../rpc/protocol.ts";
+import { isHubNodesUnsupportedError } from "../hubNodes.ts";
 import type { RpcSession } from "../rpc/session.ts";
 
 export class EnvironmentRpcUnavailableError extends Schema.TaggedError<EnvironmentRpcUnavailableError>()(
@@ -73,6 +74,7 @@ export type EnvironmentSubscriptionRpcTag =
   | typeof WS_METHODS.subscribeAuthAccess
   | typeof WS_METHODS.subscribeServerConfig
   | typeof WS_METHODS.subscribeServerLifecycle
+  | typeof WS_METHODS.hubNodesSubscribe
   | typeof WS_METHODS.scheduledTasksSubscribe
   | typeof WS_METHODS.serverGetStorageCleanupReport
   | typeof WS_METHODS.serverGetDatabaseStorage
@@ -295,7 +297,20 @@ export const requestGuarded = Effect.fn("EnvironmentRpc.request")(function* <
     environmentId: supervisor.target.environmentId,
     method: tag,
   });
-  return yield* method(dispatchInput).pipe(Effect.ensuring(completeObservation));
+  return yield* method(dispatchInput).pipe(
+    // Older hubs encode a missing RPC as a defect rather than a typed failure.
+    Effect.catchCauseIf(
+      (cause) => tag.startsWith("hub.nodes.") && isHubNodesUnsupportedError(cause),
+      () =>
+        Effect.fail(
+          new EnvironmentRpcUnavailableError({
+            environmentId: supervisor.target.environmentId,
+            message: `Unknown request tag: ${tag}`,
+          }),
+        ),
+    ),
+    Effect.ensuring(completeObservation),
+  );
 });
 
 export function runStreamGuarded<TTag extends EnvironmentStreamCommandRpcTag>(
@@ -439,6 +454,12 @@ function subscribeDynamicMapped<TTag extends EnvironmentSubscriptionRpcTag, A>(
                         : Effect.void,
                     ),
                     Stream.catchCause((cause) => {
+                      if (
+                        tag === WS_METHODS.hubNodesSubscribe &&
+                        isHubNodesUnsupportedError(cause)
+                      ) {
+                        return Stream.failCause(cause);
+                      }
                       const hasOnlyExpectedFailures =
                         cause.reasons.length > 0 &&
                         cause.reasons.every((reason) => reason._tag === "Fail");

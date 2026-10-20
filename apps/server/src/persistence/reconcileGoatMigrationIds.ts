@@ -33,6 +33,7 @@ export const GOAT_MIGRATION_NAMES: ReadonlySet<string> = new Set([
   "ThreadRunObservedChecks",
   "RemoteDispatchObservation",
   "MemoryRevisionCheckpointSize",
+  "HubNodes",
 ]);
 
 type MigrationEntry<E> = readonly [

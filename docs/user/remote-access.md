@@ -399,15 +399,14 @@ machine running an older GOAT
 only accepts approval-required threads in folders that are already projects
 there.
 
-An agent can also list, add, and remove the connections saved in
-**Settings → Connections**, so another machine's threads show up in the
-sidebar without a trip to Settings. This works while the desktop app is open on
-the machine the agent runs on; web and mobile clients keep their own saved
-connections. Adding uses only SSH keys or ssh-agent, never a password, and
-adding a host that is already saved returns the saved one. Adding and removing
-need a full-access thread or a full-access outside agent. Settings shows the
-change right away, and the agent's connection list shows which agent added each
-connection.
+An agent can also list, add, and remove the devices on this hub (see
+[Devices on this hub](#devices-on-this-hub)), including on a headless
+`goat serve` with no desktop app. Adding uses only SSH keys or ssh-agent, never a
+password, and needs a host where GOAT has run before; prepare a new host first.
+Adding a device that is already listed returns it. Adding and removing need a
+full-access thread or a full-access outside agent. While the desktop app runs on
+the same machine, the agent's change is also saved in its
+**Settings → Connections**, so the device's threads show up in the sidebar.
 
 Adding a host and saving its connection are one step for an agent: it runs the
 same checks as **Add device → SSH**, asks you to approve a new fingerprint, and
@@ -462,6 +461,31 @@ A link lasts 30 days; link again with a new code to renew it. Removing a link
 forgets it here. To end it on the other machine at once, revoke **GOAT on …** in
 that machine's **Settings → Connections**. To watch its threads yourself, add
 the machine under **Settings → Connections** with a pairing URL from `goat pair`.
+
+### Devices on this hub
+
+The GOAT server your phone or browser pairs with keeps one list of the machines it
+reaches: SSH hosts you add, GOAT servers you link, and its cloud machines. Every
+client paired with that server sees the same list, and a device added on the
+desktop appears on the phone right away. It works the same on a headless
+`goat serve`.
+
+Find it under **Settings → Connections → Devices on this hub** on desktop and
+web, and under **Settings → Devices on this hub** in the mobile app. Add an SSH
+host by its alias from this machine's `~/.ssh/config`, or add another GOAT server
+with a pairing URL from `goat pair`. A machine reached two ways, for example
+over SSH and as a linked server, is one device with two routes.
+
+**Check** asks each route whether it answers. It never starts or extends a cloud
+machine: a stopped one shows as offline. Cloud machines are removed from
+**Cloud machines** below, not from this list. Removing a saved connection in the
+desktop sidebar does not remove the device from the hub.
+
+The first time the desktop app runs as a hub, it copies the SSH connections saved
+in its **Settings → Connections** into this list. If those saved connections
+can't be unlocked, nothing is copied and the list asks you to add your devices
+again; **Saved on this desktop** offers the desktop's SSH connections that are
+not on the hub yet.
 
 ### Cloud machines
 

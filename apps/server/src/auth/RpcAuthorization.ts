@@ -32,6 +32,7 @@ import {
   WS_METHODS,
   WsRpcGroup as WsBaseRpcGroup,
   WsMemoryCoreRpcGroup,
+  WsHubNodesRpcGroup,
   WsMemoryAdministrationRpcGroup,
   WsMemoryImportRpcGroup,
 } from "@goat/contracts";
@@ -46,7 +47,8 @@ import { DESKTOP_BOOTSTRAP_SUBJECT } from "./PairingGrantStore.ts";
 
 export const AuthorizedWsRpcGroup = WsBaseRpcGroup.merge(WsMemoryCoreRpcGroup)
   .merge(WsMemoryAdministrationRpcGroup)
-  .merge(WsMemoryImportRpcGroup);
+  .merge(WsMemoryImportRpcGroup)
+  .merge(WsHubNodesRpcGroup);
 
 const WsRpcGroup = WsBaseRpcGroup;
 
@@ -288,7 +290,21 @@ export const MEMORY_RPC_REQUIRED_SCOPES = {
     AuthEnvironmentScope
   >
 >;
-const installedScopes = { ...RPC_REQUIRED_SCOPES, ...MEMORY_RPC_REQUIRED_SCOPES };
+export const HUB_NODES_RPC_REQUIRED_SCOPES = {
+  [WS_METHODS.hubNodesList]: "orchestration:read",
+  [WS_METHODS.hubNodesSubscribe]: "orchestration:read",
+  [WS_METHODS.hubNodesCheck]: "orchestration:read",
+  [WS_METHODS.hubNodesAdd]: "settings:write",
+  [WS_METHODS.hubNodesRemove]: "settings:write",
+  [WS_METHODS.hubNodesImport]: "settings:write",
+  [WS_METHODS.hubNodesDismissNotice]: "settings:write",
+} as const satisfies Record<RpcGroup.Rpcs<typeof WsHubNodesRpcGroup>["_tag"], AuthEnvironmentScope>;
+
+const installedScopes = {
+  ...RPC_REQUIRED_SCOPES,
+  ...MEMORY_RPC_REQUIRED_SCOPES,
+  ...HUB_NODES_RPC_REQUIRED_SCOPES,
+};
 
 export function requiredScopeForRpcMethod(method: string): AuthEnvironmentScope {
   if (!Object.hasOwn(installedScopes, method)) {

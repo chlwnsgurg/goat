@@ -28,6 +28,7 @@ import { RelayClientInstallDialog } from "../components/cloud/RelayClientInstall
 import { SshPasswordPromptDialog } from "../components/desktop/SshPasswordPromptDialog";
 import { ConnectionCatalogUnreadableToast } from "../components/desktop/ConnectionCatalogUnreadableNotice";
 import { SnapShotCoordinator } from "../components/desktop/SnapShotCoordinator";
+import { HubNodesImportCoordinator } from "../components/desktop/HubNodesImportCoordinator";
 import { DesktopAppActivationCoordinator } from "../components/desktop/DesktopAppActivationCoordinator";
 import { DesktopWebLinkCoordinator } from "../components/desktop/DesktopWebLinkCoordinator";
 import { RunningThreadKeepAlive } from "../components/desktop/RunningThreadKeepAlive";
@@ -233,6 +234,7 @@ function RootRouteView() {
         >
           {primaryEnvironmentAuthenticated ? <AuthenticatedTracingBootstrap /> : null}
           {primaryEnvironmentAuthenticated ? <DesktopAppActivationCoordinator /> : null}
+          {primaryEnvironmentAuthenticated ? <HubNodesImportCoordinator /> : null}
           {primaryEnvironmentAuthenticated ? <DesktopWebLinkCoordinator /> : null}
           {isElectron ? <RunningThreadKeepAlive /> : null}
           {hasCloudPublicConfig() ? <RelayClientInstallDialog /> : null}

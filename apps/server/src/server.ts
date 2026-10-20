@@ -70,6 +70,8 @@ import * as RemoteLaunchCatalog from "./remoteReports/RemoteLaunchCatalog.ts";
 import * as BoatClient from "./cloudMachines/BoatClient.ts";
 import * as CloudMachineService from "./cloudMachines/CloudMachineService.ts";
 import * as CloudMachineSsh from "./cloudMachines/sshConfig.ts";
+import * as HubNodes from "./hubNodes/HubNodes.ts";
+import * as HubNodeRepository from "./hubNodes/HubNodeRepository.ts";
 import * as LinkedHosts from "./linkedHosts/LinkedHosts.ts";
 import * as RemoteDispatchCoordinator from "./remoteReports/RemoteDispatchCoordinator.ts";
 import * as LaunchWatchService from "./mcp/LaunchWatchService.ts";
@@ -1130,6 +1132,12 @@ const layerRuntimeCoreDependenciesBase = Layer.mergeAll(
       Layer.provide(SshRemoteDispatch.layer),
       // GOAT Bot searches memory when it answers; same references, so one memory instance.
       Layer.provide(Layer.merge(layerMemoryService, layerMemorySync)),
+    ),
+  ),
+  Layer.provideMerge(
+    HubNodes.layer.pipe(
+      Layer.provide(HubNodeRepository.layer),
+      Layer.provide(SshRemoteDispatch.layer),
     ),
   ),
   // One cloud machine service for WS, MCP and both SshRemoteDispatch builds, so the

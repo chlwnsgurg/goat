@@ -21,6 +21,7 @@ import * as ChannelBotHome from "../channels/ChannelBotHome.ts";
 import * as ChannelRemoteWorkers from "../channels/ChannelRemoteWorkers.ts";
 import * as ChannelRuntime from "../channels/ChannelRuntime.ts";
 import * as ChannelWorkerReports from "../channels/ChannelWorkerReports.ts";
+import * as HubNodes from "../hubNodes/HubNodes.ts";
 import * as ConnectionCatalogBroker from "../connections/ConnectionCatalogBroker.ts";
 import * as DeviceService from "../device/DeviceService.ts";
 import * as Path from "effect/Path";
@@ -141,6 +142,7 @@ const dependencies = Layer.mergeAll(
   Layer.mock(ChannelBotHome.ChannelBotHome)({}),
   Layer.mock(ChannelRuntime.ChannelRuntime)({ ownerToken: "test-owner" }),
   Layer.mock(ConnectionCatalogBroker.ConnectionCatalogBroker)({}),
+  Layer.mock(HubNodes.HubNodes)({}),
   Layer.mock(DeviceService.DeviceService)({}),
   Path.layer,
   Layer.mock(ServerEnvironment.ServerEnvironment)({}),

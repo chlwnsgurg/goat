@@ -50,6 +50,7 @@ it.effect(
         [88, "ThreadRunObservedChecks"],
         [89, "RemoteDispatchObservation"],
         [90, "MemoryRevisionCheckpointSize"],
+        [91, "HubNodes"],
       ]);
       yield* ProjectionTurnItemRequestIndex;
       assert.deepStrictEqual(yield* runMigrations(), []);

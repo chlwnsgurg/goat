@@ -1,6 +1,7 @@
 import * as Schema from "effect/Schema";
 import { SshWorkspaceLaunchInput } from "@goat/contracts";
 import {
+  CLIENT_GUARDED_RPC_SCOPES,
   AuthEnvironmentMaintainScope,
   AuthDiagnosticsReadScope,
   AuthFilesystemReadScope,
@@ -33,12 +34,17 @@ import {
   AuthorizedWsRpcGroup as WsRpcGroup,
   RPC_REQUIRED_SCOPES as BASE_RPC_REQUIRED_SCOPES,
   MEMORY_RPC_REQUIRED_SCOPES,
+  HUB_NODES_RPC_REQUIRED_SCOPES,
   requiredScopeForRpcMethod,
   requiredScopeForDeviceList,
 } from "./RpcAuthorization.ts";
 import * as RpcAuthorization from "./RpcAuthorization.ts";
 
-const RPC_REQUIRED_SCOPES = { ...BASE_RPC_REQUIRED_SCOPES, ...MEMORY_RPC_REQUIRED_SCOPES };
+const RPC_REQUIRED_SCOPES = {
+  ...BASE_RPC_REQUIRED_SCOPES,
+  ...MEMORY_RPC_REQUIRED_SCOPES,
+  ...HUB_NODES_RPC_REQUIRED_SCOPES,
+};
 
 describe("RPC authorization scopes", () => {
   it.effect("accepts only the owning desktop with settings write scope as a catalog host", () =>
@@ -74,6 +80,15 @@ describe("RPC authorization scopes", () => {
 
   it("declares exactly one scope for every RPC in the server group", () => {
     expect(new Set(Object.keys(RPC_REQUIRED_SCOPES))).toEqual(new Set(WsRpcGroup.requests.keys()));
+  });
+
+  it("keeps hub node scopes equal to client guards", () => {
+    for (const [method, scope] of Object.entries(HUB_NODES_RPC_REQUIRED_SCOPES)) {
+      expect(CLIENT_GUARDED_RPC_SCOPES[method as keyof typeof HUB_NODES_RPC_REQUIRED_SCOPES]).toBe(
+        scope,
+      );
+      expect(requiredScopeForRpcMethod(method)).toBe(scope);
+    }
   });
 
   // Boat machines bill the owner's account, so only a settings writer may change or wake them.

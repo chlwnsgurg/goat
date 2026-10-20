@@ -303,8 +303,10 @@ compatible published release only when the host has no installed runtime or GOAT
 `SshHostSetup.preflight` serves it as `sshHost.preflight` with the server's own runner. `apps/server/src/sshRemote/SshDeviceAdd.ts`
 is the one agent path behind `goat_ssh_host_add` and its alias `goat_connection_add_ssh`:
 a failed check stops before any side effect, a new host key becomes a pin-only
-approval, and a passing host is saved through the desktop catalog or, without one,
-prepared on a managed alias. `packages/shared/src/sshDestination.ts` parses typed
+approval, and a passing host is saved through the desktop catalog when one is attached
+and registered in this server's [hub node list](#hub-nodes). Without a desktop the hub
+list alone saves it; a host GOAT has not run on is first prepared on a managed alias.
+`packages/shared/src/sshDestination.ts` parses typed
 destinations for both.
 
 SSH setup and immediate-update approvals resume through SshHostSetup's shared
@@ -418,3 +420,42 @@ GOAT never loses track of a machine that may still bill. `BoatClient.ts` is the 
 `settings:write` grant, as in Settings. Deleting a machine and managing the key stay in Settings.
 
 > Decision record: [ADR-0008](decisions/ADR-0008-ssh-hosts.md)
+
+## Hub nodes
+
+The hub is the GOAT server a phone pairs with. `HubNodes` in
+`apps/server/src/hubNodes/HubNodes.ts` owns the list of machines it reaches, so a headless
+`goat serve` serves the same list to every client over `hub.nodes.*` (`WsHubNodesRpcGroup` in
+`packages/contracts/src/rpc.ts`, wire shapes in `packages/contracts/src/hubNodes.ts`). Reading and
+checking need `orchestration:read`; adding, removing, importing and dismissing need
+`settings:write`. `goat_connection_*` MCP tools call the same service. Its tables live behind
+`apps/server/src/hubNodes/HubNodeRepository.ts`.
+
+A node is one GOAT environment with one or more routes. Routes come from three sources, merged by
+`apps/server/src/hubNodes/merge.ts`:
+
+- SSH hosts registered on the hub, in `hub_node_registrations`. An unregistered `~/.ssh/config`
+  alias is not a node. Registering a `boat-` alias is refused because the cloud source owns it.
+- Every `LinkedHosts` link. The route shows the link's access and expiry, never its token.
+- Every machine in the `CloudMachineService` local catalog. Listing never asks Boat.
+
+Routes with the same environment ID are one node. The ID comes from the link for linked hosts
+and, for SSH and running cloud machines, from `SshRemoteDispatch.identifyTarget`, which reads
+`$HOME/.goat/userdata/environment-id` over SSH without starting a runtime. A route whose ID is
+unknown is its own node with ID `route:<routeId>` until a check learns it; `get` still resolves
+that ID afterwards. The hub's own ID is refused at add and dropped at merge.
+
+Check never wakes or extends a cloud machine. It asks Boat for state once per check and probes a
+cloud route over SSH only when that state accepts SSH, through `ensureReady({ wake: false })`. A
+stopped machine reads offline. Route status, last-seen time and learned IDs persist in
+`hub_node_route_state`; a forgotten cloud alias loses its row. `changes` subscribes before it
+reads the first snapshot and coalesces signals, so a slow client gets the latest list, not a
+backlog, and a failed read waits for the next change instead of ending the stream.
+
+Removing a node deletes registrations and unlinks links. Cloud routes are refused, and a node
+with one is not partly removed. The desktop renderer imports its saved SSH connections once per
+hub (`hub_node_imports`); a catalog that cannot be unlocked records a notice that clients show
+until the user dismisses it or a later import succeeds. An agent's SSH add goes through
+`SshDeviceAdd`, which reports the hub registration separately from `desktopCatalog`, so a
+desktop save never hides a hub failure. An agent removal deletes the hub node and forwards it
+to an attached desktop catalog, reporting `desktopCatalog` as `saved`, `not_attached` or `failed`.

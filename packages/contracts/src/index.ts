@@ -37,6 +37,7 @@ export * from "./channelReception.ts";
 export * from "./channelGateway.ts";
 export * from "./slackChannel.ts";
 export * from "./cloudMachines.ts";
+export * from "./hubNodes.ts";
 export * from "./cloudAgents.ts";
 export * from "./checkpointDiff.ts";
 export * from "./model.ts";

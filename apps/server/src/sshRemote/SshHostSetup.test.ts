@@ -49,6 +49,7 @@ import type { McpInvocationScope } from "../mcp/McpInvocationContext.ts";
 import { dependencies } from "./testkit/SshHostSetupTestkit.ts";
 import * as SshHostSetup from "./SshHostSetup.ts";
 import * as SshDeviceAdd from "./SshDeviceAdd.ts";
+import * as HubNodes from "../hubNodes/HubNodes.ts";
 import * as Broker from "../connections/ConnectionCatalogBroker.ts";
 import * as SshRemoteDispatch from "./SshRemoteDispatch.ts";
 
@@ -1787,6 +1788,11 @@ it.effect(
               Layer.provide(
                 Layer.mock(Broker.ConnectionCatalogBroker)({
                   invoke: () => Effect.die("Alias conflict dispatched to the catalog"),
+                }),
+              ),
+              Layer.provide(
+                Layer.mock(HubNodes.HubNodes)({
+                  add: () => Effect.die("Alias conflict registered on the hub"),
                 }),
               ),
               Layer.provide(dependencies),

@@ -18,6 +18,7 @@ import * as Layer from "effect/Layer";
 import * as Scope from "effect/Scope";
 import { AsyncResult, Atom, AtomRegistry } from "effect/reactivity";
 import { EnvironmentRegistry } from "../connection/registry.ts";
+import { reportAtomCommandResult } from "../state/runtime.ts";
 import { createCommandPermissions } from "../state/commandPermissions.ts";
 import * as Cause from "effect/Cause";
 import * as Deferred from "effect/Deferred";
@@ -47,6 +48,7 @@ import {
   subscribeMemoryChanges,
   request,
   requestGuarded,
+  EnvironmentRpcUnavailableError,
   RpcPermissionGuard,
   runStream,
   subscribe,
@@ -134,6 +136,56 @@ const makeHarness = Effect.fn("TestEnvironmentRpc.makeHarness")(function* () {
 });
 
 describe("environment RPC", () => {
+  it.effect("turns unsupported hub RPC defects into quiet expected failures", () =>
+    Effect.gen(function* () {
+      const { activeSession, supervisor } = yield* makeHarness();
+      const client = {
+        [WS_METHODS.hubNodesImport]: () => Effect.die("Unknown request tag: hub.nodes.import"),
+      } as unknown as WsRpcProtocolClient;
+      yield* SubscriptionRef.set(activeSession, Option.some(session(client)));
+      const result = yield* requestGuarded(WS_METHODS.hubNodesImport, {
+        source: "desktop-catalog",
+        catalog: { state: "readable", profiles: [] },
+      }).pipe(
+        Effect.provideService(EnvironmentSupervisor.EnvironmentSupervisor, supervisor),
+        Effect.provideService(RpcPermissionGuard, { authorize: () => Effect.void }),
+        Effect.exit,
+      );
+      expect(Exit.isFailure(result)).toBe(true);
+      if (Exit.isFailure(result)) {
+        expect(Cause.hasDies(result.cause)).toBe(false);
+        expect(Cause.squash(result.cause)).toBeInstanceOf(EnvironmentRpcUnavailableError);
+        const reporter = { error: vi.fn(), warn: vi.fn() };
+        reportAtomCommandResult(
+          AsyncResult.failure(result.cause),
+          { reportFailure: false },
+          reporter,
+        );
+        expect(reporter.error).not.toHaveBeenCalled();
+        expect(reporter.warn).not.toHaveBeenCalled();
+      }
+    }),
+  );
+
+  it.effect("preserves real hub RPC defects", () =>
+    Effect.gen(function* () {
+      const { activeSession, supervisor } = yield* makeHarness();
+      const client = {
+        [WS_METHODS.hubNodesImport]: () => Effect.die("Storage failed"),
+      } as unknown as WsRpcProtocolClient;
+      yield* SubscriptionRef.set(activeSession, Option.some(session(client)));
+      const result = yield* requestGuarded(WS_METHODS.hubNodesImport, {
+        source: "desktop-catalog",
+        catalog: { state: "readable", profiles: [] },
+      }).pipe(
+        Effect.provideService(EnvironmentSupervisor.EnvironmentSupervisor, supervisor),
+        Effect.provideService(RpcPermissionGuard, { authorize: () => Effect.void }),
+        Effect.exit,
+      );
+      expect(Exit.isFailure(result) && Cause.hasDies(result.cause)).toBe(true);
+    }),
+  );
+
   it.effect("reuses the session config stream instead of opening a duplicate subscription", () =>
     Effect.gen(function* () {
       const event: ServerConfigStreamEvent = {

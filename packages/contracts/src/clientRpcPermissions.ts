@@ -117,6 +117,14 @@ export const CLIENT_GUARDED_RPC_SCOPES = {
   [WS_METHODS.cloudMachinesForget]: AuthSettingsWriteScope,
   [WS_METHODS.cloudMachinesDismissUnconfirmed]: AuthSettingsWriteScope,
   [WS_METHODS.cloudMachinesEnsureReady]: AuthSettingsWriteScope,
+  [WS_METHODS.hubNodesList]: AuthOrchestrationReadScope,
+  [WS_METHODS.hubNodesSubscribe]: AuthOrchestrationReadScope,
+  [WS_METHODS.hubNodesCheck]: AuthOrchestrationReadScope,
+  // Registering a node or a link lets this server reach another machine.
+  [WS_METHODS.hubNodesAdd]: AuthSettingsWriteScope,
+  [WS_METHODS.hubNodesRemove]: AuthSettingsWriteScope,
+  [WS_METHODS.hubNodesImport]: AuthSettingsWriteScope,
+  [WS_METHODS.hubNodesDismissNotice]: AuthSettingsWriteScope,
   [ORCHESTRATION_V2_WS_METHODS.stopWorkflow]: AuthOrchestrationOperateScope,
 } as const;
 export type ClientGuardedRpcTag = keyof typeof CLIENT_GUARDED_RPC_SCOPES;

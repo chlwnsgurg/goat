@@ -114,6 +114,7 @@ it.effect("083 participates in the migration ledger and leaves healthy spaces un
       [88, "ThreadRunObservedChecks"],
       [89, "RemoteDispatchObservation"],
       [90, "MemoryRevisionCheckpointSize"],
+      [91, "HubNodes"],
     ]);
     assert.deepStrictEqual(yield* pending, []);
     yield* sql.withTransaction(refreshCheckpointAccounting());

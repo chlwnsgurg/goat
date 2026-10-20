@@ -3,11 +3,9 @@ import * as Schema from "effect/Schema";
 import { EnvironmentId, IsoDateTime, ThreadId, TrimmedNonEmptyString } from "./baseSchemas.ts";
 
 /**
- * Saved connections live in each client's own catalog, not on the server. An
- * agent manages the catalog of the desktop app that owns this environment: the
- * server relays each operation to that app's renderer over
- * `connectionCatalog.serve`, and the renderer answers with
- * `connectionCatalog.respond` after running the same code Settings uses.
+ * Legacy desktop catalog bridge. The hub owns agent-managed nodes; after hub mutations the
+ * server forwards operations to an attached desktop renderer over `connectionCatalog.serve`
+ * and waits for `connectionCatalog.respond` to keep its saved sidebar connections in sync.
  */
 
 /** Who saved a connection on the user's behalf. */

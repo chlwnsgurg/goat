@@ -1,6 +1,7 @@
 import { expect, it } from "@effect/vitest";
 import {
   EnvironmentId,
+  HubNodesError,
   ProviderInstanceId,
   ThreadId,
   TurnItemId,
@@ -8,6 +9,7 @@ import {
   SSH_PREFLIGHT_STEP_ORDER,
   type SshPreflightReport,
   type SshHostResult,
+  type HubNode,
 } from "@goat/contracts";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
@@ -16,6 +18,7 @@ import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
 import * as Broker from "../connections/ConnectionCatalogBroker.ts";
 import * as Sessions from "../auth/SessionStore.ts";
+import * as HubNodes from "../hubNodes/HubNodes.ts";
 import * as Threads from "../orchestration-v2/ThreadManagementService.ts";
 import type { McpInvocationScope } from "../mcp/McpInvocationContext.ts";
 import { liveThreadShell } from "../mcp/McpToolAccess.testkit.ts";
@@ -48,10 +51,32 @@ const prepared: SshHostResult = {
   kind: "ok",
   status: { host: "build", state: "preparing", runtimeVersion: null, requestedVersion: "0.1.0" },
 };
+const hubNode: HubNode = {
+  nodeId: EnvironmentId.make("build"),
+  environmentId: EnvironmentId.make("build"),
+  label: "Build",
+  kind: "ssh",
+  status: "online",
+  lastSeenAt: null,
+  addedBy: null,
+  routes: [
+    {
+      routeId: "ssh:build",
+      source: "registered",
+      target: { kind: "ssh", alias: "build", hostname: null, username: null, port: null },
+      status: "online",
+      checkedAt: null,
+      lastSeenAt: null,
+      lastError: null,
+    },
+  ],
+};
 const fixture = (
   options: {
     blocked?: "failed" | "needs_review";
     catalog?: "absent" | "detached" | "timeout";
+    /** unidentified: GOAT never ran there; preparing: identified only after a prepare. */
+    hub?: "unidentified" | "preparing" | "unreachable";
     limited?: boolean;
     revoke?: boolean;
     authority?: boolean;
@@ -68,6 +93,7 @@ const fixture = (
     const managedAlias = options.configured ? "goat-build" : "build";
     const checkedHosts: string[] = [];
     let checks = 0;
+    let preparedOnce = false;
     const sourceReport = options.fingerprint
       ? {
           ...readyPreflight,
@@ -151,7 +177,31 @@ const fixture = (
               Effect.sync(() => {
                 expect(input.host).toBe(managedAlias);
                 calls.push("prepare");
+                preparedOnce = true;
                 return options.prepareResult ?? prepared;
+              }),
+          }),
+          Layer.mock(HubNodes.HubNodes)({
+            add: (input, hubOptions) =>
+              Effect.gen(function* () {
+                calls.push("hub");
+                expect(input).toMatchObject({ kind: "ssh", hostname: null });
+                expect(hubOptions.requireIdentity).toBe(true);
+                if (
+                  options.hub === "unidentified" ||
+                  (options.hub === "preparing" && !preparedOnce)
+                )
+                  return yield* new HubNodesError({
+                    reason: "invalid_request",
+                    detail: "GOAT has not run on build yet",
+                  });
+                if (options.hub === "unreachable")
+                  return yield* new HubNodesError({
+                    reason: "host_unavailable",
+                    detail: "Could not reach build.",
+                  });
+                yield* hubOptions.beforeSave;
+                return { created: true, node: hubNode };
               }),
           }),
           Layer.mock(Broker.ConnectionCatalogBroker)({
@@ -225,7 +275,7 @@ it.effect("review requests approval and recall reruns preflight before catalog d
     f.approve();
     expect(yield* f.call()).toMatchObject({ outcome: "connected", created: true });
     expect(f.calls.filter((call) => call === "prepare")).toEqual([]);
-    expect(f.calls).toEqual(["preflight", "approval", "preflight", "broker"]);
+    expect(f.calls).toEqual(["preflight", "approval", "preflight", "broker", "hub"]);
   }),
 );
 it.effect(
@@ -254,21 +304,71 @@ it.effect(
       });
       expect(readOnly.calls).toEqual(["preflight"]);
 
-      const prepare = yield* fixture({ catalog: "absent" });
+      const prepare = yield* fixture({ catalog: "absent", hub: "unidentified" });
       expect(yield* prepare.call(threadOnly)).toMatchObject({
         outcome: "capability_denied",
         saved: false,
         reason: expect.stringContaining("environment:maintain"),
       });
-      expect(prepare.calls).toEqual(["preflight", "broker"]);
+      expect(prepare.calls).toEqual(["preflight", "broker", "hub"]);
     }),
 );
-it.effect("an absent catalog returns the real preparation result", () =>
+it.effect("a saved desktop connection is also registered on the hub", () =>
+  Effect.gen(function* () {
+    const f = yield* fixture();
+    expect(yield* f.call()).toMatchObject({
+      outcome: "connected",
+      hub: { saved: true, node: hubNode },
+      desktopCatalog: "saved",
+    });
+    expect(f.calls).toEqual(["preflight", "broker", "hub"]);
+  }),
+);
+it.effect("a hub failure after the desktop saved is reported without failing the add", () =>
+  Effect.gen(function* () {
+    const f = yield* fixture({ hub: "unreachable" });
+    expect(yield* f.call()).toMatchObject({
+      outcome: "connected",
+      created: true,
+      hub: { saved: false, reason: "Could not reach build." },
+      desktopCatalog: "saved",
+    });
+  }),
+);
+it.effect("an absent catalog saves the identified host to the hub alone", () =>
   Effect.gen(function* () {
     const f = yield* fixture({ catalog: "absent" });
-    expect(yield* f.call()).toMatchObject({ ...prepared, saved: false });
-    expect(f.calls).toEqual(["preflight", "broker", "prepare"]);
+    const result = yield* f.call();
+    expect(result).toMatchObject({
+      outcome: "connected",
+      created: true,
+      connection: { environmentId: "build", routes: [{ kind: "ssh", host: "build" }] },
+      hub: { saved: true, node: hubNode },
+      desktopCatalog: "not_attached",
+    });
+    expect(isAddResult(result)).toBe(true);
+    expect(f.calls).toEqual(["preflight", "broker", "hub"]);
   }),
+);
+it.effect("an absent catalog registers a host on the hub once preparation identifies it", () =>
+  Effect.gen(function* () {
+    const f = yield* fixture({ catalog: "absent", hub: "preparing" });
+    expect(yield* f.call()).toMatchObject({ outcome: "connected", desktopCatalog: "not_attached" });
+    expect(f.calls).toEqual(["preflight", "broker", "hub", "prepare", "hub"]);
+  }),
+);
+it.effect(
+  "an absent catalog on a host still unidentified returns the real preparation result",
+  () =>
+    Effect.gen(function* () {
+      const f = yield* fixture({ catalog: "absent", hub: "unidentified" });
+      expect(yield* f.call()).toMatchObject({
+        ...prepared,
+        saved: false,
+        reason: expect.stringContaining("Call this tool again once preparation finishes."),
+      });
+      expect(f.calls).toEqual(["preflight", "broker", "hub", "prepare", "hub"]);
+    }),
 );
 it.effect.each(["detached", "timeout"] as const)(
   "a dispatched %s does not fall back or provision again",
@@ -302,7 +402,7 @@ it.effect("saving a trusted alias does not require settings authority", () =>
   Effect.gen(function* () {
     const f = yield* fixture({ authority: false });
     expect(yield* f.call()).toMatchObject({ outcome: "connected" });
-    expect(f.calls).toEqual(["preflight", "broker"]);
+    expect(f.calls).toEqual(["preflight", "broker", "hub"]);
   }),
 );
 it.effect.each([{}, { configured: true }])(
@@ -318,12 +418,12 @@ it.effect.each([{}, { configured: true }])(
           client: { sessionId: "client", label: "Client", access: "full-access" },
         }),
       ).toMatchObject({ outcome: "connected", created: true });
-      expect(f.calls).toEqual(["preflight", "broker"]);
+      expect(f.calls).toEqual(["preflight", "broker", "hub"]);
     }),
 );
 it.effect.each([
   { typed: true, blocked: "needs_review" as const },
-  { configured: true, catalog: "absent" as const },
+  { configured: true, catalog: "absent" as const, hub: "unidentified" as const },
 ])(
   "outside-thread callers get the Settings instruction only when trust needs a handoff (%s)",
   (options) =>
@@ -340,7 +440,7 @@ it.effect.each([
         kind: "error",
         message: "Add this host in Settings → Connections.",
       });
-      expect(f.calls).toEqual(options.catalog ? ["preflight", "broker"] : ["preflight"]);
+      expect(f.calls).toEqual(options.catalog ? ["preflight", "broker", "hub"] : ["preflight"]);
     }),
 );
 
@@ -359,13 +459,18 @@ it.effect.each([false, true])(
   "configured alias fallback pins before preparation (limited=%s)",
   (limited) =>
     Effect.gen(function* () {
-      const f = yield* fixture({ configured: true, catalog: "absent", limited });
+      const f = yield* fixture({
+        configured: true,
+        catalog: "absent",
+        hub: "unidentified",
+        limited,
+      });
       expect(yield* f.call()).toMatchObject({
         outcome: "needs_human",
         next: { call: "goat_ssh_host_add", host: "goat-build" },
       });
       expect(f.calls).toEqual(
-        limited ? ["preflight", "approval"] : ["preflight", "broker", "approval"],
+        limited ? ["preflight", "approval"] : ["preflight", "broker", "hub", "approval"],
       );
       f.approve();
       expect(f.calls).not.toContain("prepare");
@@ -374,7 +479,17 @@ it.effect.each([false, true])(
       expect(f.calls).toEqual(
         limited
           ? ["preflight", "approval", "preflight", "prepare"]
-          : ["preflight", "broker", "approval", "preflight", "broker", "prepare"],
+          : [
+              "preflight",
+              "broker",
+              "hub",
+              "approval",
+              "preflight",
+              "broker",
+              "hub",
+              "prepare",
+              "hub",
+            ],
       );
     }),
 );
@@ -407,7 +522,7 @@ it.effect("a new fingerprint returns preflight when an outside client lacks sett
 );
 it.effect("headless preparation returns preflight when environment:maintain is missing", () =>
   Effect.gen(function* () {
-    const f = yield* fixture({ catalog: "absent" });
+    const f = yield* fixture({ catalog: "absent", hub: "unidentified" });
     expect(yield* f.call({ ...scope, grantedScopes: ["settings:write"] })).toMatchObject({
       outcome: "capability_denied",
       saved: false,
@@ -416,12 +531,12 @@ it.effect("headless preparation returns preflight when environment:maintain is m
         /environment:maintain grant\. Ask the person to connect it in Settings → Connections/u,
       ),
     });
-    expect(f.calls).toEqual(["preflight", "broker"]);
+    expect(f.calls).toEqual(["preflight", "broker", "hub"]);
   }),
 );
 it.effect("a denied fallback still says why the connection was not saved", () =>
   Effect.gen(function* () {
-    const f = yield* fixture({ configured: true, catalog: "absent" });
+    const f = yield* fixture({ configured: true, catalog: "absent", hub: "unidentified" });
     const result = yield* f.call({
       ...scope,
       thread: undefined,
@@ -430,9 +545,9 @@ it.effect("a denied fallback still says why the connection was not saved", () =>
     });
     expect(result).toMatchObject({ outcome: "capability_denied", saved: false });
     expect(isAddResult(result) && "reason" in result ? result.reason : "").toMatch(
-      /^No desktop connection catalog is attached.*settings:write/su,
+      /^GOAT has not run on build yet.*settings:write/su,
     );
-    expect(f.calls).toEqual(["preflight", "broker"]);
+    expect(f.calls).toEqual(["preflight", "broker", "hub"]);
   }),
 );
 
@@ -455,6 +570,7 @@ it.effect.each([
   },
   {
     catalog: "absent" as const,
+    hub: "unidentified" as const,
     prepareResult: {
       kind: "error",
       code: "operation_failed",

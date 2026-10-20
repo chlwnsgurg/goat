@@ -1,4 +1,5 @@
 import * as ConnectionCatalogBroker from "../../../connections/ConnectionCatalogBroker.ts";
+import * as HubNodes from "../../../hubNodes/HubNodes.ts";
 import * as SshDeviceAdd from "../../../sshRemote/SshDeviceAdd.ts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as FileSystem from "effect/FileSystem";
@@ -1265,23 +1266,65 @@ const runtimeFixture = (
     Layer.provide(
       SshDeviceAdd.layer.pipe(
         Layer.provide(
-          Layer.mock(ConnectionCatalogBroker.ConnectionCatalogBroker)({
-            invoke: (operation) =>
-              Effect.sync(() => {
-                expect(operation.type).toBe("add_ssh");
-                catalogWrites.push("add_ssh");
-                return {
-                  type: "add_ssh" as const,
-                  created: true,
-                  connection: {
-                    environmentId: EnvironmentId.make("box"),
-                    label: "Box",
-                    enabled: true,
-                    routes: [],
-                  },
-                };
-              }),
-          }),
+          Layer.mergeAll(
+            Layer.mock(ConnectionCatalogBroker.ConnectionCatalogBroker)({
+              invoke: (operation) =>
+                Effect.sync(() => {
+                  expect(operation.type).toBe("add_ssh");
+                  catalogWrites.push("add_ssh");
+                  return {
+                    type: "add_ssh" as const,
+                    created: true,
+                    connection: {
+                      environmentId: EnvironmentId.make("box"),
+                      label: "Box",
+                      enabled: true,
+                      routes: [],
+                    },
+                  };
+                }),
+            }),
+            Layer.mock(HubNodes.HubNodes)({
+              add: (input, options) =>
+                options.beforeSave.pipe(
+                  Effect.andThen(
+                    Effect.sync(() => {
+                      expect(input).toMatchObject({ kind: "ssh", alias: "box" });
+                      catalogWrites.push("hub");
+                      return {
+                        created: true,
+                        node: {
+                          nodeId: EnvironmentId.make("box"),
+                          environmentId: EnvironmentId.make("box"),
+                          label: "Box",
+                          kind: "ssh" as const,
+                          status: "online" as const,
+                          lastSeenAt: null,
+                          addedBy: null,
+                          routes: [
+                            {
+                              routeId: "ssh:box",
+                              source: "registered" as const,
+                              target: {
+                                kind: "ssh" as const,
+                                alias: "box",
+                                hostname: null,
+                                username: null,
+                                port: null,
+                              },
+                              status: "online" as const,
+                              checkedAt: null,
+                              lastSeenAt: null,
+                              lastError: null,
+                            },
+                          ],
+                        },
+                      };
+                    }),
+                  ),
+                ),
+            }),
+          ),
         ),
       ),
     ),
@@ -1582,8 +1625,10 @@ it.effect(
         outcome: "connected",
         preflight: f.preflight,
         created: true,
+        hub: { saved: true, node: { environmentId: "box" } },
+        desktopCatalog: "saved",
       });
-      expect(f.catalogWrites).toEqual(["add_ssh"]);
+      expect(f.catalogWrites).toEqual(["add_ssh", "hub"]);
       expect(f.handoffs).toEqual([]);
     }),
 );

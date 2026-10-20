@@ -276,7 +276,7 @@ export const agentSurfaceRegistry = {
     toolkit: "connection",
     summary: "List saved connections",
     description:
-      "List the connections saved in the GOAT desktop app on this machine: the environments its sidebar shows, with their routes and who added them. No credentials are returned.",
+      "List nodes owned by this GOAT server (the hub), including routes and notices. Works without the desktop app, including goat serve alone. Legacy connections includes only nodes with a known environmentId. No credentials are returned.",
     effect: "read",
     hostRoutable: false,
     requires: "either",
@@ -295,7 +295,7 @@ export const agentSurfaceRegistry = {
     toolkit: "connection",
     summary: "Add an SSH device",
     description:
-      "Alias of goat_ssh_host_add. Add an SSH device from a configured host alias or typed address. Runs preflight, asks a person to pin a new fingerprint, then saves the connection when a full-access caller and desktop catalog are available. After approval call goat_ssh_host_add with next.host. Otherwise prepares the host and returns saved:false with the result and reason. Key authentication only. Repeated calls return an existing connection with created:false. Preflight needs the orchestration capability. Creating a host trust handoff needs a running GOAT thread, and the approving person needs settings:write; saving a desktop connection needs full access; headless preparation needs environment:maintain. Denied steps return the preflight report with outcome capability_denied and the missing authority in reason. When preflight fails on a host GOAT pinned (preflight.destination.managed), goat_ssh_host_forget removes that pin.",
+      "Alias of goat_ssh_host_add. Add an SSH device from a configured host alias or typed address. Runs preflight, asks a person to pin a new fingerprint, then saves the device when a full-access caller is available: in the desktop catalog when the GOAT desktop app is attached (desktopCatalog saved), and always in this GOAT server's (the hub's) node list (hub.saved, works without the desktop app). After approval call goat_ssh_host_add with next.host. A host GOAT has not run on yet is prepared first and then registered; otherwise returns saved:false with the result and reason. Key authentication only. Repeated calls return an existing connection with created:false. Preflight needs the orchestration capability. Creating a host trust handoff needs a running GOAT thread, and the approving person needs settings:write; saving needs full access; headless preparation needs environment:maintain. Denied steps return the preflight report with outcome capability_denied and the missing authority in reason. When preflight fails on a host GOAT pinned (preflight.destination.managed), goat_ssh_host_forget removes that pin.",
     effect: "write",
     hostRoutable: false,
     requires: "either",
@@ -314,7 +314,7 @@ export const agentSurfaceRegistry = {
     toolkit: "connection",
     summary: "Remove a saved connection",
     description:
-      "Remove a saved connection like Settings → Remove: forget pairing, credentials and cached threads on this device. GOAT's server keeps running on the host. Use goat_ssh_host_forget to stop it when idle. The local environment and T3 Connect environments are refused.",
+      "Remove a node owned by this GOAT server (the hub), using exactly one of nodeId or the legacy environmentId. Works without the desktop app. Linked credentials are forgotten; cloud nodes must be managed in Settings → Connections → Cloud machines. The remote GOAT server keeps running. The desktop sidebar is updated when the desktop app is attached; desktopCatalog reports saved, not_attached or failed.",
     effect: "destructive",
     hostRoutable: false,
     requires: "either",
@@ -2046,7 +2046,7 @@ export const agentSurfaceRegistry = {
     toolkit: "ssh",
     summary: "Add an SSH host",
     description:
-      "Alias of goat_connection_add_ssh. Add an SSH device from a configured host alias or typed address. Runs reachability, host key, key authentication, platform, disk and runtime preflight. Failed checks have fixes and cause no provisioning. A new fingerprint needs human approval; approval only pins the host. Call this tool again with next.host after approval to preflight and connect. A full-access caller with a desktop catalog saves the connection; otherwise returns saved:false and the real preparation result. Preflight needs the orchestration capability. Creating a host trust handoff needs a running GOAT thread, and the approving person needs settings:write; saving a desktop connection needs full access; headless preparation needs environment:maintain. Denied steps return the preflight report with outcome capability_denied and the missing authority in reason.",
+      "Alias of goat_connection_add_ssh. Add an SSH device from a configured host alias or typed address. Runs reachability, host key, key authentication, platform, disk and runtime preflight. Failed checks have fixes and cause no provisioning. A new fingerprint needs human approval; approval only pins the host. Call this tool again with next.host after approval to preflight and connect. A full-access caller saves the device in the desktop catalog when the GOAT desktop app is attached (desktopCatalog saved) and in this GOAT server's (the hub's) node list (hub.saved), which works without the desktop app. A host GOAT has not run on yet is prepared first and then registered; otherwise returns saved:false and the real preparation result. Preflight needs the orchestration capability. Creating a host trust handoff needs a running GOAT thread, and the approving person needs settings:write; saving needs full access; headless preparation needs environment:maintain. Denied steps return the preflight report with outcome capability_denied and the missing authority in reason.",
     effect: "write",
     hostRoutable: false,
     requires: "either",

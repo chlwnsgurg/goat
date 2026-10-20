@@ -26,6 +26,7 @@ it.effect("081 rolls DDL back and preserves the retained destination across ledg
       [88, "ThreadRunObservedChecks"],
       [89, "RemoteDispatchObservation"],
       [90, "MemoryRevisionCheckpointSize"],
+      [91, "HubNodes"],
     ]);
     yield* sql`INSERT INTO memory_last_ready_space(singleton,space) VALUES (1,${space})`;
     assert.deepStrictEqual(yield* runMigrations(), []);

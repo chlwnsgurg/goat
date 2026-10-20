@@ -30,6 +30,21 @@ describe("memory client guards", () => {
     for (const method of [WS_METHODS.memoryHubSettingsGet, WS_METHODS.memoryHubSettingsUpdate])
       expect(clientRpcRequiredScopes(method, {})).toEqual(["settings:write"]);
   });
+  it("lets readers list and check hub nodes but needs settings write to change them", () => {
+    for (const method of [
+      WS_METHODS.hubNodesList,
+      WS_METHODS.hubNodesSubscribe,
+      WS_METHODS.hubNodesCheck,
+    ])
+      expect(clientRpcRequiredScopes(method, {}), method).toEqual(["orchestration:read"]);
+    for (const method of [
+      WS_METHODS.hubNodesAdd,
+      WS_METHODS.hubNodesRemove,
+      WS_METHODS.hubNodesImport,
+      WS_METHODS.hubNodesDismissNotice,
+    ])
+      expect(clientRpcRequiredScopes(method, {}), method).toEqual(["settings:write"]);
+  });
   it("leaves existing compound guards unchanged", () => {
     expect(clientRpcRequiredScopes(WS_METHODS.sshWorkspaceLaunch, {})).toEqual([
       "source-control:write",
