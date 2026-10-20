@@ -1,4 +1,3 @@
-// @vitest-environment jsdom
 import { EnvironmentId, type HubNode } from "@goat/contracts";
 import { act, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
