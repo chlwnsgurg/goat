@@ -1,11 +1,7 @@
+import * as SshDeviceAdd from "../../../sshRemote/SshDeviceAdd.ts";
 import { agentSurfaceRegistry } from "@goat/contracts/agentSurface";
 import { agentSurfaceAnnotations } from "../../agentSurface.ts";
-import {
-  EnvironmentId,
-  OrchestratorMcpFailure,
-  SavedConnection,
-  TrimmedNonEmptyString,
-} from "@goat/contracts";
+import { EnvironmentId, OrchestratorMcpFailure, SavedConnection } from "@goat/contracts";
 import * as Schema from "effect/Schema";
 import { Tool, Toolkit } from "effect/ai";
 
@@ -33,13 +29,9 @@ const ListTool = Tool.make(agentSurfaceRegistry["connection.list"].name, {
 const AddSshTool = Tool.make(agentSurfaceRegistry["connection.add_ssh"].name, {
   ...shared,
   description: agentSurfaceRegistry["connection.add_ssh"].description,
-  parameters: Schema.Struct({
-    host: TrimmedNonEmptyString.annotate({
-      description: "SSH alias or host from goat_ssh_host_list.",
-    }),
-    label: Schema.optional(TrimmedNonEmptyString),
-  }),
-  success: Schema.Struct({ created: Schema.Boolean, connection: SavedConnection }),
+  dependencies: [...shared.dependencies, SshDeviceAdd.SshDeviceAdd],
+  parameters: SshDeviceAdd.SshDeviceAddInput,
+  success: Schema.toCodecJson(SshDeviceAdd.SshDeviceAddResult),
 }).annotateMerge(agentSurfaceAnnotations(agentSurfaceRegistry["connection.add_ssh"]));
 
 const RemoveTool = Tool.make(agentSurfaceRegistry["connection.remove"].name, {

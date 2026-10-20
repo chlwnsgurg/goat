@@ -212,6 +212,7 @@ const RPC_AGGREGATES = {
   [WS_METHODS.vcsInit]: "vcs",
   [WS_METHODS.sshHostStatus]: "ssh",
   [WS_METHODS.sshHostHandoffProgress]: "ssh",
+  [WS_METHODS.sshHostPreflight]: "ssh",
   [WS_METHODS.sshHostProbe]: "ssh",
   [WS_METHODS.sshHostTrust]: "ssh",
   [WS_METHODS.sshHostPrepare]: "ssh",

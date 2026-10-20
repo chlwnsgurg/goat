@@ -8,6 +8,8 @@ import {
 import * as Memory from "./memory.ts";
 import {
   SshHostAddInput,
+  SshPreflightInput,
+  SshPreflightReport,
   SshHostProbeResult,
   SshHostProbeError,
   SshHostTrustInput,
@@ -548,6 +550,7 @@ export const WS_METHODS = {
   sshWorkspaceLaunch: "sshWorkspace.launch",
   sshWorkspaceFetchBack: "sshWorkspace.fetchBack",
   sshHostProbe: "sshHost.probe",
+  sshHostPreflight: "sshHost.preflight",
   sshHostTrust: "sshHost.trust",
   sshHostPrepare: "sshHost.prepare",
   sshHostForget: "sshHost.forget",
@@ -1604,6 +1607,11 @@ export const WsSshHostProbeRpc = Rpc.make(WS_METHODS.sshHostProbe, {
   success: SshHostProbeResult,
   error: Schema.Union([SshHostProbeError, HandoffError, EnvironmentAuthorizationError]),
 });
+export const WsSshHostPreflightRpc = Rpc.make(WS_METHODS.sshHostPreflight, {
+  payload: SshPreflightInput,
+  success: SshPreflightReport,
+  error: Schema.Union([SshHostProbeError, EnvironmentAuthorizationError]),
+});
 export const WsSshHostTrustRpc = Rpc.make(WS_METHODS.sshHostTrust, {
   payload: SshHostTrustInput,
   success: SshHostResult,
@@ -2431,6 +2439,7 @@ export const WsCoreWorkspaceRpcGroup = RpcGroup.make(
   WsSshHostStatusRpc,
   WsSshHostHandoffProgressRpc,
   WsSshHostProbeRpc,
+  WsSshHostPreflightRpc,
   WsSshHostTrustRpc,
   WsSshHostPrepareRpc,
   WsSshHostForgetRpc,

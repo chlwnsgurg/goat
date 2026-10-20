@@ -1,3 +1,4 @@
+import * as SshDeviceAdd from "./sshRemote/SshDeviceAdd.ts";
 import { isGoatConnectEnabled } from "@goat/shared/goatConnect";
 import { desiredLinkReconcileStartup } from "./cloud/DesiredLinkReconcile.ts";
 import * as HomeRoute from "./provider/OpenCodexRoute.ts";
@@ -1298,9 +1299,13 @@ const layerMakeRoutes = Layer.mergeAll(
   Layer.provide(layerSshWorkspace),
   // SshHostSetup routes approvals of agent-requested provider syncs to ProviderHostSync.
   Layer.provide(
-    SshHostSetup.layer.pipe(
-      Layer.provide(MaintenanceAudit.layer),
-      Layer.provideMerge(ProviderHostSync.layer),
+    SshDeviceAdd.layer.pipe(
+      Layer.provideMerge(
+        SshHostSetup.layer.pipe(
+          Layer.provide(MaintenanceAudit.layer),
+          Layer.provideMerge(ProviderHostSync.layer),
+        ),
+      ),
     ),
   ),
   Layer.provide(

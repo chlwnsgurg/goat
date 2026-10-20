@@ -22,6 +22,7 @@ import {
   WsRpcGroup,
   WsSubscribeServerConfigRpc,
   WsSshHostProbeRpc,
+  WsSshHostPreflightRpc,
   WsSshHostTrustRpc,
   WsSshHostPrepareRpc,
   WsSshHostForgetRpc,
@@ -360,6 +361,7 @@ it("import transport retains both typed import refusal and authorization errors"
 it("installs the complete SSH host transport together while leaving runtimeUpdate unregistered", () => {
   const rpcs = [
     WsSshHostProbeRpc,
+    WsSshHostPreflightRpc,
     WsSshHostTrustRpc,
     WsSshHostPrepareRpc,
     WsSshHostForgetRpc,
@@ -368,7 +370,7 @@ it("installs the complete SSH host transport together while leaving runtimeUpdat
   ];
   for (const rpc of rpcs) expect(WsRpcGroup.requests.get(rpc._tag)).toBeDefined();
   expect([...WsRpcGroup.requests.keys()].filter((tag) => tag.startsWith("sshHost."))).toHaveLength(
-    6,
+    7,
   );
   expect(WsRpcGroup.requests.has("sshHost.runtimeUpdate")).toBe(false);
   expect(decodeHostPrepare({ host: "box" })).toEqual({ host: "box" });
