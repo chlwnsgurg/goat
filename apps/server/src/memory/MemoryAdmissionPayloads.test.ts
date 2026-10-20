@@ -296,12 +296,25 @@ describe("memory admission history reads", () => {
         const selected = yield* store.loadAggregate(
           space,
           memory,
-          { heads: true, revisionIds: op.kind === "revert" ? [op.restoredRevisionId] : [] },
-          op.kind === "revert" ? { resolutionId: op.revertsResolutionId } : {},
+          op.kind === "forget"
+            ? {}
+            : { heads: true, revisionIds: op.kind === "revert" ? [op.restoredRevisionId] : [] },
+          op.kind === "forget"
+            ? {}
+            : {
+                ...(op.kind === "revert" ? { resolutionId: op.revertsResolutionId } : {}),
+                revision: op.revision,
+                ...(op.kind === "resolve"
+                  ? { metadataRevisionIds: op.resolution.inputRevisionIds }
+                  : {}),
+              },
         );
+        const selectedIds = new Set(selected.revisions.map((pair) => pair.revision.revisionId));
         assert.deepStrictEqual(
           selected.revisions.map((pair) => pair.revision),
-          full.revisions.map((pair) => pair.revision),
+          full.revisions
+            .filter((pair) => selectedIds.has(pair.revision.revisionId))
+            .map((pair) => pair.revision),
         );
         const decide = (aggregate: Store.MemoryAggregate) => {
           try {
@@ -485,6 +498,14 @@ describe("memory admission payload reads", () => {
         assert.isAtMost(params.length, 2);
         assert.isAtMost((yield* sql.unsafe(query, params)).length, 1);
       }
+      const revisionReads = queries.filter(([query]) =>
+        query.includes("SELECT r.*,NULL AS body_json FROM memory_revisions"),
+      );
+      assert.isAbove(revisionReads.length, 0);
+      for (const [query, params] of revisionReads) {
+        assert.isAtMost(params.length, 4);
+        assert.isAtMost((yield* sql.unsafe(query, params)).length, 2);
+      }
     }).pipe(Effect.provide(live)),
   );
 
@@ -545,6 +566,67 @@ describe("memory admission payload reads", () => {
           yield* store.transact(store.firstForgetReservation(operation(6))),
           before,
         );
+      }).pipe(Effect.provide(live)),
+  );
+
+  it.effect(
+    "bounds admission revision metadata reads and widens to the full DAG when ancestry needs it",
+    () =>
+      Effect.gen(function* () {
+        const store = yield* Store.MemoryStore;
+        const sql = yield* SqlClient.SqlClient;
+        yield* chain(24, () => false);
+
+        const queries: Array<readonly [string, ReadonlyArray<unknown>]> = [];
+        const record: Statement.Transformer = (statement) =>
+          Effect.sync(() => {
+            queries.push(statement.compile());
+            return statement;
+          });
+        const received = yield* receive(operation(24, false), 24).pipe(
+          Effect.provideService(Statement.CurrentTransformer, record),
+        );
+        assert.strictEqual(received.receipt.outcome, "accepted");
+        const revisionReads = queries.filter(([query]) =>
+          query.includes("SELECT r.*,NULL AS body_json FROM memory_revisions"),
+        );
+        assert.isAbove(revisionReads.length, 0);
+        for (const [query, params] of revisionReads) {
+          assert.isAtMost((yield* sql.unsafe(query, params)).length, 2);
+        }
+        const empty = yield* store.loadAggregate(space, memory, {}, {});
+        assert.deepStrictEqual(empty.revisions, []);
+        const headOnly = yield* store.loadAggregate(space, memory, { heads: true }, {});
+        assert.deepStrictEqual(
+          headOnly.revisions.map((pair) => pair.revision.revisionId),
+          [revisionId(24)],
+        );
+        // Existing revision IDs or parked inbox operations still widen to the full DAG for cycle/frontier checks.
+        const existing = yield* store.loadAggregate(
+          space,
+          memory,
+          { heads: true },
+          { revision: operation(24).revision },
+        );
+        assert.lengthOf(existing.revisions, 25);
+        // A revision branching from an older revision, or an ancestor arriving after
+        // its child, needs every link to prune heads exactly as the full read does.
+        const branch = operation(25, false).revision;
+        const fromOld = yield* store.loadAggregate(
+          space,
+          memory,
+          { heads: true },
+          { revision: { ...branch, parents: [revisionId(3)] } },
+        );
+        assert.lengthOf(fromOld.revisions, 25);
+        yield* sql`DELETE FROM memory_revisions WHERE space=${space} AND memory_id=${memory} AND revision_id=${revisionId(5)}`;
+        const lateAncestor = yield* store.loadAggregate(
+          space,
+          memory,
+          { heads: true },
+          { revision: { ...operation(5, false).revision, parents: [revisionId(24)] } },
+        );
+        assert.lengthOf(lateAncestor.revisions, 24);
       }).pipe(Effect.provide(live)),
   );
 });

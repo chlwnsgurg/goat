@@ -1,8 +1,15 @@
-import type { EnvironmentId } from "@goat/contracts";
+import { deriveGoatBotModelSettings } from "@goat/client-runtime/goatBot";
+import { AuthSettingsWriteScope, type EnvironmentId, type ModelSelection } from "@goat/contracts";
+import { useState } from "react";
 import { Text } from "react-native";
 
 import { ScreenScrollView } from "../../components/ui/ScreenScrollView";
+import { useEnvironmentServerConfig } from "../../state/entities";
+import { serverEnvironment } from "../../state/server";
+import { readEnvironmentScope } from "../../state/session";
+import { useAtomCommand } from "../../state/use-atom-command";
 import { useMobileGoatBotHomeSettings } from "../goat-bot/useMobileGoatBotHomeSettings";
+import { SettingsChoiceRow } from "./components/SettingsChoiceRow";
 import { SettingsRow } from "./components/SettingsRow";
 import { SettingsScreen } from "./components/SettingsScreen";
 import { SettingsSection } from "./components/SettingsSection";
@@ -73,9 +80,119 @@ export function SettingsGoatBotRouteScreen() {
                   />
                 ))}
             </SettingsSection>
+            {resolution.state === "claimed" && resolution.homeConnected ? (
+              <GoatBotModelSection
+                key={resolution.claim.environmentId}
+                environmentId={resolution.claim.environmentId}
+                canWrite={writableIds.has(resolution.claim.environmentId)}
+              />
+            ) : null}
           </>
         )}
       </ScreenScrollView>
     </SettingsScreen>
+  );
+}
+
+function GoatBotModelSection({
+  environmentId,
+  canWrite,
+}: {
+  readonly environmentId: EnvironmentId;
+  readonly canWrite: boolean;
+}) {
+  const config = useEnvironmentServerConfig(environmentId);
+  const updateSettings = useAtomCommand(serverEnvironment.updateSettings, {
+    label: "environment settings update",
+    reportFailure: false,
+  });
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  if (!config) return null;
+
+  const modelState = deriveGoatBotModelSettings({
+    settings: config.settings,
+    providers: config.providers,
+  });
+  const allowed = canWrite && !saving;
+
+  function save(goatBotModelSelection: ModelSelection | null) {
+    if (saving || !readEnvironmentScope(environmentId, AuthSettingsWriteScope)) return;
+    setSaving(true);
+    setError(null);
+    void updateSettings({
+      environmentId,
+      input: { patch: { goatBotModelSelection } },
+    })
+      .then((result) => {
+        setError(result._tag === "Success" ? null : "Could not update GOAT Bot's model.");
+      })
+      .catch(() => {
+        setError("Could not update GOAT Bot's model.");
+      })
+      .finally(() => setSaving(false));
+  }
+
+  return (
+    <>
+      <SettingsSection title="Model">
+        <SettingsRow
+          icon="sparkles"
+          label="GOAT Bot model"
+          value={saving ? "Saving…" : modelState.summaryLabel}
+          disabled={!allowed}
+          onPress={() => setPickerOpen((open) => !open)}
+        />
+        {pickerOpen ? (
+          <>
+            <SettingsChoiceRow
+              label="Automatic"
+              description={modelState.automaticDescription}
+              selected={!modelState.separate}
+              separated
+              disabled={!allowed}
+              onPress={() => {
+                setPickerOpen(false);
+                if (modelState.separate) save(null);
+              }}
+            />
+            {modelState.choices.map((choice) => (
+              <SettingsChoiceRow
+                key={choice.key}
+                label={choice.label}
+                description={choice.providerLabel}
+                selected={
+                  modelState.separate &&
+                  modelState.selection.instanceId === choice.instanceId &&
+                  modelState.selection.model === choice.model
+                }
+                separated
+                disabled={!allowed}
+                onPress={() => {
+                  setPickerOpen(false);
+                  if (
+                    !modelState.separate ||
+                    modelState.selection.instanceId !== choice.instanceId ||
+                    modelState.selection.model !== choice.model
+                  ) {
+                    save(choice.selection);
+                  }
+                }}
+              />
+            ))}
+          </>
+        ) : null}
+      </SettingsSection>
+      <Text className="text-foreground-muted">
+        The model GOAT Bot uses when it looks into something itself. Automatic follows the default
+        model for new threads.
+      </Text>
+      {error ? (
+        <Text accessibilityRole="alert" className="text-danger-foreground">
+          {error}
+        </Text>
+      ) : null}
+    </>
   );
 }

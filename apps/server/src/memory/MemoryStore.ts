@@ -93,6 +93,91 @@ export const approvedReplica: MemoryAdmissionContext = {
 const sameHeadSet = (a: readonly string[], b: readonly string[]) =>
   a.length === b.length && a.every((id) => b.includes(id));
 const hashText = (text: string) => NodeCrypto.createHash("sha256").update(text).digest("hex");
+const hasBatchim = (ch: string) => {
+  const code = ch.charCodeAt(0);
+  return code >= 0xac00 && code <= 0xd7a3 && (code - 0xac00) % 28 !== 0;
+};
+const hasRieulBatchim = (ch: string) => {
+  const code = ch.charCodeAt(0);
+  return code >= 0xac00 && code <= 0xd7a3 && (code - 0xac00) % 28 === 8;
+};
+const HANGUL_PARTICLE_PATTERN =
+  "에게서|한테서|으로부터|로부터|으로서|으로써|으로는|으로도|으로만|에게는|에게도|한테는|한테도|이라고|이라며|이라서|이랑은|이랑도|입니다|입니까|이에요|께서도|께서는|에서도|에서는|께서|에서|에게|한테|으로|로서|로써|로만|로는|로도|부터|까지|마저|조차|이나|이라|이랑|하고|보다|처럼|같이|대로|마다|밖에|커녕|인들|라고|라며|라서|이란|랑은|랑도|예요|이다|이야|은|는|이|가|을|를|의|에|로|와|과|도|만|께|란|랑";
+const HANGUL_SUFFIX_RE = new RegExp(
+  `^([\\uAC00-\\uD7A3]{2,}?)(?:(님|씨)(?:${HANGUL_PARTICLE_PATTERN})?|(${HANGUL_PARTICLE_PATTERN}))$`,
+  "u",
+);
+const BATCHIM_PARTICLES = new Set([
+  "은",
+  "이",
+  "을",
+  "과",
+  "으로",
+  "으로서",
+  "으로써",
+  "으로부터",
+  "으로는",
+  "으로도",
+  "으로만",
+  "이나",
+  "이라",
+  "이랑",
+  "이라고",
+  "이라며",
+  "이라서",
+  "이란",
+  "이랑은",
+  "이랑도",
+  "이에요",
+]);
+const VOWEL_PARTICLES = new Set([
+  "는",
+  "가",
+  "를",
+  "와",
+  "랑",
+  "라고",
+  "라며",
+  "라서",
+  "란",
+  "랑은",
+  "랑도",
+  "예요",
+]);
+const RO_PARTICLES = new Set(["로", "로서", "로써", "로부터", "로는", "로도", "로만"]);
+const stripHangulParticle = (word: string) => {
+  const match = HANGUL_SUFFIX_RE.exec(word);
+  if (!match) return word;
+  const [, stem, honorific, bareParticle] = match;
+  if (!stem) return word;
+  if (honorific) return stem;
+  const last = stem[stem.length - 1]!;
+  if (bareParticle && BATCHIM_PARTICLES.has(bareParticle)) {
+    if (!hasBatchim(last) || (bareParticle.startsWith("으로") && hasRieulBatchim(last)))
+      return word;
+  } else if (bareParticle && VOWEL_PARTICLES.has(bareParticle)) {
+    if (hasBatchim(last)) return word;
+  } else if (bareParticle && RO_PARTICLES.has(bareParticle)) {
+    if (hasBatchim(last) && !hasRieulBatchim(last)) return word;
+  }
+  return stem;
+};
+const ftsQuote = (value: string) => '"' + value.replaceAll('"', '""') + '"';
+// unicode61 splits only on whitespace/punctuation, so Hangul nouns stay glued to
+// trailing particles in both stored bodies and queries.
+const ftsMatchQuery = (text: string) => {
+  const exact = ftsQuote(text);
+  if (!/[\uAC00-\uD7A3]/u.test(text)) return exact;
+  const clauses = (text.match(/[\p{L}\p{N}_]+/gu) ?? []).map((token) => {
+    if (!/[\uAC00-\uD7A3]/u.test(token)) return ftsQuote(token);
+    const stemmed = token.replace(/[\uAC00-\uD7A3]+/gu, stripHangulParticle);
+    // A one-syllable prefix such as 이 would match nearly every Korean body.
+    return stemmed.length < 2 ? ftsQuote(stemmed) : `${ftsQuote(stemmed)}*`;
+  });
+  if (!clauses.length) return exact;
+  const expanded = clauses.length === 1 ? clauses[0]! : `(${clauses.join(" ")})`;
+  return `${exact} OR ${expanded}`;
+};
 const strict = { onExcessProperty: "error" } as const;
 const digest = Schema.String.check(Schema.makeFilter((s) => /^[a-f0-9]{64}$/.test(s)));
 const Metadata = Schema.Struct({
@@ -302,12 +387,18 @@ export type MemoryPayloadSelection = {
   readonly when?: (revision: M.MemoryRevision) => boolean;
 };
 /**
- * Admission needs at most the claimed conflict and the reverted resolution. Omit this
- * selection for full history; `{}` skips both histories without reading their rows.
+ * Admission needs at most the claimed conflict, the reverted resolution, and the incoming
+ * revision's frontier/parent metadata. Omit this selection for full history; `{}` skips
+ * historical rows that are not explicitly selected.
  */
 export type MemoryHistorySelection = {
   readonly conflictId?: M.MemoryConflictId;
   readonly resolutionId?: M.MemoryResolutionId;
+  /** Incoming revision whose admission DAG checks need its direct parents and any active ancestry. */
+  readonly revision?: M.MemoryRevision;
+  readonly metadataRevisionIds?: ReadonlyArray<M.MemoryRevisionId>;
+  /** Also retain import-attributed revision metadata when computing forget reservations. */
+  readonly importLineage?: boolean;
 };
 /** A published boundary is not proof that an arbitrary unknown UUID was compacted. */
 export type MemoryParentState =
@@ -3111,26 +3202,77 @@ const make = Effect.gen(function* () {
       };
     },
   );
-  /** Admission reads the whole revision DAG but only the payload bodies it selects. */
+  /** Admission reads only the revision metadata and payload bodies its selection requires. */
   const loadSelectedRevisions = Effect.fnUntraced(function* (
     space: M.MemorySpaceId,
     id: M.MemoryId,
     heads: ReadonlyArray<M.MemoryRevisionId>,
     visible: boolean,
+    blocked: boolean,
     payloads: MemoryPayloadSelection,
+    history?: MemoryHistorySelection,
   ) {
-    const rows = yield* stored(
-      "revisions",
-      sql<HistoryRevisionRow>`SELECT r.*,NULL AS body_json FROM memory_revisions r WHERE r.space=${space} AND r.memory_id=${id}`,
-    );
-    const decoded = yield* Effect.forEach(rows, (row) =>
-      decodeHistoryRevision(row, space, id, false),
-    );
-    if (!visible) return decoded;
     const wanted = new Set<string>([
       ...(payloads.heads ? heads : []),
       ...(payloads.revisionIds ?? []),
     ]);
+    const r = history?.revision;
+    const wantedMetadata = new Set<string>([
+      ...wanted,
+      ...(history?.metadataRevisionIds ?? []),
+      ...(r ? [r.revisionId, ...r.parents] : []),
+    ]);
+    let rows: ReadonlyArray<HistoryRevisionRow>;
+    if (
+      history === undefined ||
+      (payloads.when !== undefined && payloads.when !== hasSourceEvidence)
+    ) {
+      rows = yield* stored(
+        "revisions",
+        sql<HistoryRevisionRow>`SELECT r.*,NULL AS body_json FROM memory_revisions r WHERE r.space=${space} AND r.memory_id=${id}`,
+      );
+    } else if (payloads.when === hasSourceEvidence) {
+      rows = yield* stored(
+        "revisions",
+        sql<HistoryRevisionRow>`SELECT r.*,NULL AS body_json FROM memory_revisions r WHERE r.space=${space} AND r.memory_id=${id} AND ((instr(r.provenance_json,'"sourceThread"')>0 AND instr(r.provenance_json,'"sourceWatermark"')>0) ${history.importLineage ? sql`OR instr(r.provenance_json,'"importSource"')>0` : sql``} ${wantedMetadata.size ? sql`OR r.revision_id IN ${sql.in([...wantedMetadata])}` : sql``})`,
+      );
+    } else if (wantedMetadata.size === 0) {
+      return [];
+    } else {
+      rows = yield* stored(
+        "revisions",
+        sql<HistoryRevisionRow>`SELECT r.*,NULL AS body_json FROM memory_revisions r WHERE r.space=${space} AND r.memory_id=${id} AND r.revision_id IN ${sql.in([...wantedMetadata])}`,
+      );
+      if (r && (r.parents.length > 0 || heads.length > 0)) {
+        // The narrow read is exact only for a revision that extends current heads and
+        // that no stored revision names as a parent: heads are maximal, so a head is
+        // then superseded exactly when it is a direct parent. Anything else, such as
+        // a branch from an older revision or an ancestor arriving after its child,
+        // walks the whole DAG as before.
+        const fullDagNeeded =
+          blocked ||
+          r.parents.some((parent) => !heads.includes(parent)) ||
+          rows.some((row) => row.revision_id === r.revisionId) ||
+          (yield* stored(
+            "revisions-child",
+            sql`SELECT 1 FROM memory_revisions WHERE space=${space} AND memory_id=${id} AND instr(parents_json,${`"${r.revisionId}"`})>0 LIMIT 1`,
+          )).length > 0 ||
+          (yield* stored(
+            "revisions-pending",
+            sql`SELECT 1 FROM memory_inbox_pending WHERE space=${space} AND memory_id=${id} AND record_kind='operation' LIMIT 1`,
+          )).length > 0;
+        if (fullDagNeeded) {
+          rows = yield* stored(
+            "revisions",
+            sql<HistoryRevisionRow>`SELECT r.*,NULL AS body_json FROM memory_revisions r WHERE r.space=${space} AND r.memory_id=${id}`,
+          );
+        }
+      }
+    }
+    const decoded = yield* Effect.forEach(rows, (row) =>
+      decodeHistoryRevision(row, space, id, false),
+    );
+    if (!visible) return decoded;
     // The stored payload_ref decides the join, exactly as the full read's LEFT JOIN does.
     const refs = decoded.map(({ revision }, index) =>
       wanted.has(revision.revisionId) || payloads.when?.(revision) === true
@@ -3171,6 +3313,10 @@ const make = Effect.gen(function* () {
   ) {
     const item = yield* readItem(space, id);
     const visible = item?.item.status !== "forgotten";
+    const blocked =
+      item?.item.status === "blocked" &&
+      (item.item.failureCode === "missing_parent" ||
+        item.item.failureCode === "source_invalidated");
     const revisions =
       payloads === undefined
         ? yield* Effect.forEach(
@@ -3181,7 +3327,15 @@ const make = Effect.gen(function* () {
             ),
             (row) => decodeHistoryRevision(row, space, id, visible),
           )
-        : yield* loadSelectedRevisions(space, id, item?.heads ?? [], visible, payloads);
+        : yield* loadSelectedRevisions(
+            space,
+            id,
+            item?.heads ?? [],
+            visible,
+            blocked,
+            payloads,
+            history,
+          );
     const tombstones = yield* stored(
       "tombstone",
       sql<{
@@ -4163,7 +4317,7 @@ const make = Effect.gen(function* () {
             sql<{ memory_id: string; matches: number }>`WITH window AS MATERIALIZED (
         SELECT rowid,memory_id,status,index_state,indexed_generation,generation FROM memory_items
         WHERE space=${filter.memorySpaceId} AND scope_key=${key} AND memory_id>${filter.afterMemoryId ?? ""} ORDER BY memory_id LIMIT 1000
-      ) SELECT memory_id,CASE WHEN status='active' AND index_state='ready' AND indexed_generation=generation THEN EXISTS(SELECT 1 FROM memory_items_fts WHERE rowid=window.rowid AND memory_items_fts MATCH ${'"' + text.replaceAll('"', '""') + '"'}) ELSE 0 END AS matches FROM window ORDER BY memory_id`,
+      ) SELECT memory_id,CASE WHEN status='active' AND index_state='ready' AND indexed_generation=generation THEN EXISTS(SELECT 1 FROM memory_items_fts WHERE rowid=window.rowid AND memory_items_fts MATCH ${ftsMatchQuery(text)}) ELSE 0 END AS matches FROM window ORDER BY memory_id`,
           )
         : yield* stored(
             "substring-search",
@@ -5017,7 +5171,12 @@ const make = Effect.gen(function* () {
         if (outcome.scannerCursor && !outcome.failure) return true;
         const old = yield* readItem(target.memorySpaceId, target.memoryId);
         if (old && old.item.status !== "forgotten" && target.kind === "scanner") {
-          const aggregate = yield* loadAggregate(target.memorySpaceId, target.memoryId);
+          const aggregate = yield* loadAggregate(
+            target.memorySpaceId,
+            target.memoryId,
+            { heads: true },
+            {},
+          );
           const pending = yield* readPending(target.memorySpaceId, target.memoryId);
           const reasons = old.item.localAvailability.reasons.filter(
             (reason) => !["scanner_pending", "secret_detected"].includes(reason),
@@ -6450,7 +6609,12 @@ const make = Effect.gen(function* () {
         }
         yield* persistImportLineageTx(pages.flatMap((page) => page.importLineage));
         for (const identity of pages.flatMap((page) => page.identities)) {
-          const current = yield* loadAggregate(input.memorySpaceId, identity.memoryId);
+          const current = yield* loadAggregate(
+            input.memorySpaceId,
+            identity.memoryId,
+            { when: hasSourceEvidence },
+            { importLineage: true },
+          );
           if (current.tombstone) continue;
           const reservation = yield* reservationForRevisions(
             {
@@ -6800,7 +6964,7 @@ const make = Effect.gen(function* () {
       {
         when: hasSourceEvidence,
       },
-      {},
+      { importLineage: true },
     );
     return yield* reservationForRevisions(op, [
       ...current.revisions,
@@ -9445,7 +9609,12 @@ const make = Effect.gen(function* () {
       }>`SELECT memory_id,highest_token FROM memory_hub_leases WHERE space=${input.memorySpaceId} AND json_extract(lease_json,'$.holderEnvironmentId')=${input.environmentId}`,
     );
     for (const lease of leases) {
-      const aggregate = yield* loadAggregate(input.memorySpaceId, M.MemoryId.make(lease.memory_id));
+      const aggregate = yield* loadAggregate(
+        input.memorySpaceId,
+        M.MemoryId.make(lease.memory_id),
+        {},
+        {},
+      );
       const highest = Math.max(lease.highest_token, aggregate.fence?.highestFencingToken ?? 0) + 1;
       const fence: M.MemoryFenceRecord = {
         memorySpaceId: input.memorySpaceId,
@@ -9798,7 +9967,7 @@ const make = Effect.gen(function* () {
     space: M.MemorySpaceId,
     request: M.MemorySourceReadRequest,
   ) {
-    const aggregate = yield* loadAggregate(space, request.memoryId);
+    const aggregate = yield* loadAggregate(space, request.memoryId, { heads: true }, {});
     if (aggregate.tombstone || aggregate.pendingForget) return false;
     if (!aggregate.item || aggregate.item.localAvailability.exposure !== "visible") return false;
     for (const pair of aggregate.revisions) {
@@ -11300,10 +11469,7 @@ const make = Effect.gen(function* () {
             : null,
       revertsResolutionId: op.kind === "revert" ? op.revertsResolutionId : null,
       attemptId:
-        op.kind === "resolve"
-          ? ((yield* loadAggregate(op.memorySpaceId, op.memoryId, {}, {})).fence?.activeLease
-              ?.attemptId ?? op.operationId)
-          : null,
+        op.kind === "resolve" ? (aggregate.fence?.activeLease?.attemptId ?? op.operationId) : null,
       fencingToken: op.kind === "resolve" ? op.fencingToken : null,
       reportGuard:
         (op.kind === "resolve" || op.kind === "revert") &&

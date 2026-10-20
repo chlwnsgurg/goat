@@ -91,6 +91,8 @@ export interface NewProjectScriptInput {
   runOnWorktreeCreate: boolean;
   waitForSetup: boolean;
   runOnSettle: boolean;
+  runAsCheck?: boolean;
+  checkInSharedCheckout?: boolean;
   /** Omit to preserve the current shortcut when the form did not edit it. */
   keybinding?: string | null;
   previewUrl: string | null;
@@ -130,6 +132,8 @@ export function editorRequestForScript(
       runOnWorktreeCreate: script.runOnWorktreeCreate,
       waitForSetup: script.runOnWorktreeCreate && script.async === false,
       runOnSettle: script.runOnSettle ?? false,
+      runAsCheck: script.runAsCheck ?? false,
+      checkInSharedCheckout: script.runAsCheck === true && script.checkInSharedCheckout === true,
       keybinding: keybindingValueForCommand(keybindings, commandForProjectScript(script.id)),
       previewUrl: script.previewUrl ?? null,
       autoOpenPreview: script.autoOpenPreview ?? false,
@@ -268,6 +272,8 @@ function ProjectScriptEditorForm({
   const [runOnWorktreeCreate, setRunOnWorktreeCreate] = useState(false);
   const [waitForSetup, setWaitForSetup] = useState(false);
   const [runOnSettle, setRunOnSettle] = useState(false);
+  const [runAsCheck, setRunAsCheck] = useState(false);
+  const [checkInSharedCheckout, setCheckInSharedCheckout] = useState(false);
   const [keybinding, setKeybinding] = useState("");
   const [previewUrl, setPreviewUrl] = useState("");
   const [autoOpenPreview, setAutoOpenPreview] = useState(false);
@@ -297,6 +303,8 @@ function ProjectScriptEditorForm({
       setRunOnWorktreeCreate(request.initial.runOnWorktreeCreate);
       setWaitForSetup(request.initial.waitForSetup);
       setRunOnSettle(request.initial.runOnSettle);
+      setRunAsCheck(request.initial.runAsCheck ?? false);
+      setCheckInSharedCheckout(request.initial.checkInSharedCheckout ?? false);
       setKeybinding(request.initial.keybinding ?? "");
       setPreviewUrl(request.initial.previewUrl ?? "");
       setAutoOpenPreview(request.initial.autoOpenPreview);
@@ -371,6 +379,8 @@ function ProjectScriptEditorForm({
         runOnWorktreeCreate,
         waitForSetup: runOnWorktreeCreate && waitForSetup,
         runOnSettle,
+        runAsCheck,
+        checkInSharedCheckout: runAsCheck && checkInSharedCheckout,
         ...((request.scriptId === null && canChangeKeybinding) || changesKeybinding
           ? { keybinding: keybindingRule?.key ?? null }
           : {}),
@@ -531,6 +541,25 @@ function ProjectScriptEditorForm({
               <Switch
                 checked={runOnSettle}
                 onCheckedChange={(checked) => setRunOnSettle(Boolean(checked))}
+              />
+            </label>
+            <label className="flex items-center justify-between gap-3 rounded-md border border-border/70 px-3 py-2 text-sm dark:border-transparent dark:bg-white/[0.035]">
+              <span>Run as a check when an agent's run completes</span>
+              <Switch
+                checked={runAsCheck}
+                onCheckedChange={(checked) => setRunAsCheck(Boolean(checked))}
+              />
+            </label>
+            <label
+              className={`flex items-center justify-between gap-3 rounded-md border border-border/70 px-3 py-2 text-sm dark:border-transparent dark:bg-white/[0.035] ${
+                runAsCheck ? "" : "opacity-60"
+              }`}
+            >
+              <span>Also check threads in the shared checkout</span>
+              <Switch
+                checked={runAsCheck && checkInSharedCheckout}
+                disabled={!runAsCheck}
+                onCheckedChange={(checked) => setCheckInSharedCheckout(Boolean(checked))}
               />
             </label>
             <label
