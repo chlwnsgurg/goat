@@ -109,7 +109,9 @@ import { htmlRenderFromToolItem } from "@goat/shared/toolOutput";
 const decodeMcpAttachmentInput = Schema.decodeUnknownEffect(McpAttachmentInput);
 const decodeThreadReadResult = Schema.decodeUnknownEffect(OrchestratorMcpThreadReadResult);
 
-const layerThreadToolkit = McpHttpServer.layerThreadToolkit.pipe(
+// A service provided here shadows a test's own mock, so tests that stub the
+// provider registry start from this layer.
+const layerThreadToolkitWithoutProviders = McpHttpServer.layerThreadToolkit.pipe(
   Layer.provide(Layer.mock(ThreadLaunchService.ThreadLaunchService)({})),
   Layer.provide(Layer.mock(GitVcsDriver.GitVcsDriver)({})),
   Layer.provide(ServerSettings.layerTest()),
@@ -123,8 +125,10 @@ const layerThreadToolkit = McpHttpServer.layerThreadToolkit.pipe(
   ),
   Layer.provide(Layer.mock(ProjectService.ProjectService)({})),
   Layer.provide(Layer.mock(ProviderAdapterRegistry.ProviderAdapterRegistryV2)({})),
-  Layer.provide(Layer.mock(ProviderRegistry.ProviderRegistry)({})),
   Layer.provide(Layer.mock(SecretRequests.SecretRequests)({})),
+);
+const layerThreadToolkit = layerThreadToolkitWithoutProviders.pipe(
+  Layer.provide(Layer.mock(ProviderRegistry.ProviderRegistry)({})),
 );
 
 it("publishes unique tool names with reference-free object-root inputs", () => {
@@ -630,7 +634,7 @@ it.effect("records the calling agent and the agent a tool acted on", () => {
     });
   }).pipe(
     Effect.provide(
-      layerThreadToolkit.pipe(
+      layerThreadToolkitWithoutProviders.pipe(
         Layer.provideMerge(McpServer.McpServer.layer),
         Layer.provide(NodeCrypto.layer),
         Layer.provide(
