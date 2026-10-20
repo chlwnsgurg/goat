@@ -47,10 +47,12 @@ describe("buildGoatProjectFileJsonSchema", () => {
     expect(Object.keys(script?.properties ?? {}).sort()).toEqual([
       "async",
       "autoOpenPreview",
+      "checkInSharedCheckout",
       "command",
       "icon",
       "name",
       "previewUrl",
+      "runAsCheck",
       "runOnSettle",
       "runOnWorktreeCreate",
     ]);
@@ -82,10 +84,13 @@ describe("GoatProjectFileFromJson", () => {
 });
 
 describe("parseGoatProjectFile", () => {
-  it("returns the decoded file for valid contents", () => {
-    expect(parseGoatProjectFile('{ "defaultThreadEnvMode": "worktree" }')).toEqual({
-      defaultThreadEnvMode: "worktree",
-    });
+  it("reads project defaults from JSONC with a URL in a block comment", () => {
+    expect(
+      parseGoatProjectFile(`{
+        /* See https://t3.codes/schema/t3.json */
+        "defaultThreadEnvMode": "worktree"
+      }`),
+    ).toEqual({ defaultThreadEnvMode: "worktree" });
   });
 
   it("returns null for malformed or invalid contents", () => {

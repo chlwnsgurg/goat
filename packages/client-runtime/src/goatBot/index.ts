@@ -5,3 +5,4 @@ export * from "./ensure.ts";
 export * from "./sendQueue.ts";
 export * from "./availability.ts";
 export * from "./homeSync.ts";
+export * from "./model.ts";

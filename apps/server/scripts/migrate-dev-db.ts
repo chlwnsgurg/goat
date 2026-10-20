@@ -139,6 +139,91 @@ interface KeptProject {
   readonly threads: number;
 }
 
+interface ForeignKeyRow {
+  readonly child_table: string;
+  readonly id: number;
+  readonly parent_table: string;
+  readonly from: string;
+  readonly to: string | null;
+}
+
+interface ForeignKeyConstraint {
+  readonly parentTable: string;
+  readonly columns: ReadonlyArray<{ readonly from: string; readonly to: string | null }>;
+}
+
+const quoteIdent = (identifier: string) => `"${identifier.replaceAll('"', '""')}"`;
+
+const groupForeignKeys = (rows: ReadonlyArray<ForeignKeyRow>) => {
+  const byTable = new Map<string, Map<number, ForeignKeyConstraint>>();
+  for (const row of rows) {
+    let constraints = byTable.get(row.child_table);
+    if (constraints === undefined) {
+      constraints = new Map();
+      byTable.set(row.child_table, constraints);
+    }
+    const existing = constraints.get(row.id);
+    const column = { from: row.from, to: row.to };
+    constraints.set(
+      row.id,
+      existing === undefined
+        ? { parentTable: row.parent_table, columns: [column] }
+        : { ...existing, columns: [...existing.columns, column] },
+    );
+  }
+  return new Map(
+    Array.from(byTable, ([table, constraints]) => [table, Array.from(constraints.values())]),
+  );
+};
+
+const orderTablesParentsFirst = <T extends { readonly name: string }>(
+  tables: ReadonlyArray<T>,
+  foreignKeys: ReadonlyMap<string, ReadonlyArray<ForeignKeyConstraint>>,
+): Array<T> => {
+  const byName = new Map(tables.map((table) => [table.name, table]));
+  const visited = new Set<string>();
+  const ordered: Array<T> = [];
+  const visit = (table: T) => {
+    if (visited.has(table.name)) return;
+    visited.add(table.name);
+    for (const fk of foreignKeys.get(table.name) ?? []) {
+      if (fk.parentTable === table.name) continue;
+      const parent = byName.get(fk.parentTable);
+      if (parent !== undefined) visit(parent);
+    }
+    ordered.push(table);
+  };
+  for (const table of tables) visit(table);
+  return ordered;
+};
+
+const parentExistsPredicates = (
+  childTable: string,
+  constraints: ReadonlyArray<ForeignKeyConstraint>,
+  primaryKeys: ReadonlyMap<string, ReadonlyArray<string>>,
+): Array<string> => {
+  const childRef = quoteIdent(childTable);
+  return constraints.flatMap((fk) => {
+    if (fk.parentTable === childTable) return [];
+    const parentPks = primaryKeys.get(fk.parentTable) ?? [];
+    const resolved = fk.columns.map((col, idx) => ({
+      from: col.from,
+      to: col.to ?? parentPks[idx],
+    }));
+    if (resolved.some((col) => col.to === undefined)) return [];
+    const nullable = resolved.map((col) => `${childRef}.${quoteIdent(col.from)} IS NULL`);
+    const matches = resolved.map(
+      (col) => `parent.${quoteIdent(col.to!)} = ${childRef}.${quoteIdent(col.from)}`,
+    );
+    return [
+      `(${[
+        ...nullable,
+        `EXISTS (SELECT 1 FROM main.${quoteIdent(fk.parentTable)} AS parent WHERE ${matches.join(" AND ")})`,
+      ].join(" OR ")})`,
+    ];
+  });
+};
+
 const removeDatabaseFiles = Effect.fn("removeDatabaseFiles")(function* (databasePath: string) {
   const fs = yield* FileSystem.FileSystem;
   for (const suffix of ["", "-wal", "-shm"]) {
@@ -255,22 +340,47 @@ const copySourceSlice = Effect.fn("copyDevDbSourceSlice")(function* (sourcePath:
   // `hidden` 2 and 3 are VIRTUAL and STORED generated columns. INSERT refuses
   // them (`cannot INSERT into generated column`), so SELECT * cannot copy a
   // table that has one — including an empty provider-thread roster.
-  const columnRows = yield* sql<{ table_name: string; name: string; hidden: number }>`
-    SELECT m.name AS table_name, c.name AS name, c.hidden AS hidden
+  const columnRows = yield* sql<{ table_name: string; name: string; hidden: number; pk: number }>`
+    SELECT m.name AS table_name, c.name AS name, c.hidden AS hidden, c.pk AS pk
     FROM src.sqlite_master m, pragma_table_xinfo(m.name, 'src') c
     WHERE m.type = 'table' AND m.name NOT LIKE 'sqlite_%'
     ORDER BY m.name, c.cid`;
   const writableColumns = new Map<string, Array<string>>();
+  const primaryKeyRows = new Map<string, Array<{ readonly pk: number; readonly name: string }>>();
   for (const column of columnRows) {
+    if (Number(column.pk) > 0) {
+      const pks = primaryKeyRows.get(column.table_name) ?? [];
+      pks.push({ pk: Number(column.pk), name: column.name });
+      primaryKeyRows.set(column.table_name, pks);
+    }
     if (Number(column.hidden) !== 0) continue;
     const names = writableColumns.get(column.table_name) ?? [];
     names.push(column.name);
     writableColumns.set(column.table_name, names);
   }
-  const quoteIdent = (identifier: string) => `"${identifier.replaceAll('"', '""')}"`;
+  const primaryKeys = new Map(
+    Array.from(primaryKeyRows, ([table, cols]) => [
+      table,
+      cols.toSorted((a, b) => a.pk - b.pk).map((col) => col.name),
+    ]),
+  );
+  const foreignKeyRows = yield* sql<ForeignKeyRow>`
+    SELECT
+      m.name AS child_table,
+      fk.id AS id,
+      fk."table" AS parent_table,
+      fk."from" AS "from",
+      fk."to" AS "to"
+    FROM src.sqlite_master m, pragma_foreign_key_list(m.name, 'src') fk
+    WHERE m.type = 'table' AND m.name NOT LIKE 'sqlite_%'
+    ORDER BY m.name, fk.id, fk.seq`;
+  const foreignKeys = groupForeignKeys(foreignKeyRows);
   // Creating a virtual table creates its shadow storage. Copy its logical rows once,
   // preserving rowids used by the memory index, rather than replaying shadow DDL.
-  const tables = schema.filter((entry) => entry.type === "table" && !shadowTables.has(entry.name));
+  const tables = orderTablesParentsFirst(
+    schema.filter((entry) => entry.type === "table" && !shadowTables.has(entry.name)),
+    foreignKeys,
+  );
   const filtered = tables.some((table) => table.name === "orchestration_v2_projection_threads");
 
   yield* sql.withTransaction(
@@ -287,16 +397,23 @@ const copySourceSlice = Effect.fn("copyDevDbSourceSlice")(function* (sourcePath:
       for (const { name } of tables) {
         if (CLEARED_TABLES.includes(name)) continue;
         const nullable = threadIdNullable.get(name);
-        const filter = !filtered
-          ? ""
-          : name === "orchestration_events"
-            ? // Two ranges rather than `<>`, so SQLite seeks the (aggregate_kind, stream_id)
-              // index instead of scanning every event.
-              `WHERE (aggregate_kind = 'thread' AND stream_id IN (SELECT thread_id FROM copied_threads))
-                OR aggregate_kind < 'thread' OR aggregate_kind > 'thread'`
-            : nullable === undefined || name === PROVIDER_SESSIONS_TABLE
-              ? ""
-              : `WHERE thread_id IN (SELECT thread_id FROM copied_threads)${nullable ? " OR thread_id IS NULL" : ""}`;
+        const predicates: Array<string> = [];
+        if (filtered) {
+          if (name === "orchestration_events") {
+            // Two ranges rather than `<>`, so SQLite seeks the (aggregate_kind, stream_id)
+            // index instead of scanning every event.
+            predicates.push(
+              `((aggregate_kind = 'thread' AND stream_id IN (SELECT thread_id FROM copied_threads))
+                OR aggregate_kind < 'thread' OR aggregate_kind > 'thread')`,
+            );
+          } else if (nullable !== undefined && name !== PROVIDER_SESSIONS_TABLE) {
+            predicates.push(
+              `(${quoteIdent("thread_id")} IN (SELECT thread_id FROM copied_threads)${nullable ? ` OR ${quoteIdent("thread_id")} IS NULL` : ""})`,
+            );
+          }
+        }
+        predicates.push(...parentExistsPredicates(name, foreignKeys.get(name) ?? [], primaryKeys));
+        const filter = predicates.length === 0 ? "" : `WHERE ${predicates.join(" AND ")}`;
         const columns = writableColumns.get(name) ?? [];
         if (columns.length === 0) continue;
         const columnList = (virtualTables.has(name) ? ["rowid", ...columns] : columns)
@@ -390,9 +507,41 @@ const pruneSnapshot = Effect.fn("pruneDevDbSnapshot")(function* (input: RunMigra
     SELECT m.name FROM sqlite_master m, pragma_table_info(m.name) c
     WHERE m.type = 'table' AND c.name = 'thread_id'
       AND m.name <> ${PROVIDER_SESSIONS_TABLE}`;
+  const pkRows = yield* sql<{ table_name: string; name: string; pk: number }>`
+    SELECT m.name AS table_name, c.name AS name, c.pk AS pk
+    FROM sqlite_master m, pragma_table_info(m.name) c
+    WHERE m.type = 'table' AND m.name NOT LIKE 'sqlite_%' AND c.pk > 0
+    ORDER BY m.name, c.pk`;
+  const primaryKeys = new Map<string, Array<string>>();
+  for (const row of pkRows) {
+    const names = primaryKeys.get(row.table_name) ?? [];
+    names.push(row.name);
+    primaryKeys.set(row.table_name, names);
+  }
+  const foreignKeyRows = yield* sql<ForeignKeyRow>`
+    SELECT
+      m.name AS child_table,
+      fk.id AS id,
+      fk."table" AS parent_table,
+      fk."from" AS "from",
+      fk."to" AS "to"
+    FROM sqlite_master m, pragma_foreign_key_list(m.name) fk
+    WHERE m.type = 'table' AND m.name NOT LIKE 'sqlite_%'
+    ORDER BY m.name, fk.id, fk.seq`;
+  const foreignKeys = groupForeignKeys(foreignKeyRows);
+  const orderedThreadTables = orderTablesParentsFirst(threadTables, foreignKeys).toReversed();
+  const orderedClearedTables = orderTablesParentsFirst(
+    CLEARED_TABLES.map((name) => ({ name })),
+    foreignKeys,
+  ).toReversed();
+  const orderedChildTables = orderTablesParentsFirst(
+    Array.from(foreignKeys.keys(), (name) => ({ name })),
+    foreignKeys,
+  );
 
   yield* sql.withTransaction(
     Effect.gen(function* () {
+      yield* sql.unsafe("PRAGMA defer_foreign_keys = ON").unprepared;
       yield* sql`DELETE FROM projection_projects
         WHERE project_id NOT IN (SELECT project_id FROM kept_projects)`;
       yield* sql`DELETE FROM ${sql(PROVIDER_SESSIONS_TABLE)}
@@ -401,9 +550,9 @@ const pruneSnapshot = Effect.fn("pruneDevDbSnapshot")(function* (input: RunMigra
             SELECT provider_session_id FROM orchestration_v2_projection_provider_session_bindings
             WHERE thread_id IN (SELECT thread_id FROM kept_threads)
           )`;
-      for (const { name } of threadTables) {
+      for (const { name } of orderedThreadTables) {
         yield* sql.unsafe(
-          `DELETE FROM "${name}" WHERE thread_id NOT IN (SELECT thread_id FROM kept_threads)`,
+          `DELETE FROM ${quoteIdent(name)} WHERE thread_id NOT IN (SELECT thread_id FROM kept_threads)`,
         ).unprepared;
       }
       yield* sql`DELETE FROM orchestration_v2_projection_context_transfers
@@ -414,8 +563,15 @@ const pruneSnapshot = Effect.fn("pruneDevDbSnapshot")(function* (input: RunMigra
             AND stream_id NOT IN (SELECT thread_id FROM kept_threads))
            OR (aggregate_kind = 'project'
             AND stream_id NOT IN (SELECT project_id FROM kept_projects))`;
-      for (const table of CLEARED_TABLES) {
-        yield* sql`DELETE FROM ${sql(table)}`;
+      for (const { name } of orderedClearedTables) {
+        yield* sql`DELETE FROM ${sql(name)}`;
+      }
+      for (const { name } of orderedChildTables) {
+        const predicates = parentExistsPredicates(name, foreignKeys.get(name) ?? [], primaryKeys);
+        if (predicates.length === 0) continue;
+        yield* sql.unsafe(
+          `DELETE FROM main.${quoteIdent(name)} WHERE NOT (${predicates.join(" AND ")})`,
+        ).unprepared;
       }
     }),
   );

@@ -1,20 +1,23 @@
 # 10 — T3 chase MOC
 
 > 축: upstream `pingdotgg/t3code` `main`
-> reviewed-through: `de49d637d` (fork point) · 머지 대상: `v0.0.46-nightly.20261012.3021` · 갱신 2026-10-13
+> reviewed-through: `02b794c78` · 열린 사이클 없음 · 갱신 2026-10-20
 
-| NNN | 카드                                                                   | GOAT 영역           | P      | 상태         |
-| --- | ---------------------------------------------------------------------- | ------------------- | ------ | ------------ |
-| 001 | [사이클 261012 triage](./10.001_t3_chase_cycle_261012.md)              | 전체                | **P1** | ↪ 005가 대체 |
-| 002 | [마이그레이션 id 61 충돌](./10.002_t3_chase_migration_61_collision.md) | `server-activity`   | **P0** | 🟡 PR 리뷰   |
-| 003 | [새 upstream `t3_*` 이름](./10.003_t3_chase_goat_tool_names.md)        | `mcp-names`         | **P1** | ✅ PR 반영   |
-| 004 | [SSH tunnel 테스트 이식](./10.004_t3_chase_ssh_tunnel_port.md)         | `ssh-runtime`, `ci` | P2     | ✅ PR 반영   |
-| 005 | [사이클 261013 머지](./10.005_t3_chase_cycle_261013.md)                | 전체                | **P1** | 🟡 PR 리뷰   |
-| 006 | [사이클 261014 머지](./10.006_t3_chase_cycle_261014.md)                | 전체                | **P1** | 🟡 PR 리뷰   |
-| 007 | [사이클 261019 머지](./10.007_t3_chase_cycle_261019.md)                | 전체                | **P1** | 🟡 PR 리뷰   |
+| NNN | 카드                                            | GOAT 영역 | P   | 상태 |
+| --- | ----------------------------------------------- | --------- | --- | ---- |
+| —   | 열린 카드 없음 (다음 사이클은 `scan.sh`로 시작) | —         | —   | —    |
 
-머지 순서: 005 PR(002-004 포함) goat-ci green → dev에 merge commit으로 랜딩 → 000 기준선 갱신, 카드 `_fin` 이동.
+머지 순서: 사이클 PR goat-ci green → dev에 merge commit으로 랜딩 → 000 기준선 갱신, 카드 `_fin` 이동.
 
 ## \_fin
 
-아직 없음. 닫힌 카드는 [`_fin/10/`](./_fin/README.md)에 둔다.
+| NNN | 카드                                                                           | 닫힘                 |
+| --- | ------------------------------------------------------------------------------ | -------------------- |
+| 001 | [사이클 261012 triage](./_fin/10/10.001_t3_chase_cycle_261012.md)              | ✅ _fin (005가 대체) |
+| 002 | [마이그레이션 id 61 충돌](./_fin/10/10.002_t3_chase_migration_61_collision.md) | ✅ _fin PR #100      |
+| 003 | [새 upstream `t3_*` 이름](./_fin/10/10.003_t3_chase_goat_tool_names.md)        | ✅ _fin PR #100      |
+| 004 | [SSH tunnel 테스트 이식](./_fin/10/10.004_t3_chase_ssh_tunnel_port.md)         | ✅ _fin PR #100      |
+| 005 | [사이클 261013 머지](./_fin/10/10.005_t3_chase_cycle_261013.md)                | ✅ _fin PR #100      |
+| 006 | [사이클 261014 머지](./_fin/10/10.006_t3_chase_cycle_261014.md)                | ✅ _fin PR #191      |
+| 007 | [사이클 261019 머지](./_fin/10/10.007_t3_chase_cycle_261019.md)                | ✅ _fin PR #368      |
+| 008 | [사이클 261020 머지](./_fin/10/10.008_t3_chase_cycle_261020.md)                | ✅ _fin PR #562      |

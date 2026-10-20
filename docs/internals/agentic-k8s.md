@@ -1,6 +1,7 @@
 # Agentic Kubernetes: goals, controller, self-healing, resources, fallback
 
-Status: proposal. Nothing below is implemented unless a paragraph is marked **Now**.
+Status: proposal, with T1 (goals and the controller) implemented as its **Now** paragraph says.
+Nothing else below is implemented unless a paragraph is marked **Now**.
 
 **Now** describes `dev` at `876c09947` with source paths. **Proposed** is design that
 does not exist yet. Unlabeled text inside a Proposed section is also proposal.
@@ -314,9 +315,74 @@ that predates them reports `unknown`, which the decision table treats as "resche
 New status fields are decoded with defaults so a newer parent still reads an older host; the
 existing fallback in `HostThreadsMcpService.ts` only covers a missing tool.
 
+**Now (T1).** Goals, the controller and the goal tools exist on `dev`, behind
+`fleet.controllerEnabled` (default off). The pieces follow the Proposed text above, with these
+differences a maintainer would otherwise trip on:
+
+- Code: contract in `packages/contracts/src/fleetGoal.ts`; `plan()` is `planGoal` in
+  `apps/server/src/fleet/goals/goalPlan.ts`; claims, CAS and the four tables are in
+  `GoalStore.ts` (migration 086); `GoalController.ts` is the Scheduler source; every touch on a
+  thread goes through `GoalWorkerRuntime.ts`. The four tags live where the interface section says,
+  with the local-only defaults in `apps/server/src/fleet/defaults.ts`.
+- Workers are observed by reading thread status on each pass. The `controller` watch kind and
+  `LaunchWatchService.snapshot` are not built: local workers are launched without a watch, and
+  launch-watch reports do not move `nextReconcileAt` yet, so the 60 s cadence is the only trigger.
+- An unconfirmed local launch is found by the action id at the end of the worker's title among the
+  project's threads, which exist before any watch. A rescheduled attempt is claimed under
+  `goal:<id>:s<slot>:a<attempt>:<runId>:reschedule`, one per failed or stalled run.
+- Local follow-ups, model switches and interrupts dispatch `message.dispatch` / `run.interrupt`
+  directly with the action id as `commandId`, after checking the worker's modes against the
+  goal's authority and under `DispatchModeLimit`, because `goat_thread_send` refuses an owner
+  whose turn has ended.
+- Goal workers are local-only for now. Apply refuses a spec that names a remote host, the
+  controller refuses a remote placement before claiming, and the runtime refuses remote launches
+  and follow-ups. The remote paths re-read the owner's current mode instead of the goal's stored
+  ceiling, find a remote thread only by its title marker, and gate project creation on the worker's
+  mode. Each needs a fix before remote workers come back.
+- PR state comes from `PullRequestService.checks` for the goal's repo, not thread PR links.
+- Goal-owned threads are excluded from `UsageLimitRecoveryWorker` through `GoalThreadOwnership`, so
+  the controller resumes them itself: once a run failed with `usage_limit` and its reset time has
+  passed, it sends one continue message under `goal:<id>:s<slot>:a<attempt>:<runId>:resume`. A
+  paused goal does not resume.
+- An attempt replaced after `LAUNCH_GRACE_MS` is not kept as its own record, so a late thread from
+  it is not found or interrupted by the goal. Fencing of stale attempts arrives with self-healing.
+- Owner authority is re-read right before each action, but not inside the claim transaction, so a
+  mode change in that short window is honoured from the next action on.
+- `limits.maxTokens` is refused unless null; nothing counts tokens yet.
+- Only thread owners are accepted; `owner.kind: "mcp_client"` is in the contract but refused
+  (#493). Owners in plan mode are refused because the remote and dispatch paths carry no plan
+  ceiling.
+
 ## Self-healing
 
-**Now.** Only channel tasks heal. `ChannelRemoteWorkers.ts` gives a remote launch
+**Now.** `apps/server/src/fleet/health/` implements this section. `Health` and `Rescheduler` are
+the tags below; `goat_host_status` returns each host's conditions as the additive `conditions`
+field, and `goat_host_cordon`, `goat_host_uncordon`, `goat_host_drain` and `goat_thread_reschedule`
+live in `apps/server/src/mcp/toolkits/fleet/`. Cordons persist in `fleet_host_states`. Moving work
+off a goal attempt still needs the goal controller: until it lands, drain only cordons and marks the
+host Draining, and `goat_thread_reschedule` takes the branch and folder from its caller. Channel
+tasks still heal through `ChannelRemoteWorkers.ts`. Moving the replica helpers out of channels waits
+for replica capture of goal attempts (#525); `fleet_replicas` already exists for it.
+
+Where the code departs from the text below, and why:
+
+- Sleep on this machine never counts against a host. A gap of two minutes or more in the shared
+  Scheduler's ticks, or a suspended power snapshot, drops the failures counted so far and ignores
+  failures for the next five minutes, so a Mac waking from sleep makes no host Lost.
+- `RescheduleRequest` has three optional fields: `project` (the folder and repository key to find on
+  the target), `targetHost` (a person's choice) and `force` (skip only the Lost wait).
+- VersionMismatch follows the host status compatibility verdict (#497): it appears only for a
+  `degraded` or `incompatible` host, with that verdict as its `reason`, and an `incompatible` host
+  takes no work. Different builds that are compatible raise no condition.
+- Placement uses `choosePlacement` over Ready, uncordoned hosts until the T3 `Placement` tag lands.
+- A request that resumes from a replica is refused with `no_resume_point` until replica capture for
+  goal attempts lands; branch and base resumes work.
+- A retry after a lost answer finds the launched thread by its title (`Resume <branch>`) on the
+  candidate hosts instead of launching again; the attempt branch keeps two launches apart as well.
+- `fenceStaleAttempt` interrupts a returning stale attempt with a reason that names the successor.
+  It sends no message, since a message would start another turn there.
+
+**Channel tasks.** `ChannelRemoteWorkers.ts` gives a remote launch
 `LAUNCH_GRACE_MS = 300000` and `MAX_LAUNCH_ATTEMPTS = 3`, notices an outage after
 `OUTAGE_NOTICE_AFTER = 3` failed contacts, and `move` relaunches a task elsewhere but refuses while the
 old host still answers (`MOVE_COPY`). `channelReplica.ts` bundles each finished turn's commits and
@@ -324,7 +390,7 @@ uncommitted changes into `refs/goat/replicas/<task>/<gen>` and resumes on
 `goat/replica/<task>-<gen>`, skipping files over 2 MiB and secret-looking names. Launch watches back
 off 30 s → 15 min per host and report one outage per episode after three failures.
 
-**Proposed (T2, `apps/server/src/fleet/health/`).**
+**Design (T2, `apps/server/src/fleet/health/`).**
 
 ### Host conditions
 
@@ -511,6 +577,15 @@ goal resumes them through its own claims instead.
 There is no preemption. A goal never stops someone's thread to make room; it waits, like a pod with
 `preemptionPolicy: Never` ([priority and preemption](https://kubernetes.io/docs/concepts/scheduling-eviction/pod-priority-preemption/)).
 
+**Now (T3).** `fleet` settings and `Placement` (`apps/server/src/fleet/resources/Placement.ts`)
+ship as above. The filter is `placementRules.ts`, not `placement.ts`: on a case-insensitive
+filesystem that name is the same file as `Placement.ts`. `choosePlacement` stays in
+`channelPlacement.ts` and is imported rather than moved while channel work is in flight; it is
+still the only scorer. The filter cannot see projects on a host or cordons yet: missing projects
+surface at launch, and the cordon set is an input that T2's `Health` fills. Goal reservations
+belong to T1's action claims and are not counted here. Service keys follow the repository's
+deterministic-key rule (`goat/fleet/resources/Placement`), not the shorter names above.
+
 ## Fallback chains
 
 **Now.** No fallback chain exists in contracts or settings. A thread that fails with
@@ -577,6 +652,14 @@ There is no separate fallback worker. The default (no chain) leaves ordinary thr
 
 Each hop is recorded on the thread as a system notice ("Switched to gpt-6.1-sol after usage limit on
 anthropic/claude-opus-5-5") so the user sees why the model changed.
+
+**Now (T3).** `Fallback` (`apps/server/src/fleet/resources/Fallback.ts`) implements `next` and
+`reportFailure` as above, and `continueThread` is the recovery sweep's branch for ordinary
+threads. A thread's earlier hops are read from the failed runs at the end of its history, so a
+restart finds the same next step and replays the same command ids instead of skipping one. When
+a chain covers threads, the sweep reads unarmed usage-limit failures even with auto-resume off;
+arming still follows the user's settings. `GoalThreadOwnership` is the owner filter: it reports
+no goal threads until the goal controller provides it.
 
 ## Interfaces between T1, T2 and T3
 

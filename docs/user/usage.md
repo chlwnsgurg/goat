@@ -82,8 +82,9 @@ the dialog.
 **Usage → Limits** pools every subscription account it can see per provider, so with several Codex
 or Claude accounts across your environments and hubs you read one number per window rather than a
 list. Each window card shows how much of the pool is left and a bar with one segment per account,
-kept in the same column across windows. Accounts are ordered by their 5-hour reset, soonest
-first, or by the first available window when no account reports a 5-hour limit. A gap means the
+kept in the same column across windows. Accounts are ordered by their next 5-hour refill, soonest
+first. For an account with no weekly quota left, this is when its session becomes usable again.
+The first available window is used when no account reports a 5-hour limit. A gap means the
 account does not report that window. When the provider reports reset times, the card also says
 when the next reset lands and how much it hands back. The hatched
 part of a segment is what that reset restores. Tap a segment or account row for the account's plan,
@@ -95,6 +96,12 @@ the bar show each account's quota, countdown, and credits. Tap a row to open its
 
 The same account signed in on more than one environment, or reported by a hub as well, counts once.
 Filter with the environment dropdown to see what a single machine has.
+
+When a Claude or Codex account has no overall weekly quota left, its pooled session contribution
+shows 0% left. The next refill depends on both reset times: an exhausted session must also reset,
+and a partly spent session may only regain its unused portion when the week resets. Missing or
+stale reset times have no refill estimate; refresh Limits for a new reading. Claude's
+model-specific weekly allowances keep their reported values.
 
 Opening Limits checks the selected connected environments automatically. Each client waits at
 least five minutes between automatic checks of an environment, including after a failed check.
@@ -121,6 +128,75 @@ or endpoint configurations do not report subscription limits.
 
 API-key accounts may not report subscription limits. This also applies to Claude connections
 using a proxy through `ANTHROPIC_AUTH_TOKEN`.
+
+## Fall back to another model at a limit
+
+A fallback chain moves work to the next model when a usage limit stops it, instead of waiting
+for the reset. Each move leaves a notice on the thread saying which model it left, why, and when
+that limit resets, and the thread is asked to continue where it left off. A move to another
+provider, such as Codex to Claude Code, carries the conversation over as a handoff. When no step
+is left, the thread waits for its reset as before, with **Resume at reset** and auto-resume if you
+turned them on.
+
+Chains are off until you create one. Ask an agent with full access to call
+`goat_fallback_chain_set`, or add them under `fleet` in the environment's `settings.json`.
+This chain tries two Claude accounts routed through Codex, then GPT, then the Claude Code CLI:
+
+```json
+{
+  "fleet": {
+    "fallbackChains": {
+      "claude-opus": {
+        "steps": [
+          { "instanceId": "codex", "model": "anthropic/claude-opus-5-5" },
+          { "instanceId": "codex", "model": "anthropic2/claude-opus-5-5" },
+          { "instanceId": "codex", "model": "gpt-6.1-sol" },
+          { "instanceId": "claudeAgent", "model": "claude-opus-5-5" }
+        ],
+        "on": ["usage_limit"],
+        "cooldownMs": 900000,
+        "scope": "goals_and_threads"
+      }
+    },
+    "defaultFallbackChain": "claude-opus"
+  }
+}
+```
+
+- `scope` decides what the chain moves. `"goals"`, the default, applies it to fleet goals only.
+  `"goals_and_threads"` also moves your ordinary threads whose model is one of the steps.
+- `on` lists what triggers a move: `usage_limit` (the default), `provider_error`,
+  `transport_error`, or `unavailable`. Ordinary threads move only on usage limits.
+- A step that just failed is skipped for `cooldownMs` (15 minutes by default), and so is a step on
+  another provider whose account reports an exhausted window. `maxHops` caps how many moves one
+  piece of work makes; by default it can try every step once.
+- `defaultFallbackChain` is the chain goals use when they name none.
+
+Each step names a provider and model already set up in this environment. GOAT never changes
+provider sign-ins or Codex configuration to move work.
+
+## Set fleet limits
+
+Limits under `fleet` cap how much goal work each machine takes. They count running and queued
+threads, your own included, but never refuse a thread you start yourself. `hosts` keys are SSH
+aliases, with `local` for this machine:
+
+```json
+{
+  "fleet": {
+    "maxRunningThreads": 12,
+    "hosts": {
+      "local": { "maxThreads": 4 },
+      "lidge-ai": { "maxThreads": 6 },
+      "mini": { "allowGoals": false }
+    }
+  }
+}
+```
+
+`goat_scheduler_status` shows each machine's threads against these limits, its quota per
+provider, why it would refuse goal work now, the models cooling down after a failure, and recent
+placement decisions.
 
 ## Connect a CLIProxyAPI hub
 

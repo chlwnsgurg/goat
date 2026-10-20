@@ -231,9 +231,13 @@ runtime running as before. Agents can request an update that runs when the
 runtime is idle. If the new version fails to start, GOAT restores the previous one.
 
 Runtime archives come from published GOAT releases or a configured release mirror.
-If the matching archive is unavailable, use a published GOAT release or the mirror
-suggested by the error. GOAT does not replace a newer runtime; update the machine
-that owns the SSH connection instead.
+If this app's own version has no archive (a development build, for example) and
+the host has never run GOAT, GOAT installs the newest published runtime that works
+with this app instead. The connection then shows **Running <version> · Upgrade to
+<version> deferred** and GOAT retries the upgrade every 10 minutes. A host that
+already has GOAT data never gets a different version this way. When nothing
+usable exists, the status says so and names the one thing to do. GOAT does not
+replace a newer runtime; update the machine that owns the SSH connection instead.
 
 A server that GOAT cannot confirm it launched, or that cannot restart itself,
 is left running. GOAT keeps using it if it is compatible; otherwise, stop it on
@@ -503,8 +507,9 @@ The server shows the exact line for how you started it, such as
 `sudo npx t3 browser setup`, and keeps your `PATH` when Node is installed only
 for your user. Where `goat` is not on your `PATH`, such as with only the
 desktop app installed, it names the full path of the app's own `goat` instead. It allows Chrome's sandbox with an AppArmor profile and installs
-any missing libraries with apt. It is safe to run again. Without `sudo`, it
-only reports what it would change.
+any missing libraries and system fonts with apt; pages that load without text
+can mean the host has no fonts. It is safe to run again. Without `sudo`, it only
+reports what it would change.
 
 The browser always runs in Chrome's sandbox. Where you cannot change the host,
 set `GOAT_SERVER_BROWSER_SANDBOX=0` for the environment to run without it.

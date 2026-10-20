@@ -258,6 +258,8 @@ Agent dispatch to an SSH host is a server-side path with its own failure,
 `host_unavailable` (see
 [remote dispatch](../../structure/launch-and-remote-dispatch.md)); it does not
 use this client state.
+[Self-healing](agentic-k8s.md#self-healing) builds on that server path: it ignores failures
+across this machine's sleep and waits out a reconnect before it moves any work.
 
 ## What each surface shows
 

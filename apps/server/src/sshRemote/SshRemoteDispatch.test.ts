@@ -46,11 +46,11 @@ import * as NodeSqliteClient from "@goat/shared/nodeSqliteClient";
 import * as SqlClient from "effect/sql/SqlClient";
 import * as Coordinator from "../remoteReports/RemoteDispatchCoordinator.ts";
 import * as LaunchWatchService from "../mcp/LaunchWatchService.ts";
-import Migration0062 from "../persistence/Migrations/065_RemoteReports.ts";
-import Migration0063 from "../persistence/Migrations/066_RemoteDispatches.ts";
-import Migration0065 from "../persistence/Migrations/068_RemoteDispatchQuestions.ts";
-import Migration0068 from "../persistence/Migrations/070_RemoteReportRelay.ts";
-import Migration0073 from "../persistence/Migrations/075_MemoryTaskGrantCeiling.ts";
+import Migration0062 from "../persistence/Migrations/066_RemoteReports.ts";
+import Migration0063 from "../persistence/Migrations/067_RemoteDispatches.ts";
+import Migration0065 from "../persistence/Migrations/069_RemoteDispatchQuestions.ts";
+import Migration0068 from "../persistence/Migrations/071_RemoteReportRelay.ts";
+import Migration0073 from "../persistence/Migrations/076_MemoryTaskGrantCeiling.ts";
 
 import packageJson from "../../package.json" with { type: "json" };
 import * as ServerConfig from "../config.ts";
@@ -280,6 +280,30 @@ describe("matchRemoteProject", () => {
         os: "Darwin",
       }),
     ).toBe(project);
+  });
+
+  it.each([
+    "C:\\Users\\super\\Developer\\goat",
+    "c:\\users\\super\\developer\\goat\\",
+    "C:/Users/super/Developer/goat",
+    "/c/Users/super/Developer/goat",
+  ])("matches a linked Windows host's project by Windows rules: %s", (cwd) => {
+    // A linked host reports no OS; its native project roots show it is Windows.
+    const windows = { id: "windows", workspaceRoot: "C:\\Users\\super\\Developer\\goat" };
+    expect(matchRemoteProject([project, windows], { path: cwd, realPath: cwd, os: null })).toBe(
+      windows,
+    );
+  });
+
+  it("never folds a POSIX project root on a host without an OS", () => {
+    const posix = { id: "posix", workspaceRoot: "/c/Users/super/goat" };
+    expect(
+      matchRemoteProject([posix], {
+        path: "C:/Users/super/goat",
+        realPath: "C:/Users/super/goat",
+        os: null,
+      }),
+    ).toBeUndefined();
   });
 
   it.each(["Linux", "Windows_NT", "darwin", null])("keeps case-sensitive matching on %s", (os) => {

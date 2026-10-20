@@ -351,6 +351,14 @@
       "types": "./src/state/fleetCloudAgents.ts",
       "default": "./src/state/fleetCloudAgents.ts"
     },
+    "./state/fleet-heat": {
+      "types": "./src/state/fleetHeat.ts",
+      "default": "./src/state/fleetHeat.ts"
+    },
+    "./state/host-metrics": {
+      "types": "./src/state/host-metrics.ts",
+      "default": "./src/state/host-metrics.ts"
+    },
     "./state/user-input-draft": {
       "types": "./src/state/userInputDraft.ts",
       "default": "./src/state/userInputDraft.ts"
@@ -410,6 +418,10 @@
     "./work-log/item-detail": {
       "types": "./src/work-log/itemDetail.ts",
       "default": "./src/work-log/itemDetail.ts"
+    },
+    "./work-log/file-change-diff": {
+      "types": "./src/work-log/fileChangeDiff.ts",
+      "default": "./src/work-log/fileChangeDiff.ts"
     },
     "./work-log/presentation": {
       "types": "./src/work-log/presentation.ts",

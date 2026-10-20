@@ -1,6 +1,6 @@
+// @effect-diagnostics nodeBuiltinImport:off - Archive digests hash file bytes in place; WebCrypto rejects views over possibly shared buffers.
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
-import * as Hex from "effect/encoding/Hex";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
@@ -8,6 +8,7 @@ import * as Option from "effect/Option";
 import * as Stream from "effect/Stream";
 import * as Semaphore from "effect/Semaphore";
 import { HttpClient, HttpClientRequest, HttpClientResponse } from "effect/http";
+import * as NodeCrypto from "node:crypto";
 
 import {
   CLI_RELEASE_CHECKSUMS_FILE,
@@ -132,10 +133,10 @@ interface PinnedRuntimeInstallInput {
 }
 
 const sha256Hex = (bytes: Uint8Array, step: string) =>
-  Effect.tryPromise({
-    try: () => crypto.subtle.digest("SHA-256", bytes),
+  Effect.try({
+    try: () => NodeCrypto.createHash("sha256").update(bytes).digest("hex"),
     catch: (cause) => new PinnedRuntimeInstallError({ step, cause }),
-  }).pipe(Effect.map((digest) => Hex.encode(new Uint8Array(digest))));
+  });
 
 const fileSha256 = (fs: FileSystem.FileSystem, filePath: string, step: string) =>
   fs.readFile(filePath).pipe(

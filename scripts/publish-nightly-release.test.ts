@@ -11,6 +11,12 @@ import {
   type GitHubRelease,
   type GitHubReleaseAsset,
 } from "./lib/github-releases.ts";
+import { cliArchiveFileName } from "@goat/shared/cliRelease";
+import {
+  ownRuntimeManifest,
+  releaseRuntimeManifest,
+  runtimeManifestAssetName,
+} from "@goat/shared/runtimeManifest";
 import { publishNightlyRelease, writePublishOutcome } from "./publish-nightly-release.ts";
 
 const version = "0.1.0-nightly.20261012.2";
@@ -49,7 +55,7 @@ const fixture = (
     const newerTag = options.newer ?? newer;
     const files = new Map<string, Uint8Array>(
       options.assetsOnly
-        ? [[`goat-${target}-linux-x64.tar.gz`, new TextEncoder().encode("runtime archive")]]
+        ? []
         : [
             ["install.sh", new TextEncoder().encode("#!/bin/sh\necho GOAT\n")],
             ["install.ps1", new TextEncoder().encode("Write-Host GOAT\n")],
@@ -57,6 +63,20 @@ const fixture = (
             ["THIRD_PARTY_NOTICES.md", new TextEncoder().encode("Notices\n")],
             ["GOAT-arm64.dmg", new TextEncoder().encode("macos artifact")],
           ],
+    );
+    const runtimeAsset = cliArchiveFileName(target, "linux-x64");
+    const runtimeBytes = new TextEncoder().encode("runtime archive");
+    files.set(runtimeAsset, runtimeBytes);
+    files.set(
+      runtimeManifestAssetName(target),
+      new TextEncoder().encode(
+        JSON.stringify(
+          releaseRuntimeManifest(
+            ownRuntimeManifest({ version: target }),
+            new Map([[runtimeAsset, yield* hashBytes(runtimeBytes)]]),
+          ),
+        ),
+      ),
     );
     const lines: string[] = [];
     for (const [name, bytes] of files) lines.push(`${yield* hashBytes(bytes)}  ${name}\n`);
@@ -163,6 +183,8 @@ const fixture = (
     const fs = FileSystem.makeNoop({
       readDirectory: () => Effect.succeed([...files.keys()]),
       readFile: (file) => Effect.succeed(files.get(file.slice(dir.length + 1))!),
+      readFileString: (file) =>
+        Effect.succeed(new TextDecoder().decode(files.get(file.slice(dir.length + 1))!)),
     });
     const run = (dryRun = false) =>
       publishNightlyRelease({
@@ -407,6 +429,53 @@ describe("publish nightly release", () => {
         "Local checksum differs for install.sh",
       );
       expect(state.calls).toEqual([]);
+    }),
+  );
+
+  it.effect(
+    "requires a checksummed runtime manifest matching every published archive before API reads",
+    () =>
+      Effect.gen(function* () {
+        for (const [mode, assetsOnly] of [
+          ["missing", false],
+          ["invalid", false],
+          ["omitted-platform", false],
+          ["digest-mismatch", false],
+          ["invalid", true],
+          ["omitted-platform", true],
+          ["digest-mismatch", true],
+        ] as const) {
+          const state = yield* fixture({ assetsOnly });
+          const name = runtimeManifestAssetName(version);
+          if (mode === "missing") state.files.delete(name);
+          else if (mode === "invalid") state.files.set(name, new TextEncoder().encode("invalid"));
+          else {
+            const manifest = JSON.parse(new TextDecoder().decode(state.files.get(name)!));
+            if (mode === "omitted-platform") manifest.platforms = {};
+            else manifest.platforms["linux-x64"].sha256 = "b".repeat(64);
+            state.files.set(name, new TextEncoder().encode(JSON.stringify(manifest)));
+          }
+          const lines: string[] = [];
+          for (const [asset, bytes] of state.files) {
+            if (asset !== "SHA256SUMS") lines.push(`${yield* hashBytes(bytes)}  ${asset}\n`);
+          }
+          state.files.set("SHA256SUMS", new TextEncoder().encode(lines.join("")));
+          expect((yield* Effect.result(state.run()))._tag).toBe("Failure");
+          expect(state.calls).toEqual([]);
+        }
+      }),
+  );
+
+  it.effect("backfills a runtime-only release published before manifests", () =>
+    Effect.gen(function* () {
+      const state = yield* fixture({ assetsOnly: true });
+      state.files.delete(runtimeManifestAssetName(version));
+      const lines: string[] = [];
+      for (const [asset, bytes] of state.files) {
+        if (asset !== "SHA256SUMS") lines.push(`${yield* hashBytes(bytes)}  ${asset}\n`);
+      }
+      state.files.set("SHA256SUMS", new TextEncoder().encode(lines.join("")));
+      expect((yield* Effect.result(state.run()))._tag).toBe("Success");
     }),
   );
 

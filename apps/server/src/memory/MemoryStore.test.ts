@@ -19,18 +19,18 @@ import * as SqlClient from "effect/sql/SqlClient";
 import * as NodeSqliteClient from "@goat/shared/nodeSqliteClient";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as FileSystem from "effect/FileSystem";
-import migration from "../persistence/Migrations/072_Memory.ts";
+import migration from "../persistence/Migrations/073_Memory.ts";
 import { runMigrations } from "../persistence/Migrations.ts";
-import hubMigration from "../persistence/Migrations/073_MemoryHubSync.ts";
-import searchMigration from "../persistence/Migrations/074_MemorySearchCounters.ts";
-import lineageMigration from "../persistence/Migrations/076_MemoryImportLineage.ts";
-import checkpointMigration from "../persistence/Migrations/077_MemoryCheckpointAccounting.ts";
-import reportMigration from "../persistence/Migrations/078_MemoryReportLifecycle.ts";
-import usageMigration from "../persistence/Migrations/079_MemoryUsageCounters.ts";
-import revertMigration from "../persistence/Migrations/080_MemoryRevertResults.ts";
-import readyMigration from "../persistence/Migrations/082_MemoryLastReadySpace.ts";
-import adminMigration from "../persistence/Migrations/083_MemoryHubAdministered.ts";
-import lifecycleMigration from "../persistence/Migrations/084_MemoryCheckpointLifecycle.ts";
+import hubMigration from "../persistence/Migrations/074_MemoryHubSync.ts";
+import searchMigration from "../persistence/Migrations/075_MemorySearchCounters.ts";
+import lineageMigration from "../persistence/Migrations/077_MemoryImportLineage.ts";
+import checkpointMigration from "../persistence/Migrations/078_MemoryCheckpointAccounting.ts";
+import reportMigration from "../persistence/Migrations/079_MemoryReportLifecycle.ts";
+import usageMigration from "../persistence/Migrations/080_MemoryUsageCounters.ts";
+import revertMigration from "../persistence/Migrations/081_MemoryRevertResults.ts";
+import readyMigration from "../persistence/Migrations/083_MemoryLastReadySpace.ts";
+import adminMigration from "../persistence/Migrations/084_MemoryHubAdministered.ts";
+import lifecycleMigration from "../persistence/Migrations/085_MemoryCheckpointLifecycle.ts";
 import * as Store from "./MemoryStore.ts";
 import { CheckpointAccountingError } from "./MemoryCheckpointAccounting.ts";
 import { decideMemoryOperation, memoryOperationDigest } from "./MemoryDecider.ts";
@@ -611,6 +611,14 @@ describe("MemoryStore", () => {
         (yield* store.search(
           { memorySpaceId: space, scope: { kind: "user" }, limit: 100 },
           '" OR *',
+          "fts",
+        )).items.length,
+        0,
+      );
+      assert.strictEqual(
+        (yield* store.search(
+          { memorySpaceId: space, scope: { kind: "user" }, limit: 100 },
+          '홍길동" OR *',
           "fts",
         )).items.length,
         0,

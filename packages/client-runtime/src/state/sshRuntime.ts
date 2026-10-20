@@ -87,7 +87,7 @@ export function sshRuntimeStatusText(status: SshHostStatus): string {
     case "stopped":
       return `Not running · Runtime ${version}`;
     case "ready": {
-      if (status.refreshDeferred) return `Runtime ${version} · ${status.refreshDeferred.detail}`;
+      if (status.refreshDeferred) return `Running ${version} · ${status.refreshDeferred.detail}`;
       if (status.runtimeVersion === status.requestedVersion)
         return `Up to date · Runtime ${version}`;
       const order = sshRuntimeBuildOrder(status);
@@ -120,7 +120,7 @@ export function sshRuntimeStatusText(status: SshHostStatus): string {
       if (!failure) return status.detail ?? `GOAT setup failed on ${status.host}.`;
       switch (failure.reason) {
         case "archive_unavailable":
-          return `GOAT ${failure.archive?.requestedVersion ?? status.requestedVersion} for ${archivePlatform(failure.archive?.platformKey)} isn't available to install.`;
+          return `No GOAT runtime for ${archivePlatform(failure.archive?.platformKey)} that works with GOAT ${failure.archive?.requestedVersion ?? status.requestedVersion} could be installed.`;
         case "host_key_changed":
           return `The host key for ${status.host} changed, so GOAT stopped connecting. If you rebuilt this server, forget it and add it again.`;
         case "start_timeout":
@@ -152,12 +152,12 @@ export function sshRuntimeStatusText(status: SshHostStatus): string {
 /** The single next step for the current runtime condition. */
 export function sshRuntimeRecoveryText(status: SshHostStatus) {
   const deferredRecovery = status.refreshDeferred
-    ? "GOAT is connected. It will retry the refresh every 10 minutes."
+    ? "GOAT is connected. It retries the upgrade every 10 minutes."
     : null;
   switch (status.state) {
     case "failed":
       return status.failure?.reason === "archive_unavailable"
-        ? "This build has no published server archive. Install a published GOAT release, or set a release mirror."
+        ? status.failure.fix.instruction
         : null;
     case "stopped":
       return "GOAT starts it the next time you connect.";

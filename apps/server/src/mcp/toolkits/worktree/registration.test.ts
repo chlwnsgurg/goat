@@ -3,9 +3,9 @@ import * as SshHostSetup from "../../../sshRemote/SshHostSetup.ts";
 import * as CloudMachineService from "../../../cloudMachines/CloudMachineService.ts";
 import * as SshWorkspaceSync from "../../../sshRemote/SshWorkspaceSync.ts";
 import * as ConnectionCatalogBroker from "../../../connections/ConnectionCatalogBroker.ts";
-import Migration0062 from "../../../persistence/Migrations/065_RemoteReports.ts";
-import Migration0063 from "../../../persistence/Migrations/066_RemoteDispatches.ts";
-import Migration0065 from "../../../persistence/Migrations/068_RemoteDispatchQuestions.ts";
+import Migration0062 from "../../../persistence/Migrations/066_RemoteReports.ts";
+import Migration0063 from "../../../persistence/Migrations/067_RemoteDispatches.ts";
+import Migration0065 from "../../../persistence/Migrations/069_RemoteDispatchQuestions.ts";
 import * as Orchestrator from "../../../orchestration-v2/Orchestrator.ts";
 import * as RemoteDispatchCoordinator from "../../../remoteReports/RemoteDispatchCoordinator.ts";
 import * as ProjectionStore from "../../../orchestration-v2/ProjectionStore.ts";
@@ -24,6 +24,8 @@ import { HttpBody, HttpClient, HttpRouter } from "effect/http";
 import * as ServerEnvironment from "../../../environment/ServerEnvironment.ts";
 import * as GitWorkflowService from "../../../git/GitWorkflowService.ts";
 import * as GitManager from "../../../git/GitManager.ts";
+import * as FleetFallback from "../../../fleet/resources/Fallback.ts";
+import * as FleetPlacement from "../../../fleet/resources/Placement.ts";
 import * as ProviderAdapterRegistry from "../../../orchestration-v2/ProviderAdapterRegistry.ts";
 import * as ThreadManagementService from "../../../orchestration-v2/ThreadManagementService.ts";
 import * as ProjectService from "../../../project/ProjectService.ts";
@@ -53,12 +55,18 @@ import * as ChannelWorkerReports from "../../../channels/ChannelWorkerReports.ts
 import * as LaunchWatchService from "../../LaunchWatchService.ts";
 import * as McpHttpServer from "../../McpHttpServer.ts";
 import * as McpSessionRegistry from "../../McpSessionRegistry.ts";
+import * as HostHealthMonitor from "../../../fleet/health/HostHealthMonitor.ts";
+import * as FleetHostStates from "../../../fleet/health/FleetHostStates.ts";
+import * as Rescheduler from "../../../fleet/health/Rescheduler.ts";
 import * as PreviewAutomationBroker from "../../PreviewAutomationBroker.ts";
 import * as PreviewBrowser from "../../../preview/PreviewBrowser.ts";
 
 const layerStubServices = Layer.mergeAll(
   Layer.mock(CloudSource.CloudTaskSourceService)({}),
   Layer.mock(SshRemoteDispatch.SshRemoteDispatch)({}),
+  Layer.mock(HostHealthMonitor.HostHealthMonitor)({}),
+  Layer.mock(FleetHostStates.FleetHostStates)({}),
+  Layer.mock(Rescheduler.Rescheduler)({}),
   Layer.mock(SshHostSetup.SshHostSetup)({}),
   Layer.mock(CloudMachineService.CloudMachineService)({}),
   Layer.mock(SshWorkspaceSync.SshWorkspaceSync)({}),
@@ -124,6 +132,8 @@ it.effect("production mcp layer lists worktree tools over http", () =>
     Effect.gen(function* () {
       const layerRoutes = McpHttpServer.layer.pipe(
         Layer.provide(McpHttpServer.layerHostStatusService),
+        Layer.provide(Layer.mock(FleetFallback.FallbackChains)({})),
+        Layer.provide(Layer.mock(FleetPlacement.Placement)({})),
         Layer.provide(McpSessionRegistry.layer),
         Layer.provide(RemoteDispatchCoordinator.layer),
         Layer.provide(LaunchWatchService.layer),

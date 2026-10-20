@@ -28,6 +28,9 @@ export const GOAT_MIGRATION_NAMES: ReadonlySet<string> = new Set([
   "MemoryLastReadySpace",
   "MemoryHubAdministered",
   "MemoryCheckpointLifecycle",
+  "FleetGoals",
+  "FleetHealth",
+  "ThreadRunObservedChecks",
 ]);
 
 type MigrationEntry<E> = readonly [

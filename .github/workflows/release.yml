@@ -50,6 +50,7 @@ jobs:
   # have already run. Scheduled runs also decide here whether a nightly is due.
   resolve_commit:
     name: Resolve release commit
+    if: github.repository == 'pingdotgg/t3code'
     runs-on: blacksmith-8vcpu-ubuntu-2404
     timeout-minutes: 5
     outputs:
@@ -771,6 +772,9 @@ jobs:
 
       # Installers verify archives against this file, so it is written from the
       # signed bytes that get uploaded, never from an earlier stage.
+      - name: Write runtime compatibility manifest
+        run: node scripts/release-runtime-manifest.ts --dir release-assets --version "${{ needs.preflight.outputs.version }}"
+
       - name: Write CLI archive checksums
         shell: bash
         run: |
@@ -782,7 +786,7 @@ jobs:
             echo "No CLI archives were produced." >&2
             exit 1
           fi
-          sha256sum "${archives[@]}" > SHA256SUMS
+          sha256sum "${archives[@]}" goat-*-runtime.json > SHA256SUMS
           cat SHA256SUMS
 
       # The desktop build omits the publish config for preview versions, so
@@ -854,6 +858,7 @@ jobs:
             for apk in release-assets/*.apk; do
               [[ -f "$apk" ]] && echo "$apk"
             done
+            echo 'release-assets/goat-*-runtime.json'
             echo 'release-assets/SHA256SUMS'
             echo 'EOF'
           } >> "$GITHUB_OUTPUT"

@@ -252,6 +252,10 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(goat-mob
   --color-warning-foreground: var(--warning-foreground);
   --color-warning: var(--warning);
   --color-warning-surface: var(--warning-surface);
+  --color-heat-warm: var(--heat-warm);
+  --color-heat-hot: var(--heat-hot);
+  --color-heat-burning: var(--heat-burning);
+  --color-heat-ember: var(--heat-ember);
   /* GOAT Bot's face follows the theme's text and canvas without an accent hue. */
   --color-goat-avatar: color-mix(in oklab, var(--foreground) 6%, var(--background));
   --color-goat-avatar-border: color-mix(in oklab, var(--foreground) 12%, var(--background));
@@ -571,6 +575,41 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(goat-mob
   mask-size:
     calc(100% - var(--app-scrollbar-width)) 100%,
     var(--app-scrollbar-width) 100%;
+}
+
+@utility timeline-scroll-bottom-fade {
+  --virtualized-scroll-fade-mask: linear-gradient(
+    to bottom,
+    black 0,
+    black calc(100% - var(--timeline-composer-overlay-height) - 0.75rem),
+    transparent calc(100% - var(--timeline-composer-overlay-height)),
+    transparent 100%
+  );
+}
+
+/* Stage-channel art needs a mask and pseudo-element gradient, so keep the
+   behavior composable without tying it to the global components layer. */
+@utility sidebar-stage-backdrop {
+  --stage-fade: var(--sidebar-stage-fade, var(--app-chrome-background));
+  mask-image: linear-gradient(to bottom, black 0%, black 55%, transparent 92%);
+  -webkit-mask-image: linear-gradient(to bottom, black 0%, black 55%, transparent 92%);
+
+  &::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(
+      to bottom,
+      transparent 0%,
+      transparent 28%,
+      color-mix(in srgb, var(--stage-fade) 10%, transparent) 40%,
+      color-mix(in srgb, var(--stage-fade) 30%, transparent) 52%,
+      color-mix(in srgb, var(--stage-fade) 58%, transparent) 64%,
+      color-mix(in srgb, var(--stage-fade) 82%, transparent) 75%,
+      color-mix(in srgb, var(--stage-fade) 96%, transparent) 85%,
+      var(--stage-fade) 93%
+    );
+  }
 }
 
 @keyframes live-tool-shine {
@@ -1185,6 +1224,12 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(goat-mob
   --warning: var(--color-amber-500);
   --warning-foreground: var(--color-amber-700);
   --warning-surface: color-mix(in srgb, var(--warning) 8%, transparent);
+  /* Fleet machine heat (FleetGraph): warm, hot, and burning, plus the ember
+     highlight its flames fade into. */
+  --heat-warm: var(--color-amber-500);
+  --heat-hot: var(--color-orange-500);
+  --heat-burning: var(--color-red-500);
+  --heat-ember: var(--color-amber-400);
   --update: var(--primary);
   --update-foreground: var(--primary);
   --update-surface: color-mix(in srgb, var(--update) 12%, transparent);
@@ -1245,6 +1290,10 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(goat-mob
     --merged-foreground: var(--color-violet-400);
     --warning-foreground: var(--color-amber-400);
     --warning-surface: color-mix(in srgb, var(--warning) 16%, transparent);
+    --heat-warm: var(--color-amber-400);
+    --heat-hot: var(--color-orange-400);
+    --heat-burning: var(--color-red-500);
+    --heat-ember: var(--color-amber-200);
     --update-foreground: var(--color-blue-400);
     --update-surface: color-mix(in srgb, var(--update) 18%, transparent);
     --sidebar: var(--card);
@@ -2500,7 +2549,61 @@ code {
   .fleet-graph .fleet-ring {
     animation: fleet-ring 1.8s ease-out infinite;
   }
+  /* Machine heat (HeatLayer): a still glow when hot; a flickering crown of
+     flames and two embers when burning. These HTML boxes animate only
+     transform and opacity, and each running animation is still a little main
+     thread work per frame, so only burning machines move. */
+  .fleet-graph .fleet-heat,
+  .fleet-graph .fleet-heat-spot {
+    position: absolute;
+    top: 0;
+    left: 0;
+  }
+  .fleet-graph .fleet-heat[data-tier="hot"] {
+    --fleet-heat-color: var(--heat-hot);
+  }
+  .fleet-graph .fleet-heat[data-tier="burning"] {
+    --fleet-heat-color: var(--heat-burning);
+  }
+  .fleet-graph .fleet-heat-glow {
+    position: absolute;
+    top: -34px;
+    left: -34px;
+    width: 68px;
+    height: 68px;
+    border-radius: 9999px;
+    background: radial-gradient(
+      closest-side,
+      color-mix(in srgb, var(--fleet-heat-color) 50%, transparent) 45%,
+      transparent
+    );
+  }
+  .fleet-graph .fleet-flames {
+    position: absolute;
+    transform-origin: 0 0;
+    animation: fleet-flame 1.3s ease-in-out infinite alternate;
+  }
+  .fleet-graph .fleet-flame {
+    position: absolute;
+    bottom: 0;
+    left: -7.5px;
+    width: 15px;
+    height: 24px;
+    overflow: visible;
+    transform-origin: 50% 100%;
+  }
+  .fleet-graph .fleet-ember {
+    position: absolute;
+    translate: -50% -50%;
+    border-radius: 9999px;
+    background: radial-gradient(var(--heat-ember) 30%, var(--heat-hot));
+    opacity: 0;
+    animation: fleet-ember 2.4s ease-out infinite;
+  }
   .fleet-graph svg[data-paused] * {
+    animation-play-state: paused;
+  }
+  .fleet-graph[data-paused] .fleet-heat-layer * {
     animation-play-state: paused;
   }
   .fleet-graph .fleet-node:focus-visible .fleet-node-ring {
@@ -2511,6 +2614,109 @@ code {
     .fleet-graph * {
       animation: none !important;
     }
+  }
+}
+
+/* Fleet telemetry console (FleetConsole.tsx). The texture is static; the only motion is one
+   sweep per new host sample, paused offscreen and in hidden tabs by observeVisibleAnimation. */
+@layer components {
+  .fleet-console {
+    --fleet-console-accent: color-mix(in oklab, var(--primary) 55%, transparent);
+    box-shadow: inset 0 1px 0 color-mix(in oklab, var(--primary) 12%, transparent);
+  }
+  .fleet-console::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    background-image: repeating-linear-gradient(
+      to bottom,
+      color-mix(in oklab, var(--foreground) 3%, transparent) 0 1px,
+      transparent 1px 3px
+    );
+  }
+  .fleet-console-corners {
+    --fleet-console-corner: 10px;
+    --fleet-console-corner-weight: 1.5px;
+    position: absolute;
+    inset: 5px;
+    pointer-events: none;
+    background:
+      linear-gradient(var(--fleet-console-accent), var(--fleet-console-accent)) top left /
+        var(--fleet-console-corner) var(--fleet-console-corner-weight),
+      linear-gradient(var(--fleet-console-accent), var(--fleet-console-accent)) top left /
+        var(--fleet-console-corner-weight) var(--fleet-console-corner),
+      linear-gradient(var(--fleet-console-accent), var(--fleet-console-accent)) top right /
+        var(--fleet-console-corner) var(--fleet-console-corner-weight),
+      linear-gradient(var(--fleet-console-accent), var(--fleet-console-accent)) top right /
+        var(--fleet-console-corner-weight) var(--fleet-console-corner),
+      linear-gradient(var(--fleet-console-accent), var(--fleet-console-accent)) bottom left /
+        var(--fleet-console-corner) var(--fleet-console-corner-weight),
+      linear-gradient(var(--fleet-console-accent), var(--fleet-console-accent)) bottom left /
+        var(--fleet-console-corner-weight) var(--fleet-console-corner),
+      linear-gradient(var(--fleet-console-accent), var(--fleet-console-accent)) bottom right /
+        var(--fleet-console-corner) var(--fleet-console-corner-weight),
+      linear-gradient(var(--fleet-console-accent), var(--fleet-console-accent)) bottom right /
+        var(--fleet-console-corner-weight) var(--fleet-console-corner);
+    background-repeat: no-repeat;
+  }
+  .fleet-console-mark {
+    width: 6px;
+    height: 6px;
+    flex-shrink: 0;
+    transform: rotate(45deg);
+    background: var(--primary);
+    box-shadow: 0 0 6px color-mix(in oklab, var(--primary) 60%, transparent);
+  }
+  .fleet-console-spark {
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 1.25;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+    filter: drop-shadow(0 0 2px color-mix(in oklab, currentColor 40%, transparent));
+  }
+  .fleet-console-leader {
+    flex: 1;
+    align-self: center;
+    border-top: 1px dotted var(--contrast-border);
+  }
+  .fleet-console-baseline {
+    stroke: var(--contrast-border);
+    stroke-width: 1;
+    stroke-dasharray: 2 3;
+    vector-effect: non-scaling-stroke;
+  }
+  .fleet-console-sweep {
+    position: absolute;
+    inset: 2.5rem 0 0;
+    pointer-events: none;
+    animation: fleet-console-sweep 1.6s ease-out 1 both;
+    animation-play-state: var(--visible-animation-state, paused);
+  }
+  .fleet-console-sweep::before {
+    content: "";
+    position: absolute;
+    inset: 0 0 auto;
+    height: 1px;
+    background: linear-gradient(to right, transparent, var(--fleet-console-accent), transparent);
+    box-shadow: 0 0 8px color-mix(in oklab, var(--primary) 40%, transparent);
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .fleet-console-sweep {
+      display: none;
+    }
+  }
+}
+
+@keyframes fleet-console-sweep {
+  from {
+    transform: translateY(0);
+    opacity: 1;
+  }
+  to {
+    transform: translateY(100%);
+    opacity: 0;
   }
 }
 
@@ -2542,6 +2748,37 @@ code {
   }
   to {
     transform: scale(1.35);
+    opacity: 0;
+  }
+}
+@keyframes fleet-flame {
+  0% {
+    transform: scale(1, 1) skewX(0deg);
+    opacity: 0.92;
+  }
+  35% {
+    transform: scale(0.94, 1.08) skewX(-4deg);
+    opacity: 1;
+  }
+  70% {
+    transform: scale(1.04, 0.92) skewX(3deg);
+    opacity: 0.85;
+  }
+  100% {
+    transform: scale(0.97, 1.04) skewX(-1deg);
+    opacity: 0.95;
+  }
+}
+@keyframes fleet-ember {
+  0% {
+    transform: translate(0, 0);
+    opacity: 0;
+  }
+  20% {
+    opacity: 1;
+  }
+  100% {
+    transform: translate(0, -22px);
     opacity: 0;
   }
 }

@@ -46,6 +46,7 @@ import {
   sshSupervisorOwner,
 } from "../serverOwnerLock.ts";
 import { tryAcquireServerOwnerLock } from "../serverOwnerLockFile.ts";
+import { ownRuntimeManifest } from "@goat/shared/runtimeManifest";
 import { BUILD_COMMIT_TIME } from "../buildCommitTime.ts";
 import packageJson from "../../package.json" with { type: "json" };
 
@@ -384,6 +385,26 @@ export const readLiveSshRuntimeProtocol = async (
     return unknown;
   }
 };
+
+declare const __GOAT_BUILD_COMMIT__: string | undefined;
+
+const runtimeManifest = Command.make("runtime-manifest").pipe(
+  Command.unlisted,
+  Command.withHandler(() =>
+    Effect.sync(() => {
+      const manifest = ownRuntimeManifest({
+        version: packageJson.version,
+        commit:
+          typeof __GOAT_BUILD_COMMIT__ === "string" && __GOAT_BUILD_COMMIT__
+            ? __GOAT_BUILD_COMMIT__
+            : undefined,
+        commitTime: BUILD_COMMIT_TIME,
+      });
+      // @effect-diagnostics-next-line preferSchemaOverJson:off - internal helper JSON output.
+      process.stdout.write(JSON.stringify(manifest) + "\n");
+    }),
+  ),
+);
 
 const protocol = Command.make("protocol", {
   shell: Flag.Boolean("shell").pipe(Flag.withDefault(false)),
@@ -988,6 +1009,7 @@ export const sshHelperCommand = Command.make("__ssh-helper").pipe(
     waitReady,
     runtimePort,
     protocol,
+    runtimeManifest,
     activity,
     compareVersion,
     commitTime,

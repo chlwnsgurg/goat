@@ -15,6 +15,7 @@ import {
   getDesktopUpdateActionError,
   getDesktopUpdateButtonTooltip,
   getDesktopUpdateDownloadedVersion,
+  getDesktopUpdateIdleTooltip,
   getDesktopUpdateInstallConfirmationMessage,
   isDesktopUpdateButtonDisabled,
   resolveDesktopUpdateButtonAction,
@@ -284,12 +285,18 @@ function SidebarUpdateControl({ placement }: { placement: SidebarUpdatePlacement
     isDownloading,
     showCheckIcon,
   });
-  const heading = resolveSidebarUpdateHeading({
-    local: action !== "none" || isDownloading,
-    remote: runsEverything ? everything.remote : null,
-    run,
-    checking: showCheckIcon,
-  });
+  const idleTooltip =
+    !showUpdateDetails && !showCheckIcon && !runsEverything && !run
+      ? getDesktopUpdateIdleTooltip(state)
+      : null;
+  const heading =
+    idleTooltip?.title ??
+    resolveSidebarUpdateHeading({
+      local: action !== "none" || isDownloading,
+      remote: runsEverything ? everything.remote : null,
+      run,
+      checking: showCheckIcon,
+    });
   const detail = runsEverything
     ? everything.summary
     : showUpdateDetails
@@ -297,7 +304,8 @@ function SidebarUpdateControl({ placement }: { placement: SidebarUpdatePlacement
         ? getDesktopUpdateButtonTooltip(state)
         : "Update available"
       : null;
-  const installationDetail = state?.installationNotice ?? (!state?.enabled ? state?.message : null);
+  const installationDetail =
+    state?.installationNotice ?? idleTooltip?.detail ?? (!state?.enabled ? state?.message : null);
   const tooltip = [
     heading,
     detail,
@@ -305,7 +313,11 @@ function SidebarUpdateControl({ placement }: { placement: SidebarUpdatePlacement
   ]
     .filter(Boolean)
     .join("\n");
-  const ariaLabel = detail === null ? heading : `${heading}: ${detail.split("\n")[0]}`;
+  const ariaLabel = idleTooltip?.detail
+    ? `${heading}: ${idleTooltip.detail}`
+    : detail === null
+      ? heading
+      : `${heading}: ${detail.split("\n")[0]}`;
   const disabled = showCheckIcon
     ? true
     : runsEverything
@@ -612,7 +624,14 @@ function SidebarUpdateControl({ placement }: { placement: SidebarUpdatePlacement
               side={inRail ? "right" : "top"}
               variant={showUpdateDetails ? "glass" : "default"}
             >
-              <span className="whitespace-pre-line">{tooltip}</span>
+              {idleTooltip?.detail ? (
+                <div className="text-left">
+                  <div className="font-medium">{idleTooltip.title}</div>
+                  <div className="text-muted-foreground">{idleTooltip.detail}</div>
+                </div>
+              ) : (
+                <span className="whitespace-pre-line">{tooltip}</span>
+              )}
             </TooltipPopup>
           ) : null}
         </Tooltip>
