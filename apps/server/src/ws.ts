@@ -3148,6 +3148,8 @@ const layerWsRpc = (
         [WS_METHODS.sshHostStatus]: (input) => sshHostSetup.status(input),
         [WS_METHODS.sshHostHandoffProgress]: (input) =>
           sshHostSetup.handoffProgress(input, { kind: "client", sessionId: currentSessionId }),
+        [WS_METHODS.sshHostPreflight]: (input) =>
+          sshHostSetup.preflight(input, { kind: "client", sessionId: currentSessionId }),
         [WS_METHODS.sshHostProbe]: (input) => sshHostSetup.probe(input, currentSessionId),
         [WS_METHODS.sshHostTrust]: (input) => sshHostSetup.trust(input, currentSessionId),
         [WS_METHODS.sshHostPrepare]: (input) =>

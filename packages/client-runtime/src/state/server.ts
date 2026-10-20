@@ -1429,6 +1429,10 @@ export function createServerEnvironmentAtoms<R, E>(
       concurrency: configConcurrency,
     }),
     // Waiting on an SSH host must not occupy the settings config lane.
+    preflightSshHost: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:ssh:preflightSshHost",
+      tag: WS_METHODS.sshHostPreflight,
+    }),
     probeSshHost: createEnvironmentRpcCommand(runtime, {
       label: "environment-data:ssh:probeSshHost",
       tag: WS_METHODS.sshHostProbe,

@@ -126,7 +126,12 @@ it("hub reconcile requires Settings authority", () => {
 });
 
 it("SSH setup separates read, settings and runtime-maintenance authority", () => {
-  for (const method of [WS_METHODS.sshHostProbe, WS_METHODS.sshHostTrust, WS_METHODS.sshHostForget])
+  for (const method of [
+    WS_METHODS.sshHostProbe,
+    WS_METHODS.sshHostPreflight,
+    WS_METHODS.sshHostTrust,
+    WS_METHODS.sshHostForget,
+  ])
     expect(clientRpcRequiredScopes(method, {})).toEqual(["settings:write"]);
   expect(clientRpcRequiredScopes(WS_METHODS.sshHostPrepare, {})).toEqual(["environment:maintain"]);
   for (const method of [WS_METHODS.sshHostStatus, WS_METHODS.sshHostHandoffProgress])

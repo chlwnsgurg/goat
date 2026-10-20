@@ -1,15 +1,18 @@
+import * as SshDeviceAdd from "../../../sshRemote/SshDeviceAdd.ts";
+import * as Setup from "../../../sshRemote/SshHostSetup.ts";
+import * as Sessions from "../../../auth/SessionStore.ts";
 import { expect, it } from "@effect/vitest";
 import {
   EnvironmentId,
   HubNodesError,
   ProviderInstanceId,
+  SSH_PREFLIGHT_STEP_ORDER,
   type HubNode,
   type SavedConnection,
+  type SshPreflightReport,
   ThreadId,
 } from "@goat/contracts";
-import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
-import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Stream from "effect/Stream";
 import { McpSchema, McpServer, Tool } from "effect/ai";
@@ -61,10 +64,13 @@ const outsideCaller = (
   client: { sessionId: "client:connections", label: "Test agent", access },
   capabilities: new Set(["orchestration"]),
   issuedAt: 0,
+  grantedScopes: ["orchestration:read", "orchestration:operate"],
+  reauthorize: () => Effect.void,
 });
 const threadCaller: McpInvocationContext.McpInvocationScope = {
   ...outsideCaller("full-access"),
   client: undefined,
+  grantedScopes: ["settings:write", "environment:maintain"],
   thread: {
     threadId,
     providerSessionId: "provider:connections",
@@ -72,17 +78,49 @@ const threadCaller: McpInvocationContext.McpInvocationScope = {
   },
 };
 
+const preflight: SshPreflightReport = {
+  host: "build-host",
+  destination: { alias: "build-host", hostname: "build.example", user: "deploy", port: 22 },
+  ready: true,
+  steps: SSH_PREFLIGHT_STEP_ORDER.map((id) => ({
+    id,
+    state: "passed",
+    summary: `${id} passed.`,
+    ...(id === "host_key" ? { fingerprint: "SHA256:human-only" } : {}),
+  })),
+};
+const noDesktop: Broker.ConnectionCatalogBroker["Service"]["invoke"] = () =>
+  Effect.fail(new Broker.ConnectionCatalogHostUnavailable());
 const testLayer = (
-  caller = outsideCaller("full-access"),
+  caller: McpInvocationContext.McpInvocationScope = outsideCaller("full-access"),
   hub: Partial<HubNodes.HubNodes["Service"]> = {},
   broker: Partial<Broker.ConnectionCatalogBroker["Service"]> = {},
+  setup: Partial<Setup.SshHostSetup["Service"]> = {},
 ) =>
   McpToolAccess.HandlersLayer.layer(Handlers.layer).pipe(
     Layer.provideMerge(Layer.succeed(McpInvocationContext.McpInvocationContext, caller)),
+    Layer.provideMerge(
+      SshDeviceAdd.layer.pipe(
+        Layer.provide(
+          Layer.mergeAll(
+            Layer.mock(Sessions.SessionStore)({ cookieName: "test", legacyCookieName: undefined }),
+            Layer.mock(Setup.SshHostSetup)({
+              resolveDestination: (input) => Effect.succeed({ input, host: input.address }),
+              preflight: () => Effect.succeed(preflight),
+              ...setup,
+            }),
+          ),
+        ),
+      ),
+    ),
     Layer.provideMerge(liveThreadsLayer),
     Layer.provideMerge(Layer.mock(HubNodes.HubNodes)(hub)),
     Layer.provideMerge(
-      Layer.mock(Broker.ConnectionCatalogBroker)({ hasHost: Effect.succeed(false), ...broker }),
+      Layer.mock(Broker.ConnectionCatalogBroker)({
+        hasHost: Effect.succeed(false),
+        invoke: noDesktop,
+        ...broker,
+      }),
     ),
   );
 
@@ -185,65 +223,169 @@ it.effect("projects SSH, linked and cloud routes without credentials", () => {
   );
 });
 
-it.effect.each(["saved", "not_attached", "failed", "refused", "mismatched"] as const)(
-  "saves through the hub with identity required, desktop result %s",
-  (desktop) => {
-    let persisted = false;
-    return call("goat_connection_add_ssh", { host: "build-host", label: "Build" }).pipe(
-      Effect.tap((result) =>
-        Effect.sync(() =>
-          expect(result).toEqual({
-            created: true,
-            node,
-            connection: saved,
-            desktopCatalog: desktop === "refused" || desktop === "mismatched" ? "failed" : desktop,
-          }),
-        ),
-      ),
+const expectHubAdd =
+  (created: boolean, attribution: Record<string, unknown>): HubNodes.HubNodes["Service"]["add"] =>
+  (input, options) =>
+    Effect.gen(function* () {
+      expect(input).toMatchObject({
+        kind: "ssh",
+        alias: "build-host",
+        hostname: null,
+        username: null,
+        port: null,
+      });
+      expect(options.requireIdentity).toBe(true);
+      expect(options.addedBy).toMatchObject({ kind: "agent", ...attribution });
+      expect(options.addedBy.at).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+      yield* options.beforeSave;
+      return { created, node };
+    });
+
+it.effect(
+  "a thread add saves on the desktop with the ten minute timeout and registers on the hub",
+  () =>
+    Effect.gen(function* () {
+      const result = yield* call("goat_connection_add_ssh", { host: "build-host", label: "Build" });
+      expect(result).toMatchObject({
+        outcome: "connected",
+        created: true,
+        connection: saved,
+        hub: { saved: true, node },
+        desktopCatalog: "saved",
+      });
+      expect(JSON.stringify(result)).not.toContain("fingerprint");
+      expect(JSON.stringify(result)).not.toContain("SHA256:human-only");
+    }).pipe(
       Effect.provide(
         testLayer(
           threadCaller,
+          { add: expectHubAdd(true, { threadId }) },
           {
-            add: (input, options) =>
-              Effect.gen(function* () {
-                expect(input).toEqual({
-                  kind: "ssh",
-                  alias: "build-host",
-                  hostname: null,
-                  username: null,
-                  port: null,
-                  label: "Build",
-                });
-                expect(options.requireIdentity).toBe(true);
-                expect(options.addedBy).toMatchObject({ kind: "agent", threadId });
-                expect(options.addedBy.client).toBeUndefined();
-                expect(options.addedBy.at).toMatch(/^\d{4}-\d{2}-\d{2}T/);
-                yield* options.beforeSave;
-                persisted = true;
-                return { created: true, node };
-              }),
-          },
-          {
-            hasHost: Effect.succeed(desktop !== "not_attached"),
             invoke: (operation, timeoutMs) => {
-              expect(persisted).toBe(true);
-              expect(timeoutMs).toBe(600_000);
               expect(operation).toMatchObject({
                 type: "add_ssh",
                 host: "build-host",
                 label: "Build",
                 addedBy: { kind: "agent", threadId },
               });
-              return desktop === "failed"
-                ? Effect.fail(new Broker.ConnectionCatalogTimeout({ timeoutMs }))
-                : Effect.succeed(
-                    desktop === "refused"
-                      ? { type: "failure", reason: "refused", message: "Locked" }
-                      : desktop === "mismatched"
-                        ? { type: "list", connections: [] }
-                        : { type: "add_ssh", created: true, connection: saved },
-                  );
+              if (operation.type === "add_ssh") {
+                expect(operation.addedBy.client).toBeUndefined();
+                expect(operation.addedBy.at).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+              }
+              expect(timeoutMs).toBe(600_000);
+              return Effect.succeed({ type: "add_ssh", created: true, connection: saved });
             },
+          },
+        ),
+      ),
+    ),
+);
+
+it.effect("without a desktop, a full-access outside caller saves to the hub alone", () =>
+  call("goat_connection_add_ssh", { host: "build-host", label: "Build" }).pipe(
+    Effect.tap((result) =>
+      Effect.sync(() =>
+        expect(result).toMatchObject({
+          outcome: "connected",
+          created: false,
+          connection: saved,
+          hub: { saved: true, node },
+          desktopCatalog: "not_attached",
+        }),
+      ),
+    ),
+    Effect.provide(
+      testLayer(undefined, {
+        add: (input, options) => {
+          expect(input).toMatchObject({ label: "Build" });
+          expect(options.addedBy.threadId).toBeUndefined();
+          return expectHubAdd(false, { client: "Test agent" })(input, options);
+        },
+      }),
+    ),
+  ),
+);
+
+it.effect("reports a hub failure after the desktop saved without failing the add", () =>
+  call("goat_connection_add_ssh", { host: "build-host" }).pipe(
+    Effect.tap((result) =>
+      Effect.sync(() =>
+        expect(result).toMatchObject({
+          outcome: "connected",
+          connection: saved,
+          hub: { saved: false, reason: "Could not reach build-host." },
+          desktopCatalog: "saved",
+        }),
+      ),
+    ),
+    Effect.provide(
+      testLayer(
+        undefined,
+        {
+          add: () =>
+            Effect.fail(
+              new HubNodesError({
+                reason: "host_unavailable",
+                detail: "Could not reach build-host.",
+              }),
+            ),
+        },
+        { invoke: () => Effect.succeed({ type: "add_ssh", created: true, connection: saved }) },
+      ),
+    ),
+  ),
+);
+
+it.effect.each([true, false])(
+  "prepares an unidentified managed host without a desktop and retries the hub (prepare ok: %s)",
+  (prepared) => {
+    let attempts = 0;
+    return call("goat_connection_add_ssh", { host: "build-host" }).pipe(
+      Effect.tap((result) =>
+        Effect.sync(() => {
+          expect(attempts).toBe(prepared ? 2 : 1);
+          expect(result).toMatchObject(
+            prepared
+              ? { outcome: "connected", hub: { saved: true, node }, desktopCatalog: "not_attached" }
+              : {
+                  kind: "error",
+                  saved: false,
+                  reason: expect.stringContaining(
+                    "GOAT has not run on build-host yet, so this hub cannot identify it.",
+                  ),
+                },
+          );
+        }),
+      ),
+      Effect.provide(
+        testLayer(
+          threadCaller,
+          {
+            add: (_input, options) =>
+              ++attempts === 1
+                ? Effect.fail(
+                    new HubNodesError({ reason: "invalid_request", detail: "GOAT has not run" }),
+                  )
+                : options.beforeSave.pipe(Effect.as({ created: true, node })),
+          },
+          {},
+          {
+            resolveDestination: (input) =>
+              Effect.succeed({ input, host: input.address, managed: true }),
+            prepare: () =>
+              Effect.succeed(
+                prepared
+                  ? {
+                      kind: "ok",
+                      status: {
+                        host: "build-host",
+                        state: "preparing",
+                        runtimeVersion: null,
+                        requestedVersion: "0.1.0",
+                      },
+                    }
+                  : { kind: "error", code: "unsupported", message: "Install failed" },
+              ),
           },
         ),
       ),
@@ -251,87 +393,36 @@ it.effect.each(["saved", "not_attached", "failed", "refused", "mismatched"] as c
   },
 );
 
-it.effect("awaits the desktop answer synchronously after the hub save", () =>
-  Effect.gen(function* () {
-    const invoked = yield* Deferred.make<void>();
-    const answer = yield* Deferred.make<void>();
-    let completed = false;
-    const fiber = yield* call("goat_connection_add_ssh", { host: "build-host" }).pipe(
-      Effect.tap(() =>
-        Effect.sync(() => {
-          completed = true;
-        }),
-      ),
-      Effect.provide(
-        testLayer(
-          undefined,
-          { add: (_input, options) => options.beforeSave.pipe(Effect.as({ created: true, node })) },
-          {
-            hasHost: Effect.succeed(true),
-            invoke: () =>
-              Deferred.succeed(invoked, undefined).pipe(
-                Effect.andThen(Deferred.await(answer)),
-                Effect.as({ type: "add_ssh", created: true, connection: saved }),
-              ),
-          },
+it.effect.each(["refused", "host_unavailable", "storage_failed"] as const)(
+  "maps hub %s on a desktop-less add",
+  (reason) =>
+    call("goat_connection_add_ssh", { host: "build-host" }).pipe(
+      Effect.tap((result) =>
+        Effect.sync(() =>
+          expect(result).toMatchObject({
+            code:
+              reason === "storage_failed"
+                ? "orchestration_error"
+                : reason === "host_unavailable"
+                  ? reason
+                  : "invalid_request",
+            message: "Hub failure",
+          }),
         ),
       ),
-      Effect.forkChild,
-    );
-    yield* Deferred.await(invoked);
-    expect(completed).toBe(false);
-    yield* Deferred.succeed(answer, undefined);
-    expect(yield* Fiber.join(fiber)).toMatchObject({ desktopCatalog: "saved" });
-    expect(completed).toBe(true);
-  }),
-);
-
-it.effect("attributes an outside client and preserves created:false", () =>
-  call("goat_connection_add_ssh", { host: "build-host" }).pipe(
-    Effect.tap((result) =>
-      Effect.sync(() =>
-        expect(result).toMatchObject({ created: false, desktopCatalog: "not_attached" }),
+      Effect.provide(
+        testLayer(undefined, {
+          add: () => Effect.fail(new HubNodesError({ reason, detail: "Hub failure" })),
+        }),
       ),
     ),
-    Effect.provide(
-      testLayer(undefined, {
-        add: (_input, options) => {
-          expect(options.addedBy).toMatchObject({ kind: "agent", client: "Test agent" });
-          expect(options.addedBy.threadId).toBeUndefined();
-          return options.beforeSave.pipe(Effect.as({ created: false, node }));
-        },
-      }),
-    ),
-  ),
 );
 
-it.effect.each(["read-only", "approval-required"] as const)(
-  "refuses writes by %s callers before hub calls",
-  (access) =>
-    Effect.gen(function* () {
-      for (const result of [
-        yield* call("goat_connection_add_ssh", { host: "build-host" }),
-        yield* call("goat_connection_remove", { environmentId }),
-      ]) {
-        expect(result).toMatchObject({ code: "capability_denied" });
-      }
-    }).pipe(Effect.provide(testLayer(outsideCaller(access)))),
-);
-
-it.effect("refuses add without orchestration capability", () =>
-  call("goat_connection_add_ssh", { host: "build-host" }).pipe(
-    Effect.tap((result) =>
-      Effect.sync(() => expect(result).toMatchObject({ code: "capability_denied" })),
-    ),
-    Effect.provide(testLayer({ ...outsideCaller("full-access"), capabilities: new Set() })),
-  ),
-);
-
-it.effect("rechecks caller authority immediately before saving", () => {
+it.effect("rechecks caller authority immediately before the hub saves", () => {
   const caller = outsideCaller("full-access");
   return call("goat_connection_add_ssh", { host: "build-host" }).pipe(
     Effect.tap((result) =>
-      Effect.sync(() => expect(result).toMatchObject({ code: "capability_denied" })),
+      Effect.sync(() => expect(result).toMatchObject({ outcome: "capability_denied" })),
     ),
     Effect.provide(
       testLayer(caller, {
@@ -345,6 +436,51 @@ it.effect("rechecks caller authority immediately before saving", () => {
     ),
   );
 });
+
+it.effect("refuses read-only and approval-required clients on remove, and read-only on add", () =>
+  Effect.forEach(["read-only", "approval-required"] as const, (access) =>
+    Effect.gen(function* () {
+      expect(yield* call("goat_connection_add_ssh", { host: "build-host" })).toMatchObject(
+        access === "read-only"
+          ? { code: "capability_denied" }
+          : {
+              outcome: "capability_denied",
+              saved: false,
+              reason: expect.stringContaining("settings:write"),
+            },
+      );
+      expect(yield* call("goat_connection_remove", { environmentId })).toMatchObject({
+        code: "capability_denied",
+      });
+    }).pipe(
+      Effect.provide(
+        testLayer(
+          outsideCaller(access),
+          {
+            add: () => Effect.die("Denied caller reached the hub"),
+            remove: () => Effect.die("Denied caller reached the hub"),
+          },
+          { invoke: () => Effect.die("Denied caller reached broker") },
+        ),
+      ),
+    ),
+  ),
+);
+
+it.effect("refuses an add without the orchestration capability", () =>
+  call("goat_connection_add_ssh", { host: "build-host" }).pipe(
+    Effect.tap((result) =>
+      Effect.sync(() => expect(result).toMatchObject({ code: "capability_denied" })),
+    ),
+    Effect.provide(
+      testLayer(
+        { ...outsideCaller("full-access"), capabilities: new Set() },
+        { add: () => Effect.die("Missing capability reached the hub") },
+        { invoke: () => Effect.die("Missing capability reached broker") },
+      ),
+    ),
+  ),
+);
 
 it.effect.each(["environmentId", "nodeId"] as const)(
   "removes using %s and forwards the identified environment",
@@ -421,13 +557,12 @@ it.effect.each([
   "refused",
   "host_unavailable",
   "storage_failed",
-] as const)("maps hub %s failures on all operations", (reason) =>
+] as const)("maps hub %s failures on list and remove", (reason) =>
   Effect.gen(function* () {
     const failure = Effect.fail(new HubNodesError({ reason, detail: "Hub failure" }));
     yield* Effect.gen(function* () {
       for (const result of [
         yield* call("goat_connection_list", {}),
-        yield* call("goat_connection_add_ssh", { host: "build-host" }),
         yield* call("goat_connection_remove", { nodeId: environmentId }),
       ]) {
         expect(result).toMatchObject({
@@ -440,11 +575,7 @@ it.effect.each([
           message: "Hub failure",
         });
       }
-    }).pipe(
-      Effect.provide(
-        testLayer(undefined, { snapshot: failure, add: () => failure, remove: () => failure }),
-      ),
-    );
+    }).pipe(Effect.provide(testLayer(undefined, { snapshot: failure, remove: () => failure })));
   }),
 );
 
@@ -456,6 +587,17 @@ it("requires exactly one remove identifier", () => {
   expect(() => decode({ nodeId: "node", environmentId })).toThrow();
   expect(decode({ nodeId: "node" })).toEqual({ nodeId: "node" });
   expect(decode({ environmentId })).toEqual({ environmentId });
+});
+
+it("rejects labels beyond the hub contract before saving", () => {
+  const decodeAdd = Schema.decodeUnknownSync(
+    ConnectionToolkit.tools.goat_connection_add_ssh.parametersSchema,
+  );
+  expect(() => decodeAdd({ host: "build-host", label: "x".repeat(121) })).toThrow();
+  expect(decodeAdd({ host: "build-host", label: "x".repeat(120) })).toHaveProperty(
+    "host",
+    "build-host",
+  );
 });
 
 it.effect("production registration refuses undeclared arguments before invoking the broker", () =>
@@ -494,6 +636,7 @@ it.effect("production registration refuses undeclared arguments before invoking 
         Layer.provideMerge(McpServer.McpServer.layer),
         Layer.provideMerge(liveThreadsLayer),
         Layer.provide(Layer.mock(HubNodes.HubNodes)({})),
+        Layer.provide(Layer.mock(SshDeviceAdd.SshDeviceAdd)({})),
         Layer.provide(
           Layer.mock(Broker.ConnectionCatalogBroker)({
             invoke: () => Effect.die("Unknown arguments reached broker"),
@@ -503,15 +646,3 @@ it.effect("production registration refuses undeclared arguments before invoking 
     ),
   ),
 );
-
-const decodeAdd = Schema.decodeUnknownSync(
-  ConnectionToolkit.tools.goat_connection_add_ssh.parametersSchema,
-);
-it("rejects SSH aliases and labels beyond the hub contract before saving", () => {
-  expect(() => decodeAdd({ host: "x".repeat(256) })).toThrow();
-  expect(() => decodeAdd({ host: "build-host", label: "x".repeat(121) })).toThrow();
-  expect(decodeAdd({ host: "build-host", label: "x".repeat(120) })).toHaveProperty(
-    "host",
-    "build-host",
-  );
-});

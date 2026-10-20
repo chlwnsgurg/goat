@@ -293,6 +293,22 @@ client-owned: local native-primary setup reviews trust through the server but
 installs through the desktop manager. Remote or WSL clients cannot use that local
 ownership path.
 
+Adding a host starts with one read-only preflight shared by Settings and agents:
+`packages/ssh/src/preflight.ts` runs reachability, host key, key sign-in, platform,
+runtime and disk checks with fresh SSH processes (no shared master, strict host keys,
+no host-key updates), and `packages/ssh/src/runtimeAvailability.ts` checks the
+runner's archive sources without downloading archives. The runtime check follows the same
+published-fallback rule as provisioning: an opted-in runner with no mirror may use the newest
+compatible published release only when the host has no installed runtime or GOAT data.
+`SshHostSetup.preflight` serves it as `sshHost.preflight` with the server's own runner. `apps/server/src/sshRemote/SshDeviceAdd.ts`
+is the one agent path behind `goat_ssh_host_add` and its alias `goat_connection_add_ssh`:
+a failed check stops before any side effect, a new host key becomes a pin-only
+approval, and a passing host is saved through the desktop catalog when one is attached
+and registered in this server's [hub node list](#hub-nodes). Without a desktop the hub
+list alone saves it; a host GOAT has not run on is first prepared on a managed alias.
+`packages/shared/src/sshDestination.ts` parses typed
+destinations for both.
+
 SSH setup and immediate-update approvals resume through SshHostSetup's shared
 continuation worker. `apps/server/src/handoffs/Handoffs.ts` retains the private
 approved session and execution payload until the result is published and acknowledged;
@@ -439,6 +455,7 @@ backlog, and a failed read waits for the next change instead of ending the strea
 Removing a node deletes registrations and unlinks links. Cloud routes are refused, and a node
 with one is not partly removed. The desktop renderer imports its saved SSH connections once per
 hub (`hub_node_imports`); a catalog that cannot be unlocked records a notice that clients show
-until the user dismisses it or a later import succeeds. When an agent adds or removes an SSH node
-and a desktop catalog host is attached to `ConnectionCatalogBroker`, the MCP handler forwards
-the same change to it and reports `desktopCatalog` as `saved`, `not_attached` or `failed`.
+until the user dismisses it or a later import succeeds. An agent's SSH add goes through
+`SshDeviceAdd`, which reports the hub registration separately from `desktopCatalog`, so a
+desktop save never hides a hub failure. An agent removal deletes the hub node and forwards it
+to an attached desktop catalog, reporting `desktopCatalog` as `saved`, `not_attached` or `failed`.

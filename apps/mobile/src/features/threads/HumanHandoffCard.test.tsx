@@ -545,3 +545,38 @@ describe("OpenCodex Home approval", () => {
     },
   );
 });
+
+it("shows successful pin-only approval as the agent's next step", async () => {
+  const trust = { ...handoff, target: { ...handoff.target, path: "ssh.host_add" } };
+  await render({ ...trust, state: "pending" });
+  await click("Review request");
+  await click("Approve");
+  expect(harness.respond.mock.lastCall?.[0].input.action).toBe("completed");
+  await render({ ...trust, resolvedAt: DateTime.makeUnsafe(0) });
+  await publish({ ...diagnosis, result: { kind: "ok", status: { ...runtime, state: "stopped" } } });
+  expect(container.textContent).toContain("Host key pinned. The agent can continue.");
+  expect(container.textContent).not.toContain("expired or was replaced");
+  expect(container.textContent).not.toContain("GOAT is setting up");
+  expect(container.textContent).not.toContain("ready for agents");
+});
+it.each(["expired", "superseded"] as const)("preserves real %s trust requests", async (reason) => {
+  await render({ ...handoff, target: { ...handoff.target, path: "ssh.host_add" } });
+  await publish({ kind: "unavailable", reason });
+  expect(container.textContent).toContain(
+    "This request expired or was replaced. Ask the agent again.",
+  );
+  expect(container.textContent).not.toContain("Host key pinned");
+});
+it("preserves a failed pin after approval", async () => {
+  await render({ ...handoff, target: { ...handoff.target, path: "ssh.host_add" } });
+  await publish({
+    ...diagnosis,
+    result: {
+      kind: "error",
+      code: "operation_failed",
+      message: "The SSH host key or destination changed. Add this host again to review it.",
+    },
+  });
+  expect(container.textContent).toContain("The SSH host key or destination changed.");
+  expect(container.textContent).not.toContain("Host key pinned");
+});
