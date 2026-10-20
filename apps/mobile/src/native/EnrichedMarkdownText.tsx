@@ -145,8 +145,11 @@ function enrichedStyle(
 export function MobileEnrichedMarkdownText(props: SelectableMarkdownTextProps) {
   const { renderImage, resolveImageSource } = props;
   const markdown = useMemo(
-    () => markdownWithTableBreaks(markdownWithHtml(props.markdown)),
-    [props.markdown],
+    () =>
+      props.preserveMarkdownSource
+        ? props.markdown
+        : markdownWithTableBreaks(markdownWithHtml(props.markdown)),
+    [props.markdown, props.preserveMarkdownSource],
   );
   const { themeAppearance } = useAppearancePreferences();
   const [documentAssets, setDocumentAssets] = useState<DocumentAssetsEvent["assets"]>([]);
@@ -316,7 +319,8 @@ export function MobileEnrichedMarkdownText(props: SelectableMarkdownTextProps) {
             hardSoftBreaks: props.preserveSoftBreaks ?? false,
             admonitions: true,
           }}
-          enableTaskListItemToggle={false}
+          enableTaskListItemToggle={props.onTaskListItemPress !== undefined}
+          onTaskListItemPress={props.onTaskListItemPress}
           enableCodeBlockWrapToggle
           spoilerOverlay="solid"
           onLinkPress={props.onLinkPress ? ({ url }) => props.onLinkPress?.(url) : undefined}

@@ -155,3 +155,84 @@ describe("offline pull request cache", () => {
       ),
   );
 });
+
+describe("durable notes outbox migration", () => {
+  const environmentId = "notes-hub" as import("@goat/contracts").EnvironmentId;
+  async function versionOneDatabase() {
+    const { DatabaseSync } = await import("node:sqlite");
+    const sqlite = new DatabaseSync(":memory:");
+    sqlite.exec(`PRAGMA user_version = 1;
+      CREATE TABLE client_preferences (singleton INTEGER PRIMARY KEY, payload TEXT NOT NULL, updated_at INTEGER NOT NULL);
+      INSERT INTO client_preferences VALUES (1, '{"theme":"dark"}', 123);`);
+    const database = {
+      execAsync: async (sql: string) => {
+        sqlite.exec(sql);
+      },
+      runAsync: async (sql: string, ...args: Array<string | number>) =>
+        sqlite.prepare(sql).run(...args),
+      getFirstAsync: async (sql: string, ...args: Array<string | number>) =>
+        sqlite.prepare(sql).get(...args),
+      getAllAsync: async (sql: string, ...args: Array<string | number>) =>
+        sqlite.prepare(sql).all(...args),
+      withExclusiveTransactionAsync: async (run: (transaction: unknown) => Promise<void>) => {
+        await run(database);
+      },
+      closeAsync: async () => {
+        sqlite.close();
+      },
+    };
+    openDatabaseAsync.mockResolvedValueOnce(database);
+    return sqlite;
+  }
+  it.effect(
+    "upgrades v1 without losing preferences and preserves drafts through every cache clear",
+    () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const sqlite = yield* Effect.promise(versionOneDatabase);
+          const database = yield* MobileDatabase.make;
+          expect(sqlite.prepare("PRAGMA user_version").get()).toMatchObject({ user_version: 2 });
+          expect(yield* database.loadPreferencesJson).toEqual(
+            Option.some({ payload: '{"theme":"dark"}', updatedAt: 123 }),
+          );
+          const pending = JSON.stringify({
+            body: "pending",
+            baseRevision: null,
+            localUpdatedAt: 100,
+            state: "pending",
+          });
+          const conflict = JSON.stringify({
+            body: "conflicted",
+            baseRevision: "original",
+            current: { body: "theirs" },
+            localUpdatedAt: 101,
+            state: "conflict",
+          });
+          yield* database.saveNoteOutbox(environmentId, "note.md", pending, 100);
+          yield* database.saveNoteOutbox(environmentId, "project/note.md", conflict, 101);
+          yield* database.saveCache(environmentId, "thread", "cached-thread", 1, "cached");
+          yield* database.clearCacheKind(environmentId, "thread");
+          yield* database.clearEnvironmentCache(environmentId);
+          yield* database.clearAllCaches;
+          expect(yield* database.loadNoteOutbox).toEqual([pending, conflict]);
+          expect(yield* database.inspectCaches).toEqual([]);
+        }),
+      ),
+  );
+  it.effect(
+    "coalesces only matching environment/path rows and removes only the acknowledged note",
+    () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          yield* Effect.promise(versionOneDatabase);
+          const database = yield* MobileDatabase.make;
+          yield* database.saveNoteOutbox(environmentId, "note.md", "first", 1);
+          yield* database.saveNoteOutbox("another-hub", "note.md", "other", 2);
+          yield* database.saveNoteOutbox(environmentId, "note.md", "newer", 3);
+          expect(yield* database.loadNoteOutbox).toEqual(["other", "newer"]);
+          yield* database.removeNoteOutbox(environmentId, "note.md");
+          expect(yield* database.loadNoteOutbox).toEqual(["other"]);
+        }),
+      ),
+  );
+});

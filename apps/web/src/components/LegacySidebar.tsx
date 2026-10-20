@@ -244,6 +244,7 @@ import {
 } from "../sidebarProjectGrouping";
 import { PullRequestGlyph } from "~/components/pullRequest/pullRequestIcons";
 import { GoatBotSidebarRow } from "./goatBot/GoatBotSidebarRow";
+import { NotesSidebarRow } from "../notes/NotesSidebarRow";
 import { DecisionInboxSidebarRow } from "./decisions/DecisionInboxSidebarRow";
 import { useGoatBotPreferred } from "./goatBot/GoatBotModeButton";
 const projectsViewEnvironments = createProjectsViewEnvironmentAtoms({
@@ -3073,6 +3074,7 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
       ) : null}
       <LocalSecondaryStatus />
       <ul role="presentation">
+        <NotesSidebarRow />
         <DecisionInboxSidebarRow />
       </ul>
       {pinnedProject && pinnedThreads.length > 0 ? (
