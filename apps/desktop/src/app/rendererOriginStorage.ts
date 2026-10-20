@@ -177,8 +177,9 @@ function openVersion(name, version, upgrade) {
 /**
  * Installs `globalThis.__goatOriginExport` and resolves to the size of this origin's storage.
  * Each call of the installed function resolves to the next chunk, `{ done: false, database,
- * store, records, bytes, chunk }` with `chunk` a JSON string, and finally to `{ done: true,
- * skipped, oversized }`.
+ * store, records, bytes, chunk }`, and finally to `{ done: true, skipped, oversized }`. `chunk` is
+ * the chunk's JSON already quoted as a JS string literal, so main can splice it into the import
+ * script without making another copy of its own.
  */
 export function originStorageExporterScript(limits: OriginChunkLimits = ORIGIN_CHUNK_LIMITS) {
   return `(async (limits) => {
@@ -242,6 +243,7 @@ function readPage(database, storeName, after) {
     transaction.onabort = () => reject(transaction.error || new Error("Transaction aborted."));
   });
 }
+const quote = (data) => JSON.stringify(JSON.stringify(data));
 async function* chunks() {
   const items = {};
   let bytes = 0;
@@ -251,7 +253,7 @@ async function* chunks() {
     items[key] = localStorage.getItem(key);
     bytes += (key.length + items[key].length) * 2;
   }
-  yield { database: null, store: null, records: Object.keys(items).length, bytes, chunk: JSON.stringify({ localStorage: items }) };
+  yield { database: null, store: null, records: Object.keys(items).length, bytes, chunk: quote({ localStorage: items }) };
   for (const info of await indexedDB.databases()) {
     if (!info.name) continue;
     const database = await openExisting(info.name);
@@ -259,7 +261,7 @@ async function* chunks() {
     try {
       const schema = { name: info.name, version: database.version, stores: describeStores(database) };
       if (schema.stores.length === 0) {
-        yield { database: info.name, store: null, records: 0, bytes: 0, chunk: JSON.stringify({ database: schema, store: null, records: [] }) };
+        yield { database: info.name, store: null, records: 0, bytes: 0, chunk: quote({ database: schema, store: null, records: [] }) };
         continue;
       }
       for (const store of schema.stores) {
@@ -277,7 +279,7 @@ async function* chunks() {
           }
           page.records.length = 0;
           if (first || records.length > 0) {
-            const chunk = JSON.stringify({ database: schema, store: store.name, records });
+            const chunk = quote({ database: schema, store: store.name, records });
             yield { database: info.name, store: store.name, records: records.length, bytes: page.bytes, chunk };
           }
           first = false;
@@ -400,8 +402,8 @@ globalThis.__goatOriginImport = async (data) => {
 return true;
 })()`;
 
-/** Imports one chunk on a page where `ORIGIN_STORAGE_IMPORTER_SCRIPT` ran. */
+/** Imports one quoted exporter chunk on a page where `ORIGIN_STORAGE_IMPORTER_SCRIPT` ran. */
 export function originStorageImportChunkScript(chunk: string): string {
-  // Parsed rather than inlined as a literal: in a literal a "__proto__" key sets the prototype.
-  return `globalThis.__goatOriginImport(JSON.parse(${JSON.stringify(chunk)}))`;
+  // Parsed rather than inlined as an object literal: there a "__proto__" key sets the prototype.
+  return `globalThis.__goatOriginImport(JSON.parse(${chunk}))`;
 }
