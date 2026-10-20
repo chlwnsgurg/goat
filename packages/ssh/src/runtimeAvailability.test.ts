@@ -22,6 +22,7 @@ const fixture = (
     head?: "present" | "absent" | "unknown";
     gh?: "both" | "archive" | "absent" | "unknown";
     installed?: string[];
+    held?: Readonly<Record<string, "pending" | "rejected">>;
     source?: boolean;
     checksum?: "absent" | "unknown";
     publishedFallback?: boolean;
@@ -45,7 +46,11 @@ const fixture = (
     if (options.local === "both")
       yield* fs.writeFileString(`${directory}/${fileName}.sha256`, "not read or hashed");
     let requests = 0;
-    const searches: Array<{ platformKey: string; requestedVersion: string }> = [];
+    const searches: Array<{
+      platformKey: string;
+      requestedVersion: string;
+      exclude: ReadonlySet<string>;
+    }> = [];
     const process = ChildProcessSpawner.make(() =>
       Effect.succeed({
         ...makeSuccessfulProcess(
@@ -71,7 +76,10 @@ const fixture = (
     const result = yield* checkRuntimeAvailability({
       ownerLabel: "Origin",
       platformKey: "linux-arm64",
-      installedVersions: options.installed ?? [],
+      installedCandidates: (options.installed ?? []).map((version) => {
+        const held = options.held?.[version];
+        return { version, ...(held ? { held } : {}) };
+      }),
       hostHasData: options.hostHasData ?? false,
       ...(options.host === undefined ? {} : { host: options.host }),
       runner: {
@@ -244,7 +252,9 @@ it.effect.each(["nightly", "stable"] as const)(
         summary: `GOAT 0.1.0 isn't published for linux-arm64; GOAT installs ${version}, the newest compatible ${channel} release.`,
       });
       expect(result.needsTransfer).toBe(true);
-      expect(result.searches).toEqual([{ platformKey: "linux-arm64", requestedVersion: "0.1.0" }]);
+      expect(result.searches).toEqual([
+        { platformKey: "linux-arm64", requestedVersion: "0.1.0", exclude: new Set() },
+      ]);
     }).pipe(Effect.provide(NodeServices.layer)),
 );
 it.effect.each(["unreachable", "client-too-old", "none"] as const)(
@@ -358,5 +368,40 @@ it.effect("keeps exact-source uncertainty on a host with existing data", () =>
     expect(result.step.state).toBe("warning");
     expect(result.step.summary).toContain("Could not confirm");
     expect(result.searches).toEqual([]);
+  }).pipe(Effect.provide(NodeServices.layer)),
+);
+
+it.effect.each(["pending", "rejected"] as const)(
+  "a held %s requested runtime still requires an exact-source transfer",
+  (held) =>
+    Effect.gen(function* () {
+      const result = yield* fixture({
+        installed: ["0.1.0"],
+        held: { "0.1.0": held },
+        head: "present",
+      });
+      expect(result.step.state).toBe("passed");
+      expect(result.step.summary).toContain("Downloads the published GOAT 0.1.0");
+      expect(result.needsTransfer).toBe(true);
+    }).pipe(Effect.provide(NodeServices.layer)),
+);
+
+it.effect("only rejected held runtimes are excluded from the published search", () =>
+  Effect.gen(function* () {
+    const result = yield* fixture({
+      installed: ["0.2.0-nightly.1", "0.2.0"],
+      held: { "0.2.0-nightly.1": "rejected", "0.2.0": "pending" },
+      publishedFallback: true,
+      published: { found: { version: "0.2.0", channel: "stable" }, rejected: [] },
+    });
+    expect(result.step.state).toBe("passed");
+    expect(result.needsTransfer).toBe(true);
+    expect(result.searches).toEqual([
+      {
+        platformKey: "linux-arm64",
+        requestedVersion: "0.1.0",
+        exclude: new Set(["0.2.0-nightly.1"]),
+      },
+    ]);
   }).pipe(Effect.provide(NodeServices.layer)),
 );

@@ -41,6 +41,7 @@ export const RuntimePublishedSearch = Context.Reference<
   (input: {
     readonly platformKey: CliArchivePlatformKey;
     readonly requestedVersion: string;
+    readonly exclude: ReadonlySet<string>;
   }) => Effect.Effect<PublishedRuntimeSearch, never, Crypto.Crypto>
 >("ssh/preflight/RuntimePublishedSearch", {
   defaultValue: () => (input) =>
@@ -53,13 +54,20 @@ const decodeAssets = Schema.decodeUnknownEffect(Schema.fromJsonString(Assets));
 export const checkRuntimeAvailability = Effect.fn("ssh/preflight.runtime")(function* (input: {
   readonly runner: RemoteGoatRunnerOptions;
   readonly platformKey: CliArchivePlatformKey;
-  readonly installedVersions: ReadonlyArray<string>;
+  readonly installedCandidates: ReadonlyArray<{
+    readonly version: string;
+    readonly held?: "pending" | "rejected";
+  }>;
   readonly ownerLabel: string;
   readonly hostHasData: boolean;
   readonly host?: string;
 }) {
-  const { runner, ownerLabel, platformKey, installedVersions } = input;
-  // Installed candidates may be reused by provisioning, even when the requested archive exists.
+  const { runner, ownerLabel, platformKey, installedCandidates } = input;
+  // Held fallbacks can run only through provisioning's published path and fresh-data gate.
+  const installedVersions = installedCandidates
+    .filter((candidate) => candidate.held === undefined)
+    .map((candidate) => candidate.version);
+  // Reusable candidates may avoid a transfer even when the requested archive exists.
   const result = (step: Omit<SshPreflightStep, "id">, needsTransfer = false) => ({
     step: { id: "runtime" as const, ...step },
     needsTransfer: needsTransfer && installedVersions.length === 0,
@@ -150,7 +158,15 @@ export const checkRuntimeAvailability = Effect.fn("ssh/preflight.runtime")(funct
     });
   if (runner.publishedFallback === true && !runner.releaseBaseUrl?.trim() && !input.hostHasData) {
     const search = yield* RuntimePublishedSearch;
-    const published = yield* search({ platformKey, requestedVersion: version });
+    const published = yield* search({
+      platformKey,
+      requestedVersion: version,
+      exclude: new Set(
+        installedCandidates.flatMap((candidate) =>
+          candidate.held === "rejected" ? [candidate.version] : [],
+        ),
+      ),
+    });
     if ("found" in published)
       return result(
         {

@@ -23,7 +23,15 @@ const FACTS = String.raw`printf 'GOAT_OS=%s\n' "$(uname -s)"
 printf 'GOAT_ARCH=%s\n' "$(uname -m)"
 df -Pk "$HOME" | awk 'END { print "GOAT_FREE_KIB=" $4 }'
 for dir in "$HOME"/.goat/runtime/goat/versions/*; do
-  [ -d "$dir" ] && [ -x "$dir/goat" ] && [ "$(cat "$dir/.install-complete" 2>/dev/null)" = "$(basename "$dir")" ] && printf 'GOAT_INSTALLED=%s\n' "$(basename "$dir")"
+  version="$(basename "$dir")"
+  if [ -d "$dir" ] && [ -x "$dir/goat" ] && [ "$(cat "$dir/.install-complete" 2>/dev/null)" = "$version" ]; then
+    printf 'GOAT_INSTALLED=%s\n' "$version"
+    held_file="$HOME/.goat/runtime/goat/held/$version"
+    if [ -e "$held_file" ] || [ -L "$held_file" ]; then
+      case "$(cat "$held_file" 2>/dev/null || true)" in rejected) held=rejected ;; *) held=pending ;; esac
+      printf 'GOAT_HELD=%s:%s\n' "$version" "$held"
+    fi
+  fi
 done
 for db in "$HOME/.goat/userdata/statev2.sqlite" "$HOME/.goat/userdata/state.sqlite"; do
   if [ -e "$db" ] || [ -L "$db" ]; then printf 'GOAT_HAS_DATA=1\n'; break; fi
@@ -420,15 +428,31 @@ export const runSshPreflight = Effect.fn("ssh/preflight.run")(function* (
   }
   platformKey = key;
   steps.push({ id: "platform", state: "passed", summary: `Supports ${key}.` });
-  const installedVersions = facts.stdout
+  const heldVersions = new Map(
+    facts.stdout
+      .split(/\r?\n/u)
+      .filter((line) => line.startsWith("GOAT_HELD="))
+      .map((line) => {
+        const at = line.lastIndexOf(":");
+        return [line.slice(10, at), line.slice(at + 1)] as const;
+      }),
+  );
+  const installedCandidates = facts.stdout
     .split(/\r?\n/u)
     .filter((line) => line.startsWith("GOAT_INSTALLED="))
-    .map((line) => line.slice(15));
+    .map((line) => {
+      const version = line.slice(15);
+      const held = heldVersions.get(version);
+      return { version, ...(held === "pending" || held === "rejected" ? { held } : {}) };
+    });
+  const installedVersions = installedCandidates
+    .filter((candidate) => candidate.held === undefined)
+    .map((candidate) => candidate.version);
   const runtime = yield* checkRuntimeAvailability({
     runner: options.runner,
     ownerLabel: options.ownerLabel,
     platformKey: key,
-    installedVersions,
+    installedCandidates,
     hostHasData: values.get("GOAT_HAS_DATA") === "1",
     host: input.host,
   });

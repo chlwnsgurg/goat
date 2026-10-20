@@ -46,6 +46,7 @@ const fixture = (
     const calls: ReadonlyArray<string>[] = [];
     const nativeSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
     let publishedSearches = 0;
+    const publishedExcludes: Array<ReadonlySet<string> | undefined> = [];
     const spawner = ChildProcessSpawner.make((command) =>
       Effect.gen(function* () {
         if (command._tag !== "StandardCommand") return yield* Effect.die("Unexpected pipeline");
@@ -118,14 +119,15 @@ const fixture = (
       Effect.provideService(RuntimeReleaseHead, () =>
         Effect.succeed(input.exactReleaseAbsent ? "absent" : "present"),
       ),
-      Effect.provideService(RuntimePublishedSearch, () => {
+      Effect.provideService(RuntimePublishedSearch, (input) => {
         publishedSearches++;
+        publishedExcludes.push(input.exclude);
         return Effect.succeed({ found: { version: "0.2.0", channel: "stable" }, rejected: [] });
       }),
     );
     expect(isReport(report)).toBe(true);
     expect(report.steps.map((step) => step.id)).toEqual(SSH_PREFLIGHT_STEP_ORDER);
-    return { report, calls, publishedSearches };
+    return { report, calls, publishedSearches, publishedExcludes };
   });
 it.effect(
   "resolves destination and jump once, disables sharing, uses key-only authentication and reads installed facts",
@@ -617,6 +619,58 @@ it.effect("a published fallback still requires space to install", () =>
     });
     expect(publishedSearches).toBe(1);
     expect(report.steps.find((step) => step.id === "runtime")?.state).toBe("passed");
+    expect(report.steps.find((step) => step.id === "disk")?.state).toBe("failed");
+    expect(report.ready).toBe(false);
+  }).pipe(Effect.provide(NodeServices.layer)),
+);
+
+it.effect.each(["pending", "rejected"] as const)(
+  "refuses a held-only %s fallback when the host has GOAT data",
+  (held) =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const home = yield* fs.makeTempDirectoryScoped({ prefix: "goat-preflight-held-" });
+      const runtime = `${home}/.goat/runtime/goat`;
+      yield* fs.makeDirectory(`${runtime}/versions/0.2.0`, { recursive: true });
+      yield* fs.writeFileString(`${runtime}/versions/0.2.0/goat`, "");
+      yield* fs.chmod(`${runtime}/versions/0.2.0/goat`, 0o755);
+      yield* fs.writeFileString(`${runtime}/versions/0.2.0/.install-complete`, "0.2.0");
+      yield* fs.makeDirectory(`${runtime}/held`);
+      yield* fs.writeFileString(`${runtime}/held/0.2.0`, held);
+      yield* fs.makeDirectory(`${home}/.goat/userdata`);
+      yield* fs.writeFileString(`${home}/.goat/userdata/statev2.sqlite`, "");
+      const { report, publishedSearches } = yield* fixture({
+        factsHome: home,
+        exactReleaseAbsent: true,
+        runner: { archiveVersion: "0.1.0", publishedFallback: true },
+      });
+      expect(report.steps.find((step) => step.id === "runtime")?.state).toBe("failed");
+      expect(report.steps.find((step) => step.id === "runtime")?.summary).toContain(
+        "build has GOAT data but no runtime",
+      );
+      expect(publishedSearches).toBe(0);
+      expect(report.ready).toBe(false);
+    }).pipe(Effect.provide(NodeServices.layer)),
+);
+
+it.effect("a rejected nightly does not bypass stable fallback lookup or disk enforcement", () =>
+  Effect.gen(function* () {
+    const nightly = "0.2.0-nightly.1";
+    const { report, publishedSearches, publishedExcludes } = yield* fixture({
+      facts: facts
+        .replace("1048576", "1024")
+        .replace(
+          "GOAT_INSTALLED=0.1.0",
+          `GOAT_INSTALLED=${nightly}\nGOAT_HELD=${nightly}:rejected`,
+        ),
+      exactReleaseAbsent: true,
+      runner: { archiveVersion: "0.1.0", publishedFallback: true },
+    });
+    const runtime = report.steps.find((step) => step.id === "runtime");
+    expect(runtime?.state).toBe("passed");
+    expect(runtime?.summary).toContain("GOAT installs 0.2.0");
+    expect(publishedSearches).toBe(1);
+    expect(publishedExcludes).toEqual([new Set([nightly])]);
     expect(report.steps.find((step) => step.id === "disk")?.state).toBe("failed");
     expect(report.ready).toBe(false);
   }).pipe(Effect.provide(NodeServices.layer)),
