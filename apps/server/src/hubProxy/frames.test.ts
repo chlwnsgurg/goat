@@ -169,6 +169,21 @@ it("4b: an operate client may send a follow-up and stop a run through the hub", 
   ).toBeUndefined();
 });
 
+it("4b: after Stop holds the queue, Resume goes through the hub too", () => {
+  // The client's stop sends holdQueue: true; without queue.resume the queue stays held.
+  const stop = {
+    type: "run.interrupt",
+    commandId: "c-stop",
+    threadId: "t1",
+    runId: "r1",
+    holdQueue: true,
+  };
+  const resume = { type: "queue.resume", commandId: "c-resume", threadId: "t1" };
+  expect(operate(stop)).toBeUndefined();
+  expect(operate(resume)).toBeUndefined();
+  expect(admit(write, resume)).toMatchObject({ requiredScope: "orchestration:operate" });
+});
+
 it("4b: other commands stay on the node's own clients", () => {
   for (const command of [
     { type: "thread.delete", commandId: "c3", threadId: "t1" },

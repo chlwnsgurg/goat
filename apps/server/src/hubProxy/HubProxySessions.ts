@@ -85,7 +85,8 @@ interface NodeState {
   routeKey: string | undefined;
   revoked: Deferred.Deferred<void>;
   readonly sessions: Map<string, CachedSession & HubProxyUpstream>;
-  linkedSession: (CachedSession & HubProxyUpstream) | undefined;
+  /** By granted scope set, so a read-only refresh never evicts the session uploads rely on. */
+  readonly linkedSessions: Map<string, CachedSession & HubProxyUpstream>;
   enrollmentRejected: boolean;
   readonly lock: Semaphore.Semaphore;
   readonly uploads: Semaphore.Semaphore;
@@ -217,7 +218,7 @@ export const make = Effect.gen(function* () {
       routeKey: undefined,
       revoked: yield* Deferred.make<void>(),
       sessions: new Map(),
-      linkedSession: undefined,
+      linkedSessions: new Map(),
       enrollmentRejected: false,
       lock: yield* Semaphore.make(1),
       uploads: yield* Semaphore.make(UPLOADS_PER_NODE),
@@ -234,7 +235,7 @@ export const make = Effect.gen(function* () {
     state.generation += 1;
     state.revoked = yield* Deferred.make<void>();
     state.sessions.clear();
-    state.linkedSession = undefined;
+    state.linkedSessions.clear();
     state.snapshot = undefined;
     yield* Deferred.succeed(previous, undefined);
   });
@@ -401,10 +402,10 @@ export const make = Effect.gen(function* () {
       token: enrollment.value.token,
       scopes: granted,
     } satisfies HubProxyUpstream;
-    state.linkedSession = {
+    state.linkedSessions.set(scopeKey(granted), {
       ...upstream,
       expiresAtMs: expiresAt === null ? Number.POSITIVE_INFINITY : Date.parse(expiresAt),
-    };
+    });
     return upstream;
   });
 
@@ -455,7 +456,10 @@ export const make = Effect.gen(function* () {
     Effect.gen(function* () {
       const state = states.get(nodeId);
       if (state === undefined) return;
-      if (unauthorized && state.linkedSession?.token === token) {
+      if (
+        unauthorized &&
+        [...state.linkedSessions.values()].some((session) => session.token === token)
+      ) {
         state.enrollmentRejected = true;
         yield* revoke(state);
       }
@@ -474,10 +478,7 @@ export const make = Effect.gen(function* () {
       const state = states.get(nodeId);
       if (state === undefined || route === undefined || state.routeKey !== routeKey(route))
         return Option.none();
-      for (const session of [
-        ...state.sessions.values(),
-        ...(state.linkedSession ? [state.linkedSession] : []),
-      ]) {
+      for (const session of [...state.sessions.values(), ...state.linkedSessions.values()]) {
         if (
           session.generation === state.generation &&
           session.expiresAtMs > now &&
