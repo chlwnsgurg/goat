@@ -1,6 +1,8 @@
 import { useMemo, useState } from "react";
 import { Pressable, View } from "react-native";
+import { useAtomValue } from "@effect/atom-react";
 import { useNavigation } from "@react-navigation/native";
+import { Atom } from "effect/reactivity";
 import type { FileDiffMetadata } from "@pierre/diffs";
 import { parsePatchFiles } from "@pierre/diffs/utils/parsePatchFiles";
 import {
@@ -8,16 +10,17 @@ import {
   fileChangeTargetPaths,
   findPatchFile,
   INLINE_DIFF_MAX_LINES,
+  inlineDiffLineCount,
   resolveFileDiffPath,
 } from "@goat/client-runtime/work-log/file-change-diff";
-import { deriveThreadCheckpointSummaries } from "@goat/client-runtime/state/thread-checkpoints";
+import type { ThreadCheckpointSummary } from "@goat/client-runtime/state/thread-checkpoints";
 import type { EnvironmentId, OrchestrationV2ProjectedTurnItem } from "@goat/contracts";
 import { workspaceRelativeFilePath } from "@goat/shared/path";
 
 import { AppText as Text } from "../../components/ui/AppText";
 import { SymbolView } from "../../components/ui/AppSymbol";
 import { useCheckpointDiff, useTurnItemDetail } from "../../state/queries";
-import { useThreadProjection } from "../../state/use-thread-detail";
+import { environmentThreadDetails } from "../../state/threads";
 import { useSelectedThreadWorktree } from "../../state/use-selected-thread-worktree";
 import { resolveNativeReviewDiffView } from "../diffs/nativeReviewDiffSurface";
 import { buildNativeReviewDiffData } from "../review/nativeReviewDiffAdapter";
@@ -30,6 +33,9 @@ import { CopyTextButton } from "./CopyTextButton";
 
 const EMPTY_IDS: readonly string[] = [];
 const MAX_CARD_HEIGHT = 288;
+const EMPTY_CHECKPOINT_SUMMARIES_ATOM = Atom.make<ReadonlyArray<ThreadCheckpointSummary>>(
+  Object.freeze([]),
+).pipe(Atom.withLabel("mobile-inline-diff-checkpoints:empty"));
 
 function InlineDiffNote(props: { readonly children: string }) {
   return <Text className="ml-7 py-1 text-xs text-foreground-muted">{props.children}</Text>;
@@ -60,16 +66,16 @@ export function FileChangeInlineDiff(props: {
   const awaitingOwnPatch = hasOwnPatch && detail.isPending && !detail.error;
   const usesCheckpoint = ownPatch === undefined && !awaitingOwnPatch;
 
-  const thread = useThreadProjection({ environmentId, threadId: row.sourceThreadId });
-  const summary = useMemo(
-    () =>
-      usesCheckpoint && thread !== null
-        ? deriveThreadCheckpointSummaries(thread.projection).find(
-            (candidate) => candidate.runId === item.runId,
-          )
-        : undefined,
-    [item.runId, thread, usesCheckpoint],
+  // Only the checkpoint list, and only when it is needed: the whole thread changes on every token.
+  const summaries = useAtomValue(
+    usesCheckpoint
+      ? environmentThreadDetails.checkpointSummariesAtom({
+          environmentId,
+          threadId: row.sourceThreadId,
+        })
+      : EMPTY_CHECKPOINT_SUMMARIES_ATOM,
   );
+  const summary = summaries.find((candidate) => candidate.runId === item.runId);
   const checkpoint = useCheckpointDiff({
     environmentId: summary ? environmentId : null,
     threadId: summary ? row.sourceThreadId : null,
@@ -136,7 +142,8 @@ function InlineFileDiff(props: {
   // An edit's own patch names files by their absolute host path.
   const displayPath = workspaceRelativeFilePath(filePath, props.workspaceRoot) ?? filePath;
   const sectionId = `inline:${filePath}`;
-  const tooLarge = file.unifiedLineCount > INLINE_DIFF_MAX_LINES;
+  const lineCount = inlineDiffLineCount(file);
+  const tooLarge = lineCount > INLINE_DIFF_MAX_LINES;
   const data = useMemo(() => {
     const parsed = buildNativeReviewDiffData(
       buildReviewParsedDiff(tooLarge ? "" : patch, sectionId),
@@ -200,7 +207,11 @@ function InlineFileDiff(props: {
       </View>
       {tooLarge ? (
         <Text className="p-3 text-xs text-foreground-muted">
-          {`${file.unifiedLineCount.toLocaleString()} lines is too long to show here.`}
+          {`${lineCount.toLocaleString()} lines is too long to show here.`}
+        </Text>
+      ) : file.hunks.length === 0 ? (
+        <Text className="p-3 text-xs text-foreground-muted">
+          {file.type === "rename-pure" ? "Renamed without changes." : "No line changes."}
         </Text>
       ) : NativeDiff && data.rows.length > 0 ? (
         <View style={{ height: Math.min(contentHeight, MAX_CARD_HEIGHT) }}>

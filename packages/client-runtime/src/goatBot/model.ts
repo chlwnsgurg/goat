@@ -214,9 +214,8 @@ export function deriveGoatBotModelSettings({
     ? state.automaticLabel
     : selectedChoice
       ? `${selectedChoice.providerLabel} · ${selectedChoice.label}`
-      : state.activeEntry
-        ? `${state.activeEntry.displayName} · ${activeModelName}`
-        : `${state.selection.model} (not available)`;
+      : // A disabled, failed or removed model is not offered, so say so rather than look chosen.
+        `${state.activeEntry ? `${state.activeEntry.displayName} · ${activeModelName}` : state.selection.model} (not available)`;
 
   return {
     ...state,
