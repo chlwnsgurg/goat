@@ -1,6 +1,8 @@
 import { SSH_RUNTIME_PROTOCOL_VERSION } from "@goat/shared/sshRuntimeProtocol";
 import { ORCHESTRATION_PROTOCOL_VERSION } from "@goat/contracts";
 import { assert } from "@effect/vitest";
+import { build } from "vite-plus";
+import * as NodeURL from "node:url";
 import * as NetService from "@goat/shared/Net";
 import * as Crypto from "effect/Crypto";
 import * as Clock from "effect/Clock";
@@ -50,8 +52,8 @@ export const protocolExecutable = (
     contestedAttempts?: number;
   },
   state: string,
+  helperUrl = new URL("../../../apps/server/src/cli/sshHelper.ts", import.meta.url).href,
 ) => {
-  const helperUrl = new URL("../../../apps/server/src/cli/sshHelper.ts", import.meta.url).href;
   // From packages/ssh/src, ../../../apps resolves the repository apps directory.
   return `#!${process.execPath}
 (async () => {
@@ -308,6 +310,44 @@ export const makeProtocolFixture = Effect.fn("test.protocol.fixture")(function* 
   const old = `${home}/.goat/runtime/goat/versions/${input.oldVersion}`;
   const cache = `${home}/cache`;
   for (const dir of [state, test, old, cache]) yield* fs.makeDirectory(dir, { recursive: true });
+  const helperSource = new URL("../../../apps/server/src/cli/sshHelper.ts", import.meta.url);
+  const helperEntry = `${test}/helpers.entry.mjs`;
+  yield* fs.writeFileString(
+    helperEntry,
+    `export { readLiveSshRuntimeProtocol, readSshRuntimeCompatibility, readSshServerActivity, requestSshRuntimeDrain, superviseSshRuntimeReplacement } from ${JSON.stringify(NodeURL.fileURLToPath(helperSource))};`,
+  );
+  const scriptsEntry = `${test}/scripts.entry.mjs`;
+  yield* fs.writeFileString(
+    scriptsEntry,
+    `export { buildRemoteGoatRunnerScript, buildRemoteLaunchScript, buildRemotePairingScript, buildRemoteMcpSessionScript, buildRemoteRuntimeProbeScript, buildRemoteGoatUploadInstallerScript } from ${JSON.stringify(NodeURL.fileURLToPath(new URL("./tunnel.ts", import.meta.url)))};`,
+  );
+  // Every subprocess still calls production code. Bundle once so repeated Node starts
+  // do not spend the ownership race's deadline loading unrelated schemas and CLI commands.
+  yield* Effect.promise(() =>
+    build({
+      configFile: false,
+      logLevel: "silent",
+      ssr: { noExternal: true },
+      build: {
+        ssr: true,
+        outDir: test,
+        emptyOutDir: false,
+        target: "node24",
+        rollupOptions: {
+          input: { sshHelper: helperEntry, scripts: scriptsEntry },
+          external: (id) => id.startsWith("node:"),
+          treeshake: { moduleSideEffects: false },
+          output: {
+            entryFileNames: "[name].mjs",
+            chunkFileNames: "chunks/[name]-[hash].mjs",
+            format: "es",
+          },
+        },
+      },
+    }),
+  );
+  const helperUrl = NodeURL.pathToFileURL(`${test}/sshHelper.mjs`).href;
+  const scriptsUrl = NodeURL.pathToFileURL(`${test}/scripts.mjs`).href;
   // Node-mode launches pick a port from the production default (3773). Parallel test files and
   // concurrent CI jobs on one host would race for it, so start this fixture's pick at its own
   // reserved port. The shim only rewrites that argument; argv0 stays "node" for ps checks.
@@ -338,18 +378,23 @@ exec -a node '${process.execPath.replaceAll("'", "'\\''")}' "$@"
   yield* fs.writeFileString(`${test}/pids`, "");
   const fifo = yield* realSpawner.spawn(ChildProcess.make("mkfifo", [`${test}/ready.fifo`]));
   assert.equal(Number(yield* fifo.exitCode), 0);
-  yield* fs.writeFileString(`${old}/goat`, protocolExecutable(input.oldVersion, input, state));
+  yield* fs.writeFileString(
+    `${old}/goat`,
+    protocolExecutable(input.oldVersion, input, state, helperUrl),
+  );
   yield* fs.chmod(`${old}/goat`, 0o700);
   yield* fs.writeFileString(`${old}/.install-complete`, input.oldVersion + "\n");
   const nodeEntry = `${home}/old dev's entry.cjs`;
   if (input.nodeMode)
     yield* fs.writeFileString(
       nodeEntry,
-      protocolExecutable(input.oldVersion, { ...input, nodeReadiness: true }, state),
+      protocolExecutable(input.oldVersion, { ...input, nodeReadiness: true }, state, helperUrl),
     );
   const oldRunner =
     (yield* nativeScripts(
       input.nodeMode ? { nodeScriptPath: nodeEntry } : { archiveVersion: input.oldVersion },
+      undefined,
+      scriptsUrl,
     )).runner + "\n";
   yield* fs.writeFileString(`${state}/run-t3.sh`, oldRunner);
   yield* fs.chmod(`${state}/run-t3.sh`, 0o700);
@@ -432,6 +477,7 @@ exec -a node '${process.execPath.replaceAll("'", "'\\''")}' "$@"
         drain: true,
       },
       state,
+      helperUrl,
     ),
   );
   yield* fs.chmod(`${stage}/goat`, 0o700);

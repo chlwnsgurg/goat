@@ -1,5 +1,24 @@
 // @vitest-environment jsdom
 import * as Cause from "effect/Cause";
+import { it as effectIt } from "@effect/vitest";
+import { actEffect, makeSshProvisionGate } from "./sshPreparation.test-support";
+import * as Effect from "effect/Effect";
+import * as Deferred from "effect/Deferred";
+import * as Option from "effect/Option";
+import { Atom, AtomRegistry } from "effect/reactivity";
+import { RegistryContext, useAtomValue } from "@effect/atom-react";
+import {
+  EnvironmentId,
+  type DesktopSshPreparationProgress,
+  type SshHostResult,
+} from "@goat/contracts";
+import {
+  SshConnectionTarget,
+  SshConnectionProfile,
+  connectionRouteId,
+} from "@goat/client-runtime/connection";
+import type { EnvironmentPresentation } from "../../state/environments";
+import { TooltipProvider } from "../ui/tooltip";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, it, vi } from "vite-plus/test";
@@ -16,11 +35,14 @@ const state = vi.hoisted(() => ({
   sshHosts: null as unknown,
   addHubNode: vi.fn(),
   canAddHubNode: true,
-  toasts: vi.fn(),
+  environments: null as unknown as Atom.Writable<ReadonlyArray<EnvironmentPresentation>>,
+  runtimeReply: null as SshHostResult | null,
+  runtimeReplies: new Map<string, SshHostResult>(),
+  toast: vi.fn(),
 }));
 
 vi.mock("../../state/environments", () => ({
-  useEnvironments: () => ({ environments: [] }),
+  useEnvironments: () => ({ environments: useAtomValue(state.environments) }),
   usePrimaryEnvironment: () => ({
     environmentId: "primary",
     label: "This Mac",
@@ -78,11 +100,25 @@ vi.mock(import("../../cloud/publicConfig"), async (importOriginal) => ({
 }));
 vi.mock("~/confirmDialog", () => ({ requestConfirmDialog: state.confirm }));
 vi.mock("../ui/toast", () => ({
-  toastManager: { add: state.toasts },
+  toastManager: { add: state.toast },
   stackedThreadToast: (toast: unknown) => toast,
 }));
 
 import { SSH_PREFLIGHT_STEP_ORDER, type SshPreflightReport } from "@goat/contracts";
+vi.mock("../../state/sshRuntime", async () => {
+  const { createSshRuntimeState } = await import("@goat/client-runtime/state/sshRuntime");
+  const Effect = await import("effect/Effect");
+  const Layer = await import("effect/Layer");
+  const { Atom } = await import("effect/reactivity");
+  return {
+    sshRuntime: createSshRuntimeState(Atom.runtime(Layer.empty), {
+      status: (target) =>
+        Effect.sync(() => state.runtimeReplies.get(target.alias) ?? state.runtimeReply!),
+      update: () => Effect.sync(() => state.runtimeReply!),
+    }),
+  };
+});
+
 import { ConnectionEnvironmentsSection } from "./ConnectionEnvironmentsSection";
 
 const getLocalEnvironmentBootstraps = () => [
@@ -101,7 +137,7 @@ let root: Root;
 
 beforeEach(() => {
   (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
-  state.toasts.mockReset();
+  state.toast.mockReset();
   state.addHubNode.mockReset().mockResolvedValue({ _tag: "Success", value: undefined });
   state.canAddHubNode = true;
   state.canWriteSsh = true;
@@ -111,6 +147,19 @@ beforeEach(() => {
   state.forgetSshHost.mockReset();
   state.confirm.mockReset();
   state.preflightSshHost.mockResolvedValue({ _tag: "Success", value: readyReport });
+  state.environments = Atom.make<ReadonlyArray<EnvironmentPresentation>>([]);
+  state.runtimeReply = {
+    kind: "ok",
+    status: {
+      host: "fixture-vps",
+      state: "preparing",
+      phase: "checking",
+      runtimeVersion: null,
+      requestedVersion: "0.4.3",
+    },
+  };
+  state.runtimeReplies.clear();
+  state.toast.mockReset();
   state.connectPairing.mockReset();
   state.connectSshEnvironment.mockReset();
   container = document.createElement("div");
@@ -586,8 +635,8 @@ it("keeps a locally saved SSH device and offers Retry after a real hub failure",
   await saveSshDevice();
   expect(state.connectSshEnvironment).toHaveBeenCalledOnce();
   expect(document.querySelector('[role="dialog"]')).toBeNull();
-  expect(state.toasts).toHaveBeenCalledWith(expect.objectContaining({ type: "success" }));
-  const toast = state.toasts.mock.calls
+  expect(state.toast).toHaveBeenCalledWith(expect.objectContaining({ type: "success" }));
+  const toast = state.toast.mock.calls
     .map(([value]) => value)
     .find((value) => value.type === "error");
   expect(toast).toMatchObject({
@@ -607,7 +656,7 @@ it("silently skips unsupported hub registration after saving SSH locally", async
   await saveSshDevice();
   expect(state.addHubNode).toHaveBeenCalledOnce();
   expect(state.connectSshEnvironment).toHaveBeenCalledOnce();
-  expect(state.toasts.mock.calls.map(([value]) => value.type)).toEqual(["success"]);
+  expect(state.toast.mock.calls.map(([value]) => value.type)).toEqual(["success"]);
 });
 
 it("does not register a locally saved SSH device without hub write permission", async () => {
@@ -615,5 +664,328 @@ it("does not register a locally saved SSH device without hub write permission", 
   await saveSshDevice();
   expect(state.connectSshEnvironment).toHaveBeenCalledOnce();
   expect(state.addHubNode).not.toHaveBeenCalled();
-  expect(state.toasts.mock.calls.map(([value]) => value.type)).toEqual(["success"]);
+  expect(state.toast.mock.calls.map(([value]) => value.type)).toEqual(["success"]);
 });
+effectIt.effect(
+  "shows local add progress until terminal and drops a neutral result without a banner or toast",
+  () =>
+    Effect.gen(function* () {
+      const gate = makeSshProvisionGate();
+      yield* Effect.forkChild(gate.worker);
+      state.connectSshEnvironment.mockImplementation(gate.command);
+      const phase: DesktopSshPreparationProgress = {
+        operationId: "fixture-add",
+        phase: "uploading",
+        hostAnswered: true,
+        remainingMs: 800000,
+      };
+      const target = {
+        alias: "fixture-vps",
+        hostname: "example.invalid",
+        username: null,
+        port: null,
+      };
+      (window as { desktopBridge?: unknown }).desktopBridge = {
+        resolveSshHost: async () => target,
+        getLocalEnvironmentBootstraps,
+      };
+      state.sshHosts = [target];
+      const dialog = yield* Effect.promise(openAddDialog);
+      yield* Effect.promise(async () => {
+        const sshMode = [...dialog.querySelectorAll("button")].find((element) =>
+          element.textContent?.startsWith("SSH"),
+        )!;
+        await act(async () => sshMode.click());
+        type(document.querySelector<HTMLInputElement>("#saved-backend-ssh-host")!, target.alias);
+        await act(async () => button("Check", dialog).click());
+        await act(async () => button("Connect", dialog).click());
+      });
+      const input = yield* Deferred.await(gate.entered);
+      const report = input.onPreparationProgress!;
+      yield* actEffect(report(phase));
+      expect(dialog.textContent).toContain(
+        "Installing GOAT runtime — first setup can take a few minutes",
+      );
+      expect(dialog.textContent?.match(/Installing GOAT runtime/g)).toHaveLength(1);
+      yield* actEffect(report({ ...phase, phase: null, outcome: "superseded" }));
+      expect(dialog.textContent).not.toContain("Installing GOAT");
+      yield* actEffect(
+        Deferred.succeed(gate.release, {
+          _tag: "Failure",
+          cause: Cause.fail(new Error("SSH preparation superseded by a newer connection intent.")),
+        }),
+      );
+      expect(dialog.querySelector('[role="alert"]')).toBeNull();
+      expect(state.toast).not.toHaveBeenCalled();
+      yield* actEffect(report(phase));
+      expect(dialog.textContent).not.toContain("Installing GOAT");
+      yield* Effect.promise(() =>
+        act(async () =>
+          dialog.dispatchEvent(
+            new KeyboardEvent("keydown", {
+              key: "Escape",
+              code: "Escape",
+              bubbles: true,
+              cancelable: true,
+            }),
+          ),
+        ),
+      );
+      expect(document.querySelector('[role="dialog"]')).toBeNull();
+      yield* actEffect(report(phase));
+      expect(document.querySelector('[role="dialog"]')).toBeNull();
+    }),
+);
+
+it.each([
+  { source: "local", firstState: "preparing" },
+  { source: "owner", firstState: "preparing" },
+  { source: "alternate", firstState: "failed" },
+  { source: "alternate", firstState: "stopped" },
+] as const)(
+  "updates an open tooltip and subtitle from $source progress with first-route $firstState",
+  async ({ source, firstState }) => {
+    const registry = AtomRegistry.make();
+    const environmentId = EnvironmentId.make("fixture-vps");
+    const target = {
+      alias: "fixture-vps",
+      hostname: "example.invalid",
+      username: null,
+      port: null,
+    };
+    const sshTarget = new SshConnectionTarget({
+      environmentId,
+      connectionId: "fixture-ssh",
+      label: "Fixture VPS",
+    });
+    const alternateTarget = new SshConnectionTarget({
+      ...sshTarget,
+      connectionId: "fixture-ssh-alternate",
+    });
+    const alternateSshTarget = {
+      ...target,
+      alias: "fixture-vps-alternate",
+      hostname: "alternate.example.invalid",
+    };
+    const activeTarget = source === "alternate" ? alternateSshTarget : target;
+    const routeId = connectionRouteId(source === "alternate" ? alternateTarget : sshTarget);
+    const identity = { supervisorId: "fixture-window", attemptId: 2, routeId };
+    const ready = {
+      host: activeTarget.alias,
+      state: "ready" as const,
+      runtimeVersion: "0.4.3",
+      requestedVersion: "0.4.3",
+    };
+    if (source === "owner") {
+      state.runtimeReply = {
+        kind: "ok",
+        status: { ...ready, state: "preparing", phase: "uploading" },
+      };
+    }
+    if (source === "alternate") {
+      state.runtimeReplies.set(target.alias, {
+        kind: "ok",
+        status: { ...ready, host: target.alias, state: "preparing", phase: "checking" },
+      });
+      state.runtimeReplies.set(alternateSshTarget.alias, { kind: "ok", status: ready });
+    }
+    const environment: EnvironmentPresentation = {
+      environmentId,
+      label: "Fixture VPS",
+      displayUrl: null,
+      relayManaged: false,
+      serverConfig: null,
+      entry: {
+        enabled: true,
+        target: sshTarget,
+        profile: Option.some(
+          new SshConnectionProfile({
+            environmentId,
+            connectionId: "fixture-ssh",
+            label: "Fixture VPS",
+            target,
+          }),
+        ),
+        ...(source === "alternate"
+          ? {
+              alternateRoutes: [
+                {
+                  target: alternateTarget,
+                  profile: Option.some(
+                    new SshConnectionProfile({
+                      environmentId,
+                      connectionId: alternateTarget.connectionId,
+                      label: "Fixture VPS alternate",
+                      target: alternateSshTarget,
+                    }),
+                  ),
+                },
+              ],
+            }
+          : {}),
+      },
+      connection: {
+        phase: "reconnecting",
+        stage: "preparing",
+        error: "old setup timeout",
+        traceId: null,
+        failure: { kind: "retrying", reason: "timeout", detail: "old setup timeout" },
+        failureOrigin: { ...identity, attemptId: 1, stage: "preparing", setupTimeout: true },
+        ...(source !== "owner"
+          ? {
+              sshPreparation: {
+                ...identity,
+                operationId: "fixture-op",
+                phase: "uploading" as const,
+                hostAnswered: true,
+              },
+            }
+          : {}),
+      },
+    };
+    (window as { desktopBridge?: unknown }).desktopBridge = {};
+    registry.set(state.environments, [environment]);
+    const { sshRuntime } = await import("../../state/sshRuntime");
+    await act(async () =>
+      root.render(
+        <RegistryContext value={registry}>
+          <TooltipProvider delay={0}>
+            <ConnectionEnvironmentsSection title="Connections" searchable={false} />
+          </TooltipProvider>
+        </RegistryContext>,
+      ),
+    );
+    const trigger = [
+      ...container.querySelectorAll<HTMLElement>('[data-slot="tooltip-trigger"]'),
+    ].find((node) => node.textContent?.includes("Installing GOAT"));
+    expect(trigger).toBeDefined();
+    expect(container.textContent?.match(/Installing GOAT runtime/g)).toHaveLength(1);
+    await act(async () => {
+      const pointer = new MouseEvent("pointerover", { bubbles: true });
+      Object.defineProperty(pointer, "pointerType", { value: "mouse" });
+      trigger!.dispatchEvent(pointer);
+      trigger!.dispatchEvent(new MouseEvent("mouseenter", { bubbles: false }));
+      trigger!.dispatchEvent(new MouseEvent("mouseover", { bubbles: true }));
+      trigger!.dispatchEvent(new MouseEvent("mousemove", { bubbles: true }));
+    });
+    expect(document.querySelector('[data-slot="tooltip-popup"]')?.textContent).toContain(
+      "Installing GOAT runtime",
+    );
+    const { sshPreparation: _preparation, ...terminalConnection } = environment.connection;
+    const readyConnection = {
+      ...terminalConnection,
+      stage: "opening" as const,
+      sshRuntimeReady: {
+        ...identity,
+        operationId: "fixture-op",
+        attachmentId: "fixture-attachment",
+        runtimeStatus: ready,
+      },
+    };
+    await act(async () => {
+      if (source === "alternate") {
+        state.runtimeReplies.set(target.alias, {
+          kind: "ok",
+          status: { ...ready, host: target.alias, state: firstState },
+        });
+        await sshRuntime.refresh.run(registry, { environmentId, target });
+        await sshRuntime.refresh.run(registry, { environmentId, target: alternateSshTarget });
+      }
+      registry.set(state.environments, [
+        {
+          ...environment,
+          connection: readyConnection,
+        },
+      ]);
+    });
+    expect(trigger?.textContent).toContain("Runtime ready · Opening connection");
+    expect(trigger?.className).not.toContain("text-destructive");
+    expect(document.querySelector('[data-slot="tooltip-popup"]')?.textContent).toContain(
+      "Runtime ready · Opening connection",
+    );
+    expect(document.querySelector('[data-slot="tooltip-popup"]')?.textContent).not.toMatch(
+      /old setup timeout|unknown/,
+    );
+    if (source === "alternate") {
+      state.runtimeReplies.set(alternateSshTarget.alias, {
+        kind: "ok",
+        status: { ...ready, state: "failed", detail: "Alternate runtime stopped responding" },
+      });
+      await act(async () => {
+        await sshRuntime.refresh.run(registry, { environmentId, target: alternateSshTarget });
+      });
+      expect(trigger?.textContent).toContain("Reconnecting: old setup timeout");
+      expect(trigger?.className).toContain("text-destructive");
+      expect(document.querySelector('[data-slot="tooltip-popup"]')?.textContent).toContain(
+        "Alternate runtime stopped responding",
+      );
+      await act(async () =>
+        registry.set(state.environments, [
+          {
+            ...environment,
+            connection: {
+              ...readyConnection,
+              error: "fresh active route timeout",
+              failure: {
+                kind: "retrying",
+                reason: "timeout",
+                detail: "fresh active route timeout",
+              },
+              failureOrigin: { ...identity, attemptId: 3, stage: "opening", setupTimeout: false },
+            },
+          },
+        ]),
+      );
+      expect(trigger?.textContent).toContain("Reconnecting: fresh active route timeout");
+      expect(trigger?.className).toContain("text-destructive");
+      expect(document.querySelector('[data-slot="tooltip-popup"]')?.textContent).toContain(
+        "fresh active route timeout",
+      );
+    }
+    await act(async () => root.render(<div />));
+    registry.dispose();
+  },
+);
+
+effectIt.effect("ignores local Add reports and a failed completion after unmount", () =>
+  Effect.gen(function* () {
+    const gate = makeSshProvisionGate();
+    yield* Effect.forkChild(gate.worker);
+    state.connectSshEnvironment.mockImplementation(gate.command);
+    const target = {
+      alias: "fixture-vps",
+      hostname: "example.invalid",
+      username: null,
+      port: null,
+    };
+    (window as { desktopBridge?: unknown }).desktopBridge = {
+      resolveSshHost: async () => target,
+      getLocalEnvironmentBootstraps,
+    };
+    state.sshHosts = [target];
+    const dialog = yield* Effect.promise(openAddDialog);
+    yield* Effect.promise(async () => {
+      const sshMode = [...dialog.querySelectorAll("button")].find((element) =>
+        element.textContent?.startsWith("SSH"),
+      )!;
+      await act(async () => sshMode.click());
+      type(document.querySelector<HTMLInputElement>("#saved-backend-ssh-host")!, target.alias);
+      await act(async () => button("Check", dialog).click());
+      await act(async () => button("Connect", dialog).click());
+    });
+    const input = yield* Deferred.await(gate.entered);
+    yield* Effect.promise(() => act(async () => root.render(<div />)));
+    yield* input.onPreparationProgress!({
+      operationId: "late-add",
+      phase: "uploading",
+      hostAnswered: true,
+      remainingMs: 800000,
+    });
+    yield* Deferred.succeed(gate.release, {
+      _tag: "Failure",
+      cause: Cause.fail(new Error("late failure")),
+    });
+    expect(container.textContent).toBe("");
+    expect(state.toast).not.toHaveBeenCalled();
+  }),
+);

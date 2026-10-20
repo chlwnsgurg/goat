@@ -1,6 +1,8 @@
 import {
   type AuthClientPresentationMetadata,
   type DesktopSshEnvironmentBootstrap,
+  type DesktopSshPreparationProgress,
+  type DesktopSshAttemptContext,
   type DesktopSshEnvironmentTarget,
   EnvironmentId,
   type ExecutionEnvironmentDescriptor,
@@ -71,7 +73,12 @@ export class SshEnvironmentGateway extends Context.Service<
     readonly provision: (
       target: DesktopSshEnvironmentTarget,
       expectedEnvironmentId?: EnvironmentId,
-      options?: { readonly keyOnly?: boolean },
+      options?: {
+        readonly keyOnly?: boolean;
+        readonly onPreparationProgress?: (
+          progress: DesktopSshPreparationProgress,
+        ) => Effect.Effect<void>;
+      },
     ) => Effect.Effect<ProvisionedSshEnvironment, ConnectionAttemptError>;
     /**
      * Starts or reuses the remote server for a saved connection. Returns
@@ -85,6 +92,10 @@ export class SshEnvironmentGateway extends Context.Service<
       readonly target: DesktopSshEnvironmentTarget;
       readonly bearerToken?: string;
       readonly onHostAnswered?: Effect.Effect<void>;
+      readonly onPreparationProgress?: (
+        progress: DesktopSshPreparationProgress,
+      ) => Effect.Effect<void>;
+      readonly attemptContext?: DesktopSshAttemptContext;
       /** Runs beside saved-session validation; its result is used only if that session is accepted. */
       readonly authorize?: (
         prepared: PreparedSshEnvironment,

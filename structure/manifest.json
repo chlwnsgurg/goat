@@ -293,6 +293,7 @@
         "packages/ssh/src/command.ts",
         "packages/ssh/src/auth.ts",
         "packages/ssh/src/errors.ts",
+        "packages/ssh/src/ensureFlight.ts",
         "packages/ssh/src/tunnel.ts",
         "apps/desktop/src/ssh/DesktopSshEnvironment.ts",
         "apps/server/src/sshRemote/SshRemoteDispatch.ts",

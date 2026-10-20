@@ -61,6 +61,7 @@ export const CLEAR_CONNECTION_CATALOG_CHANNEL = "desktop:clear-connection-catalo
 export const DISCOVER_SSH_HOSTS_CHANNEL = "desktop:discover-ssh-hosts";
 export const RESOLVE_SSH_HOST_CHANNEL = "desktop:resolve-ssh-host";
 export const SSH_ENVIRONMENT_ANSWERED_CHANNEL = "desktop:ssh-environment-answered";
+export const SSH_ENVIRONMENT_PROGRESS_CHANNEL = "desktop:ssh-environment-progress";
 export const ENSURE_SSH_ENVIRONMENT_CHANNEL = "desktop:ensure-ssh-environment";
 export const SSH_HOST_STATUS_CHANNEL = "desktop:ssh-host-status";
 export const SSH_RUNTIME_UPDATE_CHANNEL = "desktop:ssh-runtime-update";

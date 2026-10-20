@@ -14,7 +14,13 @@ import {
   unsavedManagedSshAlias,
 } from "./SshPreflightChecklist.logic";
 import { sshRuntime } from "~/state/sshRuntime";
-import { sshRuntimeStatusText } from "@goat/client-runtime/state/sshRuntime";
+import { sshRuntimeTargetKey } from "@goat/client-runtime/state/sshRuntime";
+import {
+  isSshConnectionSuperseded,
+  savedConnectionPresentation,
+  savedConnectionSshRoute,
+} from "./ConnectionsSettings.logic";
+import * as Effect from "effect/Effect";
 import { appAtomRegistry } from "~/rpc/atomRegistry";
 import { SessionPermissions } from "./SessionPermissions";
 import {
@@ -38,6 +44,7 @@ import {
   AuthEnvironmentMaintainScope,
   type DesktopDiscoveredSshHost,
   type DesktopSshEnvironmentTarget,
+  type DesktopSshPreparationProgress,
   type EnvironmentId,
   resolveEnvironmentMachineKind,
 } from "@goat/contracts";
@@ -45,7 +52,6 @@ import {
   RelayConnectionRegistration,
   RelayConnectionTarget,
   connectionRoutes,
-  connectionStatusText,
   environmentMcpUrl,
   hasSavedBearerRoute,
   offlineSnapshotAgeLabel,
@@ -230,16 +236,9 @@ function sshSetupError(result: SshHostResult, host: string) {
 
 /** Only saved Desktop SSH profiles can address the Desktop runtime owner. */
 function savedDesktopSshTarget(environment: EnvironmentPresentation) {
-  if (window.desktopBridge === undefined) return null;
-  for (const route of connectionRoutes(environment.entry)) {
-    if (
-      route.target._tag === "SshConnectionTarget" &&
-      Option.isSome(route.profile) &&
-      route.profile.value._tag === "SshConnectionProfile"
-    )
-      return route.profile.value.target;
-  }
-  return null;
+  return window.desktopBridge === undefined
+    ? null
+    : (savedConnectionSshRoute(environment)?.target ?? null);
 }
 
 type SavedBackendListRowProps = {
@@ -274,41 +273,6 @@ function savedSshEnvironmentKeys(environments: ReadonlyArray<EnvironmentPresenta
     keys.add(formatDesktopSshTarget(target));
   }
   return keys;
-}
-
-function savedBackendStatus(environment: EnvironmentPresentation): {
-  readonly text: string;
-  readonly tone: "muted" | "error";
-} {
-  if (isGoatConnectUnavailable(environment.entry)) return { text: "Unavailable", tone: "muted" };
-  if (!environment.entry.enabled && environment.connection.phase !== "unsupported")
-    return { text: "Off", tone: "muted" };
-  const { connection } = environment;
-  switch (connection.phase) {
-    case "connected":
-      return { text: "Connected", tone: "muted" };
-    case "connecting":
-      return { text: "Connecting", tone: "muted" };
-    case "reconnecting":
-      // Expected for a laptop that is asleep or away; it retries on its own.
-      if (connection.unreachable) return { text: "Unreachable", tone: "muted" };
-      return {
-        text: connection.error ? `Reconnecting: ${connection.error}` : "Reconnecting",
-        tone: "error",
-      };
-    // Not a failure: the machine is fine, this build just cannot talk to it.
-    case "unsupported":
-      return { text: "Client not supported", tone: "muted" };
-    case "error":
-      return {
-        text: connection.error ? `Connection failed: ${connection.error}` : "Connection failed",
-        tone: "error",
-      };
-    case "offline":
-      return { text: "Offline", tone: "muted" };
-    case "available":
-      return { text: "Not connected", tone: "muted" };
-  }
 }
 
 /**
@@ -387,7 +351,7 @@ function SavedBackendListRow({
   const serverUpdateState = useAtomValue(serverEnvironment.updateStateAtom(environmentId));
   const resumingServerUpdate =
     serverUpdateState.status === "running" && serverUpdateState.stage === "resuming";
-  const status = savedBackendStatus(environment);
+  const status = savedConnectionPresentation({ environment, runtimeStatus });
   const serverVersion = environment.serverConfig?.environment.serverVersion ?? null;
   // A saved T3 Connect machine this device has never reached (unsupported,
   // or not yet connected) still has a descriptor from relay discovery, so
@@ -435,11 +399,7 @@ function SavedBackendListRow({
     resumingServerUpdate ? "Restarting" : status.text,
     snapshotAge,
     enabled && versionMismatch ? serverVersion : null,
-    savedSshTarget && runtimeStatus
-      ? runtimeStatus.state === "preparing"
-        ? "Setting up runtime"
-        : sshRuntimeStatusText(runtimeStatus)
-      : null,
+    status.runtimeText,
   ]
     .filter((value): value is string => value !== null)
     .join(" · ");
@@ -454,19 +414,9 @@ function SavedBackendListRow({
 
   const statusTooltip = isGoatConnectUnavailable(environment.entry)
     ? `${GOAT_CONNECT_COMING_SOON.status}. ${GOAT_CONNECT_COMING_SOON.description}`
-    : `${
-        unsupported
-          ? (environment.connection.error ?? connectionStatusText(environment.connection))
-          : enabled
-            ? `${connectionStatusText(environment.connection)}${snapshotAge === null ? "" : ` · ${snapshotAge}`}`
-            : "Switched off"
-      }${
+    : `${status.tooltipText}${snapshotAge === null ? "" : ` · ${snapshotAge}`}${
         versionMismatch
           ? `\nUpdate available: ${versionMismatch.serverVersion} → ${versionMismatch.clientVersion}`
-          : ""
-      }${
-        savedSshTarget && runtimeStatus
-          ? `\nRuntime ${runtimeStatus.runtimeVersion ?? "unknown"} · This app ${runtimeStatus.requestedVersion}`
           : ""
       }`;
 
@@ -545,6 +495,13 @@ function SavedBackendListRow({
             environmentId={environmentId}
             target={savedSshTarget}
             enabled={environment.entry.enabled && !isRemoving}
+            preparationInSubtitle={
+              (!resumingServerUpdate && status.preparationPhase !== undefined) ||
+              (runtimeStatus?.state === "preparing" && status.runtimeText !== null)
+            }
+            {...(status.preparationPhase !== undefined
+              ? { preparationProgress: { phase: status.preparationPhase } }
+              : {})}
             onReviewTrust={() => onReviewTrust(environment)}
           />
         ) : serverUpdateState.status !== "idle" ? (
@@ -820,6 +777,18 @@ export function ConnectionEnvironmentsSection({
   );
   const sshAddInFlight = useRef(false);
   const sshConnectInFlight = useRef(false);
+  const sshSubmission = useRef(0);
+  const [sshPreparation, setSshPreparation] = useState<{
+    readonly submissionId: number;
+    readonly targetKey: string;
+    readonly progress: DesktopSshPreparationProgress;
+  } | null>(null);
+  useEffect(
+    () => () => {
+      sshSubmission.current += 1;
+    },
+    [],
+  );
   const sshReviewGeneration = useRef(0);
   const [pendingForget, setPendingForget] = useState<EnvironmentPresentation | null>(null);
   const [removeForgottenConnection, setRemoveForgottenConnection] = useState(false);
@@ -926,33 +895,49 @@ export function ConnectionEnvironmentsSection({
       return;
     }
     sshConnectInFlight.current = true;
+    const submissionId = ++sshSubmission.current;
+    const targetKey = sshRuntimeTargetKey({ environmentId: primaryEnvironmentId!, target });
+    setSshPreparation(null);
     setPendingSshTarget(target);
     setIsAddingSavedBackend(true);
     setSavedBackendError(null);
     const result = await connectSshEnvironment({
       target,
       label: "",
+      onPreparationProgress: (progress) =>
+        Effect.sync(() => {
+          if (sshSubmission.current === submissionId && sshConnectInFlight.current)
+            setSshPreparation({ submissionId, targetKey, progress });
+        }),
       ...(target.alias.startsWith("goat-") ? { keyOnly: true } : {}),
       ...(routeTarget ? { expectedEnvironmentId: routeTarget.environmentId } : {}),
     });
+    if (sshSubmission.current !== submissionId) return;
+    setSshPreparation(null);
+    sshConnectInFlight.current = false;
+    setIsAddingSavedBackend(false);
     if (result._tag === "Failure") {
-      if (!isAtomCommandInterrupted(result)) {
-        const message = formatDesktopSshConnectionError(squashAtomCommandFailure(result));
-        const current =
-          primaryEnvironmentId === null
-            ? null
-            : await sshRuntime.refresh.run(appAtomRegistry, {
-                environmentId: primaryEnvironmentId,
-                target,
-              });
-        setSavedBackendError(
-          current?._tag === "Success" && current.value?.status?.state === "ready"
-            ? `GOAT is ready on ${target.alias}, but the connection couldn't be saved. ${message}`
-            : message,
-        );
+      if (
+        isAtomCommandInterrupted(result) ||
+        isSshConnectionSuperseded(squashAtomCommandFailure(result))
+      ) {
+        setPendingSshTarget(null);
+        return;
       }
-      sshConnectInFlight.current = false;
-      setIsAddingSavedBackend(false);
+      const message = formatDesktopSshConnectionError(squashAtomCommandFailure(result));
+      const current =
+        primaryEnvironmentId === null
+          ? null
+          : await sshRuntime.refresh.run(appAtomRegistry, {
+              environmentId: primaryEnvironmentId,
+              target,
+            });
+      if (sshSubmission.current !== submissionId) return;
+      setSavedBackendError(
+        current?._tag === "Success" && current.value?.status?.state === "ready"
+          ? `GOAT is ready on ${target.alias}, but the connection couldn't be saved. ${message}`
+          : message,
+      );
       return;
     }
 
@@ -972,7 +957,6 @@ export function ConnectionEnvironmentsSection({
         ? `${routeTarget.label} can now be reached over SSH ${target.alias}.`
         : `${target.alias} is ready over an SSH-managed tunnel.`,
     });
-    setIsAddingSavedBackend(false);
   };
 
   const invalidateSshPreflight = () => {
@@ -1580,6 +1564,9 @@ export function ConnectionEnvironmentsSection({
             value={savedBackendSshHost}
             onValueChange={(value, eventDetails) => {
               invalidateSshPreflight();
+              sshSubmission.current += 1;
+              setSshPreparation(null);
+              setPendingSshTarget(null);
               setSavedBackendSshHost(value);
               if (eventDetails.reason !== "item-press") return;
 
@@ -1649,6 +1636,9 @@ export function ConnectionEnvironmentsSection({
               aria-describedby={configuredSshAlias ? "saved-backend-ssh-config-hint" : undefined}
               onChange={(event) => {
                 invalidateSshPreflight();
+                sshSubmission.current += 1;
+                setSshPreparation(null);
+                setPendingSshTarget(null);
                 setSavedBackendSshUsername(event.target.value);
               }}
               onKeyDown={handleSavedBackendSshFieldKeyDown}
@@ -1671,6 +1661,9 @@ export function ConnectionEnvironmentsSection({
               aria-describedby={configuredSshAlias ? "saved-backend-ssh-config-hint" : undefined}
               onChange={(event) => {
                 invalidateSshPreflight();
+                sshSubmission.current += 1;
+                setSshPreparation(null);
+                setPendingSshTarget(null);
                 setSavedBackendSshPort(event.target.value);
               }}
               onKeyDown={handleSavedBackendSshFieldKeyDown}
@@ -1725,6 +1718,10 @@ export function ConnectionEnvironmentsSection({
             target={pendingSshTarget}
             enabled={addBackendDialogOpen}
             pendingAdd
+            {...(sshPreparation?.targetKey ===
+            sshRuntimeTargetKey({ environmentId: primaryEnvironmentId, target: pendingSshTarget })
+              ? { preparationProgress: sshPreparation.progress }
+              : {})}
             connecting={isAddingSavedBackend}
             originLabel={primaryEnvironment?.label ?? "this machine"}
             {...(isAddingSavedBackend ? {} : { onRetry: () => void checkSavedBackendSshFields() })}
@@ -1766,6 +1763,8 @@ export function ConnectionEnvironmentsSection({
                 if (!open) {
                   if (sshProbe !== null) void answerSshTrust(false);
                   invalidateSshPreflight();
+                  sshSubmission.current += 1;
+                  setSshPreparation(null);
                 }
                 setAddBackendDialogOpen(open);
                 if (open) {

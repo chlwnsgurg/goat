@@ -15,6 +15,16 @@ const validPreload = `
 `;
 
 describe("desktop preload bundle verifier", () => {
+  it("retains browser encoding APIs and DOM event registration in the sandbox", () => {
+    assert.doesNotThrow(() =>
+      verifyPreloadBundle(`
+      ${validPreload}
+      const bytes = new TextEncoder().encode("SSH progress");
+      if (new TextDecoder().decode(bytes) !== "SSH progress") throw new Error("Invalid encoding");
+      window.addEventListener("DOMContentLoaded", () => {});
+    `),
+    );
+  });
   it("rejects required API names that only appear in strings", () => {
     assert.throws(
       () =>

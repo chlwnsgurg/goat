@@ -219,7 +219,9 @@ describe("saved SSH runtime row", () => {
     });
     await click("Update runtime");
     await settle();
-    expect(container.textContent).toContain("Installing GOAT runtime (about 90 MB)");
+    expect(container.textContent).toContain(
+      "Installing GOAT runtime — first setup can take a few minutes",
+    );
     const ready: SshHostResult = {
       kind: "ok",
       status: { ...base, state: "ready", runtimeVersion: "0.4.3" },
@@ -370,7 +372,9 @@ it("polls a pending Add while the Desktop connection has not published its first
   await act(async () => {
     await vi.advanceTimersByTimeAsync(1_000);
   });
-  expect(container.textContent).toContain("Installing GOAT runtime (about 90 MB)");
+  expect(container.textContent).toContain(
+    "Installing GOAT runtime — first setup can take a few minutes",
+  );
 });
 
 describe("SSH runtime recovery actions", () => {
@@ -489,3 +493,40 @@ it.each(["owner-key", "legacy-key", "command"] as const)(
     expect(writeText).toHaveBeenCalledExactlyOnceWith(source === "command" ? command : publicKey);
   },
 );
+
+it("uses local phase before the owner poll and clears it immediately on terminal", async () => {
+  const preparation = {
+    operationId: "fixture-operation",
+    phase: "uploading" as const,
+    hostAnswered: true,
+    remainingMs: 800_000,
+  };
+  reply = {
+    kind: "ok",
+    status: { ...base, state: "preparing", phase: "checking", runtimeVersion: null },
+  };
+  const draw = async (progress: import("@goat/contracts").DesktopSshPreparationProgress) => {
+    await act(async () =>
+      root.render(
+        <RegistryContext value={registry}>
+          <SshRuntimeSettingsRow
+            {...input}
+            enabled
+            pendingAdd
+            connecting
+            preparationProgress={progress}
+          />
+        </RegistryContext>,
+      ),
+    );
+  };
+  await draw(preparation);
+  expect(container.textContent?.match(/Installing GOAT runtime/g)).toHaveLength(1);
+  expect(container.textContent).not.toMatch(/Checking GOAT|Setting up GOAT|unknown/);
+  expect(container.querySelector('[role="status"]')?.textContent).toBe(
+    "Installing GOAT runtime — first setup can take a few minutes",
+  );
+  await draw({ ...preparation, phase: null, outcome: "pending" });
+  expect(container.textContent).not.toMatch(/Installing|Checking GOAT|Setting up GOAT/);
+  expect(container.querySelector('[role="status"]')?.textContent).toBe("");
+});

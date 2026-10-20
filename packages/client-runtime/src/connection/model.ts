@@ -1,4 +1,8 @@
-import { EnvironmentId } from "@goat/contracts";
+import {
+  type DesktopSshPreparationProgress,
+  type SshHostStatus,
+  EnvironmentId,
+} from "@goat/contracts";
 import * as Schema from "effect/Schema";
 
 const ConnectionTargetBase = {
@@ -95,6 +99,7 @@ export class ConnectionTransientError extends Schema.TaggedError<ConnectionTrans
     reason: ConnectionTransientReason,
     detail: Schema.String,
     traceId: Schema.optionalKey(Schema.String),
+    sshPreparationTimedOut: Schema.optionalKey(Schema.Boolean),
   },
 ) {
   override get message(): string {
@@ -118,7 +123,44 @@ export class ConnectionBlockedError extends Schema.TaggedError<ConnectionBlocked
   }
 }
 
-export type ConnectionAttemptError = ConnectionTransientError | ConnectionBlockedError;
+export class ConnectionAttemptSuperseded extends Schema.TaggedError<ConnectionAttemptSuperseded>()(
+  "ConnectionAttemptSuperseded",
+  {
+    reason: Schema.Literal("superseded"),
+    detail: Schema.String,
+    traceId: Schema.optionalKey(Schema.String),
+  },
+) {
+  override get message(): string {
+    return this.detail;
+  }
+}
+
+export type ConnectionFailure = ConnectionTransientError | ConnectionBlockedError;
+export type ConnectionAttemptError = ConnectionFailure | ConnectionAttemptSuperseded;
+
+export interface ConnectionAttemptIdentity {
+  readonly supervisorId: string;
+  readonly attemptId: number;
+  readonly routeId: string;
+}
+
+export interface ConnectionFailureOrigin extends ConnectionAttemptIdentity {
+  readonly stage: ConnectionAttemptStage;
+  readonly setupTimeout: boolean;
+}
+
+export interface ConnectionSshPreparation extends ConnectionAttemptIdentity {
+  readonly operationId: string;
+  readonly phase: Exclude<DesktopSshPreparationProgress["phase"], null>;
+  readonly hostAnswered: boolean;
+}
+
+export interface ConnectionSshRuntimeReady extends ConnectionAttemptIdentity {
+  readonly operationId: string;
+  readonly attachmentId: string;
+  readonly runtimeStatus: SshHostStatus;
+}
 
 export const DPOP_ACCESS_TOKEN_REFRESH_SKEW_MS = 60_000;
 
@@ -159,7 +201,10 @@ export interface SupervisorConnectionState {
   readonly stage: ConnectionAttemptStage | null;
   readonly attempt: number;
   readonly generation: number;
-  readonly lastFailure: ConnectionAttemptError | null;
+  readonly lastFailure: ConnectionFailure | null;
+  readonly failureOrigin?: ConnectionFailureOrigin;
+  readonly sshPreparation?: ConnectionSshPreparation;
+  readonly sshRuntimeReady?: ConnectionSshRuntimeReady;
   readonly retryAt: number | null;
 }
 

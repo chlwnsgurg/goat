@@ -223,7 +223,8 @@ bundled or cached archive when available. Otherwise it uses your configured
 release mirror, or downloads the matching published GOAT release and checks its
 checksums. If a public download fails, GOAT can try the GitHub CLI when signed in
 (`gh auth login`). It refuses a checksum mismatch and names the expected release
-when it cannot obtain an archive.
+when it cannot obtain an archive. Connections shows the current setup step. The first
+installation can take a few minutes; reconnecting while it runs joins that setup.
 
 When the host is asleep or off the network, its connection shows **Unreachable**
 and GOAT keeps retrying, sooner when this computer wakes or joins a network.

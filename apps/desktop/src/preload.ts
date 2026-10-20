@@ -7,6 +7,8 @@ import type {
   DesktopPreviewTabState,
   DesktopSnapShotEvent,
 } from "@goat/contracts";
+import { DesktopSshPreparationProgressEventSchema } from "@goat/contracts";
+import * as Schema from "effect/Schema";
 import { exposeClerkBridge } from "@clerk/electron/preload";
 import { contextBridge, ipcRenderer, webFrame, webUtils } from "electron";
 
@@ -75,6 +77,10 @@ function unwrapEnsureSshEnvironmentResult(
   }
   return result as Awaited<ReturnType<DesktopBridge["ensureSshEnvironment"]>>;
 }
+
+const decodeSshPreparationProgress = Schema.decodeUnknownOption(
+  DesktopSshPreparationProgressEventSchema,
+);
 
 contextBridge.exposeInMainWorld("desktopBridge", {
   getAppBranding: () => {
@@ -145,27 +151,47 @@ contextBridge.exposeInMainWorld("desktopBridge", {
   discoverSshHosts: () => ipcRenderer.invoke(IpcChannels.DISCOVER_SSH_HOSTS_CHANNEL),
   resolveSshHost: (alias) => ipcRenderer.invoke(IpcChannels.RESOLVE_SSH_HOST_CHANNEL, alias),
   supportsSshEnvironmentProgress: true,
+  supportsSshPreparationPhases: true,
   ensureSshEnvironment: async (target, options) => {
-    // @effect-diagnostics-next-line cryptoRandomUUID:off - the sandboxed preload cannot load the Effect runtime
+    // @effect-diagnostics-next-line cryptoRandomUUID:off - request IDs use Chromium's secure randomness in the sandboxed preload
     const requestId = crypto.randomUUID();
-    const { onHostAnswered, ...ensureOptions } = options ?? {};
+    const { onHostAnswered, onPreparationProgress, caller, attemptContext, ...ensureOptions } =
+      options ?? {};
     const answered = (_event: Electron.IpcRendererEvent, id: unknown) => {
       if (id === requestId) {
         ipcRenderer.removeListener(IpcChannels.SSH_ENVIRONMENT_ANSWERED_CHANNEL, answered);
-        onHostAnswered?.();
+        try {
+          onHostAnswered?.();
+        } catch {
+          // Observer failure must not change the native request's result.
+        }
+      }
+    };
+    const progress = (_event: Electron.IpcRendererEvent, value: unknown) => {
+      const decoded = decodeSshPreparationProgress(value);
+      if (decoded._tag === "None" || decoded.value.requestId !== requestId) return;
+      const { requestId: _requestId, ...preparation } = decoded.value;
+      try {
+        onPreparationProgress?.(preparation);
+      } catch {
+        // A listener can disappear while the manager finishes shared work.
       }
     };
     ipcRenderer.on(IpcChannels.SSH_ENVIRONMENT_ANSWERED_CHANNEL, answered);
     try {
+      ipcRenderer.on(IpcChannels.SSH_ENVIRONMENT_PROGRESS_CHANNEL, progress);
       return unwrapEnsureSshEnvironmentResult(
         await ipcRenderer.invoke(IpcChannels.ENSURE_SSH_ENVIRONMENT_CHANNEL, {
           requestId,
           target,
           ...(options === undefined ? {} : { options: ensureOptions }),
+          ...(caller === undefined ? {} : { caller }),
+          ...(attemptContext === undefined ? {} : { attemptContext }),
         }),
       );
     } finally {
       ipcRenderer.removeListener(IpcChannels.SSH_ENVIRONMENT_ANSWERED_CHANNEL, answered);
+      ipcRenderer.removeListener(IpcChannels.SSH_ENVIRONMENT_PROGRESS_CHANNEL, progress);
     }
   },
   // The main-process handlers encode these results with the SshHostResult schema.

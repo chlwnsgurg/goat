@@ -8,6 +8,8 @@ import { environmentEndpointUrl } from "../environment/endpoint.ts";
 import type {
   AuthClientPresentationMetadata,
   ExecutionEnvironmentDescriptor,
+  DesktopSshPreparationProgress,
+  DesktopSshAttemptContext,
 } from "@goat/contracts";
 import { withRelayClientTracing } from "@goat/shared/relayTracing";
 import * as Context from "effect/Context";
@@ -55,12 +57,18 @@ import { credentialConnectionId } from "./routes.ts";
 import { fetchRemoteEnvironmentDescriptor } from "../environment/descriptor.ts";
 import { withSshConnectionTiming } from "./sshTiming.ts";
 
+export interface SshPreparationOptions {
+  readonly attemptContext?: DesktopSshAttemptContext;
+  readonly onPreparationProgress?: (progress: DesktopSshPreparationProgress) => Effect.Effect<void>;
+}
+
 export class ConnectionResolver extends Context.Service<
   ConnectionResolver,
   {
     readonly prepare: (
       entry: ConnectionCatalogEntry,
       onHostAnswered?: Effect.Effect<void>,
+      options?: SshPreparationOptions,
     ) => Effect.Effect<PreparedConnection, ConnectionAttemptError>;
     /**
      * Authorizes a socket without the orchestration protocol gate, for hosts
@@ -220,6 +228,7 @@ const makeSshBroker = Effect.fn("clientRuntime.connection.broker.makeSsh")(funct
   return Effect.fn("clientRuntime.connection.broker.ssh")(function* (
     entry: ConnectionCatalogEntry & { readonly target: SshConnectionTarget },
     onHostAnswered?: Effect.Effect<void>,
+    options?: SshPreparationOptions,
   ) {
     const target = entry.target;
     const profile = yield* Effect.fromOption(entry.profile, () =>
@@ -265,6 +274,10 @@ const makeSshBroker = Effect.fn("clientRuntime.connection.broker.makeSsh")(funct
       target: profile.target,
       ...(savedToken === undefined ? {} : { bearerToken: savedToken }),
       ...(onHostAnswered === undefined ? {} : { onHostAnswered }),
+      ...(options?.onPreparationProgress === undefined
+        ? {}
+        : { onPreparationProgress: options.onPreparationProgress }),
+      ...(options?.attemptContext === undefined ? {} : { attemptContext: options.attemptContext }),
       authorize,
     });
     const preparedCredential = new BearerConnectionCredential({
@@ -372,6 +385,7 @@ export const make = Effect.gen(function* () {
   const authorize = Effect.fn("clientRuntime.connection.broker.authorize")(function* (
     entry: ConnectionCatalogEntry,
     onHostAnswered?: Effect.Effect<void>,
+    options?: SshPreparationOptions,
   ) {
     const target: ConnectionTarget = entry.target;
     yield* Effect.annotateCurrentSpan({
@@ -395,7 +409,7 @@ export const make = Effect.gen(function* () {
             Effect.map((prepared) => ({ prepared, verifiedEndpoint: undefined })),
           );
         case "SshConnectionTarget":
-          return ssh({ ...entry, target }, onHostAnswered);
+          return ssh({ ...entry, target }, onHostAnswered, options);
       }
     })();
     const descriptor =
@@ -419,8 +433,9 @@ export const make = Effect.gen(function* () {
   const prepare = Effect.fn("clientRuntime.connection.broker.prepare")(function* (
     entry: ConnectionCatalogEntry,
     onHostAnswered?: Effect.Effect<void>,
+    options?: SshPreparationOptions,
   ) {
-    const { prepared, descriptor } = yield* authorize(entry, onHostAnswered);
+    const { prepared, descriptor } = yield* authorize(entry, onHostAnswered, options);
     const compatibilityError = orchestrationProtocolCompatibilityError(descriptor);
     if (compatibilityError !== null) {
       return yield* compatibilityError;

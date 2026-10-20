@@ -506,11 +506,18 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")(
               authentications: 0,
               steps: {} as Record<string, number>,
             };
+            const workerCosts: Readonly<Record<string, unknown>>[] = [];
+            const logger = Logger.make(({ fiber, message }) => {
+              if (String(message) === "ssh.reconnect.cost")
+                workerCosts.push(fiber.getRef(References.CurrentLogAnnotations));
+            });
             const result = yield* Effect.gen(function* () {
               const startedAt = yield* Clock.currentTimeMillis;
               measureReconnect = true;
               const result = yield* manager.ensureEnvironment(uploadTarget).pipe(
                 Effect.provideService(SshReconnectCost, cost),
+                Effect.provideService(References.MinimumLogLevel, "Info"),
+                Effect.provide(Logger.layer([logger], { mergeWithExisting: false })),
                 Effect.ensuring(
                   Effect.sync(() => {
                     measureReconnect = false;
@@ -544,7 +551,10 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")(
             assert.isUndefined(result.pendingReplacement);
             assert.equal(forwards, 2);
             assert.equal(f.remoteCommands.length - commands, 1);
-            assert.property(cost.steps, "runtime-probe-folded");
+            assert.lengthOf(workerCosts, 1);
+            assert.isString(workerCosts[0]?.operationId);
+            assert.property(workerCosts[0]?.steps, "runtime-probe-folded");
+            assert.notProperty(cost.steps, "runtime-probe-folded");
             assert.deepEqual(yield* f.snapshot, snapshot);
             if (contended !== "none") {
               assert.equal(yield* f.fs.readLink(lock), owner);

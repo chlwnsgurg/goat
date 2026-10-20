@@ -12,6 +12,7 @@ import {
   EnvironmentId,
   ORCHESTRATION_PROTOCOL_VERSION,
   type DesktopSshEnvironmentTarget,
+  type DesktopSshPreparationProgress,
 } from "@goat/contracts";
 import { RelayClientTracer } from "@goat/shared/relayTracing";
 import { describe, expect, it } from "@effect/vitest";
@@ -499,6 +500,14 @@ describe("ConnectionResolver", () => {
       const preparedTargets = yield* Ref.make<ReadonlyArray<DesktopSshEnvironmentTarget>>([]);
       const connectionMethods = yield* Ref.make<ReadonlyArray<string>>([]);
       const answered = yield* Ref.make(false);
+      const phases: DesktopSshPreparationProgress[] = [];
+      const phase: DesktopSshPreparationProgress = {
+        operationId: "resolver-flight",
+        phase: "uploading",
+        hostAnswered: true,
+        remainingMs: 800_000,
+      };
+      const attemptContext = { supervisorId: "resolver-owner", attemptId: 2, routeId: "ssh-1" };
       const target = new SshConnectionTarget({
         environmentId: ENVIRONMENT_ID,
         label: "SSH",
@@ -513,7 +522,9 @@ describe("ConnectionResolver", () => {
       const layerBroker = yield* makeDependencies({
         prepareSsh: (input) =>
           Ref.update(preparedTargets, (values) => [...values, input.target]).pipe(
+            Effect.andThen(Effect.sync(() => expect(input.attemptContext).toEqual(attemptContext))),
             Effect.andThen(input.onHostAnswered ?? Effect.void),
+            Effect.andThen(input.onPreparationProgress?.(phase) ?? Effect.void),
             Effect.as({
               bootstrap: {
                 target: input.target,
@@ -541,10 +552,20 @@ describe("ConnectionResolver", () => {
       const broker = yield* ConnectionResolver.ConnectionResolver.pipe(Effect.provide(layerBroker));
 
       expect(
-        (yield* broker.prepare(catalogEntry(target, Option.some(profile)), Ref.set(answered, true)))
-          .socketUrl,
+        (yield* broker.prepare(
+          catalogEntry(target, Option.some(profile)),
+          Ref.set(answered, true),
+          {
+            attemptContext,
+            onPreparationProgress: (progress) =>
+              Effect.sync(() => {
+                phases.push(progress);
+              }),
+          },
+        )).socketUrl,
       ).toContain("wsTicket=bearer");
       expect(yield* Ref.get(answered)).toBe(true);
+      expect(phases).toEqual([phase]);
       expect(yield* Ref.get(preparedTargets)).toEqual([SSH_TARGET]);
       expect(yield* Ref.get(connectionMethods)).toEqual(["ssh"]);
     }),

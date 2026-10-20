@@ -274,7 +274,11 @@ still queued when ssh exits cannot crash the process with `EPIPE`.
 `SshEnvironmentManager` orders `ensureEnvironment` and `disconnectEnvironment` calls for one
 target by arrival. Both resolve the alias before they take the target lock, so a later call can
 reach the lock first. A disconnect does nothing once a newer call for that target exists, and an
-ensure fails as cancelled once a newer disconnect exists.
+ensure ends neutrally once a newer disconnect exists. Compatible calls share one credential-free
+manager preparation; pairing completes separately for each caller. Canceling a waiter detaches
+its observers, while preparation lives in the manager scope. Disconnect invalidates the owner
+before waiting for the target lock. Completion revalidates the generation, selected runtime and
+live attachment; an attachment hint never authorizes use of a replacement runtime.
 
 The client registry keeps one SSH teardown per route in flight (`forkSshDisconnect` in
 `packages/client-runtime/src/connection/registry.ts`). Switching off again while it is stalled
@@ -288,7 +292,10 @@ aliases. It uses thin bridges in `apps/server/src/sshRemote/SshRemoteDispatch.ts
 to reach the existing server manager; it does not create another manager.
 `apps/desktop/src/ssh/DesktopSshEnvironment.ts` owns saved desktop targets and runs
 status, idle updates, and confirmed immediate updates through its existing manager
-and typed IPC (`packages/contracts/src/ipc.ts`). Desktop catalog storage remains
+and typed IPC (`packages/contracts/src/ipc.ts`). Sparse request-scoped phase events replay the
+current phase and remaining preparation budget to joining renderers; terminal readiness carries
+native attachment evidence, not proof of an authenticated client session. Server and desktop
+managers remain separate owners. Desktop catalog storage remains
 client-owned: local native-primary setup reviews trust through the server but
 installs through the desktop manager. Remote or WSL clients cannot use that local
 ownership path.
