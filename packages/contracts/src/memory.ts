@@ -1101,6 +1101,8 @@ export type MemoryStorageStatus = typeof MemoryStorageStatus.Type;
 
 export const MemorySyncStatus = struct({
   memorySpaceId: Schema.NullOr(MemorySpaceId),
+  /** Last locally ready space remains readable while sharing is disabled. */
+  retainedLocalSpaceId: Schema.optionalKey(Schema.NullOr(MemorySpaceId)),
   state: Schema.Literals(["disabled", "bootstrapping", "online", "offline", "error"]),
   pendingSync: NonNegativeInt,
   quarantined: NonNegativeInt,
@@ -1343,6 +1345,8 @@ export const MemoryHistoryPage = bounded(
   struct({
     memoryId: MemoryId,
     revisions: array(revisionPair),
+    /** Selected resolution inputs retained on the server, including bodies too large to preview. */
+    restorableRevisionIds: Schema.optionalKey(distinct(MemoryRevisionId)),
     resolutions: array(resolutionPair),
     tombstone: Schema.NullOr(MemoryTombstone),
     reports: array(MemoryReportDelivery),
@@ -1360,8 +1364,12 @@ export const MemoryHistoryPage = bounded(
           100 &&
         v.revisions.every((r) => r.revision.memoryId === v.memoryId) &&
         v.resolutions.every((r) => r.resolution.memoryId === v.memoryId) &&
+        (v.restorableRevisionIds ?? []).every((id) =>
+          v.revisions.some((r) => r.revision.revisionId === id),
+        ) &&
         (v.localAvailability.exposure === "visible" ||
-          (v.revisions.every((r) => r.payload === null) &&
+          ((v.restorableRevisionIds?.length ?? 0) === 0 &&
+            v.revisions.every((r) => r.payload === null) &&
             v.resolutions.every((r) => r.payload === null))),
     ),
   ),
@@ -1504,7 +1512,13 @@ export type MemoryListInput = typeof MemoryListInput.Type;
 export const MemoryReadInput = struct({ ...space, memoryId: MemoryId });
 export type MemoryReadInput = typeof MemoryReadInput.Type;
 
-export const MemoryHistoryInput = struct({ ...space, ...paging, memoryId: MemoryId });
+export const MemoryHistoryInput = struct({
+  ...space,
+  ...paging,
+  memoryId: MemoryId,
+  /** Page only the retained inputs of this resolution, independently of ordinary history. */
+  resolutionInputsFor: Schema.optionalKey(MemoryResolutionId),
+});
 export type MemoryHistoryInput = typeof MemoryHistoryInput.Type;
 
 export const MemorySyncStatusInput = struct({});

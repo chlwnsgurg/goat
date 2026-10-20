@@ -1916,3 +1916,38 @@ it("r5 bounds upsert request identity and exposes incomplete provenance guidance
     }),
   ).toThrow();
 });
+
+describe("resolution input history selection", () => {
+  const input = { memorySpaceId: id(), memoryId: id(2), resolutionInputsFor: id(7), limit: 20 };
+  it("round-trips one resolution selector with bounded pagination", () => {
+    round(M.MemoryHistoryInput, input);
+    round(M.MemoryHistoryInput, { ...input, cursor: "20", limit: 100 });
+    round(M.MemoryHistoryInput, { memorySpaceId: id(), memoryId: id(2), limit: 20 });
+  });
+  it("rejects invalid IDs, plural selectors and page limits outside the contract", () => {
+    for (const resolutionInputsFor of [null, "invalid", [id(7)]])
+      rejects(M.MemoryHistoryInput, { ...input, resolutionInputsFor });
+    for (const limit of [0, -1, 101, 1.5]) rejects(M.MemoryHistoryInput, { ...input, limit });
+    rejects(M.MemoryHistoryInput, { ...input, resolutionIds: [id(7)] });
+  });
+});
+
+it("keeps restoration availability bounded to visible revisions in the selected page", () => {
+  round(M.MemoryHistoryPage, { ...history, restorableRevisionIds: [revision.revisionId] });
+  rejects(M.MemoryHistoryPage, { ...history, restorableRevisionIds: [id(9999)] });
+  rejects(M.MemoryHistoryPage, {
+    ...history,
+    restorableRevisionIds: [revision.revisionId, revision.revisionId],
+  });
+  rejects(M.MemoryHistoryPage, {
+    ...history,
+    revisions: [{ revision, payload: null }],
+    restorableRevisionIds: [revision.revisionId],
+    localAvailability: {
+      exposure: "held",
+      reasons: ["secret_detected"],
+      deferred: [],
+      cleanupPending: false,
+    },
+  });
+});

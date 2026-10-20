@@ -24,20 +24,30 @@ import {
   presentMemoryResolution,
   presentMemoryRevertResult,
   presentMemoryRevert,
+  memoryLocalSpace,
   presentMemoryReport,
   memoryReportTarget,
   MEMORY_FORGET_NOTICE,
 } from "@goat/client-runtime/memory-presentation";
 import { squashAtomCommandFailure } from "@goat/client-runtime/state/runtime";
+import {
+  memoryBrowseInput,
+  memorySearchInput,
+  memoryProjectScope,
+  memoryPreview,
+  memoryScopeLabel,
+  presentMemoryPage,
+} from "@goat/client-runtime/memory-browsing";
 import { AsyncResult } from "effect/reactivity";
 import * as Option from "effect/Option";
 import { useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import { AppState, Modal, FlatList, Pressable, TextInput, View } from "react-native";
 import * as Crypto from "expo-crypto";
 import { AppText as Text } from "../../components/AppText";
+import { ControlPillMenu } from "../../components/ControlPillMenu";
 import { ScreenScrollView } from "../../components/ScreenScrollView";
 import { memoryEnvironment as memory } from "../../state/memory";
-import { useThreadShell } from "../../state/entities";
+import { useThreadShell, useProjects } from "../../state/entities";
 import { serverEnvironment } from "../../state/server";
 import { environmentSession, useEnvironmentScope, readEnvironmentScope } from "../../state/session";
 import { useAtomCommand } from "../../state/use-atom-command";
@@ -374,10 +384,7 @@ function MemoryConnected({
       };
     }, [load, readAllowed]),
   );
-  const readySpace =
-    status && status.state !== "disabled" && status.state !== "bootstrapping"
-      ? status.memorySpaceId
-      : null;
+  const readySpace = memoryLocalSpace(status);
   if (readySpace && readySpace !== savedSpace) setSavedSpace(readySpace);
   const space = params.memorySpaceId ?? readySpace ?? savedSpace;
   const enabled =
@@ -443,15 +450,121 @@ function MemoryBootstrapRefresh({
 function MemoryBrowser({
   params,
   memorySpaceId,
-  onSyncRefresh,
-  memoryEnabled,
-  status,
+  ...props
 }: {
   readonly params: MemoryScreenParams & { environmentId: EnvironmentId };
   readonly memorySpaceId: MemorySpaceId;
   readonly onSyncRefresh: () => Promise<void>;
   readonly memoryEnabled: boolean;
   readonly status: MemorySyncStatus | null;
+}) {
+  const projects = useProjects().filter(
+    (project) => project.environmentId === params.environmentId,
+  );
+  const getBinding = useAtomCommand(memory.projectBindingGet);
+  const canGetBinding = useAtomValue(memory.projectBindingGet.permissionAtom(params.environmentId));
+  const [scope, setScope] = useState<MemoryScope | null>({ kind: "user" });
+  const [selection, setSelection] = useState("user");
+  const [browsing, setBrowsing] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const generation = useRef(0);
+  useEffect(
+    () => () => {
+      generation.current += 1;
+    },
+    [],
+  );
+  async function choose(project: (typeof projects)[number] | null) {
+    const attempt = ++generation.current;
+    setBrowsing(true);
+    setSelection(project ? `project:${project.id}` : "user");
+    setError(null);
+    setScope(project ? null : { kind: "user" });
+    if (!project) return;
+    const result = await getBinding({
+      environmentId: params.environmentId,
+      input: {
+        memorySpaceId,
+        project: { environmentId: params.environmentId, projectId: project.id },
+      },
+    });
+    if (generation.current !== attempt) return;
+    if (!AsyncResult.isSuccess(result)) {
+      setError("Could not load project memory scope. Choose the project again to retry.");
+      return;
+    }
+    const next = memoryProjectScope(result.value, project.repositoryIdentity);
+    setScope(next);
+    if (!next) setError("This project needs a repository or an explicit shared memory key.");
+  }
+  const scopePicker = (
+    <SettingsSection title="Memory scope">
+      <ControlPillMenu
+        title="Memory scope"
+        actions={[
+          { id: "user", title: "User", state: selection === "user" ? "on" : "off" },
+          ...projects.map((project) => ({
+            id: `project:${project.id}`,
+            title: project.title,
+            state: selection === `project:${project.id}` ? ("on" as const) : ("off" as const),
+            attributes: { disabled: !canGetBinding },
+          })),
+        ]}
+        onPressAction={({ nativeEvent }) => {
+          if (nativeEvent.event === "user") void choose(null);
+          else {
+            const project = projects.find((item) => `project:${item.id}` === nativeEvent.event);
+            if (project && canGetBinding) void choose(project);
+          }
+        }}
+      >
+        <SettingsRow
+          icon="brain"
+          label="Memory scope"
+          value={
+            selection === "user"
+              ? "User"
+              : projects.find((project) => `project:${project.id}` === selection)?.title
+          }
+        />
+      </ControlPillMenu>
+      {!canGetBinding && projects.length > 0 ? (
+        <Copy>Project scope requires memory write permission to look up its shared key.</Copy>
+      ) : null}
+      {error ? <Copy>{error}</Copy> : null}
+      {!scope && !error ? <Copy>Loading project memory scope</Copy> : null}
+    </SettingsSection>
+  );
+  return scope ? (
+    <ScopedMemoryBrowser
+      key={JSON.stringify(scope)}
+      {...props}
+      params={browsing ? { ...params, memoryId: undefined, resolutionId: undefined } : params}
+      memorySpaceId={memorySpaceId}
+      scope={scope}
+      scopePicker={scopePicker}
+    />
+  ) : (
+    <ScreenScrollView>{scopePicker}</ScreenScrollView>
+  );
+}
+
+function ScopedMemoryBrowser({
+  params,
+  memorySpaceId,
+  onSyncRefresh,
+  memoryEnabled,
+  status,
+  scope,
+  scopePicker,
+}: {
+  readonly params: MemoryScreenParams & { environmentId: EnvironmentId };
+  readonly memorySpaceId: MemorySpaceId;
+  readonly onSyncRefresh: () => Promise<void>;
+  readonly memoryEnabled: boolean;
+  readonly status: MemorySyncStatus | null;
+  readonly scope: MemoryScope;
+  readonly scopePicker: React.ReactNode;
 }) {
   const registry = useContext(RegistryContext);
   const canWrite = useAtomValue(memory.upsert.permissionAtom(params.environmentId));
@@ -460,7 +573,6 @@ function MemoryBrowser({
   const [cursor, setCursor] = useState<string | undefined>();
   const [selected, setSelected] = useState(params.memoryId);
   const [creating, setCreating] = useState(false);
-  const [scope] = useState<MemoryScope | undefined>();
   const [quarantine, setQuarantine] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const forget = useAtomCommand(memory.forget);
@@ -504,16 +616,16 @@ function MemoryBrowser({
     setCreating(false);
   }
 
-  const input = {
+  const input = memoryBrowseInput({
     memorySpaceId,
     limit: PAGE_SIZE,
     ...(cursor ? { cursor } : {}),
-    ...(scope ? { scope } : {}),
-  };
+    scope,
+  });
   const atom = search
     ? memory.search({
         environmentId: params.environmentId,
-        input: { ...input, query: search, mode: "fts" },
+        input: memorySearchInput(input, search),
       })
     : memory.list({
         environmentId: params.environmentId,
@@ -538,7 +650,7 @@ function MemoryBrowser({
       <MemoryEditor
         params={params}
         memorySpaceId={memorySpaceId}
-        scope={scope ?? { kind: "user" }}
+        scope={scope}
         onClose={() => {
           setCreating(false);
           registry.refresh(atom);
@@ -557,11 +669,15 @@ function MemoryBrowser({
             onSharingRefresh={() => void onSyncRefresh()}
             sync={status}
           />
+          {scopePicker}
           <SettingsSection title="Memories">
             {!memoryEnabled ? (
               <Copy>Saved memories stay. Turn on memory to save new memories.</Copy>
             ) : null}
             {notice ? <Copy>{notice}</Copy> : null}
+            {page && page.items.length > 0 && presentMemoryPage(page, Boolean(search)) ? (
+              <Copy>{presentMemoryPage(page, Boolean(search))}</Copy>
+            ) : null}
           </SettingsSection>
           <Field label="Search memory" value={query} onChange={setQuery} />
           <Action
@@ -599,7 +715,7 @@ function MemoryBrowser({
       renderItem={({ item }) => (
         <Pressable
           accessibilityRole="button"
-          accessibilityLabel={`Open memory: ${item.status === "active" ? item.payload.text : item.status === "forgotten" ? "Forgotten memory" : "Conflicting memory"}`}
+          accessibilityLabel={`Open memory: ${item.status === "active" ? memoryPreview(item.payload.text) : item.status === "forgotten" ? "Forgotten memory" : "Conflicting memory"}`}
           onPress={() => {
             registry.refresh(
               memory.read({
@@ -615,7 +731,7 @@ function MemoryBrowser({
             className={item.status === "forgotten" ? "text-foreground-muted" : "text-foreground"}
           >
             {item.status === "active"
-              ? item.payload.text
+              ? memoryPreview(item.payload.text)
               : item.status === "forgotten"
                 ? "Forgotten memory"
                 : "Conflicting memory"}
@@ -632,7 +748,7 @@ function MemoryBrowser({
           {AsyncResult.isFailure(result)
             ? "Could not load memory. Refresh to try again."
             : page
-              ? "No matching memories on this page."
+              ? presentMemoryPage(page, Boolean(search))
               : "Waiting for memory access or fresh data. Refresh to try again."}
         </Copy>
       }
@@ -917,7 +1033,11 @@ function MemoryDetails({
                     {formatMemoryTime(view.revertDeadlineUtc)}
                   </Copy>
                   <Copy>{entry.payload?.judgment ?? "Judgment unavailable"}</Copy>
-                  {item && history && memoryEnabled ? (
+                  {item?.status === "active" &&
+                  history &&
+                  memoryEnabled &&
+                  item.revision.revisionId === entry.resolution.resultRevisionId &&
+                  entry.resolution.revertsResolutionId === undefined ? (
                     <MemoryRevertControl
                       environmentId={params.environmentId}
                       item={item}
@@ -985,6 +1105,31 @@ function MemoryRevertControl({
   const allowed = useAtomValue(memory.revertResolution.permissionAtom(environmentId));
   const revert = useAtomCommand(memory.revertResolution);
   const { savedConnectionsById } = useSavedRemoteConnections();
+  const [originalCursor, setOriginalCursor] = useState<string | undefined>();
+  const originalsAtom = memory.history({
+    environmentId,
+    input: {
+      memorySpaceId: item.memorySpaceId,
+      memoryId: item.memoryId,
+      resolutionInputsFor: entry.resolution.resolutionId,
+      limit: 20,
+      ...(originalCursor ? { cursor: originalCursor } : {}),
+    },
+  });
+  const originalsResult = useAtomValue(originalsAtom);
+  const originalPage = AsyncResult.isSuccess(originalsResult)
+    ? Option.getOrNull(originalsResult.value)
+    : null;
+  const revertHistory = {
+    ...history,
+    revisions: originalPage?.revisions ?? [],
+    restorableRevisionIds: originalPage?.restorableRevisionIds ?? [],
+  };
+  const previousHistory = useRef(history);
+  useEffect(() => {
+    if (previousHistory.current !== history) registry.refresh(originalsAtom);
+    previousHistory.current = history;
+  }, [history, registry, originalsAtom]);
   const [selected, setSelected] = useState<MemoryRevisionId | null>(null);
   const [intent, setIntent] = useState<MemoryRevertResolutionInput | null>(null);
   const [result, setResult] = useState<MemoryRevertResult | null>(null);
@@ -995,7 +1140,7 @@ function MemoryRevertControl({
   const display = presentMemoryRevert({
     item,
     entry,
-    history,
+    history: revertHistory,
     now: openedAt,
     ...(selected ? { restoredRevisionId: selected } : {}),
   });
@@ -1017,12 +1162,17 @@ function MemoryRevertControl({
     if (!selected || busy.current || result || !active()) return;
     const current = readCurrent();
     const page = readHistory();
+    const originals = registry.get(originalsAtom);
+    const liveOriginals = AsyncResult.isSuccess(originals)
+      ? Option.getOrNull(originals.value)
+      : null;
     const resolution = page?.resolutions.find(
       (value) => value.resolution.resolutionId === entry.resolution.resolutionId,
     );
     if (
       !current ||
       !page ||
+      !liveOriginals ||
       !resolution ||
       current.memoryId !== item.memoryId ||
       current.memorySpaceId !== item.memorySpaceId ||
@@ -1033,7 +1183,11 @@ function MemoryRevertControl({
       !presentMemoryRevert({
         item: current,
         entry: resolution,
-        history: page,
+        history: {
+          ...page,
+          revisions: liveOriginals.revisions,
+          restorableRevisionIds: liveOriginals.restorableRevisionIds ?? [],
+        },
         now: Date.now(),
         restoredRevisionId: selected,
       }).canRevert
@@ -1061,6 +1215,7 @@ function MemoryRevertControl({
         setResult(response.value);
         setIntent(null);
         setSelected(null);
+        registry.refresh(originalsAtom);
         onSettled();
       }
     } finally {
@@ -1073,6 +1228,31 @@ function MemoryRevertControl({
       <Copy>{display.windowLabel}</Copy>
       {display.timeNotice ? <Copy>{display.timeNotice}</Copy> : null}
       {display.reason ? <Copy>{display.reason}</Copy> : null}
+      {AsyncResult.isFailure(originalsResult) ? (
+        <Copy>Could not load retained originals.</Copy>
+      ) : null}
+      {originalCursor ? (
+        <Action
+          label="First originals page"
+          disabled={pending}
+          onPress={() => {
+            setOriginalCursor(undefined);
+            setSelected(null);
+            setIntent(null);
+          }}
+        />
+      ) : null}
+      {originalPage?.nextCursor ? (
+        <Action
+          label="Next originals page"
+          disabled={pending}
+          onPress={() => {
+            setOriginalCursor(originalPage.nextCursor!);
+            setSelected(null);
+            setIntent(null);
+          }}
+        />
+      ) : null}
       {!allowed ? <Copy>Memory write permission is required to revert.</Copy> : null}
       {error ? <Copy>{error}</Copy> : null}
       {result ? <Copy>{presentMemoryRevertResult(result).label}</Copy> : null}
@@ -1080,7 +1260,7 @@ function MemoryRevertControl({
         <>
           <Copy>Choose the retained original to restore.</Copy>
           {display.restorableRevisionIds.map((id) => {
-            const { number, pair } = originalDisplay(history, id);
+            const { number, pair } = originalDisplay(revertHistory, id);
             return (
               <View key={id}>
                 <Action
@@ -1088,7 +1268,7 @@ function MemoryRevertControl({
                   disabled={pending || intent !== null}
                   onPress={() => setSelected(id)}
                 />
-                <Copy>{pair?.payload?.text ?? "Original unavailable"}</Copy>
+                <Copy>{pair?.payload?.text ?? "Retained original is too large to preview."}</Copy>
                 {pair ? (
                   <Copy>
                     {formatMemoryTime(pair.revision.createdAtUtc)} ·{" "}
@@ -1276,6 +1456,7 @@ function MemoryEditor({
   return (
     <ScreenScrollView contentInsetAdjustmentBehavior="automatic">
       <Action label="Close editor" onPress={onClose} />
+      <Copy>Save to: {memoryScopeLabel(scope)}</Copy>
       {text === null ? (
         <Copy>The draft is no longer available. Close and reopen this memory.</Copy>
       ) : (

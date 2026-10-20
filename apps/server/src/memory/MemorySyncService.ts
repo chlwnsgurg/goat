@@ -2013,6 +2013,16 @@ const make = Effect.gen(function* () {
         const epoch = s.memoryHubVersion;
         resetStatus(epoch);
         const space = s.memoryHub.mode === "disabled" ? null : s.memoryHub.memorySpaceId;
+        const retained = yield* sql<{ space: string }>`
+          SELECT space FROM (
+            SELECT space,last_success_at AS ready_at FROM memory_sync_cursors WHERE bootstrap_state='ready'
+            UNION ALL SELECT space,NULL AS ready_at FROM memory_compaction_state WHERE published=1
+          ) ORDER BY ready_at DESC,space LIMIT 1`.pipe(
+          Effect.mapError(
+            (cause) => new Store.MemoryStorageError({ stage: "retained-local-space", cause }),
+          ),
+        );
+        const retainedLocalSpaceId = retained[0] ? M.MemorySpaceId.make(retained[0].space) : null;
         const hubId = s.memoryHub.mode === "member" ? s.memoryHub.hubEnvironmentId : local;
         const bootstrap = space ? (yield* runtime.readBootstrap(space, hubId)).state : "unbound";
         const persisted = yield* runtime.readProcessing(space, space ? hubId : null);
@@ -2027,6 +2037,7 @@ const make = Effect.gen(function* () {
         const success = lastSuccess?.epoch === epoch ? lastSuccess.at : null;
         return {
           memorySpaceId: space,
+          retainedLocalSpaceId,
           state:
             s.memoryHub.mode === "disabled"
               ? "disabled"

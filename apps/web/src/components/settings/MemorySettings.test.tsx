@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { act, useSyncExternalStore, type ReactNode } from "react";
+import { act, Children, isValidElement, useSyncExternalStore, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, it, vi } from "vite-plus/test";
 import {
@@ -14,6 +14,8 @@ import {
 import * as Schema from "effect/Schema";
 import * as Option from "effect/Option";
 const state = vi.hoisted(() => ({
+  projects: [] as { id: string; title: string; environmentId: string; repositoryIdentity: null }[],
+  requests: [] as { label: string; input: unknown }[],
   allowed: true,
   write: true,
   version: 0,
@@ -57,7 +59,7 @@ vi.mock("@effect/atom-react", async (original) => ({
     useFixtureVersion();
     return atom.label === "syncChanges"
       ? state.exposure
-      : ["forget", "upsert"].includes(atom.label)
+      : ["forget", "upsert", "projectBindingGet"].includes(atom.label)
         ? state.write
         : state.allowed;
   },
@@ -76,6 +78,7 @@ vi.mock("../../state/memory", async () => {
       exposureAtom: () => ({ label: "syncChanges" }),
       ...Object.fromEntries(
         [
+          "projectBindingGet",
           "syncStatus",
           "upsert",
           "forget",
@@ -89,17 +92,33 @@ vi.mock("../../state/memory", async () => {
       ...Object.fromEntries(
         ["list", "search", "read", "history", "readSource"].map((label) => [
           label,
-          () => ({ label }),
+          (request: { input?: { resolutionInputsFor?: string } }) => {
+            state.requests.push({ label, input: request.input });
+            return {
+              label:
+                label === "history" && request.input?.resolutionInputsFor
+                  ? "resolutionInputs"
+                  : label,
+            };
+          },
         ]),
       ),
       draftAtom: ({ draftId }: { draftId: string }) => drafts(draftId),
     },
   };
 });
+vi.mock("../../state/entities", () => ({ useProjects: () => state.projects }));
 vi.mock("../../state/query", () => ({
   useEnvironmentQuery: ({ label }: { label: string }) => {
     useFixtureVersion();
-    return { data: state.queries.get(label) ?? Option.none(), error: null, refresh: state.refresh };
+    return {
+      data:
+        state.queries.get(label) ??
+        (label === "resolutionInputs" ? state.queries.get("history") : undefined) ??
+        Option.none(),
+      error: null,
+      refresh: state.refresh,
+    };
   },
 }));
 vi.mock("../../state/use-atom-command", () => ({
@@ -158,22 +177,41 @@ vi.mock("../ui/select", () => ({
     value: string | null;
     onValueChange: (id: string) => void;
     disabled: boolean;
-  }) => (
-    <select
-      aria-label="Fixture device picker"
-      value={value ?? ""}
-      disabled={disabled}
-      onChange={(e) => onValueChange(e.currentTarget.value)}
-    >
-      <option value="">Choose a device</option>
-      {children}
-    </select>
-  ),
+  }) => {
+    const trigger = Children.toArray(children).find(
+      (child) => isValidElement<{ "aria-label"?: string }>(child) && child.props["aria-label"],
+    );
+    return (
+      <select
+        aria-label={
+          isValidElement<{ "aria-label"?: string }>(trigger)
+            ? trigger.props["aria-label"]
+            : "Fixture device picker"
+        }
+        value={value ?? ""}
+        disabled={disabled}
+        onChange={(e) => onValueChange(e.currentTarget.value)}
+      >
+        <option value="">Choose a device</option>
+        {children}
+      </select>
+    );
+  },
   SelectTrigger: () => null,
   SelectValue: () => null,
   SelectPopup: ({ children }: { children: ReactNode }) => <>{children}</>,
-  SelectItem: ({ children, value }: { children: ReactNode; value: string }) => (
-    <option value={value}>{children}</option>
+  SelectItem: ({
+    children,
+    value,
+    disabled,
+  }: {
+    children: ReactNode;
+    value: string;
+    disabled?: boolean;
+  }) => (
+    <option value={value} disabled={disabled}>
+      {children}
+    </option>
   ),
 }));
 vi.mock("./settingsLayout", () => ({
@@ -236,6 +274,8 @@ beforeEach(() => {
   state.allowed = true;
   state.write = true;
   state.exposure = 0;
+  state.projects = [];
+  state.requests = [];
   state.queries.clear();
   state.executors.clear();
   state.refresh.mockClear();
@@ -325,7 +365,10 @@ async function renderRevert(
   history:
     | typeof retained
     | Pick<MemoryHistoryPage, "revisions" | "revertResults" | "nextCursor"> = retained,
+  originals = history,
 ) {
+  state.queries.set("history", Option.some(history));
+  state.queries.set("resolutionInputs", Option.some(originals));
   const { AtomRegistry } = await import("effect/reactivity");
   const registry = AtomRegistry.make();
   vi.spyOn(registry, "get").mockImplementation(() => state.allowed as never);
@@ -426,7 +469,7 @@ it.each(["pending", "accepted", "revision_changed", "forgotten"] as const)(
     expect(container.querySelector('[aria-label="Revert confirmation"]')).toBeNull();
   },
 );
-it("cancels without sending, revalidates missing originals, and closes on revoke or incomplete history", async () => {
+it("cancels without sending, revalidates missing originals, and closes on revoke, with paged history allowed", async () => {
   await renderRevert();
   await chooseOriginal();
   await click("Cancel");
@@ -436,7 +479,7 @@ it("cancels without sending, revalidates missing originals, and closes on revoke
   await renderRevert({ ...retained, revisions: [] });
   expect(container.querySelector('[aria-label="Revert confirmation"]')).toBeNull();
   await renderRevert({ ...retained, nextCursor: "more" });
-  expect(container.textContent).toContain("Load the remaining history before reverting");
+  expect(container.querySelector('[aria-label="Revert confirmation"]')).not.toBeNull();
   await renderRevert();
   await chooseOriginal();
   state.allowed = false;
@@ -679,7 +722,10 @@ async function supportedScreen(withDetails = true) {
   const get = registry.get.bind(registry);
   vi.spyOn(registry, "get").mockImplementation((atom) => {
     const label = (atom as unknown as { label?: string }).label;
-    if (label) return (["forget", "upsert"].includes(label) ? state.write : state.allowed) as never;
+    if (label)
+      return (
+        ["forget", "upsert", "projectBindingGet"].includes(label) ? state.write : state.allowed
+      ) as never;
     return get(atom);
   });
   state.environment = {
@@ -1486,4 +1532,263 @@ it("removes an open editor and history when shared admission removes the derived
   expect(state.navigate).toHaveBeenCalledWith(
     expect.objectContaining({ to: "/settings/memory", hash: "" }),
   );
+});
+
+it("reopens saved memory after sharing is disabled and the settings screen remounts", async () => {
+  state.queries.set("list", Option.some({ items: [activeItem], nextCursor: null }));
+  await supportedScreen(false);
+  expect(container.textContent).toContain("Synthetic original");
+  state.responses.set(
+    "syncStatus",
+    success({ state: "disabled", memorySpaceId: null, retainedLocalSpaceId: id(1) }),
+  );
+  state.responses.set(
+    "hubSettingsUpdate",
+    success({ view: { version: 3, settings: { mode: "disabled" } }, credential: null }),
+  );
+  await click("Turn sharing off");
+  await click("Stop sharing");
+  await act(async () => root.render(null));
+  await supportedScreen(false);
+  expect(container.textContent).toContain("Synthetic original");
+  expect(container.textContent).toContain("Turn on memory to save new memories.");
+  expect(
+    [...container.querySelectorAll("button")].find((b) => b.textContent === "Remember something")!
+      .disabled,
+  ).toBe(true);
+});
+
+it("chooses an original from its bounded query while the ordinary history page has no input bodies", async () => {
+  await renderRevert({ ...retained, revisions: [], nextCursor: "80" }, retained);
+  expect(container.querySelectorAll('input[type="radio"]')).toHaveLength(1);
+  await chooseOriginal();
+  await click("Revert resolution");
+  expect(state.calls).toHaveBeenCalledWith(
+    expect.objectContaining({ input: expect.objectContaining({ restoredRevisionId: id(3) }) }),
+  );
+});
+
+it("browses, searches and creates in an explicitly bound project, then returns to user scope", async () => {
+  state.projects = [
+    {
+      id: "synthetic-project",
+      title: "Synthetic project",
+      environmentId: "remote-owner",
+      repositoryIdentity: null,
+    },
+  ];
+  const scope = {
+    kind: "project",
+    projectKey: { kind: "explicit", sharedProjectId: "synthetic-shared" },
+  };
+  state.responses.set(
+    "projectBindingGet",
+    success({ projectKey: scope.projectKey, repositoryKey: null }),
+  );
+  state.queries.set("list", Option.some({ items: [], nextCursor: null, projectionWatermark: 1 }));
+  await supportedScreen(false);
+  await selectMemoryScope("project:synthetic-project");
+  expect(state.calls).toHaveBeenCalledWith({
+    environmentId: "remote-owner",
+    input: {
+      memorySpaceId: id(1),
+      project: { environmentId: "remote-owner", projectId: "synthetic-project" },
+    },
+  });
+  expect(state.requests.at(-1)).toMatchObject({ label: "list", input: { scope } });
+  const search = container.querySelector<HTMLInputElement>('[aria-label="Search memories"]')!;
+  await act(async () => {
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(
+      search,
+      "missing",
+    );
+    search.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+  state.queries.set(
+    "search",
+    Option.some({ items: [], nextCursor: "more", projectionWatermark: 1 }),
+  );
+  await click("Search");
+  expect(state.requests.at(-1)).toMatchObject({
+    label: "search",
+    input: { scope, mode: "fts", query: "missing" },
+  });
+  expect(container.textContent).toContain("Continue to the next page");
+  await click("Remember something");
+  expect(container.textContent).toContain("Save to: Project");
+  const textarea = container.querySelector<HTMLTextAreaElement>('[aria-label="Memory text"]')!;
+  await act(async () => {
+    Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")!.set!.call(
+      textarea,
+      "Synthetic project memory",
+    );
+    textarea.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+  state.responses.set("upsert", success({ outcome: "accepted" }));
+  await act(async () =>
+    textarea
+      .closest("form")!
+      .dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })),
+  );
+  expect(state.calls.mock.calls.at(-1)?.[0]).toMatchObject({
+    input: { scope, payload: { text: "Synthetic project memory" } },
+  });
+  await selectMemoryScope("user");
+  expect(state.requests.at(-1)).toMatchObject({
+    label: "list",
+    input: { scope: { kind: "user" } },
+  });
+  expect(container.querySelector('[aria-label="Memory text"]')).toBeNull();
+});
+
+it("does not silently browse user memory when a project binding lookup fails", async () => {
+  state.projects = [
+    {
+      id: "synthetic-project",
+      title: "Synthetic project",
+      environmentId: "remote-owner",
+      repositoryIdentity: null,
+    },
+  ];
+  await supportedScreen(false);
+  await selectMemoryScope("project:synthetic-project");
+  expect(container.textContent).toContain("Could not load project memory scope");
+  expect(container.querySelector('[aria-label="Search memories"]')).toBeNull();
+  state.responses.set(
+    "projectBindingGet",
+    success({
+      projectKey: { kind: "explicit", sharedProjectId: "retry-shared" },
+      repositoryKey: null,
+    }),
+  );
+  await selectMemoryScope("project:synthetic-project");
+  expect(state.requests.at(-1)).toMatchObject({
+    label: "list",
+    input: {
+      scope: { kind: "project", projectKey: { kind: "explicit", sharedProjectId: "retry-shared" } },
+    },
+  });
+  await selectMemoryScope("user");
+  expect(container.querySelector('[aria-label="Search memories"]')).not.toBeNull();
+});
+
+it.each([{ items: [] }, { items: [activeItem] }])(
+  "shows incomplete search coverage with matching items %j",
+  async ({ items }) => {
+    await supportedScreen(false);
+    const input = container.querySelector<HTMLInputElement>('[aria-label="Search memories"]')!;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(
+        input,
+        "pending",
+      );
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    state.queries.set(
+      "search",
+      Option.some({
+        items,
+        nextCursor: null,
+        projectionWatermark: 1,
+        indexCoverage: {
+          status: "partial",
+          eligibleItems: 2,
+          indexedItems: 1,
+          unindexedItems: 1,
+          projectionWatermark: 1,
+        },
+      }),
+    );
+    await click("Search");
+    expect(container.textContent).toContain(
+      "Search index is preparing. Results may be incomplete.",
+    );
+    expect(container.textContent).not.toContain("No memories yet");
+  },
+);
+
+it("ignores a late project binding after returning to user scope", async () => {
+  state.projects = [
+    {
+      id: "synthetic-project",
+      title: "Synthetic project",
+      environmentId: "remote-owner",
+      repositoryIdentity: null,
+    },
+  ];
+  const pending = await deferredResult();
+  state.executors.set("projectBindingGet", () => pending.promise);
+  await supportedScreen(false);
+  await selectMemoryScope("project:synthetic-project");
+  expect(container.textContent).toContain("Loading project memory scope");
+  await selectMemoryScope("user");
+  await act(async () =>
+    pending.resolve(
+      success({
+        projectKey: { kind: "explicit", sharedProjectId: "late-shared" },
+        repositoryKey: null,
+      }),
+    ),
+  );
+  expect(state.requests.at(-1)).toMatchObject({
+    label: "list",
+    input: { scope: { kind: "user" } },
+  });
+  expect(container.textContent).not.toContain("Loading project memory scope");
+});
+
+it("explains why a read-only session cannot look up project keys", async () => {
+  state.write = false;
+  state.projects = [
+    {
+      id: "synthetic-project",
+      title: "Synthetic project",
+      environmentId: "remote-owner",
+      repositoryIdentity: null,
+    },
+  ];
+  await supportedScreen(false);
+  expect(container.textContent).toContain("Project scope requires memory write permission");
+  await selectMemoryScope("project:synthetic-project");
+  expect(state.calls.mock.calls.some(([request]) => request?.input?.project)).toBe(false);
+  expect(container.querySelector('[aria-label="Search memories"]')).not.toBeNull();
+});
+
+async function selectMemoryScope(value: string) {
+  const picker = container.querySelector<HTMLSelectElement>('select[aria-label="Memory scope"]')!;
+  await act(async () => {
+    picker.value = value;
+    picker.dispatchEvent(new Event("change", { bubbles: true }));
+  });
+}
+
+it("keeps scope selection in one row with dozens of projects and selects the last project", async () => {
+  state.projects = Array.from({ length: 60 }, (_, index) => ({
+    id: `project-${index}`,
+    title: `Project ${index}`,
+    environmentId: "remote-owner",
+    repositoryIdentity: null,
+  }));
+  state.responses.set(
+    "projectBindingGet",
+    success({
+      projectKey: { kind: "explicit", sharedProjectId: "last-shared" },
+      repositoryKey: null,
+    }),
+  );
+  await supportedScreen(false);
+  const picker = container.querySelector<HTMLSelectElement>('select[aria-label="Memory scope"]')!;
+  expect(picker.closest("section")!.querySelectorAll("[data-test-row]")).toHaveLength(1);
+  expect(picker.querySelectorAll("option[value^='project:']")).toHaveLength(60);
+  expect(picker.closest("section")!.querySelectorAll("button")).toHaveLength(0);
+  await selectMemoryScope("project:project-59");
+  expect(state.calls.mock.calls.at(-1)?.[0]).toMatchObject({
+    input: { project: { projectId: "project-59" } },
+  });
+  expect(state.requests.at(-1)).toMatchObject({
+    label: "list",
+    input: {
+      scope: { kind: "project", projectKey: { kind: "explicit", sharedProjectId: "last-shared" } },
+    },
+  });
 });

@@ -1178,6 +1178,17 @@ const make = Effect.fnUntraced(function* (
     const value = yield* decode(decodeHistory(input, strict));
     return yield* store.transact(
       Effect.gen(function* () {
+        if (value.resolutionInputsFor !== undefined) {
+          yield* permit;
+          const result = yield* store.readResolutionInputsPage({
+            ...value,
+            resolutionInputsFor: value.resolutionInputsFor,
+          });
+          if (result.scope) yield* requireScope(result.scope);
+          yield* permit;
+          yield* consume(value.memorySpaceId, sourceThread, result.page.revisions);
+          return result.page;
+        }
         const item = yield* read(
           { memorySpaceId: value.memorySpaceId, memoryId: value.memoryId },
           permit,
