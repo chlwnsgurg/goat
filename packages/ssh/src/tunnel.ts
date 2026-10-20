@@ -930,6 +930,10 @@ ensure_remote_node_path() {
   prepend_path_if_dir "/usr/local/bin"
   prepend_path_if_dir "/usr/bin"
   prepend_path_if_dir "/bin"
+  # lsof lives in sbin on macOS. A login PATH that already has node returns
+  # before these lines, so the launch script also prepends them unconditionally.
+  prepend_path_if_dir "/usr/sbin"
+  prepend_path_if_dir "/sbin"
 
   if [ -z "\${VOLTA_HOME:-}" ]; then
     VOLTA_HOME="$HOME/.volta"
@@ -2087,7 +2091,32 @@ $cwd"
 
 // Retained archives have a port-only wait-ready helper. Inspect the kernel's socket owner
 // in the launch shell instead, without adding helper arguments or starts on reconnect.
-export const REMOTE_LAUNCH_LISTENER_SCRIPT = String.raw`server_owns_listener() (
+export const REMOTE_LAUNCH_LISTENER_SCRIPT = String.raw`# macOS login shells often omit /usr/sbin, which is where lsof lives, and archive
+# launches never call ensure_remote_node_path. Resolve lsof without that PATH.
+ensure_listener_path() {
+  prepend_path_if_dir "/usr/sbin"
+  prepend_path_if_dir "/sbin"
+  export PATH
+}
+listener_lsof() {
+  if command -v lsof >/dev/null 2>&1; then
+    command -v lsof
+    return 0
+  fi
+  for candidate in /usr/sbin/lsof /sbin/lsof; do
+    if [ -x "$candidate" ]; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
+listener_probe_available() {
+  if [ "$GOAT_HOST_WINDOWS" = 1 ]; then return 0; fi
+  if [ -d /proc/self/fd ]; then return 0; fi
+  listener_lsof >/dev/null 2>&1
+}
+server_owns_listener() (
   # Protocol parsing leaves noglob enabled; socket fd discovery needs expansion.
   set +f
   if [ "$GOAT_HOST_WINDOWS" = 1 ]; then
@@ -2104,7 +2133,8 @@ export const REMOTE_LAUNCH_LISTENER_SCRIPT = String.raw`server_owns_listener() (
       END { exit !found }
     ' /proc/"$1"/net/tcp 2>/dev/null
   else
-    lsof -nP -a -p "$1" -iTCP@127.0.0.1:"$2" -sTCP:LISTEN -t 2>/dev/null | grep -qx "$1"
+    lsof_bin="$(listener_lsof)" || return 1
+    "$lsof_bin" -nP -a -p "$1" -iTCP@127.0.0.1:"$2" -sTCP:LISTEN -t 2>/dev/null | grep -qx "$1"
   fi
 )
 wait_launched_listener() {
@@ -2197,6 +2227,17 @@ recheck_selected_before_use
 REMOTE_PID=""
 REMOTE_PORT=""
 REMOTE_MANAGED=""
+# Refuse before drain or a fresh start. Stopping the server and then failing
+# this check would leave the host with nothing to attach to.
+ensure_listener_path
+if ! listener_probe_available; then
+  if [ "$NEEDS_OWNED_UPGRADE" = 1 ] || [ "$LIVE_STATUS" = live ]; then
+    printf 'Cannot verify the launched GOAT listener: this host needs /proc or lsof. The existing server was left running.\\n' >&2
+  else
+    printf 'Cannot verify the launched GOAT listener: this host needs /proc or lsof.\\n' >&2
+  fi
+  exit 1
+fi
 if [ "$NEEDS_OWNED_UPGRADE" = 1 ]; then
   UPGRADE_PID="$LIVE_PID"; UPGRADE_PORT="$LIVE_PORT"; UPGRADE_VERSION="$LIVE_VERSION"
   UPGRADE_INSTANCE="$LIVE_INSTANCE_ID"
@@ -2327,9 +2368,6 @@ database_ahead_marked() {
 }
 LAUNCH_ATTEMPTS=0
 while [ -z "$REMOTE_PORT" ]; do
-  if [ "$GOAT_HOST_WINDOWS" = 0 ] && [ ! -d /proc/self/fd ] && ! command -v lsof >/dev/null 2>&1; then
-    printf 'Cannot verify the launched GOAT listener: this host needs /proc or lsof.\\n' >&2; exit 1
-  fi
   LAUNCH_ATTEMPTS=$((LAUNCH_ATTEMPTS + 1))
   REMOTE_PORT="$(pick_port)" || true
   if [ -z "$REMOTE_PORT" ]; then
