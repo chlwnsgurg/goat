@@ -51,7 +51,7 @@ import { useNavigate } from "@tanstack/react-router";
 import * as Option from "effect/Option";
 import { useContext, useEffect, useRef, useState, type ReactNode } from "react";
 import { useEnvironmentSettings } from "../../hooks/useSettings";
-import { useEnvironment, useEnvironmentProviders, useEnvironments } from "../../state/environments";
+import { useEnvironment, useEnvironments } from "../../state/environments";
 import { resolveMemoryModelSelection } from "@goat/shared/serverSettings";
 import { useProjects } from "../../state/entities";
 import {
@@ -231,12 +231,11 @@ function MemoryDestinationContent({
   };
 
   // Turning memory off or a new effective memory model clears a pause, so status is read again.
-  const settings = useEnvironmentSettings(environmentId);
-  const providers = useEnvironmentProviders().get(environmentId) ?? [];
-  const memoryModel = JSON.stringify([
-    settings.memoryEnabled,
-    resolveMemoryModelSelection(settings, providers),
-  ]);
+  // Resolved as the server does when it reports the pause; the string keeps re-renders to
+  // changes of these two values.
+  const memoryModel = useEnvironmentSettings(environmentId, (settings) =>
+    JSON.stringify([settings.memoryEnabled, resolveMemoryModelSelection(settings, undefined)]),
+  );
   const [syncRequest, setSyncRequest] = useState({
     canSync,
     environmentId,
