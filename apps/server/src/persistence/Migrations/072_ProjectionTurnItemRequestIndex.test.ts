@@ -48,6 +48,7 @@ it.effect(
         [86, "FleetGoals"],
         [87, "FleetHealth"],
         [88, "ThreadRunObservedChecks"],
+        [89, "MemoryRevisionCheckpointSize"],
       ]);
       yield* ProjectionTurnItemRequestIndex;
       assert.deepStrictEqual(yield* runMigrations(), []);

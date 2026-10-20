@@ -252,5 +252,5 @@ export default Effect.gen(function* () {
   yield* sql`INSERT INTO memory_quota_counters(space,dimension,scope_key,value) SELECT '_checkpoint_dirty',space,'l:'||rowid,1 FROM memory_import_lineage`;
   yield* sql`INSERT INTO memory_quota_counters(space,dimension,scope_key,value) SELECT '_checkpoint_dirty',space,'s:'||rowid,1 FROM memory_import_keys WHERE key_kind IN ('sourceKey','content','sourceExclusion')`;
   yield* sql`INSERT INTO memory_quota_counters(space,dimension,scope_key,value) VALUES ('_hub_global','checkpoint_codec','',1)`;
-  yield* refreshCheckpointAccounting();
+  yield* refreshCheckpointAccounting("recompute");
 });
