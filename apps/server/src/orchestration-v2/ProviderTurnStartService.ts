@@ -1347,6 +1347,13 @@ export const layer: Layer.Layer<
         !noteContinuation
           ? session
           : makeDeliverySession(session, startWithHandoffs);
+      const recoveredProviderTurn =
+        input.reattach === true
+          ? projection.providerTurns.find(
+              (turn) =>
+                turn.providerThreadId === providerThread.id && turn.runAttemptId === attempt.id,
+            )
+          : undefined;
       yield* runExecution.startRootRun({
         commandId: CommandId.make(`command:effect:provider-turn.start:${run.id}`),
         appThread: projection.thread,
@@ -1371,12 +1378,13 @@ export const layer: Layer.Layer<
           subagent.providerThreadId === null ? [] : [subagent.providerThreadId],
         ),
         providerTurnOrdinal:
+          recoveredProviderTurn?.ordinal ??
           Math.max(
             0,
             ...projection.providerTurns
               .filter((turn) => turn.providerThreadId === providerThread.id)
               .map((turn) => turn.ordinal),
-          ) + (input.reattach === true ? 0 : 1),
+          ) + 1,
         // Legacy accepted attempts have no native id. They count only before
         // a replacement, while no accepted attempt records a native identity.
         nativeThreadHasTurns:
@@ -1417,7 +1425,8 @@ export const layer: Layer.Layer<
           return yield* start(input).pipe(
             Effect.catch((cause) =>
               Effect.gen(function* () {
-                if (input.reattach !== true) return yield* Effect.fail(cause);
+                if (input.reattach !== true || input.willRetry === true)
+                  return yield* Effect.fail(cause);
                 const current = yield* projectionStore.getTurnStartContext(
                   input.threadId,
                   input.runId,

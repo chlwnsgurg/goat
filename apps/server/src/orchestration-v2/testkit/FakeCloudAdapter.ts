@@ -186,6 +186,7 @@ export const makeFakeCloudAdapter = Effect.fnUntraced(function* (
   const finish = Effect.fnUntraced(function* (
     linkOnly = false,
     status: "succeeded" | "cancelled" = "succeeded",
+    beforeTerminal: Effect.Effect<void> = Effect.void,
   ) {
     const input = yield* Ref.get(current);
     if (!input) return;
@@ -202,6 +203,7 @@ export const makeFakeCloudAdapter = Effect.fnUntraced(function* (
       localChangesExcluded: input.providerThread.cloudTask?.localChangesExcluded ?? false,
       updatedAt: DateTime.formatIso(now),
     });
+    yield* beforeTerminal;
     yield* publish({
       type: "turn.terminal",
       driver: fakeCloudDriver,

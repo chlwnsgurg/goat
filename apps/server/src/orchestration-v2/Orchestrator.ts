@@ -9900,6 +9900,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       const hasActiveCloudTask =
         providerThread?.cloudTask?.status === "running" ||
         providerThread?.cloudTask?.status === "submitting";
+      const hasRecordedCloudTask = providerThread?.cloudTask !== undefined;
       const hasBackgroundWork =
         run?.id === projection.runs.findLast((candidate) => candidate.status !== "queued")?.id &&
         derivePendingBackgroundWork({
@@ -10073,7 +10074,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         }
       }
 
-      if (hasActiveCloudTask && providerTurn === undefined) {
+      if (hasRecordedCloudTask && providerTurn === undefined) {
         return yield* new OrchestratorDispatchError({
           commandId: command.commandId,
           commandType: command.type,
