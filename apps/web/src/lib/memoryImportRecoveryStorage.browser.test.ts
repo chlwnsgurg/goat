@@ -1,4 +1,3 @@
-// @vitest-environment jsdom
 import { afterEach, beforeEach, expect, it, vi } from "vite-plus/test";
 import * as M from "@goat/contracts";
 import { createMemoryImportWorkflow } from "@goat/client-runtime/memory-import-workflow";

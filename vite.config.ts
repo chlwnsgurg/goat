@@ -25,13 +25,6 @@ const DOM_TEST_ENVIRONMENT_ALLOWLIST: Array<string> = [
   "apps/mobile/src/features/threads/ThreadHeader.memory.test.tsx",
   "apps/mobile/src/features/threads/ThreadMarkdownImage.test.tsx",
   "apps/mobile/src/lib/visible-animations.test.tsx",
-  "apps/web/src/components/decisions/DecisionInbox.test.tsx",
-  "apps/web/src/components/decisions/DecisionUserInputForm.test.tsx",
-  "apps/web/src/components/sidebar/SidebarChrome.test.tsx",
-  "apps/web/src/components/sidebar/SidebarEnvironmentConnection.test.tsx",
-  "apps/web/src/components/sidebar/useThreadContextDrag.test.ts",
-  "apps/web/src/lib/memoryImportRecoveryStorage.test.ts",
-  "apps/web/src/lib/storageMigration.integration.test.ts",
 ];
 
 const RESTRICTED_IMPORT_PATHS = [
