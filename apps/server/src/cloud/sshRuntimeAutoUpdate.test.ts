@@ -7,7 +7,8 @@ import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
-import { DEFAULT_SERVER_SETTINGS } from "@goat/contracts";
+import { DEFAULT_SERVER_SETTINGS, ORCHESTRATION_PROTOCOL_VERSION } from "@goat/contracts";
+import { SSH_RUNTIME_PROTOCOL_VERSION } from "@goat/shared/sshRuntimeProtocol";
 import * as ServerConfig from "../config.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
@@ -39,7 +40,7 @@ const makeHarness = Effect.fn("test.ssh_runtime_auto_update.harness")(function* 
   const state = {
     activity: "idle" as "idle" | "busy",
     enabled: true,
-    protocol: { ssh: 2, orchestration: 9 },
+    protocol: { ssh: SSH_RUNTIME_PROTOCOL_VERSION, orchestration: ORCHESTRATION_PROTOCOL_VERSION },
     installCode: 0,
     executableSha256: "exe-sha",
     preflight: undefined as Record<string, unknown> | undefined,
@@ -198,6 +199,23 @@ it.layer(NodeServices.layer)("SSH runtime auto-update", (it) => {
     }),
   );
 
+  it.effect("leaves a target with a protocol this runtime does not serve to the clients", () =>
+    Effect.gen(function* () {
+      const h = yield* makeHarness();
+      h.state.protocol = {
+        ssh: SSH_RUNTIME_PROTOCOL_VERSION,
+        orchestration: ORCHESTRATION_PROTOCOL_VERSION + 1,
+      };
+      expect((yield* h.runtime.prepare(target).pipe(Effect.flip)).reason).toContain(
+        "does not serve",
+      );
+      // Never prepared, so it can never be activated or win arbitration.
+      expect((yield* h.runtime.activate(target).pipe(Effect.flip)).reason).toContain(
+        "was not prepared",
+      );
+    }),
+  );
+
   it.effect("refuses a target whose preflight is blocked", () =>
     Effect.gen(function* () {
       const h = yield* makeHarness();
@@ -226,8 +244,10 @@ it.layer(NodeServices.layer)("SSH runtime auto-update", (it) => {
       expect(launch?.script).toContain("REFRESH_IF_IDLE=1");
       expect(launch?.script).toContain("DRAIN_AUTOMATIC=1");
       expect(launch?.script).toContain("EXPECTED_INSTALLED_SHA256='exe-sha'");
-      // The script checks the candidate against the target's protocol, not this build's.
-      expect(launch?.script).toContain('[ "$2" = "2" ] && [ "$3" = "9" ] && return 0');
+      // The script checks the candidate against the protocol the target binary reported.
+      expect(launch?.script).toContain(
+        `[ "$2" = "${SSH_RUNTIME_PROTOCOL_VERSION}" ] && [ "$3" = "${ORCHESTRATION_PROTOCOL_VERSION}" ] && return 0`,
+      );
       expect(launch?.env.HOME).toBe(h.home);
       // The supervisor and its rollback must not reuse this server's replacement identity.
       expect(launch?.env[SSH_REPLACEMENT_ID_ENV]).toBeUndefined();

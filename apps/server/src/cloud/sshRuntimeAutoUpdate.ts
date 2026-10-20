@@ -6,6 +6,10 @@ import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 import { ServerSelfUpdateError } from "@goat/contracts";
 import { CLI_RELEASE_BASE_URL_ENV } from "@goat/shared/cliRelease";
+import {
+  compareRuntimeProtocols,
+  servedRuntimeProtocolRanges,
+} from "@goat/shared/sshRuntimeProtocol";
 import { REMOTE_RUNTIME_STATE_KEY } from "@goat/ssh/command";
 import {
   buildRemoteHostDownloadScript,
@@ -294,7 +298,23 @@ export const make = Effect.fn("server.ssh_runtime_auto_update.make")(function* (
       const tokens = /^(\S+) (\d+) (\d+) \d+ \d+$/u.exec(lastLine(own.stdout));
       if (own.code !== 0 || tokens?.[1] !== targetVersion)
         return yield* fail(`goat@${targetVersion} did not report its protocol.`);
-      protocols.set(targetVersion, { ssh: Number(tokens[2]), orchestration: Number(tokens[3]) });
+      const protocol = { ssh: Number(tokens[2]), orchestration: Number(tokens[3]) };
+      // Only a target this runtime already serves keeps the idle-only refresh path, and lets the
+      // target's supervisor accept this version again on rollback. A protocol change stays with
+      // the clients, which replace an incompatible runtime themselves.
+      if (
+        compareRuntimeProtocols(
+          {
+            ssh: { min: protocol.ssh, max: protocol.ssh },
+            orchestration: { min: protocol.orchestration, max: protocol.orchestration },
+          },
+          { protocol: servedRuntimeProtocolRanges() },
+        ) !== "compatible"
+      )
+        return yield* fail(
+          `goat@${targetVersion} speaks a protocol this runtime does not serve; a client on that release replaces it.`,
+        );
+      protocols.set(targetVersion, protocol);
       yield* Ref.set(pending, targetVersion);
     });
 

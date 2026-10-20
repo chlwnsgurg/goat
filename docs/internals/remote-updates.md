@@ -385,8 +385,12 @@ the default `~/.goat` home on a POSIX host. Windows hosts, whose supervisor need
 native detached spawn, stay client-driven. Preparation runs the same host download a
 client would, verified against `SHA256SUMS`, checks the executable against its install
 record, and runs `__service-preflight`. Activation checks idle, then runs the owning
-launch script in its own session with the runtime's own release as the requested
-version. The script holds the host replacement lock, checks idle again, drains (which
+launch script in its own session with the target release as the requested version.
+The script checks the candidate against the protocol the target binary reports. The
+runtime only moves to a target whose protocol it already serves, so the script takes
+its idle-only refresh path and the target's supervisor accepts this version again on
+rollback. A release that changes the protocol is left to clients: a client on that
+release finds the runtime incompatible and replaces it as before. The script holds the host replacement lock, checks idle again, drains (which
 closes admission) and starts the ADR-0013 supervisor. The drain stops this server, so
 nothing in it can interrupt the swap. A busy check, a cancelled drain, or a client
 holding the lock retries in 10 minutes.
@@ -400,7 +404,8 @@ Clients sharing a runtime hold no lock or lease. A new client marks its automati
 refresh of an older runtime with `automatic: true` on the drain request. The runtime
 arbitrates it with `arbitrateAutomaticTargets` against its own prepared target and
 answers `cancelled` without draining unless the request is the newest same-channel,
-strictly newer, never-failed candidate. Manual and confirmed updates, incompatible
+strictly newer, never-failed candidate, and while `automaticServerUpdates` is off it
+drops every marked request. Manual and confirmed updates, incompatible
 replacements, and requests from older clients carry no marker and behave as before,
 so a runtime on a dev build, or an older client moving a runtime to its release, is
 unchanged. Compatibility after an update is still `hostCompatibilityOf`: a runtime newer

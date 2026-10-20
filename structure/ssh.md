@@ -243,7 +243,8 @@ the same replacement lock, idle check, drain and supervisor as a client. A new c
 `GOAT_RUNTIME_DRAIN_AUTOMATIC=1` to `__ssh-helper drain` for an automatic refresh of an older
 runtime, never for a manual or confirmed update or an incompatible runtime. The runtime answers
 such a request `cancelled` without draining when its target is not the newest same-channel,
-strictly newer, never-failed candidate, and the client keeps its attachment. The supervisor
+strictly newer, never-failed candidate, or while its `automaticServerUpdates` is off; the
+client keeps its attachment. The supervisor
 records every outcome in `last-replacement.json` next to `run-t3.sh`.
 
 Manual updates target the owning manager's version too. An idle update waits for running work;
