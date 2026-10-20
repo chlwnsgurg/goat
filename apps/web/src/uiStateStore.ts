@@ -1,18 +1,18 @@
+import { migratingStorage } from "@goat/client-runtime/storage-migration";
 import { Debouncer } from "@tanstack/react-pacer";
-import type { PullRequestMergeMethod } from "@t3tools/contracts";
+import type { PullRequestMergeMethod } from "@goat/contracts";
 import { create } from "zustand";
 import { normalizeProjectPathForComparison } from "./lib/projectPaths";
 
-export const PERSISTED_STATE_KEY = "t3code:ui-state:v1";
-// Version 1 stored card visibility, not folder expansion.
+export const PERSISTED_STATE_KEY = "goat:ui-state:v1";
 const THREAD_CHANGED_FILES_EXPANSION_VERSION = 2;
 const LEGACY_PERSISTED_STATE_KEYS = [
-  "t3code:renderer-state:v8",
-  "t3code:renderer-state:v7",
-  "t3code:renderer-state:v6",
-  "t3code:renderer-state:v5",
-  "t3code:renderer-state:v4",
-  "t3code:renderer-state:v3",
+  "goat:renderer-state:v8",
+  "goat:renderer-state:v7",
+  "goat:renderer-state:v6",
+  "goat:renderer-state:v5",
+  "goat:renderer-state:v4",
+  "goat:renderer-state:v3",
   "codething:renderer-state:v4",
   "codething:renderer-state:v3",
   "codething:renderer-state:v2",
@@ -31,14 +31,12 @@ export interface PersistedUiState {
   threadChangedFilesExpansionVersion?: number;
   threadChangedFilesExpandedById?: Record<string, Record<string, boolean>>;
   pullRequestMergeMethod?: string;
+  fleetConsoleCollapsed?: boolean;
 }
 
 export interface UiProjectState {
   projectExpandedById: Record<string, boolean>;
   projectOrder: string[];
-  // Logical project key the sidebar list is scoped to, or null for "all
-  // projects". Lives here so routes that unmount the sidebar (Settings)
-  // cannot reset the filter.
   sidebarProjectScopeKey: string | null;
 }
 
@@ -55,8 +53,12 @@ export interface UiPullRequestState {
   pullRequestMergeMethod: PullRequestMergeMethod;
 }
 
+export interface UiFleetState {
+  fleetConsoleCollapsed: boolean;
+}
+
 export interface UiState
-  extends UiProjectState, UiThreadState, UiEndpointState, UiPullRequestState {}
+  extends UiProjectState, UiThreadState, UiEndpointState, UiPullRequestState, UiFleetState {}
 
 const initialState: UiState = {
   projectExpandedById: {},
@@ -66,11 +68,11 @@ const initialState: UiState = {
   threadChangedFilesExpandedById: {},
   defaultAdvertisedEndpointKey: null,
   pullRequestMergeMethod: "merge",
+  fleetConsoleCollapsed: false,
 };
 
 const LEGACY_PROJECT_CWD_PREFERENCE_PREFIX = "legacy-project-cwd:";
 const LEGACY_PROJECT_EXPANSION_DEFAULT_KEY = "legacy-project-expansion-default";
-let legacyKeysCleanedUp = false;
 
 export function legacyProjectCwdPreferenceKey(cwd: string): string {
   return `${LEGACY_PROJECT_CWD_PREFERENCE_PREFIX}${normalizeProjectPathForComparison(cwd)}`;
@@ -158,6 +160,7 @@ export function parsePersistedState(parsed: PersistedUiState): UiState {
     pullRequestMergeMethod: isPullRequestMergeMethod(parsed.pullRequestMergeMethod)
       ? parsed.pullRequestMergeMethod
       : initialState.pullRequestMergeMethod,
+    fleetConsoleCollapsed: parsed.fleetConsoleCollapsed === true,
   };
 }
 
@@ -166,10 +169,10 @@ function readPersistedState(): UiState {
     return initialState;
   }
   try {
-    const raw = window.localStorage.getItem(PERSISTED_STATE_KEY);
+    const raw = migratingStorage(window.localStorage).getItem(PERSISTED_STATE_KEY);
     if (!raw) {
       for (const legacyKey of LEGACY_PERSISTED_STATE_KEYS) {
-        const legacyRaw = window.localStorage.getItem(legacyKey);
+        const legacyRaw = migratingStorage(window.localStorage).getItem(legacyKey);
         if (!legacyRaw) {
           continue;
         }
@@ -221,7 +224,7 @@ export function persistState(state: UiState): void {
         ([key]) => key !== LEGACY_PROJECT_EXPANSION_DEFAULT_KEY,
       ),
     );
-    window.localStorage.setItem(
+    migratingStorage(window.localStorage).setItem(
       PERSISTED_STATE_KEY,
       JSON.stringify({
         projectExpandedById,
@@ -232,14 +235,9 @@ export function persistState(state: UiState): void {
         threadChangedFilesExpansionVersion: THREAD_CHANGED_FILES_EXPANSION_VERSION,
         threadChangedFilesExpandedById: state.threadChangedFilesExpandedById,
         pullRequestMergeMethod: state.pullRequestMergeMethod,
+        fleetConsoleCollapsed: state.fleetConsoleCollapsed,
       } satisfies PersistedUiState),
     );
-    if (!legacyKeysCleanedUp) {
-      legacyKeysCleanedUp = true;
-      for (const legacyKey of LEGACY_PERSISTED_STATE_KEYS) {
-        window.localStorage.removeItem(legacyKey);
-      }
-    }
   } catch {
     // Ignore quota/storage errors to avoid breaking chat UX.
   }
@@ -430,6 +428,7 @@ interface UiStateStore extends UiState {
   setDefaultAdvertisedEndpointKey: (key: string | null) => void;
   setSidebarProjectScopeKey: (projectKey: string | null) => void;
   setPullRequestMergeMethod: (method: PullRequestMergeMethod) => void;
+  setFleetConsoleCollapsed: (collapsed: boolean) => void;
   setProjectExpanded: (projectIds: string | readonly string[], expanded: boolean) => void;
   reorderProjects: (
     currentProjectOrder: readonly string[],
@@ -451,6 +450,12 @@ export const useUiStateStore = create<UiStateStore>((set) => ({
   setSidebarProjectScopeKey: (projectKey) =>
     set((state) => setSidebarProjectScopeKey(state, projectKey)),
   setPullRequestMergeMethod: (method) => set((state) => setPullRequestMergeMethod(state, method)),
+  setFleetConsoleCollapsed: (collapsed) =>
+    set((state) =>
+      state.fleetConsoleCollapsed === collapsed
+        ? state
+        : { ...state, fleetConsoleCollapsed: collapsed },
+    ),
   setProjectExpanded: (projectIds, expanded) =>
     set((state) => setProjectExpanded(state, projectIds, expanded)),
   reorderProjects: (currentProjectOrder, draggedProjectIds, targetProjectIds) =>

@@ -1,14 +1,8 @@
-/**
- * GitHub's pull request template convention: the first single template found at a known path,
- * or the only Markdown file in a template directory, read from the committed base tree.
- *
- * @module source-control-github/server/gitHubChangeRequestTemplate
- */
-import type { GitCommandError } from "@t3tools/contracts";
+import type { GitCommandError } from "@goat/contracts";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 
-import type * as SourceControlHost from "@t3tools/source-control-core/server/SourceControlHost";
+import type * as SourceControlHost from "@goat/source-control-core/server/SourceControlHost";
 
 const TEMPLATE_MAX_BYTES = 8_000;
 const TREE_LIST_MAX_BYTES = 100_000;

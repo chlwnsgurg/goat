@@ -1,7 +1,13 @@
 import {
   CommandId,
+  EventId,
+  type OrchestrationV2CloudTask,
+  OrchestrationV2ProviderThreadJson,
+  ProviderInstanceId,
+  ProviderSessionId,
   type OrchestrationV2Run,
   OrchestrationV2DomainEvent,
+  type OrchestrationV2ProviderThread,
   OrchestrationV2StoredEvent,
   ProviderThreadId,
   RunAttemptId,
@@ -10,7 +16,7 @@ import {
   NodeId,
   type ProjectId,
   ThreadId,
-} from "@t3tools/contracts";
+} from "@goat/contracts";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
@@ -33,9 +39,10 @@ import * as ProjectionStore from "./ProjectionStore.ts";
 import * as ProjectStore from "./ProjectStore.ts";
 import * as TurnItemPositionStore from "./TurnItemPositionStore.ts";
 
-/**
- * ERRORS
- */
+const decodeProviderThreadPayload = Schema.decodeUnknownEffect(
+  Schema.fromJsonString(OrchestrationV2ProviderThreadJson),
+);
+
 export class EventSinkWriteError extends Schema.TaggedError<EventSinkWriteError>()(
   "EventSinkWriteError",
   {
@@ -67,21 +74,40 @@ export class EventSinkStreamError extends Schema.TaggedError<EventSinkStreamErro
 export const EventSinkV2Error = Schema.Union([EventSinkWriteError, EventSinkStreamError]);
 export type EventSinkV2Error = typeof EventSinkV2Error.Type;
 
-/**
- * SERVICE DEFINITION
- */
 export interface EventSinkV2Shape {
   readonly write: (input: {
+    /** Return no events if another thread owns this native session at commit time. */
+    readonly unlessNativeThreadOwned?: Pick<
+      OrchestrationV2ProviderThread,
+      "driver" | "providerInstanceId" | "appThreadId" | "nativeThreadRef"
+    >;
     readonly guardPendingUserInputCancellations?: boolean;
     readonly commandId?: CommandId;
     readonly events: ReadonlyArray<OrchestrationV2DomainEvent>;
   }) => Effect.Effect<ReadonlyArray<OrchestrationV2StoredEvent>, EventSinkV2Error>;
   readonly writeWithEffects: (input: {
+    readonly unlessNativeThreadOwned?: Pick<
+      OrchestrationV2ProviderThread,
+      "driver" | "providerInstanceId" | "appThreadId" | "nativeThreadRef"
+    >;
     readonly guardPendingUserInputCancellations?: boolean;
     readonly commandId?: CommandId;
     readonly events: ReadonlyArray<OrchestrationV2DomainEvent>;
     readonly effects: ReadonlyArray<EffectOutbox.PendingOrchestrationEffectV2>;
   }) => Effect.Effect<ReadonlyArray<OrchestrationV2StoredEvent>, EventSinkV2Error>;
+  /** Merge late cloud metadata without changing settled run or task state. */
+  readonly writeCloudTaskMetadata: (input: {
+    readonly eventId: EventId;
+    readonly threadId: ThreadId;
+    readonly providerThreadId: ProviderThreadId;
+    readonly providerSessionId: ProviderSessionId;
+    readonly providerInstanceId: ProviderInstanceId;
+    readonly runId: RunId;
+    readonly activeAttemptId: RunAttemptId;
+    readonly expectedLastRunOrdinal: number;
+    readonly nativeId: string;
+    readonly metadata: Pick<OrchestrationV2CloudTask, "url" | "title" | "progress">;
+  }) => Effect.Effect<void, EventSinkV2Error>;
   readonly writeIfRunCurrent: (input: {
     readonly guardPendingUserInputCancellations?: boolean;
     readonly commandId?: CommandId;
@@ -119,6 +145,22 @@ export interface EventSinkV2Shape {
     },
     EventSinkV2Error
   >;
+  /**
+   * Atomically commit only while the stored provider thread still equals
+   * `expected`, the row its writer read, so a read-modify-write of the row
+   * cannot overwrite an update published in between. The whole row is
+   * compared because not every writer moves `updatedAt`.
+   */
+  readonly writeIfProviderThreadUnchanged: (input: {
+    readonly expected: OrchestrationV2ProviderThread;
+    readonly events: ReadonlyArray<OrchestrationV2DomainEvent>;
+  }) => Effect.Effect<
+    {
+      readonly committed: boolean;
+      readonly storedEvents: ReadonlyArray<OrchestrationV2StoredEvent>;
+    },
+    EventSinkV2Error
+  >;
   readonly commitCommand: (input: {
     readonly commandId: CommandId;
     readonly threadId: ThreadId;
@@ -126,6 +168,8 @@ export interface EventSinkV2Shape {
     readonly acceptedAt: DateTime.Utc;
     readonly events: ReadonlyArray<OrchestrationV2DomainEvent>;
     readonly effects: ReadonlyArray<EffectOutbox.PendingOrchestrationEffectV2>;
+    /** Recover runtime work without changing projections; requires at least one effect. */
+    readonly allowEffectOnly?: boolean;
     readonly cancelUnsettledEffects?: {
       readonly effectTypes: ReadonlyArray<EffectOutbox.OrchestrationEffectRequestV2["type"]>;
       readonly reason: string;
@@ -146,10 +190,6 @@ export interface EventSinkV2Shape {
     readonly rejectedAt: DateTime.Utc;
     readonly error: string;
   }) => Effect.Effect<CommandReceiptStore.CommandReceiptV2, EventSinkV2Error>;
-  /**
-   * Append a project event, fold it into its row and record the receipt in one
-   * transaction. A reused command id commits nothing and returns its receipt.
-   */
   readonly commitProjectCommand: (input: {
     readonly commandId: CommandId;
     readonly projectId: ProjectId;
@@ -160,7 +200,6 @@ export interface EventSinkV2Shape {
     { readonly receipt: CommandReceiptStore.ProjectCommandReceiptV2; readonly committed: boolean },
     EventSinkV2Error
   >;
-  /** Record a rejected project command, or return the receipt its command id already has. */
   readonly commitRejectedProjectCommand: (input: {
     readonly commandId: CommandId;
     readonly projectId: ProjectId;
@@ -171,7 +210,6 @@ export interface EventSinkV2Shape {
   readonly stream: (input?: {
     readonly threadId?: ThreadId;
     readonly afterSequence?: number;
-    /** Filter before queuing live events so a busy worker retains only the events it handles. */
     readonly eventType?: OrchestrationV2DomainEvent["type"];
     /** Bound RPC subscribers; internal workers must not drop their subscription under load. */
     readonly bounded?: boolean;
@@ -187,12 +225,9 @@ export interface EventSinkV2Shape {
 }
 
 export class EventSinkV2 extends Context.Service<EventSinkV2, EventSinkV2Shape>()(
-  "t3/orchestration-v2/EventSink/EventSinkV2",
+  "goat/orchestration-v2/EventSink/EventSinkV2",
 ) {}
 
-/**
- * IMPLEMENTATIONS
- */
 const layerBase: Layer.Layer<
   EventSinkV2,
   never,
@@ -234,10 +269,7 @@ const layerBase: Layer.Layer<
     // Transactions commit one at a time, but each writer publishes after its
     // commit. If a writer is descheduled in between, a later commit reaches
     // subscribers first, and clients drop any event at or below the newest
-    // sequence they have applied. So a writer takes this lane as the last step
-    // of its transaction and holds it until it has published. Publishing never
-    // waits, so a writer that holds the transaction while it waits for the
-    // lane is not blocked for long.
+    // sequence they have applied.
     const publishLane = yield* Semaphore.make(1);
     const commitThenPublish = <A, E, R>(
       transaction: Effect.Effect<A, E, R>,
@@ -308,6 +340,47 @@ const layerBase: Layer.Layer<
         });
       });
 
+    // Cloud finalization writes a message and its ordinary assistant item together.
+    // Check persisted items inside the ownership-gated transaction: exact provider
+    // text from this run is reused; other text and prior runs never suppress a result.
+    // Replayed synthetic results keep their original message, position and timing.
+    const guardCloudResultItems = (events: ReadonlyArray<OrchestrationV2DomainEvent>) =>
+      Effect.gen(function* () {
+        const skippedItems = new Set<string>();
+        const skippedMessages = new Set<string>();
+        for (const event of events) {
+          if (
+            event.type !== "turn-item.updated" ||
+            event.payload.type !== "assistant_message" ||
+            event.payload.runId === null ||
+            event.payload.id !== `turn-item:cloud-result:${event.payload.runId}`
+          )
+            continue;
+          const item = event.payload;
+          const runId = event.payload.runId;
+          const { turnItems } = yield* projectionStore.getThreadRecords(
+            item.threadId,
+            ["turnItems"],
+            { turnItemRunId: runId, turnItemTypes: ["assistant_message"] },
+          );
+          if (turnItems.some((existing) => existing.id === item.id)) {
+            skippedItems.add(item.id);
+            skippedMessages.add(item.messageId);
+          } else if (
+            turnItems.some(
+              (existing) => existing.type === "assistant_message" && existing.text === item.text,
+            )
+          ) {
+            skippedItems.add(item.id);
+          }
+        }
+        return events.filter((event) =>
+          event.type === "turn-item.updated"
+            ? !skippedItems.has(event.payload.id)
+            : event.type !== "message.updated" || !skippedMessages.has(event.payload.id),
+        );
+      });
+
     const normalizeEvents = (events: ReadonlyArray<OrchestrationV2DomainEvent>) => {
       const runOrdinals = new Map(
         events.flatMap((event) =>
@@ -316,18 +389,24 @@ const layerBase: Layer.Layer<
             : [],
         ),
       );
-      return Effect.forEach(
-        events,
-        (event): Effect.Effect<OrchestrationV2DomainEvent, unknown> =>
-          event.type === "turn-item.updated"
-            ? turnItemPositions
-                .normalize(
-                  event.payload,
-                  event.payload.runId === null ? undefined : runOrdinals.get(event.payload.runId),
-                )
-                .pipe(Effect.map((payload) => ({ ...event, payload })))
-            : Effect.succeed(event),
-        { concurrency: 1 },
+      return guardCloudResultItems(events).pipe(
+        Effect.flatMap((guarded) =>
+          Effect.forEach(
+            guarded,
+            (event): Effect.Effect<OrchestrationV2DomainEvent, unknown> =>
+              event.type === "turn-item.updated"
+                ? turnItemPositions
+                    .normalize(
+                      event.payload,
+                      event.payload.runId === null
+                        ? undefined
+                        : runOrdinals.get(event.payload.runId),
+                    )
+                    .pipe(Effect.map((payload) => ({ ...event, payload })))
+                : Effect.succeed(event),
+            { concurrency: 1 },
+          ),
+        ),
       );
     };
 
@@ -361,6 +440,100 @@ const layerBase: Layer.Layer<
         }
       });
 
+    const writeCloudTaskMetadataEffect = Effect.fn(
+      "orchestrationV2.EventSink.writeCloudTaskMetadata",
+    )(function* (input: Parameters<EventSinkV2Shape["writeCloudTaskMetadata"]>[0]) {
+      yield* commitThenPublish(
+        Effect.gen(function* () {
+          const rows = yield* sql<{
+            readonly payload_json: string;
+            readonly active_attempt_id: string | null;
+            readonly run_status: string;
+          }>`
+              SELECT p.payload_json,
+                json_extract(r.payload_json, '$.activeAttemptId') AS active_attempt_id,
+                r.status AS run_status
+              FROM orchestration_v2_projection_provider_threads p
+              JOIN orchestration_v2_projection_runs r
+                ON r.thread_id = p.thread_id AND r.run_id = ${input.runId}
+                  AND r.provider_thread_id = p.provider_thread_id
+                  AND r.provider_instance_id = ${input.providerInstanceId}
+                  AND r.ordinal = ${input.expectedLastRunOrdinal}
+              WHERE p.provider_thread_id = ${input.providerThreadId}
+                AND p.thread_id = ${input.threadId}
+                AND p.last_run_ordinal = ${input.expectedLastRunOrdinal}
+                AND json_extract(r.payload_json, '$.rootNodeId') IS NOT NULL
+                AND NOT EXISTS (
+                  SELECT 1 FROM orchestration_v2_projection_runs newer
+                  WHERE newer.thread_id = p.thread_id
+                    AND newer.ordinal > r.ordinal AND newer.status <> 'rolled_back'
+                )
+              LIMIT 1
+            `;
+          const row = rows[0];
+          if (
+            !row ||
+            row.active_attempt_id !== input.activeAttemptId ||
+            !["completed", "interrupted", "failed", "cancelled"].includes(row.run_status)
+          )
+            return [];
+          const latest = yield* decodeProviderThreadPayload(row.payload_json);
+          if (
+            !latest.cloudTask ||
+            latest.ownerNodeId !== null ||
+            latest.appThreadId !== input.threadId ||
+            latest.providerSessionId !== input.providerSessionId ||
+            latest.providerInstanceId !== input.providerInstanceId ||
+            latest.nativeThreadRef?.nativeId !== input.nativeId
+          )
+            return [];
+          // Whitelist fields so a stale observer cannot replace the finalized task snapshot.
+          const patch: { url?: string; title?: string; progress?: string } = {};
+          if (typeof input.metadata.title === "string")
+            patch.title = input.metadata.title.slice(0, 512);
+          if (typeof input.metadata.progress === "string")
+            patch.progress = input.metadata.progress.slice(0, 2000);
+          if (typeof input.metadata.url === "string" && input.metadata.url.length <= 2048) {
+            try {
+              const url = new URL(input.metadata.url);
+              if (["https:", "http:"].includes(url.protocol) && !url.username && !url.password) {
+                patch.url = url.href;
+              }
+            } catch {
+              // Keep the saved link when late metadata has no usable URL.
+            }
+          }
+          if (
+            Object.entries(patch).every(
+              ([key, value]) => latest.cloudTask?.[key as keyof typeof patch] === value,
+            )
+          )
+            return [];
+          const now = yield* DateTime.now;
+          const stored = yield* eventStore.append({
+            events: yield* normalizeEvents([
+              {
+                id: input.eventId,
+                type: "provider-thread.updated",
+                threadId: input.threadId,
+                runId: input.runId,
+                providerInstanceId: input.providerInstanceId,
+                occurredAt: now,
+                payload: {
+                  ...latest,
+                  updatedAt: now,
+                  cloudTask: { ...latest.cloudTask, ...patch, updatedAt: DateTime.formatIso(now) },
+                },
+              },
+            ]),
+          });
+          yield* applyStoredEvents(stored);
+          return stored;
+        }),
+        publishStoredEvents,
+      );
+    });
+
     const writeEffect = Effect.fn("orchestrationV2.EventSink.write")(function* (
       input: Parameters<EventSinkV2Shape["writeWithEffects"]>[0],
     ) {
@@ -372,6 +545,20 @@ const layerBase: Layer.Layer<
 
       return yield* commitThenPublish(
         Effect.gen(function* () {
+          // Check ownership in the same transaction that claims the native session.
+          const imported = input.unlessNativeThreadOwned;
+          if (imported?.nativeThreadRef != null) {
+            const owners = yield* sql`
+              SELECT provider_thread_id
+              FROM orchestration_v2_projection_provider_threads
+              WHERE driver = ${imported.driver}
+                AND provider_instance_id = ${imported.providerInstanceId}
+                AND thread_id IS NOT ${imported.appThreadId}
+                AND json_extract(payload_json, '$.nativeThreadRef.nativeId') = ${imported.nativeThreadRef.nativeId}
+              LIMIT 1
+            `;
+            if (owners.length > 0) return [];
+          }
           const normalized = yield* normalizeEvents(
             input.guardPendingUserInputCancellations === true
               ? yield* guardUserInputCancellations(input.events)
@@ -384,7 +571,7 @@ const layerBase: Layer.Layer<
           yield* applyStoredEvents(committed);
           yield* effectOutbox.enqueue(input.effects);
           return committed;
-        }),
+        }).pipe(Effect.withTracerEnabled(false)),
         (storedEvents) =>
           Effect.gen(function* () {
             if (input.effects.length > 0) {
@@ -511,6 +698,39 @@ const layerBase: Layer.Layer<
       );
     });
 
+    const writeIfProviderThreadUnchangedEffect = Effect.fn(
+      "orchestrationV2.EventSink.writeIfProviderThreadUnchanged",
+    )(function* (input: Parameters<EventSinkV2Shape["writeIfProviderThreadUnchanged"]>[0]) {
+      yield* Effect.annotateCurrentSpan({
+        "orchestration_v2.event_count": input.events.length,
+        "orchestration_v2.provider_thread_id": input.expected.id,
+      });
+      const expectedJson = yield* ProjectionStore.encodeProviderThreadPayload(input.expected);
+
+      return yield* commitThenPublish(
+        Effect.gen(function* () {
+          const rows = yield* sql<{ readonly payload_json: string }>`
+            SELECT payload_json
+            FROM orchestration_v2_projection_provider_threads
+            WHERE provider_thread_id = ${input.expected.id}
+            LIMIT 1
+          `;
+          if (rows[0]?.payload_json !== expectedJson) {
+            return {
+              committed: false as const,
+              storedEvents: [] as ReadonlyArray<OrchestrationV2StoredEvent>,
+            };
+          }
+
+          const normalized = yield* normalizeEvents(input.events);
+          const storedEvents = yield* eventStore.append({ events: normalized });
+          yield* applyStoredEvents(storedEvents);
+          return { committed: true as const, storedEvents };
+        }),
+        (result) => (result.committed ? publishStoredEvents(result.storedEvents) : Effect.void),
+      );
+    });
+
     const existingCommandResult = (commandId: CommandId) =>
       Effect.gen(function* () {
         const existing = yield* commandReceipts.getByCommandId(commandId);
@@ -550,7 +770,16 @@ const layerBase: Layer.Layer<
             commandId: input.commandId,
             events: normalized,
           });
-          const sequence = storedEvents.at(-1)?.sequence;
+          let sequence = storedEvents.at(-1)?.sequence;
+          if (
+            sequence === undefined &&
+            input.allowEffectOnly === true &&
+            input.effects.length > 0
+          ) {
+            // Effect-only recovery observes the current thread high-water mark. The receipt
+            // and outbox still commit together, and retries reuse this receipt without enqueueing.
+            sequence = yield* eventStore.latestSequence({ threadId: input.threadId });
+          }
           if (sequence === undefined) {
             return yield* Effect.die(
               new Error(`Command ${input.commandId} produced no orchestration events.`),
@@ -785,6 +1014,10 @@ const layerBase: Layer.Layer<
               }),
           ),
         ),
+      writeCloudTaskMetadata: (input) =>
+        writeCloudTaskMetadataEffect(input).pipe(
+          Effect.mapError((cause) => new EventSinkWriteError({ eventCount: 1, cause })),
+        ),
       writeIfRunCurrent: (input) =>
         writeIfRunCurrentEffect(input).pipe(
           Effect.mapError(
@@ -805,6 +1038,12 @@ const layerBase: Layer.Layer<
                 ...(input.commandId === undefined ? {} : { commandId: input.commandId }),
                 cause,
               }),
+          ),
+        ),
+      writeIfProviderThreadUnchanged: (input) =>
+        writeIfProviderThreadUnchangedEffect(input).pipe(
+          Effect.mapError(
+            (cause) => new EventSinkWriteError({ eventCount: input.events.length, cause }),
           ),
         ),
       commitCommand: (input) =>
@@ -880,10 +1119,8 @@ const layerBase: Layer.Layer<
 );
 
 /**
- * Event sink layer for application compositions that already own the
- * persistence services. Keeping the outbox instance shared with the worker is
- * important because enqueue notifications are in-memory wakeups backed by the
- * durable SQL queue.
+ * Keeping the outbox instance shared with the worker is important because enqueue notifications
+ * are in-memory wakeups backed by the durable SQL queue.
  */
 export const layerFromStores = layerBase;
 

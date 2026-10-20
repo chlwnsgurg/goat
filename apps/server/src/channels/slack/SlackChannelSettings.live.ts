@@ -21,7 +21,7 @@ import {
   type SlackChannelConfigureInput,
   type SlackChannelSettings as SlackChannelSettingsSnapshot,
   type SlackChannelSettingsErrorReason,
-} from "@t3tools/contracts";
+} from "@goat/contracts";
 import * as Clock from "effect/Clock";
 import * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
@@ -37,6 +37,9 @@ import * as Stream from "effect/Stream";
 
 import * as ServerSecretStore from "../../auth/ServerSecretStore.ts";
 import * as ServerConfig from "../../config.ts";
+import * as ServerEnvironment from "../../environment/ServerEnvironment.ts";
+import * as ServerSettings from "../../serverSettings.ts";
+import { isGoatBotHome } from "../ChannelBotHome.ts";
 import * as SlackChannelSettings from "../SlackChannelSettings.ts";
 import type { ChannelConnectionOwner } from "../ChannelIngressContext.ts";
 import * as SlackChannelRuntime from "./SlackChannelRuntime.ts";
@@ -118,8 +121,21 @@ export const make = Effect.gen(function* () {
   const secrets = yield* ServerSecretStore.ServerSecretStore;
   const sdk = yield* SlackSdk.SlackSdk;
   const runtime = yield* SlackChannelRuntime.SlackChannelRuntime;
+  const serverSettings = yield* ServerSettings.ServerSettingsService;
+  const environment = yield* ServerEnvironment.ServerEnvironment;
+  const environmentId = yield* environment.getEnvironmentId;
+  // Subscribe before reading startup state so a home move during acquisition is replayed.
+  const settingsChanges = yield* serverSettings.subscribeChanges;
+  const readHome = serverSettings.getSettings.pipe(
+    Effect.map((settings) => isGoatBotHome(settings.goatBotHome, environmentId)),
+    Effect.catch(persistenceFailed("read-bot-home")),
+  );
   const settingsPath = path.join(config.stateDir, SETTINGS_FILE_NAME);
   const lock = yield* Semaphore.make(1);
+  // The home role the runtime fully reflects, or null when unknown: after a partial apply, or once
+  // configure has applied a connection against a home read that may since have changed. Null makes
+  // the next settings change apply again; leaving home always stops every connection.
+  let appliedHome: boolean | null = null;
 
   const loaded = yield* Effect.gen(function* () {
     if (!(yield* fs.exists(settingsPath))) return { loadFailed: false, connections: [] };
@@ -143,7 +159,7 @@ export const make = Effect.gen(function* () {
   const writeConnections = (connections: ReadonlyArray<StoredConnection>) =>
     Effect.gen(function* () {
       const contents = yield* encodeSettingsFile({ version: 1, connections });
-      const tempPath = `${settingsPath}.${yield* crypto.randomUUIDv4}.tmp`;
+      const tempPath = `${settingsPath}.${yield* crypto.randomUUIDv4()}.tmp`;
       yield* fs.makeDirectory(config.stateDir, { recursive: true });
       yield* Effect.gen(function* () {
         yield* fs.writeFileString(tempPath, `${contents}\n`, { mode: 0o600 });
@@ -190,10 +206,20 @@ export const make = Effect.gen(function* () {
       } satisfies SlackChannelRuntime.SlackRuntimeConnection;
     });
 
-  const applyToRuntime = (connection: StoredConnection) =>
-    connection.enabled
+  const applyForHome = (connection: StoredConnection, isHome: boolean) =>
+    connection.enabled && isHome
       ? Effect.flatMap(runtimeConnection(connection), runtime.apply)
       : stopRuntime(connection);
+
+  const applyToRuntime = (connection: StoredConnection) =>
+    Effect.flatMap(readHome, (isHome) => applyForHome(connection, isHome)).pipe(
+      // Configure applied one connection on its own read of the home; the cache no longer covers it.
+      Effect.ensuring(
+        Effect.sync(() => {
+          appliedHome = null;
+        }),
+      ),
+    );
 
   /** Stops a connection without touching its credentials, so stopping cannot fail on them. */
   const stopRuntime = (connection: StoredConnection) =>
@@ -316,7 +342,7 @@ export const make = Effect.gen(function* () {
       ),
     );
 
-  const newConnectionId = crypto.randomUUIDv4.pipe(
+  const newConnectionId = crypto.randomUUIDv4().pipe(
     Effect.map((uuid) =>
       SlackChannelConnectionId.make(`slack-${uuid.replaceAll("-", "").slice(0, 12)}`),
     ),
@@ -472,18 +498,64 @@ export const make = Effect.gen(function* () {
       ),
   });
 
-  // Bring saved connections back up. A connection whose secrets cannot be read starts in error.
-  if (!loaded.loadFailed) {
-    yield* Effect.forEach(loaded.connections, (connection) =>
-      deleteRevokedSecrets(connection).pipe(
-        Effect.catch(() =>
-          Effect.logWarning("Slack startup revocation cleanup failed; delivery stays blocked."),
+  /**
+   * Applies every saved connection for the given home role, one at a time so one unreadable
+   * connection cannot stop the rest. Returns whether all of them applied.
+   */
+  const applyAllForHome = (
+    connections: ReadonlyArray<StoredConnection>,
+    isHome: boolean,
+    prepare: (connection: StoredConnection) => Effect.Effect<void> = () => Effect.void,
+  ) =>
+    Effect.map(
+      Effect.forEach(connections, (connection) =>
+        prepare(connection).pipe(
+          Effect.andThen(applyForHome(connection, isHome)),
+          Effect.as(true),
+          Effect.catch((error) =>
+            Effect.logWarning("Slack connection did not follow the GOAT Bot home", {
+              connectionId: connection.connectionId,
+              error,
+            }).pipe(Effect.as(false)),
+          ),
         ),
-        Effect.andThen(applyToRuntime(connection)),
-        Effect.ignore({ log: true }),
       ),
+      (results) => results.every(Boolean),
     );
-  }
+
+  appliedHome = yield* lock.withPermits(1)(
+    Effect.gen(function* () {
+      const isHome = yield* readHome;
+      // Bring saved connections back up. Unreadable secrets leave that connection in error.
+      if (loaded.loadFailed) return isHome;
+      const connections = yield* readConnections;
+      const complete = yield* applyAllForHome(connections, isHome, (connection) =>
+        deleteRevokedSecrets(connection).pipe(
+          Effect.catch(() =>
+            Effect.logWarning("Slack startup revocation cleanup failed; delivery stays blocked."),
+          ),
+        ),
+      );
+      return complete ? isHome : null;
+    }),
+  );
+
+  yield* settingsChanges.pipe(
+    Stream.runForEach(() =>
+      lock
+        .withPermits(1)(
+          Effect.gen(function* () {
+            // Queued snapshots can be stale; only the current home decides socket ownership.
+            const isHome = yield* readHome;
+            if (isHome === appliedHome) return;
+            const connections = yield* readConnections;
+            appliedHome = (yield* applyAllForHome(connections, isHome)) ? isHome : null;
+          }),
+        )
+        .pipe(Effect.ignore({ log: true })),
+    ),
+    Effect.forkScoped,
+  );
 
   return { ...service, configure };
 });

@@ -1,16 +1,21 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { expect, it } from "@effect/vitest";
-import { ServerSelfUpdateError, ThreadId } from "@t3tools/contracts";
-import * as HostProcess from "@t3tools/shared/HostProcess";
+import { ServerSelfUpdateError, ThreadId } from "@goat/contracts";
+import * as HostProcess from "@goat/shared/HostProcess";
 import * as Cause from "effect/Cause";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Fiber from "effect/Fiber";
 import * as Path from "effect/Path";
+import * as Stream from "effect/Stream";
 import { HttpClient, HttpClientResponse } from "effect/http";
 import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 
+import * as Layer from "effect/Layer";
+import * as MaintenanceAudit from "../maintenance/MaintenanceAudit.ts";
+import * as RuntimeAdmission from "../runtimeAdmission.ts";
+import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
 import * as ServerConfig from "../config.ts";
 import * as DesktopAppUpdate from "../desktopUpdate/DesktopAppUpdate.ts";
 import * as ProcessRunner from "../processRunner.ts";
@@ -19,18 +24,22 @@ import { SERVICE_LAUNCHER_PROTOCOL } from "./serviceProtocol.ts";
 import * as ServerSelfUpdate from "./selfUpdate.ts";
 
 interface HarnessOptions {
+  readonly activity?: () => "idle" | "busy";
   readonly mode?: "web" | "desktop";
   readonly managed?: boolean;
   readonly preflight?: "ready" | "blocked";
+  readonly beforeDownload?: Effect.Effect<void>;
+  readonly corruptChecksum?: boolean;
   readonly requestUpdate?: ServiceLauncherClient.ServiceLauncherClient["Service"]["requestUpdate"];
   readonly desktopAppUpdate?: DesktopAppUpdate.DesktopAppUpdate["Service"];
 }
 
-// The staged runtime is a release archive: the fake client serves SHA256SUMS
-// and the tarball, and the fake runner stands in for tar before it answers
-// the staged preflight.
 const archiveBytes = new TextEncoder().encode("not really a tarball");
-const releaseHttpClient = (order: string[]) =>
+const releaseHttpClient = (
+  order: string[],
+  beforeDownload?: Effect.Effect<void>,
+  corruptChecksum = false,
+) =>
   HttpClient.make((request) =>
     Effect.gen(function* () {
       if (request.url.endsWith("/SHA256SUMS")) {
@@ -40,9 +49,10 @@ const releaseHttpClient = (order: string[]) =>
         ).join("");
         return HttpClientResponse.fromWeb(
           request,
-          new Response(`${hex}  goat-1.1.0-linux-x64.tar.gz\n`),
+          new Response(`${corruptChecksum ? "0".repeat(64) : hex}  goat-1.1.0-linux-x64.tar.gz\n`),
         );
       }
+      if (beforeDownload) yield* beforeDownload;
       order.push("download");
       return HttpClientResponse.fromWeb(request, new Response(archiveBytes));
     }),
@@ -53,7 +63,7 @@ const makeHarness = Effect.fn("test.make_self_update_harness")(function* (
 ) {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
-  const baseDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-self-update-test-" });
+  const baseDir = yield* fs.makeTempDirectoryScoped({ prefix: "goat-self-update-test-" });
   const order: string[] = [];
   const runner = ProcessRunner.ProcessRunner.of({
     run: (input) =>
@@ -62,7 +72,9 @@ const makeHarness = Effect.fn("test.make_self_update_harness")(function* (
           order.push("extract");
           const stagingDir = input.args[input.args.indexOf("-C") + 1];
           if (stagingDir === undefined) return yield* Effect.die("missing tar target");
-          yield* fs.writeFileString(path.join(stagingDir, "t3"), "#!/bin/sh\n").pipe(Effect.orDie);
+          yield* fs
+            .writeFileString(path.join(stagingDir, "goat"), "#!/bin/sh\n")
+            .pipe(Effect.orDie);
           return {
             stdout: "",
             stderr: "",
@@ -109,7 +121,21 @@ const makeHarness = Effect.fn("test.make_self_update_harness")(function* (
   const config = yield* ServerConfig.ServerConfig.pipe(
     Effect.provide(ServerConfig.layerTest(process.cwd(), baseDir)),
   );
+  const admission = yield* RuntimeAdmission.RuntimeAdmission.pipe(
+    Effect.provide(RuntimeAdmission.layer),
+  );
+  const audit = yield* MaintenanceAudit.MaintenanceAudit.pipe(
+    Effect.provide(MaintenanceAudit.layer),
+    Effect.provideService(ServerConfig.ServerConfig, config),
+  );
   const selfUpdate = yield* ServerSelfUpdate.make().pipe(
+    Effect.provideService(RuntimeAdmission.RuntimeAdmission, admission),
+    Effect.provideService(MaintenanceAudit.MaintenanceAudit, audit),
+    Effect.provide(
+      Layer.mock(ProjectionStore.ProjectionStoreV2)({
+        getServerActivity: () => Effect.sync(() => options.activity?.() ?? "idle"),
+      }),
+    ),
     Effect.provideService(ProcessRunner.ProcessRunner, runner),
     Effect.provideService(ServiceLauncherClient.ServiceLauncherClient, launcher),
     Effect.provideService(
@@ -119,21 +145,205 @@ const makeHarness = Effect.fn("test.make_self_update_harness")(function* (
         run: () => Effect.die("unexpected desktop app update run"),
       },
     ),
-    Effect.provideService(HttpClient.HttpClient, releaseHttpClient(order)),
+    Effect.provideService(
+      HttpClient.HttpClient,
+      releaseHttpClient(order, options.beforeDownload, options.corruptChecksum),
+    ),
     Effect.provideService(HostProcess.Platform, "linux"),
     Effect.provideService(HostProcess.Architecture, "x64"),
     Effect.provide(ServerConfig.layer({ ...config, mode: options.mode ?? "web" })),
   );
-  return { selfUpdate, order };
+  return {
+    selfUpdate,
+    order,
+    admission,
+    journal: path.join(config.stateDir, "maintenance-audit.jsonl"),
+  };
 });
 
 it.layer(NodeServices.layer)("server self update", (it) => {
+  it.effect(
+    "prepares with checksum and preflight while busy, then reuses the download after idle refusal",
+    () =>
+      Effect.gen(function* () {
+        let busy = true;
+        const h = yield* makeHarness({ activity: () => (busy ? "busy" : "idle") });
+        yield* h.selfUpdate.prepare("1.1.0");
+        expect(h.order).toEqual(["download", "extract", "preflight"]);
+        expect(yield* h.selfUpdate.isUpdating).toBe(false);
+        const error = yield* h.selfUpdate.update({ targetVersion: "1.1.0" }).pipe(Effect.flip);
+        expect(error.reason).toBe(ServerSelfUpdate.SERVER_UPDATE_BUSY_REASON);
+        expect(h.order).toEqual(["download", "extract", "preflight"]);
+        busy = false;
+        yield* h.selfUpdate.update({ targetVersion: "1.1.0" });
+        expect(h.order).toEqual(["download", "extract", "preflight", "preflight", "accept"]);
+      }),
+  );
+
+  it.effect("background preparation refuses a checksum mismatch before preflight or handoff", () =>
+    Effect.gen(function* () {
+      const h = yield* makeHarness({ corruptChecksum: true });
+      yield* h.selfUpdate.prepare("1.1.0").pipe(Effect.flip);
+      expect(h.order).toEqual(["download"]);
+      expect(yield* h.selfUpdate.isUpdating).toBe(false);
+    }),
+  );
+
+  it.effect("background preparation refuses a blocked preflight", () =>
+    Effect.gen(function* () {
+      const h = yield* makeHarness({ preflight: "blocked" });
+      const error = yield* h.selfUpdate.prepare("1.1.0").pipe(Effect.flip);
+      expect(error.reason).toBe("local update required");
+      expect(h.order).toEqual(["download", "extract", "preflight"]);
+    }),
+  );
+
+  it.effect("background preparation and manual activation share one in-flight guard", () =>
+    Effect.gen(function* () {
+      const entered = yield* Deferred.make<void>();
+      const release = yield* Deferred.make<void>();
+      const h = yield* makeHarness({
+        beforeDownload: Deferred.succeed(entered, undefined).pipe(
+          Effect.andThen(Deferred.await(release)),
+        ),
+      });
+      const fiber = yield* Effect.forkChild(h.selfUpdate.prepare("1.1.0"));
+      yield* Deferred.await(entered);
+      expect(yield* h.selfUpdate.isUpdating).toBe(true);
+      expect(
+        (yield* h.selfUpdate.update({ targetVersion: "1.1.0" }).pipe(Effect.flip)).reason,
+      ).toContain("already in progress");
+      expect((yield* h.selfUpdate.prepare("1.1.0").pipe(Effect.flip)).reason).toContain(
+        "already in progress",
+      );
+      yield* Deferred.succeed(release, undefined);
+      yield* Fiber.join(fiber);
+      expect(yield* h.selfUpdate.isUpdating).toBe(false);
+    }),
+  );
+
+  it.effect("interrupted background preparation releases the shared in-flight guard", () =>
+    Effect.gen(function* () {
+      const entered = yield* Deferred.make<void>();
+      const h = yield* makeHarness({
+        beforeDownload: Deferred.succeed(entered, undefined).pipe(Effect.andThen(Effect.never)),
+      });
+      const fiber = yield* Effect.forkChild(h.selfUpdate.prepare("1.1.0"));
+      yield* Deferred.await(entered);
+      yield* Fiber.interrupt(fiber);
+      expect(yield* h.selfUpdate.isUpdating).toBe(false);
+      yield* h.admission.admit(Effect.void);
+    }),
+  );
+
+  it.effect(
+    "refuses a busy unconfirmed service without downloading or contacting the launcher",
+    () =>
+      Effect.gen(function* () {
+        const { selfUpdate, order, admission } = yield* makeHarness({ activity: () => "busy" });
+        const error = yield* selfUpdate
+          .update({ targetVersion: "1.1.0", continueRunningThreads: true })
+          .pipe(Effect.flip);
+        expect(error.reason).toContain("running threads");
+        expect(order).toEqual([]);
+        yield* admission.admit(Effect.void);
+      }),
+  );
+
+  it.effect("records the confirmed requester durably before launcher handoff", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      let journal = "";
+      const harness = yield* makeHarness({
+        activity: () => "busy",
+        requestUpdate: () =>
+          Effect.gen(function* () {
+            const lines = (yield* fs.readFileString(journal).pipe(Effect.orDie))
+              .trim()
+              .split("\n")
+              .map((line) => JSON.parse(line));
+            expect(lines).toHaveLength(1);
+            expect(lines[0]).toMatchObject({
+              operation: "server-update",
+              actor: { kind: "browser-session", sessionId: "requester" },
+              targetVersion: "1.1.0",
+              mode: "confirmed",
+              outcome: "requested",
+            });
+            return "launcher-id";
+          }),
+      });
+      journal = harness.journal;
+      yield* harness.selfUpdate.update(
+        { targetVersion: "1.1.0", confirmReplacement: true },
+        undefined,
+        undefined,
+        { kind: "browser-session", sessionId: "requester" },
+      );
+      const lines = (yield* fs.readFileString(journal).pipe(Effect.orDie))
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line));
+      expect(lines[1]).toMatchObject({
+        operationId: lines[0].operationId,
+        updateId: "launcher-id",
+        outcome: "accepted",
+      });
+      expect(yield* harness.admission.admit(Effect.void).pipe(Effect.flip)).toMatchObject({
+        _tag: "ServerDrainingError",
+      });
+    }),
+  );
+
+  it.effect("rechecks activity after staging and reopens admission on refusal", () =>
+    Effect.gen(function* () {
+      let activity: "idle" | "busy" = "idle";
+      const { selfUpdate, order, admission } = yield* makeHarness({
+        activity: () => activity,
+        beforeDownload: Effect.sync(() => {
+          activity = "busy";
+        }),
+      });
+      expect(
+        (yield* selfUpdate.update({ targetVersion: "1.1.0" }).pipe(Effect.flip)).reason,
+      ).toContain("running threads");
+      expect(order).toEqual(["download", "extract", "preflight"]);
+      yield* admission.admit(Effect.void);
+    }),
+  );
+
+  it.effect("refuses handoff when the journal cannot be written and reopens admission", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const { selfUpdate, journal, admission, order } = yield* makeHarness();
+      yield* fs.makeDirectory(journal, { recursive: true });
+      const error = yield* selfUpdate.update({ targetVersion: "1.1.0" }).pipe(Effect.flip);
+      expect(error.reason).toBe("Could not record the update request.");
+      expect(order).toEqual(["download", "extract", "preflight"]);
+      yield* admission.admit(Effect.void);
+    }),
+  );
+
+  it.effect("idle projections do not bypass an admitted dispatch", () =>
+    Effect.gen(function* () {
+      const { selfUpdate, admission, order } = yield* makeHarness();
+      const error = yield* admission.admit(
+        selfUpdate.update({ targetVersion: "1.1.0" }).pipe(Effect.flip),
+      );
+      expect(error.reason).toContain("running threads");
+      expect(order).toEqual([]);
+    }),
+  );
+
   it.effect("marks running threads at the boot-service handoff", () =>
     Effect.gen(function* () {
       const events: string[] = [];
       const selfUpdate = yield* ServerSelfUpdate.withRunningThreadContinuation({
         mode: "web",
         selfUpdate: {
+          capability: "boot-service",
+          isUpdating: Effect.succeed(false),
+          prepare: () => Effect.void,
           update: (_input, reportProgress = () => Effect.void) =>
             reportProgress("downloading").pipe(
               Effect.andThen(reportProgress("installing")),
@@ -168,6 +378,9 @@ it.layer(NodeServices.layer)("server self update", (it) => {
       const selfUpdate = yield* ServerSelfUpdate.withRunningThreadContinuation({
         mode: "desktop",
         selfUpdate: {
+          capability: "boot-service",
+          isUpdating: Effect.succeed(false),
+          prepare: () => Effect.void,
           update: (_input, reportProgress = () => Effect.void) =>
             reportProgress("installing").pipe(
               Effect.as({
@@ -216,6 +429,9 @@ it.layer(NodeServices.layer)("server self update", (it) => {
       const selfUpdate = yield* ServerSelfUpdate.withRunningThreadContinuation({
         mode: "web",
         selfUpdate: {
+          capability: "boot-service",
+          isUpdating: Effect.succeed(false),
+          prepare: () => Effect.void,
           update: (_input, reportProgress = () => Effect.void) =>
             reportProgress("installing").pipe(Effect.andThen(Effect.fail(updateError))),
           commitDesktopUpdate: () => Effect.never,
@@ -238,6 +454,9 @@ it.layer(NodeServices.layer)("server self update", (it) => {
       const selfUpdate = yield* ServerSelfUpdate.withRunningThreadContinuation({
         mode: "web",
         selfUpdate: {
+          capability: "boot-service",
+          isUpdating: Effect.succeed(false),
+          prepare: () => Effect.void,
           update: (
             _input,
             reportProgress = () => Effect.void,
@@ -271,6 +490,9 @@ it.layer(NodeServices.layer)("server self update", (it) => {
       const selfUpdate = yield* ServerSelfUpdate.withRunningThreadContinuation({
         mode: "desktop",
         selfUpdate: {
+          capability: "boot-service",
+          isUpdating: Effect.succeed(false),
+          prepare: () => Effect.void,
           update: () =>
             Effect.succeed({
               targetVersion: "1.2.0",
@@ -307,6 +529,9 @@ it.layer(NodeServices.layer)("server self update", (it) => {
       const selfUpdate = yield* ServerSelfUpdate.withRunningThreadContinuation({
         mode: "desktop",
         selfUpdate: {
+          capability: "boot-service",
+          isUpdating: Effect.succeed(false),
+          prepare: () => Effect.void,
           update: () =>
             Effect.succeed({
               targetVersion: "1.2.0",
@@ -389,7 +614,6 @@ it.layer(NodeServices.layer)("server self update", (it) => {
       );
       expect(result).toEqual({ targetVersion: "1.2.0", method: "desktop-app" });
       expect(stages).toEqual(["downloading", "installing"]);
-      // The launcher staging path must not run on the desktop path.
       expect(order).toEqual([]);
     }),
   );
@@ -420,6 +644,48 @@ it.layer(NodeServices.layer)("server self update", (it) => {
       );
       yield* Deferred.succeed(accepted, "launcher-id");
       expect((yield* Fiber.join(first)).updateId).toBe("launcher-id");
+    }),
+  );
+
+  it.effect("keeps preparing after the progress stream closes", () =>
+    Effect.gen(function* () {
+      const releaseDownload = yield* Deferred.make<void>();
+      const sawDownloading = yield* Deferred.make<void>();
+      const accepted = yield* Deferred.make<void>();
+      const { selfUpdate, order } = yield* makeHarness({
+        beforeDownload: Deferred.await(releaseDownload),
+        requestUpdate: () =>
+          Effect.sync(() => {
+            order.push("accept");
+          }).pipe(Effect.andThen(Deferred.succeed(accepted, undefined)), Effect.as("launcher-id")),
+      });
+
+      const consumed = yield* ServerSelfUpdate.updateProgressStream(selfUpdate, {
+        targetVersion: "1.1.0",
+      }).pipe(
+        Stream.tap((event) =>
+          event.type === "progress" && event.stage === "downloading"
+            ? Deferred.succeed(sawDownloading, undefined)
+            : Effect.void,
+        ),
+        Stream.runDrain,
+        Effect.forkChild,
+      );
+
+      yield* Deferred.await(sawDownloading);
+      // The socket drop ends the stream. The download is still held.
+      yield* Fiber.interrupt(consumed);
+      expect((yield* selfUpdate.update({ targetVersion: "1.2.0" }).pipe(Effect.flip)).reason).toBe(
+        "A server update is already in progress.",
+      );
+
+      yield* Deferred.succeed(releaseDownload, undefined);
+      // `installing` is offered only after the stream queue has shut down.
+      yield* Deferred.await(accepted);
+      expect(order).toEqual(["download", "extract", "preflight", "accept"]);
+      expect((yield* selfUpdate.update({ targetVersion: "1.1.0" }).pipe(Effect.flip)).reason).toBe(
+        "A server update is already in progress.",
+      );
     }),
   );
 });

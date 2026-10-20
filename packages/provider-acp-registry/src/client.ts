@@ -1,12 +1,5 @@
-/**
- * ACP Registry's client definition: settings form, label, and the registry
- * glyph clients fall back to while an agent's own icon loads.
- * Browser- and React Native-safe.
- *
- * @module provider-acp-registry/client
- */
-import { ProviderDriverKind } from "@t3tools/contracts";
-import { defineProviderClient } from "@t3tools/provider-core/client";
+import { ProviderDriverKind } from "@goat/contracts";
+import { defineProviderClient } from "@goat/provider-core/client";
 
 import { AcpRegistrySettings } from "./settings.ts";
 
@@ -14,7 +7,6 @@ export const acpRegistryClient = defineProviderClient({
   driverKind: ProviderDriverKind.make("acpRegistry"),
   label: "ACP Registry",
   settingsSchema: AcpRegistrySettings,
-  // Each instance is an agent the user adds from the registry.
   hasDefaultInstance: false,
   icon: {
     viewBox: "0 0 576 220",

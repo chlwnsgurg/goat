@@ -1,20 +1,26 @@
+import { GOAT_CONNECT_COMING_SOON, isGoatConnectEnabled } from "@goat/shared/goatConnect";
+import { environmentCatalog } from "../../connection/catalog";
+import { isGoatConnectOnlyEnvironment } from "../connection/environmentSections";
+import { MemoryEnvironmentEntry } from "./SettingsMemoryRouteScreen";
+import * as Dialog from "../../components/ui/Dialog";
 import { useAtomValue } from "@effect/atom-react";
 import { useNavigation, type StaticScreenProps } from "@react-navigation/native";
 import {
   AuthProvidersManageScope,
   AuthOrchestrationReadScope,
+  PROVIDER_DISPLAY_NAMES,
   type EnvironmentId,
   type ServerProvider,
-} from "@t3tools/contracts";
-import { squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime";
+} from "@goat/contracts";
+import { settlePromise, squashAtomCommandFailure } from "@goat/client-runtime/state/runtime";
 import { AsyncResult } from "effect/reactivity";
 import { useEffect, useRef, useState } from "react";
-import { Alert, View } from "react-native";
+import { View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
-import { AppText as Text } from "../../components/AppText";
+import { AppText as Text } from "../../components/ui/AppText";
 import { ProviderIcon } from "../../components/ProviderIcon";
-import { ScreenScrollView } from "../../components/ScreenScrollView";
+import { ScreenScrollView } from "../../components/ui/ScreenScrollView";
 import { appAtomRegistry } from "../../state/atom-registry";
 import { serverEnvironment } from "../../state/server";
 import { environmentSession, useEnvironmentScope, readEnvironmentScope } from "../../state/session";
@@ -31,6 +37,7 @@ import {
   findEnvironmentUpdate,
   supportsEnvironmentUpdate,
 } from "./environment-maintenance";
+import { useSettingsEnvironmentFilter } from "./settings-environment-filter";
 
 export function SettingsEnvironmentDetailRouteScreen({
   route,
@@ -49,6 +56,7 @@ export function SettingsEnvironmentDetailRouteScreen({
 function EnvironmentDetail({ environmentId }: { readonly environmentId: EnvironmentId }) {
   const insets = useSafeAreaInsets();
   const navigation = useNavigation();
+  const { selectedIds, toggleEnvironment } = useSettingsEnvironmentFilter();
   const connections = useRemoteConnections();
   const environment = connections.connectedEnvironments.find(
     (entry) => entry.environmentId === environmentId,
@@ -72,6 +80,9 @@ function EnvironmentDetail({ environmentId }: { readonly environmentId: Environm
   const checkController = useRef<AbortController | null>(null);
   useEffect(() => () => checkController.current?.abort(), []);
 
+  const catalog = useAtomValue(environmentCatalog.catalogValueAtom);
+  const connectUnavailable =
+    !isGoatConnectEnabled() && isGoatConnectOnlyEnvironment(catalog.entries.get(environmentId));
   const connected = environment?.isEnabled === true && environment.connectionState === "connected";
   const allowed =
     !AsyncResult.isFailure(sessionResult) && canMaintainEnvironment(session, connected);
@@ -95,15 +106,14 @@ function EnvironmentDetail({ environmentId }: { readonly environmentId: Environm
     setPending(label);
     setError(null);
     setNotice(null);
-    try {
-      await action();
-    } catch (cause) {
+    const result = await settlePromise(action);
+    pendingRef.current = false;
+    setPending(null);
+    if (AsyncResult.isFailure(result)) {
+      const cause = squashAtomCommandFailure(result);
       setError(
         cause instanceof Error ? cause.message : "The action could not be completed. Try again.",
       );
-    } finally {
-      pendingRef.current = false;
-      setPending(null);
     }
   }
 
@@ -111,7 +121,7 @@ function EnvironmentDetail({ environmentId }: { readonly environmentId: Environm
     const targetVersion = checkedRelease?.targetVersion;
     if (disabled || !targetVersion || !capabilities || !supportsEnvironmentUpdate(capabilities))
       return;
-    Alert.alert(
+    Dialog.alert(
       `Update ${environment?.environmentLabel ?? "environment"}?`,
       `Install GOAT ${targetVersion}. ${capabilities.serverSelfUpdate === "desktop-managed" ? "The desktop app will close and relaunch." : "The server will restart and reconnect."} Running threads may be interrupted.`,
       [
@@ -134,6 +144,8 @@ function EnvironmentDetail({ environmentId }: { readonly environmentId: Environm
                 environmentId,
                 input: {
                   targetVersion,
+                  // The person confirmed that running threads may be interrupted.
+                  confirmReplacement: true,
                   ...(capabilities.serverUpdateThreadContinuation &&
                   config?.settings.continueThreadsAfterServerUpdate
                     ? { continueRunningThreads: true }
@@ -208,7 +220,9 @@ function EnvironmentDetail({ environmentId }: { readonly environmentId: Environm
             />
             {!connected ? (
               <Text className="px-2 text-sm text-foreground-muted">
-                Connect this environment to manage it.
+                {connectUnavailable
+                  ? `${GOAT_CONNECT_COMING_SOON.title} · ${GOAT_CONNECT_COMING_SOON.status}. ${GOAT_CONNECT_COMING_SOON.description}`
+                  : "Connect this environment to manage it."}
               </Text>
             ) : !allowed ? (
               <Text className="px-2 text-sm text-foreground-muted">
@@ -227,6 +241,7 @@ function EnvironmentDetail({ environmentId }: { readonly environmentId: Environm
             {notice ? <Text className="px-2 text-sm text-foreground-muted">{notice}</Text> : null}
             {config ? (
               <>
+                <MemoryEnvironmentEntry environmentId={environmentId} />
                 <SettingsSection title="GOAT">
                   <View className="gap-1 p-4">
                     <Text className="text-base text-foreground">Version {version}</Text>
@@ -248,7 +263,8 @@ function EnvironmentDetail({ environmentId }: { readonly environmentId: Environm
                           : "You are up to date."}
                       </Text>
                     ) : null}
-                    {!supportsEnvironmentUpdate(config.environment.capabilities) ? (
+                    {checkedRelease?.targetVersion &&
+                    !supportsEnvironmentUpdate(config.environment.capabilities) ? (
                       <Text className="text-sm text-foreground-muted">
                         {capabilities?.serverSelfUpdate === "desktop-managed"
                           ? "Update the desktop app on this machine."
@@ -267,19 +283,15 @@ function EnvironmentDetail({ environmentId }: { readonly environmentId: Environm
                         const controller = new AbortController();
                         checkController.current = controller;
                         const timeout = setTimeout(() => controller.abort(), 20_000);
-                        try {
-                          const targetVersion = await findEnvironmentUpdate(
-                            config.environment.serverVersion,
-                            controller.signal,
-                          );
-                          setRelease({
-                            fromVersion: config.environment.serverVersion,
-                            targetVersion,
-                          });
-                        } finally {
-                          clearTimeout(timeout);
-                          checkController.current = null;
-                        }
+                        const fromVersion = config.environment.serverVersion;
+                        const result = await settlePromise(() =>
+                          findEnvironmentUpdate(fromVersion, controller.signal),
+                        );
+                        clearTimeout(timeout);
+                        checkController.current = null;
+                        // `run` owns the error message, so a failed lookup rethrows to it.
+                        if (AsyncResult.isFailure(result)) throw squashAtomCommandFailure(result);
+                        setRelease({ fromVersion, targetVersion: result.value });
                       });
                     }}
                   />
@@ -313,64 +325,97 @@ function EnvironmentDetail({ environmentId }: { readonly environmentId: Environm
                   />
                   {config.providers
                     .filter((provider) => provider.enabled)
-                    .map((provider) => (
-                      <View key={provider.instanceId}>
-                        <View className="gap-1 p-4">
-                          <View className="flex-row items-center gap-2">
-                            <ProviderIcon provider={provider.driver} size={18} />
-                            <Text className="min-w-0 flex-1 text-base font-t3-medium text-foreground">
-                              {provider.displayName ?? provider.driver}
-                            </Text>
-                          </View>
-                          <Text className="text-sm text-foreground-muted">
-                            {provider.installed
-                              ? (provider.version ?? "Version unknown")
-                              : "Not installed"}
-                            {provider.versionAdvisory?.latestVersion
-                              ? ` · Latest ${provider.versionAdvisory.latestVersion}`
-                              : ""}
-                          </Text>
-                          {provider.updateState && provider.updateState.status !== "idle" ? (
-                            <Text
-                              selectable
-                              className={
-                                provider.updateState.status === "failed"
-                                  ? "text-sm text-danger-foreground"
-                                  : "text-sm text-foreground-muted"
-                              }
-                            >
-                              {provider.updateState.message ??
-                                `Update ${provider.updateState.status}`}
-                            </Text>
-                          ) : null}
-                          {provider.compatibilityAdvisory?.message ? (
-                            <Text selectable className="text-sm text-foreground-muted">
-                              {provider.compatibilityAdvisory.message}
-                            </Text>
-                          ) : null}
-                          {provider.unavailableReason || provider.message ? (
-                            <Text selectable className="text-sm text-foreground-muted">
-                              {provider.unavailableReason ?? provider.message}
-                            </Text>
-                          ) : null}
-                          {provider.versionAdvisory?.status === "behind_latest" &&
-                          !provider.versionAdvisory.canUpdate ? (
+                    .map((provider) => {
+                      const authSource = provider.authSourceInstanceId
+                        ? config.providers.find(
+                            (candidate) => candidate.instanceId === provider.authSourceInstanceId,
+                          )
+                        : undefined;
+                      const siblingName =
+                        authSource?.displayName ??
+                        (authSource ? PROVIDER_DISPLAY_NAMES[authSource.driver] : undefined) ??
+                        provider.authSourceInstanceId;
+                      const needsSiblingSignIn =
+                        provider.authSourceInstanceId !== undefined && provider.status !== "ready";
+                      return (
+                        <View key={provider.instanceId}>
+                          <View className="gap-1 p-4">
+                            <View className="flex-row items-center gap-2">
+                              <ProviderIcon provider={provider.driver} size={18} />
+                              <Text className="min-w-0 flex-1 text-base font-goat-medium text-foreground">
+                                {provider.displayName ?? provider.driver}
+                              </Text>
+                            </View>
                             <Text className="text-sm text-foreground-muted">
-                              Update this provider on the environment's machine.
+                              {provider.installed
+                                ? (provider.version ?? "Version unknown")
+                                : "Not installed"}
+                              {provider.versionAdvisory?.latestVersion
+                                ? ` · Latest ${provider.versionAdvisory.latestVersion}`
+                                : ""}
                             </Text>
+                            {provider.updateState && provider.updateState.status !== "idle" ? (
+                              <Text
+                                selectable
+                                className={
+                                  provider.updateState.status === "failed"
+                                    ? "text-sm text-danger-foreground"
+                                    : "text-sm text-foreground-muted"
+                                }
+                              >
+                                {provider.updateState.message ??
+                                  `Update ${provider.updateState.status}`}
+                              </Text>
+                            ) : null}
+                            {provider.compatibilityAdvisory?.message ? (
+                              <Text selectable className="text-sm text-foreground-muted">
+                                {provider.compatibilityAdvisory.message}
+                              </Text>
+                            ) : null}
+                            {provider.unavailableReason || provider.message ? (
+                              <Text selectable className="text-sm text-foreground-muted">
+                                {provider.unavailableReason ?? provider.message}
+                              </Text>
+                            ) : null}
+                            {needsSiblingSignIn ? (
+                              <Text className="text-sm text-foreground-muted">
+                                Signs in with {siblingName}.
+                              </Text>
+                            ) : null}
+                            {provider.versionAdvisory?.status === "behind_latest" &&
+                            !provider.versionAdvisory.canUpdate ? (
+                              <Text className="text-sm text-foreground-muted">
+                                Update this provider on the environment's machine.
+                              </Text>
+                            ) : null}
+                          </View>
+                          {needsSiblingSignIn ? (
+                            <SettingsActionRow
+                              icon="person.crop.circle"
+                              label={`Open ${siblingName} account sign-in`}
+                              onPress={() => {
+                                if (selectedIds !== null && !selectedIds.has(environmentId)) {
+                                  toggleEnvironment(environmentId);
+                                }
+                                navigation.navigate("SettingsSheet", {
+                                  screen: "SettingsContent",
+                                  params: { screen: "SettingsProviderAccounts" },
+                                });
+                              }}
+                            />
+                          ) : null}
+                          {canUpdateEnvironmentProvider(provider) ? (
+                            <SettingsActionRow
+                              icon="arrow.up.circle"
+                              label={`Update ${provider.displayName ?? provider.driver}`}
+                              disabled={busy || !canManageProviders}
+                              loading={pending === provider.instanceId}
+                              onPress={() => requestProviderUpdate(provider)}
+                            />
                           ) : null}
                         </View>
-                        {canUpdateEnvironmentProvider(provider) ? (
-                          <SettingsActionRow
-                            icon="arrow.up.circle"
-                            label={`Update ${provider.displayName ?? provider.driver}`}
-                            disabled={busy || !canManageProviders}
-                            loading={pending === provider.instanceId}
-                            onPress={() => requestProviderUpdate(provider)}
-                          />
-                        ) : null}
-                      </View>
-                    ))}
+                      );
+                    })}
                 </SettingsSection>
               </>
             ) : null}

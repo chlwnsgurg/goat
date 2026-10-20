@@ -1,4 +1,4 @@
-import { DesktopHostTelemetryMessage } from "@t3tools/contracts";
+import { DesktopHostTelemetryMessage } from "@goat/contracts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, describe, it } from "@effect/vitest";
 import * as Deferred from "effect/Deferred";
@@ -39,6 +39,7 @@ function layerElectronApp(
     name: Effect.succeed("T3 Code"),
     systemLocale: Effect.succeed("en-US"),
     whenReady: Effect.void,
+    requestSingleInstanceLock: Effect.succeed(true),
     quit: Effect.void,
     exit: () => Effect.void,
     relaunch: () => Effect.void,
@@ -471,8 +472,6 @@ describe("DesktopTelemetryPublisher", () => {
         } as const;
         yield* publisher.publishUpdateReport(report);
 
-        // A subscriber that attaches after the publish (the backend spawned
-        // by a relaunch) still sees the latest report replayed.
         const decoder = new TextDecoder();
         const decodeMessage = Schema.decodeUnknownEffect(
           Schema.fromJsonString(DesktopHostTelemetryMessage),
@@ -500,7 +499,7 @@ describe("DesktopRendererHistory", () => {
       Effect.gen(function* () {
         const fileSystem = yield* FileSystem.FileSystem;
         const directory = yield* fileSystem.makeTempDirectoryScoped({
-          prefix: "t3-renderer-history-",
+          prefix: "goat-renderer-history-",
         });
         let previewPid = 7_002;
         let previewDestroyed = false;
@@ -662,7 +661,6 @@ describe("DesktopRendererHistory", () => {
           assert.equal(crash.rendererPidSource, "last-known");
           assert.equal(crash.reason, "oom");
           assert.equal(crash.exitCode, -7);
-          // A restarted renderer can reuse the same numeric PID.
           const restarted = yield* Deferred.make<Record>();
           milestone = { matches: (row) => row.event === "dom-ready", written: restarted };
           previewPid = 7_003;
@@ -688,7 +686,6 @@ describe("DesktopRendererHistory", () => {
           yield* history.recordMetrics(metrics);
           assert.equal((yield* Deferred.await(afterDestroy)).webContentsId, 1);
           assert.isFalse(persisted.slice(previousCount).some((row) => row.webContentsId === 2));
-          // The app quit handshake drains before the history layer closes.
           for (let index = 0; index < 12; index++) main.emit("dom-ready");
           yield* history.shutdown;
           assert.equal(
@@ -719,7 +716,7 @@ describe("DesktopRendererHistory", () => {
     Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;
       const directory = yield* fileSystem.makeTempDirectoryScoped({
-        prefix: "t3-renderer-rotation-",
+        prefix: "goat-renderer-rotation-",
       });
       const filePath = `${directory}/renderer-history.ndjson`;
       const maxBytes = 256 * 1_024;

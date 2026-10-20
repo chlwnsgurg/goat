@@ -1,7 +1,8 @@
+import { isGoatConnectEnabled } from "@goat/shared/goatConnect";
 import {
   RelayManagedEndpointOrigin,
   RelayManagedEndpointRuntimeConfig,
-} from "@t3tools/contracts/relay";
+} from "@goat/contracts/relay";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
@@ -17,6 +18,7 @@ export const RELAY_ISSUER_SECRET = "cloud-relay-issuer";
 export const RELAY_ENVIRONMENT_CREDENTIAL_SECRET = "cloud-relay-environment-credential";
 export const PUBLISH_AGENT_ACTIVITY_SECRET = "cloud-publish-agent-activity";
 export const HOLD_WEBHOOKS_WHILE_OFFLINE_SECRET = "cloud-hold-webhooks-while-offline";
+export const CLOUD_LINK_REVOKED = "cloud-link-revoked";
 
 export const encodeEndpointRuntimeConfigJson = Schema.encodeEffect(
   Schema.fromJsonString(RelayManagedEndpointRuntimeConfig),
@@ -43,14 +45,15 @@ export function isAgentActivityPublishingEnabledValue(value: string | null): boo
   return value === "true";
 }
 
-/** Whether agent-activity publishes currently leave this environment: the
-    publish opt-in secret is enabled and the relay link credentials exist.
-    Mirrors the per-publish gate in AgentAwarenessRelay, so the descriptor
-    capability never advertises publishing that the publisher would skip. */
+/**
+ * Mirrors the per-publish gate in AgentAwarenessRelay, so the descriptor
+    capability never advertises publishing that the publisher would skip.
+ */
 export const readAgentActivityPublishingActive = (
   secrets: ServerSecretStore.ServerSecretStore["Service"],
 ): Effect.Effect<boolean> =>
   Effect.gen(function* () {
+    if (!isGoatConnectEnabled()) return false;
     const readSecretString = (name: string) =>
       secrets
         .get(name)
@@ -75,7 +78,6 @@ export const readAgentActivityPublishingActive = (
     );
   }).pipe(Effect.orElseSucceed(() => false));
 
-/** A non-empty secret as text, or null when it is missing, empty or unreadable. */
 const readSecretString = (name: string) =>
   ServerSecretStore.ServerSecretStore.pipe(
     Effect.flatMap((secrets) => secrets.get(name)),
@@ -85,17 +87,23 @@ const readSecretString = (name: string) =>
     Effect.orElseSucceed(() => null),
   );
 
-/** The relay URL and environment credential, or null when not linked to T3 Connect. */
-export const readRelayConnection = Effect.all([
-  readSecretString(RELAY_URL_SECRET),
-  readSecretString(RELAY_ENVIRONMENT_CREDENTIAL_SECRET),
-]).pipe(
-  Effect.map(([url, environmentCredential]) =>
-    url && environmentCredential ? { url, environmentCredential } : null,
-  ),
+export const readRelayConnection = Effect.suspend(() =>
+  !isGoatConnectEnabled()
+    ? Effect.succeed(null)
+    : Effect.all([
+        readSecretString(RELAY_URL_SECRET),
+        readSecretString(RELAY_ENVIRONMENT_CREDENTIAL_SECRET),
+      ]).pipe(
+        Effect.map(([url, environmentCredential]) =>
+          url && environmentCredential ? { url, environmentCredential } : null,
+        ),
+      ),
 );
 
-/** Whether this environment opted in to T3 Connect holding webhooks while it is offline. */
-export const readHoldWebhooksWhileOffline = readSecretString(
-  HOLD_WEBHOOKS_WHILE_OFFLINE_SECRET,
-).pipe(Effect.map((value) => value === "true"));
+export const readHoldWebhooksWhileOffline = Effect.suspend(() =>
+  !isGoatConnectEnabled()
+    ? Effect.succeed(false)
+    : readSecretString(HOLD_WEBHOOKS_WHILE_OFFLINE_SECRET).pipe(
+        Effect.map((value) => value === "true"),
+      ),
+);

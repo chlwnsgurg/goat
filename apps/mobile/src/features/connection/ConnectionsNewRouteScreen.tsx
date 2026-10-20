@@ -1,4 +1,6 @@
-import { ScreenScrollView as ScrollView } from "../../components/ScreenScrollView";
+import { ListRow } from "../../components/ui/ListRow";
+import * as Dialog from "../../components/ui/Dialog";
+import { ScreenScrollView as ScrollView } from "../../components/ui/ScreenScrollView";
 import { useAuth } from "@clerk/expo";
 import { CameraView, useCameraPermissions } from "expo-camera";
 import * as Haptics from "expo-haptics";
@@ -9,40 +11,57 @@ import {
   useRoute,
   type StaticScreenProps,
 } from "@react-navigation/native";
-import type { EnvironmentId } from "@t3tools/contracts";
+import type { EnvironmentId } from "@goat/contracts";
 import { AsyncResult } from "effect/reactivity";
-import { useCallback, useEffect, useRef, useState } from "react";
-import { Alert, Linking, Pressable, StyleSheet, View } from "react-native";
+import * as Cause from "effect/Cause";
+import { useAtomValue } from "@effect/atom-react";
+import { diagnosePairingFailure, type PairingDiagnosis } from "@goat/client-runtime/connection";
+import { useEffect, useRef, useState } from "react";
+import { Linking, Pressable, StyleSheet, View } from "react-native";
 import Svg, { Defs, RadialGradient, Rect, Stop } from "react-native-svg";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { cn } from "../../lib/cn";
 import { useUniwindTheme } from "../../lib/useUniwindTheme";
 import { useAppearancePreferences } from "../settings/appearance/AppearancePreferencesProvider";
 import { SettingsScreen } from "../settings/components/SettingsScreen";
-import { AppText as Text, AppTextInput, type AppTextInputProps } from "../../components/AppText";
-import { FrostedCutout } from "../../components/FrostedCutout";
+import { AppText as Text, AppTextInput, type AppTextInputProps } from "../../components/ui/AppText";
+import { FrostedCutout } from "../../components/ui/FrostedCutout";
 import { buildPairingUrl, extractPairingUrlFromQrPayload, parsePairingUrl } from "./pairing";
 import {
   setPendingConnectionError,
   useRemoteConnections,
 } from "../../state/use-remote-environment-registry";
-import { SymbolView } from "../../components/AppSymbol";
+import { SymbolView } from "../../components/ui/AppSymbol";
 import { hasCloudPublicConfig } from "../cloud/publicConfig";
 import { CloudEnvironmentRows } from "./CloudEnvironmentRows";
 import { splitEnvironmentSections } from "./environmentSections";
+import { environmentCatalog } from "../../connection/catalog";
+import { useConnectionController } from "./useConnectionController";
+import {
+  CONNECT_HUB_COPY,
+  type ConnectHubIntent,
+  finishHubPairing,
+  resolveConnectHubIntent,
+} from "./connectHubIntent";
+import { selectHubEnvironmentId } from "./hubEnvironment";
+import { useStoredHubEnvironment } from "./useStoredHubEnvironment";
+import { useConnectionsReady } from "../../state/workspace";
+import { PairingDiagnostics } from "./PairingDiagnostics";
 
 type ConnectionsNewRouteParams = {
   readonly mode?: string;
   readonly pairingUrl?: string;
   readonly autoConnect?: string;
-  /** Adds a route to this saved machine instead of a new environment. */
   readonly routeFor?: EnvironmentId;
+  readonly intent?: "hub" | "change-hub" | "add-server";
+  readonly replaceEnvironmentId?: EnvironmentId;
 };
 
 export function ConnectionsNewRouteScreen({
   route,
 }: StaticScreenProps<ConnectionsNewRouteParams | undefined>) {
   const {
+    connectedEnvironments,
     connectionPairingUrl,
     onChangeConnectionPairingUrl,
     onConnectPress,
@@ -51,6 +70,30 @@ export function ConnectionsNewRouteScreen({
   const navigation = useNavigation();
   const routeName = useRoute().name;
   const params = route.params ?? {};
+  const controller = useConnectionController();
+  const networkStatus = useAtomValue(environmentCatalog.networkStatusValueAtom);
+  const savedHub = useStoredHubEnvironment();
+  const catalogReady = useConnectionsReady();
+  const pairingReady = savedHub.loaded && catalogReady;
+  const { localEnvironments } = splitEnvironmentSections({
+    connectedEnvironments,
+    cloudEnvironments: null,
+  });
+  const resolvedIntent = resolveConnectHubIntent({
+    ...params,
+    savedEnvironmentCount: localEnvironments.length,
+  });
+  // Fixed once the saved environments are known, so a hub paired elsewhere while this sheet is
+  // open cannot turn "Connect hub" into "Change hub" and remove that hub on the next success.
+  const [openedIntent, setOpenedIntent] = useState<ConnectHubIntent | null>(null);
+  if (pairingReady && openedIntent === null) setOpenedIntent(resolvedIntent);
+  const intent = openedIntent ?? resolvedIntent;
+  const copy = CONNECT_HUB_COPY[intent];
+  const replaceEnvironmentId =
+    params.replaceEnvironmentId ?? selectHubEnvironmentId(localEnvironments, savedHub.storedHubId);
+  const replacedHubLabel =
+    localEnvironments.find((environment) => environment.environmentId === replaceEnvironmentId)
+      ?.environmentLabel ?? replaceEnvironmentId;
   // Deep-link prefill exists for development automation only. A production
   // link must not arrive with attacker-chosen host and token already filled.
   const routePairingUrl = __DEV__ ? (params.pairingUrl?.trim() ?? "") : "";
@@ -62,6 +105,13 @@ export function ConnectionsNewRouteScreen({
   const [hostInput, setHostInput] = useState("");
   const [codeInput, setCodeInput] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const submittingRef = useRef(false);
+  const [advancedExpanded, setAdvancedExpanded] = useState(
+    Boolean(params.routeFor || routePairingUrl),
+  );
+  const [diagnosis, setDiagnosis] = useState<PairingDiagnosis | null>(null);
+  const [completionError, setCompletionError] = useState<string | null>(null);
+  const requestedCameraPermissionRef = useRef(false);
   const [cameraPermission, requestCameraPermission] = useCameraPermissions();
   const screenFocused = useIsFocused();
   const [scannerLocked, setScannerLocked] = useState(false);
@@ -71,9 +121,26 @@ export function ConnectionsNewRouteScreen({
 
   const headerIconColor = useUniwindTheme()["--color-icon"];
 
-  const connectDisabled = isSubmitting || hostInput.trim().length === 0;
+  const connectDisabled = isSubmitting || !pairingReady || hostInput.trim().length === 0;
+  const errorMessage = completionError ?? pairingConnectionError ?? savedHub.error;
 
   useEffect(() => {
+    navigation.setOptions({ title: copy.title });
+  }, [navigation, copy.title]);
+
+  useEffect(() => {
+    if (
+      (intent === "hub" || intent === "change-hub") &&
+      cameraPermission?.status === "undetermined" &&
+      !requestedCameraPermissionRef.current
+    ) {
+      requestedCameraPermissionRef.current = true;
+      void requestCameraPermission();
+    }
+  }, [intent, cameraPermission?.status, requestCameraPermission]);
+
+  useEffect(() => {
+    if (!connectionPairingUrl) return;
     const { host, code } = parsePairingUrl(connectionPairingUrl);
     setHostInput(host);
     setCodeInput(code);
@@ -89,34 +156,34 @@ export function ConnectionsNewRouteScreen({
     setCodeInput(code);
   }, [routePairingUrl]);
 
-  useEffect(() => {
-    if (pairingConnectionError) {
-      setIsSubmitting(false);
-    }
-  }, [pairingConnectionError]);
-
-  const handleHostChange = useCallback((value: string) => {
+  const handleHostChange = (value: string) => {
     setHostInput(value);
     setPendingConnectionError(null);
-  }, []);
+    setDiagnosis(null);
+    setCompletionError(null);
+  };
 
-  const handleCodeChange = useCallback((value: string) => {
+  const handleCodeChange = (value: string) => {
     setCodeInput(value);
     setPendingConnectionError(null);
-  }, []);
+    setDiagnosis(null);
+    setCompletionError(null);
+  };
 
-  // The error is shared app state; a stale failure must not greet the next visit.
   useEffect(() => () => setPendingConnectionError(null), []);
 
-  // Opening the sheet never prompts; a tap on the scan card asks for the camera.
-  const handleScanPress = useCallback(async () => {
+  const handleScanPress = async () => {
+    if (submittingRef.current || !pairingReady) return;
+    setDiagnosis(null);
+    setCompletionError(null);
+    setPendingConnectionError(null);
     const permission = await requestCameraPermission();
     if (permission.granted) {
       setScanComplete(false);
       return;
     }
     if (permission.canAskAgain) return;
-    Alert.alert(
+    Dialog.alert(
       "Camera access needed",
       "Camera access was denied for this app. Open Settings to enable it.",
       [
@@ -124,94 +191,135 @@ export function ConnectionsNewRouteScreen({
         { text: "Open Settings", onPress: () => void Linking.openSettings() },
       ],
     );
-  }, [requestCameraPermission]);
+  };
 
-  const handleQrScan = useCallback(
-    ({ data }: { readonly data: string }) => {
-      if (scannerLocked) {
+  const handleQrScan = ({ data }: { readonly data: string }) => {
+    if (scannerLocked || scanComplete || submittingRef.current || !pairingReady) {
+      return;
+    }
+
+    setScannerLocked(true);
+
+    try {
+      const pairingUrl = extractPairingUrlFromQrPayload(data);
+      const { host, code } = parsePairingUrl(pairingUrl);
+      setHostInput(host);
+      setCodeInput(code);
+      onChangeConnectionPairingUrl(pairingUrl);
+      setScanComplete(true);
+      setScannerLocked(false);
+      void connectAndClose(pairingUrl);
+    } catch (error) {
+      void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
+      Dialog.alert(
+        "Invalid QR code",
+        error instanceof Error ? error.message : "Scanned QR code was not recognized.",
+      );
+      setTimeout(() => {
+        setScannerLocked(false);
+      }, 600);
+    }
+  };
+
+  const connectAndClose = async (pairingUrl: string, manual = false) => {
+    if (submittingRef.current || !pairingReady) return;
+    submittingRef.current = true;
+    setIsSubmitting(true);
+    setDiagnosis(null);
+    setCompletionError(null);
+    onChangeConnectionPairingUrl(pairingUrl);
+    try {
+      const result = await onConnectPress(pairingUrl, params.routeFor);
+      if (AsyncResult.isFailure(result)) {
+        const error = Cause.squash(result.cause);
+        setPendingConnectionError(
+          error instanceof Error ? error.message : "Failed to pair with the environment.",
+        );
+        setDiagnosis(
+          diagnosePairingFailure({
+            host: parsePairingUrl(pairingUrl).host,
+            error,
+            networkStatus,
+          }),
+        );
+        if (manual) setAdvancedExpanded(true);
+        void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
         return;
       }
+      if (!AsyncResult.isSuccess(result)) return;
 
-      setScannerLocked(true);
-
-      try {
-        const pairingUrl = extractPairingUrlFromQrPayload(data);
-        const { host, code } = parsePairingUrl(pairingUrl);
-        setHostInput(host);
-        setCodeInput(code);
-        onChangeConnectionPairingUrl(pairingUrl);
-        setScanComplete(true);
-        setScannerLocked(false);
-      } catch (error) {
+      // Persist before removing the old hub so other saved servers cannot become the hub.
+      await savedHub.rememberHubEnvironment({ intent, pairedEnvironmentId: result.value });
+      const completion = await finishHubPairing({
+        pairedEnvironmentId: result.value,
+        intent,
+        replaceEnvironmentId,
+        removeEnvironment: controller.removeEnvironment,
+      });
+      if (completion.removalFailed) {
+        setCompletionError(
+          `Connected to the new hub, but couldn't remove ${replacedHubLabel}. Remove it from Environments.`,
+        );
         void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
-        Alert.alert(
-          "Invalid QR code",
-          error instanceof Error ? error.message : "Scanned QR code was not recognized.",
-        );
-        setTimeout(() => {
-          setScannerLocked(false);
-        }, 600);
+        return;
       }
-    },
-    [onChangeConnectionPairingUrl, scannerLocked],
-  );
-
-  const connectAndClose = useCallback(
-    async (pairingUrl: string, replaceWithHome: boolean) => {
-      setIsSubmitting(true);
-      onChangeConnectionPairingUrl(pairingUrl);
-      try {
-        const result = await onConnectPress(pairingUrl, params.routeFor);
-        void Haptics.notificationAsync(
-          AsyncResult.isSuccess(result)
-            ? Haptics.NotificationFeedbackType.Success
-            : Haptics.NotificationFeedbackType.Error,
-        );
-        if (AsyncResult.isSuccess(result)) {
-          if (replaceWithHome || !navigation.canGoBack()) {
-            navigation.dispatch(StackActions.replace("Home"));
-          } else {
-            navigation.goBack();
-          }
-        }
-      } finally {
-        setIsSubmitting(false);
+      void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+      // Return to whatever opened the sheet. Replacing it with Home would
+      // nest Home inside any sheet still below it.
+      if (!navigation.canGoBack()) {
+        navigation.dispatch(StackActions.replace("Home"));
+      } else {
+        navigation.goBack();
       }
-    },
-    [navigation, onChangeConnectionPairingUrl, onConnectPress, params.routeFor],
-  );
+    } catch (error) {
+      setCompletionError(error instanceof Error ? error.message : "Couldn't save the new hub.");
+      if (manual) setAdvancedExpanded(true);
+    } finally {
+      submittingRef.current = false;
+      setIsSubmitting(false);
+    }
+  };
 
-  const handleSubmit = useCallback(async () => {
-    await connectAndClose(buildPairingUrl(hostInput, codeInput), false);
-  }, [codeInput, connectAndClose, hostInput]);
+  const handleSubmit = async () => {
+    await connectAndClose(buildPairingUrl(hostInput, codeInput), true);
+  };
 
   useEffect(() => {
-    if (!shouldAutoConnect || attemptedAutoConnectRef.current === routePairingUrl) {
+    if (
+      !pairingReady ||
+      !shouldAutoConnect ||
+      attemptedAutoConnectRef.current === routePairingUrl
+    ) {
       return;
     }
 
     attemptedAutoConnectRef.current = routePairingUrl;
-    void connectAndClose(routePairingUrl, true);
-  }, [connectAndClose, routePairingUrl, shouldAutoConnect]);
+    void connectAndClose(routePairingUrl);
+  }, [connectAndClose, routePairingUrl, shouldAutoConnect, pairingReady]);
 
   return (
     <SettingsScreen
-      formSheet={routeName === "ConnectionsNew"}
-      title="Add environment"
-      actions={[
-        {
-          accessibilityLabel: isSubmitting ? "Connecting" : "Add environment",
-          loading: isSubmitting,
-          icon: "checkmark",
-          tintColor: headerIconColor,
-          disabled: connectDisabled,
-          onPress: () => {
-            void handleSubmit();
-          },
-        },
-      ]}
+      formSheet={routeName === "ConnectionsNew" || routeName === "Pair"}
+      title={copy.title}
+      actions={
+        advancedExpanded
+          ? [
+              {
+                accessibilityLabel: isSubmitting ? "Connecting" : copy.title,
+                loading: isSubmitting,
+                icon: "checkmark",
+                tintColor: headerIconColor,
+                disabled: connectDisabled,
+                onPress: () => {
+                  void handleSubmit();
+                },
+              },
+            ]
+          : []
+      }
     >
       <ScrollView
+        nestedScrollEnabled
         contentInsetAdjustmentBehavior="automatic"
         keyboardShouldPersistTaps="handled"
         showsVerticalScrollIndicator={false}
@@ -223,52 +331,96 @@ export function ConnectionsNewRouteScreen({
         }}
       >
         <View collapsable={false} className="gap-6.5">
-          <PairingScanCard
-            cameraActive={cameraPermission?.granted === true && screenFocused && !scanComplete}
-            onScan={handleQrScan}
-            onScanPress={() => {
-              void handleScanPress();
-            }}
-          />
-
           <View collapsable={false} className="gap-2">
-            <Text className="px-4 text-sm font-t3-medium text-foreground-muted">Or enter it</Text>
-            <View
-              collapsable={false}
-              className={cn(
-                "overflow-hidden rounded-[26px] border-continuous border bg-grouped-card",
-                pairingConnectionError ? "border-danger-foreground" : "border-transparent",
-              )}
-            >
-              <PairingInputRow
-                label="Address"
-                keyboardType="url"
-                placeholder="192.168.1.100:3773"
-                value={hostInput}
-                onChangeText={handleHostChange}
-              />
-              <View className="ml-4 border-t border-border-subtle" />
-              <PairingInputRow
-                label="Code"
-                placeholder="Pairing code"
-                returnKeyType="go"
-                value={codeInput}
-                onChangeText={handleCodeChange}
-                onSubmitEditing={() => {
-                  if (!connectDisabled) void handleSubmit();
-                }}
-              />
-            </View>
+            <PairingScanCard
+              disabled={isSubmitting || !pairingReady}
+              cameraActive={
+                cameraPermission?.granted === true &&
+                screenFocused &&
+                !scanComplete &&
+                pairingReady &&
+                !isSubmitting
+              }
+              onScan={handleQrScan}
+              onScanPress={() => {
+                void handleScanPress();
+              }}
+            />
+            <Text className="px-4 text-sm leading-normal text-foreground-muted">
+              {copy.scanHint}
+            </Text>
+            <Text className="px-4 text-sm leading-normal text-foreground-muted">
+              Using your phone's camera opens this scanner. Scan once more inside the app.
+            </Text>
+          </View>
+
+          {diagnosis ? (
+            <PairingDiagnostics
+              diagnosis={diagnosis}
+              errorMessage={errorMessage ?? "Failed to pair with the environment."}
+            />
+          ) : null}
+          {errorMessage ? (
             <Text
               accessibilityLiveRegion="polite"
-              className={cn(
-                "px-4 text-sm leading-normal",
-                pairingConnectionError ? "text-danger-foreground" : "text-foreground-muted",
-              )}
+              className="px-4 text-sm leading-normal text-danger-foreground"
             >
-              {pairingConnectionError ??
-                "For machines on your local network or tailnet. The machine keeps its own provider credentials."}
+              {errorMessage}
             </Text>
+          ) : null}
+
+          <View collapsable={false} className="gap-2">
+            <Pressable
+              accessibilityRole="button"
+              accessibilityState={{ expanded: advancedExpanded }}
+              onPress={() => setAdvancedExpanded((expanded) => !expanded)}
+              className="min-h-13 flex-row items-center justify-between rounded-[26px] border-continuous bg-grouped-card px-4 active:opacity-70"
+            >
+              <Text className="text-base text-foreground">Advanced</Text>
+              <SymbolView
+                name={advancedExpanded ? "chevron.up" : "chevron.down"}
+                size={14}
+                tintColorClassName="accent-chevron"
+                type="monochrome"
+              />
+            </Pressable>
+            {advancedExpanded ? (
+              <>
+                <Text className="px-4 text-sm font-goat-medium text-foreground-muted">
+                  Enter address manually
+                </Text>
+                <View
+                  collapsable={false}
+                  className={cn(
+                    "overflow-hidden rounded-[26px] border-continuous border bg-grouped-card",
+                    pairingConnectionError ? "border-danger-foreground" : "border-transparent",
+                  )}
+                >
+                  <PairingInputRow
+                    label="Address"
+                    keyboardType="url"
+                    placeholder="192.168.1.100:3773"
+                    value={hostInput}
+                    onChangeText={handleHostChange}
+                  />
+                  <View className="ml-4 border-t border-border-subtle" />
+                  <PairingInputRow
+                    label="Code"
+                    placeholder="Pairing code"
+                    returnKeyType="go"
+                    value={codeInput}
+                    onChangeText={handleCodeChange}
+                    onSubmitEditing={() => {
+                      if (!connectDisabled) void handleSubmit();
+                    }}
+                  />
+                </View>
+                <Text className="px-4 text-sm leading-normal text-foreground-muted">
+                  For machines on your local network or tailnet. The machine keeps its own provider
+                  credentials.
+                </Text>
+              </>
+            ) : null}
           </View>
 
           {hasCloudPublicConfig() ? <T3ConnectSection /> : null}
@@ -283,12 +435,8 @@ const SCAN_RETICLE_SIZE = 150;
 const SCAN_RETICLE_TOP = 36;
 const SCAN_RETICLE_RADIUS = 28;
 
-/**
- * Live QR scanner: the camera fills the card, blurred everywhere except the
- * reticle so the code being aimed at stays sharp. Without a camera it shows the
- * same frame over a dark gradient.
- */
 function PairingScanCard(props: {
+  readonly disabled: boolean;
   readonly cameraActive: boolean;
   readonly onScan: (result: { readonly data: string }) => void;
   readonly onScanPress: () => void;
@@ -298,7 +446,7 @@ function PairingScanCard(props: {
     <Pressable
       accessibilityRole={props.cameraActive ? undefined : "button"}
       accessibilityLabel={props.cameraActive ? undefined : "Scan QR code"}
-      disabled={props.cameraActive}
+      disabled={props.cameraActive || props.disabled}
       onPress={props.onScanPress}
       className={cn(
         "overflow-hidden rounded-[26px] border-continuous",
@@ -360,7 +508,10 @@ function PairingScanCard(props: {
                 weight="light"
               />
               <Text
-                className={cn("font-t3-medium text-sm", light ? "text-black/70" : "text-white/80")}
+                className={cn(
+                  "font-goat-medium text-sm",
+                  light ? "text-black/70" : "text-white/80",
+                )}
               >
                 Tap to scan
               </Text>
@@ -368,18 +519,13 @@ function PairingScanCard(props: {
           )}
         </View>
         <Text className={cn("text-center text-sm", light ? "text-black/70" : "text-white/80")}>
-          Scan the code from goat pair or desktop Connections settings
+          Scan QR code
         </Text>
       </View>
     </Pressable>
   );
 }
 
-/**
- * Managed-relay alternative to manual pairing: signed in, the account's
- * published environments connect with a switch; signed out, one row opens the
- * T3 Account sheet.
- */
 function T3ConnectSection() {
   const { isLoaded, isSignedIn } = useAuth({ treatPendingAsSignedOut: false });
   const navigation = useNavigation();
@@ -392,7 +538,7 @@ function T3ConnectSection() {
 
   return (
     <View collapsable={false} className="gap-2">
-      <Text className="px-4 text-sm font-t3-medium text-foreground-muted">
+      <Text className="px-4 text-sm font-goat-medium text-foreground-muted">
         Or use the managed relay
       </Text>
       {isSignedIn ? (
@@ -403,32 +549,17 @@ function T3ConnectSection() {
           showHeader={false}
         />
       ) : (
-        <Pressable
-          accessibilityRole="button"
+        <ListRow
+          label="Sign in to T3 Connect"
+          description="Reach your machines from anywhere, no network setup."
           disabled={!isLoaded}
           onPress={() => navigation.navigate("SettingsSheet", { screen: "SettingsAuth" })}
-          className="min-h-13 flex-row items-center gap-3 rounded-[26px] border-continuous bg-grouped-card px-4 active:opacity-70"
-        >
-          <View className="min-w-0 flex-1 py-3">
-            <Text className="text-base text-foreground">Sign in to T3 Connect</Text>
-            <Text className="text-sm text-foreground-muted">
-              Reach your machines from anywhere, no network setup.
-            </Text>
-          </View>
-          <SymbolView
-            name="chevron.right"
-            size={14}
-            tintColorClassName="accent-chevron"
-            type="monochrome"
-            weight="semibold"
-          />
-        </Pressable>
+        />
       )}
     </View>
   );
 }
 
-/** Inline grouped-list field: fixed label column, input filling the rest. */
 function PairingInputRow({
   label,
   ...inputProps

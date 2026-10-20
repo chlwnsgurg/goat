@@ -10,9 +10,12 @@ import {
   DESKTOP_APP_ACTIVATION_PROTOCOL_VERSION,
   DesktopAppActivationRequest,
   type DesktopAppActivationResponse,
-} from "@t3tools/contracts";
-import { resolveDesktopAppControlAddress } from "@t3tools/shared/desktopAppControl";
-import * as HostProcess from "@t3tools/shared/HostProcess";
+} from "@goat/contracts";
+import {
+  resolveDesktopAppControlAddresses,
+  type DesktopAppControlAddress,
+} from "@goat/shared/desktopAppControl";
+import * as HostProcess from "@goat/shared/HostProcess";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -47,7 +50,6 @@ export class DesktopAppActivationStartError extends Schema.TaggedError<DesktopAp
 }
 
 interface RunningControlServer {
-  /** Binds the address again if its socket file is gone. Directory changes run this too. */
   readonly reclaim: () => Promise<void>;
   readonly close: () => Promise<void>;
 }
@@ -75,7 +77,6 @@ function requestIdFromUnknown(value: unknown): string {
   return "invalid-request";
 }
 
-/** Makes sure the socket directory is safe to use. Returns true when it had to create it. */
 async function prepareUnixDirectory(input: {
   readonly directory: string;
   readonly userId: number | undefined;
@@ -106,16 +107,6 @@ function closeServer(server: NodeNet.Server): Promise<void> {
   return new Promise((resolve) => server.close(() => resolve()));
 }
 
-/**
- * Serves `t3 app` requests on the local control address until `close`.
- *
- * Two desktop apps can share one state dir, for example nightly and a preview
- * build. They share one socket path, so on Unix:
- * - The newest app takes the path over.
- * - `close` removes the socket file only while it is still this app's socket.
- * - An app binds the path again when it is gone, for example after the app that
- *   took it over quits.
- */
 export async function startDesktopAppControlServer(input: {
   readonly address: string;
   readonly directory: string | null;
@@ -201,8 +192,8 @@ export async function startDesktopAppControlServer(input: {
   // Closing a Unix socket server unlinks the path it was bound to, even when
   // another app's socket lives there now. Bind a staging path and move it onto
   // the address instead, so a later close only unlinks the staging path, which
-  // is already gone. `rename` takes the address over in one step. `link` claims
-  // it only while it is free, and fails with EEXIST otherwise.
+  // is already gone.
+
   const bindUnix = async (directory: string, mode: "take-over" | "claim-free") => {
     const staging = NodePath.join(directory, `${NodeCrypto.randomBytes(6).toString("hex")}.tmp`);
     const server = await listen(staging);
@@ -242,7 +233,6 @@ export async function startDesktopAppControlServer(input: {
     }
     const next = await bindUnix(input.directory, "claim-free").catch(
       (error: NodeJS.ErrnoException) => {
-        // Another app bound the address first.
         if (error.code === "EEXIST") return null;
         throw error;
       },
@@ -268,7 +258,6 @@ export async function startDesktopAppControlServer(input: {
       });
       watcher.on("error", input.onReclaimError);
     } catch (error) {
-      // The socket still works without a watcher. It only cannot recover after removal.
       input.onReclaimError(error);
     }
   };
@@ -298,6 +287,31 @@ export async function startDesktopAppControlServer(input: {
   };
 }
 
+/** Both versions reach the same broker. Failed startup releases any address already bound. */
+export async function startDesktopAppControlServers(
+  input: Omit<Parameters<typeof startDesktopAppControlServer>[0], "address" | "directory"> & {
+    readonly addresses: ReadonlyArray<DesktopAppControlAddress>;
+  },
+): Promise<RunningControlServer> {
+  const servers: RunningControlServer[] = [];
+  try {
+    for (const address of input.addresses) {
+      servers.push(await startDesktopAppControlServer({ ...input, ...address }));
+    }
+  } catch (cause) {
+    await Promise.all(servers.map((server) => server.close()));
+    throw cause;
+  }
+  return {
+    reclaim: async () => {
+      await Promise.all(servers.map((server) => server.reclaim()));
+    },
+    close: async () => {
+      await Promise.all(servers.map((server) => server.close()));
+    },
+  };
+}
+
 export class DesktopAppActivation extends Context.Service<
   DesktopAppActivation,
   {
@@ -305,11 +319,11 @@ export class DesktopAppActivation extends Context.Service<
     readonly setRendererReady: (ready: boolean) => Effect.Effect<void>;
     readonly complete: (response: DesktopAppActivationResponse) => Effect.Effect<void>;
   }
->()("@t3tools/desktop/app/DesktopAppActivation") {}
+>()("@goat/desktop/app/DesktopAppActivation") {}
 
 const { logWarning } = makeComponentLogger("desktop-app-activation");
 
-/** @public Service construction is part of the canonical Effect module API. */
+/** @public */
 export const make = Effect.gen(function* () {
   const desktopEnvironment = yield* DesktopEnvironment.DesktopEnvironment;
   const desktopWindow = yield* DesktopWindow.DesktopWindow;
@@ -317,7 +331,7 @@ export const make = Effect.gen(function* () {
   const path = yield* Path.Path;
   const userId = yield* HostProcess.UserId;
   const runPromise = Effect.runPromiseWith(yield* Effect.context<never>());
-  const address = resolveDesktopAppControlAddress({
+  const addresses = resolveDesktopAppControlAddresses({
     stateDir: path.resolve(desktopEnvironment.stateDir),
     platform: desktopEnvironment.platform,
     tempDir: NodeOS.tmpdir(),
@@ -349,8 +363,8 @@ export const make = Effect.gen(function* () {
     start: Effect.acquireRelease(
       Effect.tryPromise({
         try: () =>
-          startDesktopAppControlServer({
-            ...address,
+          startDesktopAppControlServers({
+            addresses,
             userId,
             handle: (request) => broker.request(request),
             cancel: (requestId) => broker.cancel(requestId),
@@ -359,7 +373,8 @@ export const make = Effect.gen(function* () {
                 logWarning("failed to restore the desktop app control socket", { cause }),
               ),
           }),
-        catch: (cause) => new DesktopAppActivationStartError({ address: address.address, cause }),
+        catch: (cause) =>
+          new DesktopAppActivationStartError({ address: addresses[0].address, cause }),
       }),
       (server) =>
         Effect.promise(() => server.close()).pipe(

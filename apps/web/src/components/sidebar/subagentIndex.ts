@@ -1,7 +1,6 @@
 import { useAtomValue } from "@effect/atom-react";
-import { parseScopedThreadKey } from "@t3tools/client-runtime/environment";
-import type { EnvironmentThreadShell } from "@t3tools/client-runtime/state/shell";
-import { useMemo } from "react";
+import { parseScopedThreadKey } from "@goat/client-runtime/environment";
+import type { EnvironmentThreadShell } from "@goat/client-runtime/state/shell";
 import { Atom } from "effect/reactivity";
 
 import { useThreadShell } from "../../state/entities";
@@ -29,14 +28,8 @@ export function useSidebarOpenSubagent(
   routeThreadKey: string | null,
 ): { readonly ownerKey: string; readonly thread: EnvironmentThreadShell } | null {
   const ownerKey = useSidebarSubagentIndex().ownerKeyByChildKey.get(routeThreadKey ?? "") ?? null;
-  const ref = useMemo(
-    () =>
-      ownerKey === null || routeThreadKey === null ? null : parseScopedThreadKey(routeThreadKey),
-    [ownerKey, routeThreadKey],
-  );
+  const ref =
+    ownerKey === null || routeThreadKey === null ? null : parseScopedThreadKey(routeThreadKey);
   const thread = useThreadShell(ref);
-  return useMemo(
-    () => (ownerKey === null || thread === null ? null : { ownerKey, thread }),
-    [ownerKey, thread],
-  );
+  return ownerKey === null || thread === null ? null : { ownerKey, thread };
 }

@@ -1,6 +1,6 @@
 import { Outlet, createFileRoute, redirect, useLocation } from "@tanstack/react-router";
 import { useState, type ReactNode } from "react";
-import { RotateCcwIcon } from "lucide-react";
+import { RotateCcwIcon } from "~/components/solar";
 import { Button } from "../components/ui/button";
 import { useSettingsRestore } from "../components/settings/SettingsPanels";
 
@@ -20,6 +20,7 @@ import { SETTINGS_DEVICE_ONLY_PATHS } from "../components/settings/SettingsScope
 import { SettingsPageContainer } from "../components/settings/settingsLayout";
 import {
   retainSettingsScope,
+  settingsContentScopeKey,
   validateSettingsRouteSearch,
 } from "../components/settings/settingsScopeNavigation";
 import {
@@ -51,6 +52,7 @@ function SettingsScopeBoundary({ pathname, children }: { pathname: string; child
   const autoSettlementAvailability = searchTarget?.requiresThreadAutoSettlement
     ? getThreadAutoSettlementSearchAvailability(environments, scope)
     : null;
+  if (pathname === "/settings/memory") return children;
   if (
     scope.kind !== "unavailable" &&
     searchTarget &&
@@ -86,12 +88,9 @@ function SettingsScopeBoundary({ pathname, children }: { pathname: string; child
       </SettingsScopeNotice>
     );
   }
-  // Device-local pages ignore the scope entirely; the project page follows
-  // remembered members while a grouping change replaces its URL key.
   if (SETTINGS_DEVICE_ONLY_PATHS.has(pathname) || pathname === "/settings/projects") {
     return children;
   }
-  // Keep the scope sentence on screen so the selection can be changed back.
   if (scope.kind === "unavailable")
     return (
       <SettingsPageContainer>
@@ -114,7 +113,12 @@ function SettingsContentLayout() {
   const location = useLocation();
   const navigateToMainApp = useNavigateToMainApp();
   useEscapeToGoBack(navigateToMainApp);
-  const { search } = useSettingsScope();
+  const { search, environment } = useSettingsScope();
+  const contentScopeKey = settingsContentScopeKey(
+    location.pathname,
+    search,
+    environment?.environmentId,
+  );
   const [restoreSignal, setRestoreSignal] = useState(0);
 
   return (
@@ -133,10 +137,7 @@ function SettingsContentLayout() {
           </div>
         </WorkspacePageHeader>
 
-        <div
-          key={`${JSON.stringify(search)}:${restoreSignal}`}
-          className="min-h-0 flex flex-1 flex-col"
-        >
+        <div key={`${contentScopeKey}:${restoreSignal}`} className="min-h-0 flex flex-1 flex-col">
           <SettingsScopeBoundary pathname={location.pathname}>
             <Outlet />
           </SettingsScopeBoundary>
@@ -153,7 +154,7 @@ function SettingsRouteLayout() {
   return (
     <SettingsScopeProvider
       search={rawSearch}
-      singleEnvironment={pathname === "/settings/providers"}
+      singleEnvironment={pathname === "/settings/providers" || pathname === "/settings/memory"}
       onChange={(next) => {
         // Send every axis so the retain middleware sees an explicit target
         // even when the choice is "all", which is the absence of a key.

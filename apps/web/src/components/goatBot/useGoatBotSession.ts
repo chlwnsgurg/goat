@@ -1,35 +1,43 @@
-import { scopeThreadRef } from "@t3tools/client-runtime/environment";
-import type {
-  ChannelBotRef,
-  ChannelGatewayError,
-  EnvironmentId,
-  OrchestrationV2ProjectedTurnItem,
-} from "@t3tools/contracts";
-import { useContext, useEffect, useMemo } from "react";
-import { create } from "zustand";
-
-import { useGlobalAgentStore } from "~/globalAgentStore";
-import { useEnvironmentShellsBootstrapped, useThreadShell } from "~/state/entities";
 import {
-  pickGoatBotEnvironment,
-  resolveGoatBotAvailability,
-  type GoatBotEnvironmentInput,
-} from "./goatBotAvailability";
-import { GoatBotChannelContext, type GoatBotChannelPort } from "./goatBotChannelPort";
-import {
+  buildGoatBotTimeline,
+  createGoatBotSendQueue,
+  goatBotItemReaders,
+  goatBotReplyingSince,
   initialGoatBotEnsure,
   retryGoatBotEnsure,
   settleGoatBotEnsure,
   startGoatBotEnsure,
   syncGoatBotEnsure,
   type GoatBotEnsureMachine,
-} from "./goatBotEnsure";
+  type GoatBotSendQueue,
+} from "@goat/client-runtime/goatBot";
+import { scopeThreadRef } from "@goat/client-runtime/environment";
+import type {
+  ChannelBotRef,
+  ChannelGatewayError,
+  EnvironmentId,
+  OrchestrationV2ProjectedTurnItem,
+} from "@goat/contracts";
+import { useContext, useEffect } from "react";
+import { create } from "zustand";
+
+import { useGlobalAgentStore } from "~/globalAgentStore";
+import { randomUUID } from "~/lib/utils";
+import { useEnvironmentShellsBootstrapped, useThreadShell } from "~/state/entities";
+import {
+  goatBotHomeReadBack,
+  goatBotSupportUnknown,
+  pickGoatBotEnvironment,
+  resolveGoatBotAvailability,
+  resolveGoatBotHomeSelection,
+  type GoatBotEnvironmentInput,
+} from "@goat/client-runtime/goatBot";
+import { GoatBotChannelContext, type GoatBotChannelPort } from "./goatBotChannelPort";
 import { useGoatBotEnvironments } from "./goatBotHooks";
-import { goatBotItemReaders } from "./goatBotReaders";
-import { buildGoatBotTimeline } from "./goatBotRows";
-import { createGoatBotSendQueue, type GoatBotSendQueue } from "./goatBotSendQueue";
 
 interface Session {
+  readonly homeKey: string;
+  readonly notHome: { readonly homeKey: string; readonly settingsSnapshot: object | null } | null;
   readonly connected: boolean;
   readonly capability: boolean;
   readonly generation: number;
@@ -55,6 +63,7 @@ function update(environmentId: EnvironmentId, session: Session) {
 function newQueue(environmentId: EnvironmentId) {
   return createGoatBotSendQueue({
     onChange: changed,
+    makeKey: randomUUID,
     canDispatch: (bot) => {
       const session = useSessions.getState().sessions.get(environmentId);
       return (
@@ -93,6 +102,12 @@ function newQueue(environmentId: EnvironmentId) {
 /** Sidebar observers also track reconnects while the bot screen is closed. */
 function useObservedEnvironments() {
   const environments = useGoatBotEnvironments();
+  const { supported, resolution } = resolveGoatBotHomeSelection(environments, null);
+  const homeKey = !supported
+    ? "legacy"
+    : resolution.state === "claimed"
+      ? `${resolution.claim.environmentId}:${resolution.claim.claimedAt}:${resolution.claim.claimId}`
+      : resolution.state;
   useEffect(() => {
     const observed = new Map(environments.map((entry) => [entry.environmentId, entry]));
     for (const [environmentId, session] of useSessions.getState().sessions) {
@@ -108,16 +123,19 @@ function useObservedEnvironments() {
       const previous = useSessions.getState().sessions.get(environment.environmentId);
       if (
         previous?.connected === environment.connected &&
-        previous.capability === environment.supportsChannelLedger
+        previous.capability === environment.supportsChannelLedger &&
+        previous.homeKey === homeKey
       )
         continue;
       const generation =
         (previous?.generation ?? 0) + (environment.connected && !previous?.connected ? 1 : 0);
       const key =
         environment.connected && environment.supportsChannelLedger
-          ? `${environment.environmentId}:${generation}:channel`
+          ? `${environment.environmentId}:${generation}:channel:${homeKey}`
           : null;
       update(environment.environmentId, {
+        homeKey,
+        notHome: previous?.notHome ?? null,
         connected: environment.connected,
         capability: environment.supportsChannelLedger,
         generation,
@@ -128,7 +146,7 @@ function useObservedEnvironments() {
         queue: previous?.queue ?? newQueue(environment.environmentId),
       });
     }
-  }, [environments]);
+  }, [environments, homeKey]);
   return environments;
 }
 
@@ -136,19 +154,29 @@ export function goatBotEnabled(
   port: GoatBotChannelPort | null,
   environment: GoatBotEnvironmentInput | null,
 ): boolean {
-  return port !== null && environment?.supportsChannelLedger === true;
+  return (
+    port !== null &&
+    (environment?.supportsChannelLedger === true || goatBotSupportUnknown(environment))
+  );
 }
 
 export function useGoatBotEnabled() {
   const port = useContext(GoatBotChannelContext);
   const environments = useObservedEnvironments();
   const botRef = useGlobalAgentStore((state) => state.botRef);
+  const home = resolveGoatBotHomeSelection(environments, botRef);
   const environment = pickGoatBotEnvironment(environments, botRef);
   const session = useSessions((state) =>
     environment === null ? undefined : state.sessions.get(environment.environmentId),
   );
   return {
-    enabled: goatBotEnabled(port, environment),
+    enabled: home.supported
+      ? port !== null &&
+        (home.resolution.state === "claimed" ||
+          environments.some((entry) => entry.supportsChannelLedger))
+      : goatBotEnabled(port, environment),
+    environments,
+    home,
     environment,
     generation:
       session?.connected === environment?.connected &&
@@ -159,36 +187,55 @@ export function useGoatBotEnabled() {
   };
 }
 
-const useCannotSend = (_environmentId: EnvironmentId | null) => false;
+// Without a port nothing can send; the stand-in keeps the hook call unconditional.
+const NO_PORT_PERMISSION: Pick<GoatBotChannelPort, "useCanSend"> = { useCanSend: () => false };
+
+// The queue changes in place and bumps revision; taking revision makes it an input of the
+// compiled read, so the timeline does not keep the previous pending inputs.
+function pendingInputsAt(queue: GoatBotSendQueue | undefined, _revision: number) {
+  return queue?.pendingInputs() ?? [];
+}
 
 /** One ensure and send queue per environment, shared by the entry route and thread view. */
 export function useGoatBotSession(visibleTurnItems = EMPTY_ITEMS) {
-  const { enabled, environment, port } = useGoatBotEnabled();
+  const { enabled, environment, environments, home, port } = useGoatBotEnabled();
   const environmentId = environment?.environmentId ?? null;
   const bootstrapped = useEnvironmentShellsBootstrapped(environmentId);
   const session = useSessions((state) =>
     environmentId === null ? undefined : state.sessions.get(environmentId),
   );
-  useSessions((state) => state.revision);
+  const revision = useSessions((state) => state.revision);
   const botRef = useGlobalAgentStore((state) => state.botRef);
   const legacyRef = useGlobalAgentStore((state) => state.ref);
-  const legacyThreadRef = useMemo(
-    () => (legacyRef === null ? null : scopeThreadRef(legacyRef.environmentId, legacyRef.threadId)),
-    [legacyRef],
-  );
+  const legacyThreadRef =
+    legacyRef === null ? null : scopeThreadRef(legacyRef.environmentId, legacyRef.threadId);
   const legacyShell = useThreadShell(legacyThreadRef);
   const legacyStopped =
     legacyRef?.environmentId === environmentId && legacyShell?.runtime?.activeRunId === null;
   // The transport supplies a hook, installed for the lifetime of the app provider.
-  // oxlint-disable-next-line react/hooks -- The channel port owns its permission hook.
-  const useCanSend = port?.useCanSend ?? useCannotSend;
-  // oxlint-disable-next-line react/hooks -- Invoke the injected hook unconditionally.
-  const canOperate = useCanSend(environmentId);
+  const canOperate = (port ?? NO_PORT_PERMISSION).useCanSend(environmentId);
 
+  const homeKey = !home.supported
+    ? "legacy"
+    : home.resolution.state === "claimed"
+      ? `${home.resolution.claim.environmentId}:${home.resolution.claim.claimedAt}:${home.resolution.claim.claimId}`
+      : home.resolution.state;
+  const settingsSnapshot = environment?.settingsSnapshot ?? null;
+  const homeReady = !home.supported || goatBotHomeReadBack(home);
   useEffect(() => {
     if (environmentId === null || session === undefined) return;
     let current = useSessions.getState().sessions.get(environmentId);
     if (!current) return;
+    // A not_home refusal waits for observed evidence, including across manual retry and reconnect.
+    if (current.notHome !== null) {
+      if (
+        current.notHome.homeKey === homeKey &&
+        current.notHome.settingsSnapshot === settingsSnapshot
+      )
+        return;
+      current = { ...current, notHome: null, machine: retryGoatBotEnsure(current.machine) };
+      update(environmentId, current);
+    }
     let machine = current.machine;
     let legacyAutoRetried = current.port === port ? current.legacyAutoRetried : false;
     if (current.port !== port) machine = retryGoatBotEnsure(machine);
@@ -205,7 +252,15 @@ export function useGoatBotSession(visibleTurnItems = EMPTY_ITEMS) {
       current = { ...current, port, canOperate, legacyAutoRetried, machine };
       update(environmentId, current);
     }
-    if (!enabled || !bootstrapped || !current.connected || !port || machine.ensure.state !== "idle")
+    if (
+      !homeReady ||
+      !enabled ||
+      !current.capability ||
+      !bootstrapped ||
+      !current.connected ||
+      !port ||
+      machine.ensure.state !== "idle"
+    )
       return;
     const request = startGoatBotEnsure(machine);
     update(environmentId, { ...current, machine: request.machine });
@@ -232,6 +287,17 @@ export function useGoatBotSession(visibleTurnItems = EMPTY_ITEMS) {
         settle({ kind: "confirmed", bot }, bot);
       } catch (error) {
         const gatewayError = error as ChannelGatewayError | null;
+        if (gatewayError?.reason === "not_home") {
+          const latest = useSessions.getState().sessions.get(environmentId);
+          if (latest?.machine.pending === request.token) {
+            update(environmentId, {
+              ...latest,
+              machine: retryGoatBotEnsure(latest.machine),
+              notHome: { homeKey, settingsSnapshot },
+            });
+          }
+          return;
+        }
         settle(
           gatewayError?.reason === "legacy_active"
             ? { kind: "legacy_active" }
@@ -244,6 +310,9 @@ export function useGoatBotSession(visibleTurnItems = EMPTY_ITEMS) {
     })();
   }, [
     environmentId,
+    homeReady,
+    homeKey,
+    settingsSnapshot,
     enabled,
     bootstrapped,
     port,
@@ -257,12 +326,13 @@ export function useGoatBotSession(visibleTurnItems = EMPTY_ITEMS) {
   const availability = !enabled
     ? { kind: "unsupported" as const }
     : resolveGoatBotAvailability({
-        environments: environment === null ? [] : [environment],
+        environments,
         botRef,
         ensure:
           session?.connected === environment?.connected &&
           session?.capability === environment?.supportsChannelLedger &&
-          session?.port === port
+          session?.port === port &&
+          session.homeKey === homeKey
             ? session.machine.ensure
             : { state: "idle" },
       });
@@ -280,7 +350,7 @@ export function useGoatBotSession(visibleTurnItems = EMPTY_ITEMS) {
   }, [queue, visibleTurnItems]);
   const rows = buildGoatBotTimeline({
     visibleTurnItems,
-    pendingInputs: queue?.pendingInputs() ?? [],
+    pendingInputs: pendingInputsAt(queue, revision),
     readers: goatBotItemReaders,
   });
   return {
@@ -288,6 +358,7 @@ export function useGoatBotSession(visibleTurnItems = EMPTY_ITEMS) {
     availability,
     canOperate,
     rows,
+    replyingSince: goatBotReplyingSince({ visibleTurnItems, readers: goatBotItemReaders }),
     onSend: (text: string) => {
       if (availability.kind === "ready" && canOperate) queue?.submit(text, availability.bot);
     },
@@ -297,7 +368,7 @@ export function useGoatBotSession(visibleTurnItems = EMPTY_ITEMS) {
     onRetryAvailability: () => {
       if (environmentId === null) return;
       const current = useSessions.getState().sessions.get(environmentId);
-      if (current)
+      if (current && current.notHome === null)
         update(environmentId, { ...current, machine: retryGoatBotEnsure(current.machine) });
     },
   };

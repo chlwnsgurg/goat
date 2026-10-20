@@ -4,9 +4,9 @@ import {
   createEnvironmentSnapshotAtom,
   createShellEnvironmentAtoms,
   type EnvironmentShellState,
-} from "@t3tools/client-runtime/state/shell";
+} from "@goat/client-runtime/state/shell";
 import { useAtomValue } from "@effect/atom-react";
-import type { EnvironmentId } from "@t3tools/contracts";
+import type { EnvironmentId } from "@goat/contracts";
 import * as Option from "effect/Option";
 import { Atom } from "effect/reactivity";
 
@@ -30,7 +30,6 @@ const EMPTY_ENVIRONMENT_SHELL_STATE_ATOM = Atom.make<EnvironmentShellState>({
 const shellStatus = (state: EnvironmentShellState) => state.status;
 const shellHasError = (state: EnvironmentShellState) => Option.isSome(state.error);
 
-/** Snapshot contents do not affect whether the route is still hydrating. */
 export function useEnvironmentShellReadiness(environmentId: EnvironmentId | null) {
   const atom =
     environmentId === null

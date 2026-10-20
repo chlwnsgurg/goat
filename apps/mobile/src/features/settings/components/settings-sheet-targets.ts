@@ -1,4 +1,6 @@
 export type SettingsSheetTarget =
+  | "SettingsMemory"
+  | "SettingsGoatBot"
   | "SettingsEnvironments"
   | "SettingsNotifications"
   | "SettingsThreads"
@@ -13,6 +15,7 @@ export type SettingsSheetTarget =
   | "SettingsEnvironmentMaintenance"
   | "SettingsProviderAccounts"
   | "SettingsKeyboard"
+  | "SettingsMicrophone"
   | "SettingsFollowUp"
   | "SettingsScheduledTasks"
   | "SettingsProjectGrouping"

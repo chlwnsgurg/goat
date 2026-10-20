@@ -1,4 +1,8 @@
 import {
+  GOAT_ORCHESTRATION_CHECKPOINT_REFS_PREFIX,
+  LEGACY_ORCHESTRATION_CHECKPOINT_REFS_PREFIX,
+} from "@goat/contracts/legacyT3Names";
+import {
   CheckpointId,
   CheckpointRef,
   CheckpointScopeId,
@@ -8,22 +12,22 @@ import {
   ProviderThreadId,
   RunId,
   ThreadId,
-} from "@t3tools/contracts";
+} from "@goat/contracts";
 import * as Context from "effect/Context";
 import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Base64Url from "effect/encoding/Base64Url";
 import * as Hex from "effect/encoding/Hex";
-import * as KeyedLock from "@t3tools/shared/KeyedLock";
+import * as KeyedLock from "@goat/shared/KeyedLock";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
 
 import { isGitImport, parseTurnDiffFilesFromNumstat } from "../checkpointing/Diffs.ts";
 import * as CheckpointStore from "../checkpointing/CheckpointStore.ts";
-import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
+import * as IdAllocator from "@goat/provider-core/server/IdAllocator";
 
-const CHECKPOINT_REFS_PREFIX = "refs/t3/orchestration-v2/checkpoints";
+const CHECKPOINT_REFS_PREFIX = GOAT_ORCHESTRATION_CHECKPOINT_REFS_PREFIX;
 const ROOT_CHECKPOINT_SCOPE_NAME = "root";
 
 export class CheckpointRootScopePrepareError extends Schema.TaggedError<CheckpointRootScopePrepareError>()(
@@ -156,7 +160,7 @@ export interface CheckpointServiceV2Shape {
 export class CheckpointServiceV2 extends Context.Service<
   CheckpointServiceV2,
   CheckpointServiceV2Shape
->()("t3/orchestration-v2/CheckpointService/CheckpointServiceV2") {}
+>()("goat/orchestration-v2/CheckpointService/CheckpointServiceV2") {}
 
 export const checkpointRefForScopeOrdinal = Effect.fn("checkpointRefForScopeOrdinal")(
   function* (input: { readonly scopeId: CheckpointScopeId; readonly ordinalWithinScope: number }) {
@@ -170,6 +174,19 @@ export const checkpointRefForScopeOrdinal = Effect.fn("checkpointRefForScopeOrdi
     );
   },
 );
+
+/**
+ * Reconstructed refs prefer the GOAT namespace and fall back to checkpoints from older builds.
+ */
+export const checkpointRefCandidatesForScopeOrdinal = Effect.fn(
+  "checkpointRefCandidatesForScopeOrdinal",
+)(function* (input: { readonly scopeId: CheckpointScopeId; readonly ordinalWithinScope: number }) {
+  const goat = yield* checkpointRefForScopeOrdinal(input);
+  const legacy = CheckpointRef.make(
+    LEGACY_ORCHESTRATION_CHECKPOINT_REFS_PREFIX + goat.slice(CHECKPOINT_REFS_PREFIX.length),
+  );
+  return [goat, legacy] as const;
+});
 
 function checkpointIdForScopeOrdinal(
   idAllocator: IdAllocator.IdAllocatorV2["Service"],
@@ -254,6 +271,22 @@ export const layer: Layer.Layer<
     const crypto = yield* Crypto.Crypto;
     const checkpointRefFor = (input: Parameters<typeof checkpointRefForScopeOrdinal>[0]) =>
       checkpointRefForScopeOrdinal(input).pipe(Effect.provideService(Crypto.Crypto, crypto));
+    /** The stored ref for a scope ordinal under either namespace, GOAT first. */
+    const findCheckpointRef = (
+      cwd: string,
+      input: Parameters<typeof checkpointRefForScopeOrdinal>[0],
+    ) =>
+      Effect.gen(function* () {
+        const candidates = yield* checkpointRefCandidatesForScopeOrdinal(input).pipe(
+          Effect.provideService(Crypto.Crypto, crypto),
+        );
+        for (const candidate of candidates) {
+          if (yield* checkpointStore.hasCheckpointRef({ cwd, checkpointRef: candidate })) {
+            return candidate;
+          }
+        }
+        return undefined;
+      });
     const idAllocator = yield* IdAllocator.IdAllocatorV2;
     const workspaceLocks = yield* KeyedLock.make<string>();
     const withWorkspaceLock = <A, E, R>(cwd: string, effect: Effect.Effect<A, E, R>) =>
@@ -272,21 +305,17 @@ export const layer: Layer.Layer<
             return;
           }
 
-          const checkpointRef = yield* checkpointRefFor({
+          const scopeOrdinal = {
             scopeId: input.scope.id,
             ordinalWithinScope: input.ordinalWithinScope,
-          });
-          const exists = yield* checkpointStore.hasCheckpointRef({
-            cwd: input.scope.cwd,
-            checkpointRef,
-          });
-          if (exists) {
+          };
+          if ((yield* findCheckpointRef(input.scope.cwd, scopeOrdinal)) !== undefined) {
             return;
           }
 
           yield* checkpointStore.captureCheckpoint({
             cwd: input.scope.cwd,
-            checkpointRef,
+            checkpointRef: yield* checkpointRefFor(scopeOrdinal),
           });
         }),
       ).pipe(
@@ -305,31 +334,34 @@ export const layer: Layer.Layer<
         withWorkspaceLock(
           input.scope.cwd,
           Effect.gen(function* () {
-            const checkpointRef = yield* checkpointRefFor({
+            const candidates = yield* checkpointRefCandidatesForScopeOrdinal({
               scopeId: input.scope.id,
               ordinalWithinScope: input.ordinalWithinScope,
-            });
+            }).pipe(Effect.provideService(Crypto.Crypto, crypto));
             const checkpointId = yield* checkpointIdForScopeOrdinal(idAllocator, {
               scopeId: input.scope.id,
               ordinalWithinScope: input.ordinalWithinScope,
             });
             const checkpointable = yield* isGitCheckpointable(input.scope.cwd);
-            const available = checkpointable
-              ? yield* checkpointStore
-                  .hasCheckpointRef({
-                    cwd: input.scope.cwd,
-                    checkpointRef,
-                  })
-                  .pipe(
-                    Effect.catch((cause) =>
-                      Effect.logWarning("orchestration V2 baseline ref lookup failed", {
-                        scopeId: input.scope.id,
-                        checkpointRef,
-                        cause: String(cause),
-                      }).pipe(Effect.as(false)),
-                    ),
-                  )
-              : false;
+            let checkpointRef = candidates[0];
+            let available = false;
+            for (const candidate of checkpointable ? candidates : []) {
+              available = yield* checkpointStore
+                .hasCheckpointRef({ cwd: input.scope.cwd, checkpointRef: candidate })
+                .pipe(
+                  Effect.catch((cause) =>
+                    Effect.logWarning("orchestration V2 baseline ref lookup failed", {
+                      scopeId: input.scope.id,
+                      checkpointRef: candidate,
+                      cause: String(cause),
+                    }).pipe(Effect.as(false)),
+                  ),
+                );
+              if (available) {
+                checkpointRef = candidate;
+                break;
+              }
+            }
             return makeCheckpoint({
               id: checkpointId,
               scope: input.scope,
@@ -373,10 +405,10 @@ export const layer: Layer.Layer<
             scopeId: input.scope.id,
             ordinalWithinScope: input.ordinalWithinScope,
           });
-          const previousCheckpointRef = yield* checkpointRefFor({
+          const previousScopeOrdinal = {
             scopeId: input.scope.id,
             ordinalWithinScope: Math.max(0, input.ordinalWithinScope - 1),
-          });
+          };
 
           if (!(yield* isGitCheckpointable(input.scope.cwd))) {
             return makeCheckpoint({
@@ -426,27 +458,28 @@ export const layer: Layer.Layer<
             });
           }
 
-          const previousExists = yield* checkpointStore
-            .hasCheckpointRef({
-              cwd: input.scope.cwd,
-              checkpointRef: previousCheckpointRef,
-            })
-            .pipe(
-              Effect.catch((cause) =>
-                Effect.logWarning("orchestration V2 previous checkpoint ref lookup failed", {
-                  scopeId: input.scope.id,
-                  checkpointRef: previousCheckpointRef,
-                  cause: String(cause),
-                }).pipe(Effect.as(false)),
-              ),
-            );
+          // The previous checkpoint may have been written under the legacy namespace.
+          const existingPreviousRef = yield* findCheckpointRef(
+            input.scope.cwd,
+            previousScopeOrdinal,
+          ).pipe(
+            Effect.catch((cause) =>
+              Effect.logWarning("orchestration V2 previous checkpoint ref lookup failed", {
+                scopeId: input.scope.id,
+                ordinalWithinScope: previousScopeOrdinal.ordinalWithinScope,
+                cause: String(cause),
+              }).pipe(Effect.as(undefined)),
+            ),
+          );
+          const previousExists = existingPreviousRef !== undefined;
+          const previousCheckpointRef =
+            existingPreviousRef ?? (yield* checkpointRefFor(previousScopeOrdinal));
           const refs = {
             cwd: input.scope.cwd,
             fromCheckpointRef: previousCheckpointRef,
             toCheckpointRef: checkpointRef,
           };
           // A pull or rebase can change thousands of files the turn did not write.
-          // Keep only the files the turn's own work touched.
           const files = previousExists
             ? yield* Effect.all([
                 checkpointStore.diffCheckpoints({

@@ -1,4 +1,4 @@
-import { sourceControlRepositorySelector } from "@t3tools/shared/sourceControl";
+import { sourceControlRepositorySelector } from "@goat/shared/sourceControl";
 import {
   type CommandId,
   pullRequestHostOf,
@@ -6,8 +6,8 @@ import {
   type OrchestrationProjectShell,
   type SourceControlProviderKind,
   type ThreadId,
-} from "@t3tools/contracts";
-import { parseChangeRequestUrl } from "@t3tools/shared/changeRequestUrl";
+} from "@goat/contracts";
+import { parseChangeRequestUrl } from "@goat/shared/changeRequestUrl";
 import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
@@ -22,13 +22,6 @@ export interface CreatedPullRequestKey {
   readonly url: string;
 }
 
-/**
- * The identity a stacked action's pull request should be linked under, or
- * null when the action did not leave one behind. Reading the host and
- * repository from the URL keeps the link host-level even when the checkout's
- * remote differs from where the PR was opened (a fork, say); the project is
- * only consulted when the URL is one this cannot read.
- */
 export function createdPullRequestKey(
   result: Pick<GitRunStackedActionResult, "pr">,
   project: OrchestrationProjectShell | undefined,
@@ -52,10 +45,8 @@ export function createdPullRequestKey(
 }
 
 /**
- * Links the pull request a `create_pr`-shaped action produced to the thread it
- * ran beside. Never fails: the git action already succeeded and its result is
- * on its way to the client, so a link that cannot be made is logged and
- * dropped. A duplicate link is the decider saying the thread already knew.
+ * Never fails: the git action already succeeded and its result is on its way to the client, so
+ * a link that cannot be made is logged and dropped.
  */
 export const linkCreatedPullRequest = <E>(input: {
   readonly threadId: ThreadId;

@@ -1,17 +1,21 @@
 import * as Schema from "effect/Schema";
 import { describe, expect, it } from "vite-plus/test";
 
+import { OpenCodexRouteState } from "./codexRoute.ts";
 import { ExecutionEnvironmentDescriptor } from "./environment.ts";
 import {
+  OtlpEndpointCheckInput,
   resolveEnvironmentMachineKind,
   ServerConfig,
   ServerObservability,
+  ServerSelfUpdateInput,
   ServerProvider,
   ServerProviders,
   ServerUpsertKeybindingResult,
 } from "./server.ts";
 import { ServerSettings } from "./settings.ts";
 
+const decodeServerSelfUpdateInput = Schema.decodeSync(ServerSelfUpdateInput);
 const decodeServerProvider = Schema.decodeUnknownSync(ServerProvider);
 const decodeServerProviders = Schema.decodeUnknownSync(ServerProviders);
 const decodeServerObservability = Schema.decodeUnknownSync(ServerObservability);
@@ -160,12 +164,6 @@ describe("server config forward compatibility", () => {
     expect(parsed).toEqual(["zed", "vscode"]);
   });
 
-  // A provider status this build has never seen (a new ServerProviderState,
-  // ServerProviderAuthStatus, etc. member) previously failed the whole
-  // `providers` array, taking every other provider down with it and, since
-  // `providers` sits inside `ServerConfig`, failing the whole config decode —
-  // an older client would drop its connection over one provider it can't
-  // render. Dropping just that element keeps every other provider working.
   it("drops providers this build cannot decode instead of failing the whole array", () => {
     const decodedBase = decodeServerProvider(baseProviderSnapshot);
 
@@ -265,4 +263,72 @@ describe("resolveEnvironmentMachineKind", () => {
       resolveEnvironmentMachineKind({ environment: parsed, settings: decodeSettings({}) }),
     ).toBe("server");
   });
+});
+
+describe("OtlpEndpointCheckInput", () => {
+  const decode = Schema.decodeUnknownSync(OtlpEndpointCheckInput);
+
+  it("accepts HTTP receivers only", () => {
+    expect(decode({ signal: "traces", url: "https://collector.example.com/v1/traces" }).url).toBe(
+      "https://collector.example.com/v1/traces",
+    );
+    for (const url of ["data:text/plain,ok", "file:///etc/hosts", "collector:4318/v1/traces"]) {
+      expect(() => decode({ signal: "traces", url })).toThrow();
+    }
+  });
+});
+
+const providerCodec = Schema.toCodecJson(ServerProvider);
+const encodeProvider = Schema.encodeSync(providerCodec);
+const decodeProvider = Schema.decodeUnknownSync(providerCodec);
+
+describe("OpenCodex Home routing", () => {
+  it("accepts legacy provider snapshots without a Codex route", () => {
+    const provider = decodeServerProvider(baseProviderSnapshot);
+    expect(provider.codexRoute).toBeUndefined();
+    expect(decodeProvider(JSON.parse(JSON.stringify(encodeProvider(provider))))).toEqual(provider);
+  });
+
+  it.each(OpenCodexRouteState.literals)("round-trips every OpenCodex route state (%s)", (state) => {
+    const codexRoute = {
+      modelRoute: "opencodex",
+      effectiveBaseUrl: "http://127.0.0.1:10100/v1",
+      state,
+      ...(state === "home" ? { homeLabel: "home-mac" } : {}),
+      ...(state === "failed" ? { reason: "Home is unavailable." } : {}),
+    };
+    const provider = decodeServerProvider({ ...baseProviderSnapshot, codexRoute });
+    expect(decodeProvider(JSON.parse(JSON.stringify(encodeProvider(provider)))).codexRoute).toEqual(
+      codexRoute,
+    );
+  });
+
+  it("does not accept an unknown route state as connected", () => {
+    expect(() =>
+      decodeServerProvider({
+        ...baseProviderSnapshot,
+        codexRoute: { modelRoute: "opencodex", state: "future_state" },
+      }),
+    ).toThrow();
+  });
+
+  it("represents a verified default endpoint without Home state", () => {
+    const codexRoute = { modelRoute: "default", effectiveBaseUrl: "https://api.openai.com/v1" };
+    expect(decodeServerProvider({ ...baseProviderSnapshot, codexRoute }).codexRoute).toEqual(
+      codexRoute,
+    );
+  });
+});
+
+describe("ServerSelfUpdateInput", () => {
+  it.each([undefined, false, true])(
+    "accepts old clients and explicit confirmation=%s",
+    (confirmation) => {
+      const input = {
+        targetVersion: "1.1.0",
+        ...(confirmation === undefined ? {} : { confirmReplacement: confirmation }),
+      };
+      expect(decodeServerSelfUpdateInput(input)).toEqual(input);
+    },
+  );
 });

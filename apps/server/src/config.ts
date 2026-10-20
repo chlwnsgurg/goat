@@ -1,11 +1,3 @@
-/**
- * ServerConfig - Runtime configuration services.
- *
- * Defines process-level server configuration and networking helpers used by
- * startup and runtime layers.
- *
- * @module ServerConfig
- */
 import * as Context from "effect/Context";
 import * as Clock from "effect/Clock";
 import * as Effect from "effect/Effect";
@@ -17,8 +9,9 @@ import type * as Redacted from "effect/Redacted";
 import * as Schema from "effect/Schema";
 
 import { sweepStalePendingAttachments } from "./attachmentStore.ts";
-import { DEFAULT_SIGNAL_EXPORT, type SignalExport } from "@t3tools/shared/observability";
-import * as OtelEnvironment from "@t3tools/shared/otelEnvironment";
+import { DEFAULT_SIGNAL_EXPORT, type SignalExport } from "@goat/shared/observability";
+import * as OtelEnvironment from "@goat/shared/otelEnvironment";
+import packageJson from "../package.json" with { type: "json" };
 
 export const DEFAULT_PORT = 3773;
 
@@ -28,20 +21,15 @@ export type RuntimeMode = typeof RuntimeMode.Type;
 export const StartupPresentation = Schema.Literals(["browser", "headless"]);
 export type StartupPresentation = typeof StartupPresentation.Type;
 
-/**
- * ServerDerivedPaths - Derived paths from the base directory.
- */
 export interface ServerDerivedPaths {
   readonly stateDir: string;
   readonly dbPath: string;
   readonly keybindingsConfigPath: string;
   readonly settingsPath: string;
-  /** Palettes this machine publishes for clients to follow, one file per theme. */
   readonly environmentThemesDir: string;
   readonly providerStatusCacheDir: string;
   readonly worktreesDir: string;
   readonly attachmentsDir: string;
-  /** Screenshots the agent asks the collaborative browser to keep for the user. */
   readonly browserArtifactsDir: string;
   readonly logsDir: string;
   readonly serverTracePath: string;
@@ -58,9 +46,6 @@ export interface DeriveServerPathsOptions {
   readonly baseDirIsExplicit?: boolean;
 }
 
-/**
- * ServerConfig - Service tag for server runtime configuration.
- */
 export class ServerConfig extends Context.Service<
   ServerConfig,
   ServerDerivedPaths & {
@@ -73,11 +58,6 @@ export class ServerConfig extends Context.Service<
     readonly otlpTracesUrl: string | undefined;
     readonly otlpMetricsUrl: string | undefined;
     readonly otlpLogsUrl: string | undefined;
-    /**
-     * How each signal is exported. Read instead of a process-wide setting so
-     * the wire format, credential, and schedule travel with the endpoint they
-     * were configured beside.
-     */
     readonly otlpTracesExport: SignalExport;
     readonly otlpMetricsExport: SignalExport;
     readonly otlpLogsExport: SignalExport;
@@ -106,8 +86,7 @@ export class ServerConfig extends Context.Service<
     readonly tailscaleServeEnabled: boolean;
     readonly tailscaleServePort: number;
   }
->()("t3/config/ServerConfig") {
-  /** @deprecated Import and use `layerTest` from this module. */
+>()("goat/config/ServerConfig") {
   static readonly layerTest = (
     cwd: string,
     baseDirOrPrefix: string | { readonly prefix: string },
@@ -116,16 +95,17 @@ export class ServerConfig extends Context.Service<
 
 export const make = (config: ServerConfig["Service"]) => ServerConfig.of(config);
 
-/**
- * Resource attributes shared by every OTLP exporter, so traces, metrics, and
- * logs report the same service identity to the collector.
- */
-export const otlpResource = (config: ServerConfig["Service"]) => ({
-  serviceName: "t3code-server",
+export const otlpResource = (
+  config: Pick<ServerConfig["Service"], "mode" | "otelEnvironment">,
+  hostName: string,
+) => ({
+  serviceName: "goat-server",
+  serviceVersion: packageJson.version,
   attributes: {
-    "service.namespace": "t3code",
-    "service.runtime": "t3-server",
+    "service.namespace": "goat",
+    "service.runtime": "goat-server",
     "service.mode": config.mode,
+    "host.name": config.otelEnvironment.resourceAttributes["host.name"] || hostName,
   },
 });
 
@@ -172,9 +152,11 @@ export const ensureServerDirectories = Effect.fn(function* (derivedPaths: Server
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
 
+  // Prepare the private parent before any recursive child mkdir can create it.
+  // mkdir leaves an existing state directory and its permissions unchanged.
+  yield* fs.makeDirectory(derivedPaths.stateDir, { recursive: true, mode: 0o700 });
   yield* Effect.all(
     [
-      fs.makeDirectory(derivedPaths.stateDir, { recursive: true }),
       fs.makeDirectory(derivedPaths.logsDir, { recursive: true }),
       fs.makeDirectory(derivedPaths.providerLogsDir, { recursive: true }),
       fs.makeDirectory(derivedPaths.terminalLogsDir, { recursive: true }),

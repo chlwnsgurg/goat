@@ -6,16 +6,16 @@ import {
   ProviderThreadId,
   ThreadId,
   type OrchestrationV2ThreadProjection,
-} from "@t3tools/contracts";
+} from "@goat/contracts";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 
 import { CodexProviderCapabilitiesV2 } from "./Adapters/CodexAdapterV2.ts";
 import * as ProviderAdapterRegistry from "./ProviderAdapterRegistry.ts";
-import { acpSelectionTransition } from "@t3tools/provider-core/server/selectionTransition";
+import { acpSelectionTransition } from "@goat/provider-core/server/selectionTransition";
 import * as ProviderSwitch from "./ProviderSwitchService.ts";
-import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
+import type * as ProviderAdapter from "@goat/provider-core/server/ProviderAdapter";
 
 const driver = ProviderDriverKind.make("codex");
 const currentInstanceId = ProviderInstanceId.make("codex_primary");
@@ -284,10 +284,6 @@ it.effect.each(["stopped", "error"] as const)(
         projection: deadNativeThreadProjection(deadStatus, CodexProviderCapabilitiesV2),
         targetModelSelection: { instanceId: currentInstanceId, model: "gpt-5.2-codex" },
       });
-      // Static capabilities report no in-session switch, but the dead
-      // record's negotiated capabilities describe the provider: without
-      // them the ACP classification rejects the selection instead of
-      // reopening with the requested model on the next run.
       assert.equal(result.transition.type, "switch_model_in_session");
       assert.deepEqual(result.releaseProviderSessionIds, []);
     }).pipe(

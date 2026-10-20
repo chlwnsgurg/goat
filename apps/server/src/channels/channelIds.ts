@@ -22,7 +22,7 @@ import {
   MessageId,
   ThreadId,
   TurnItemId,
-} from "@t3tools/contracts";
+} from "@goat/contracts";
 
 const digest = (parts: ReadonlyArray<string>) =>
   NodeCrypto.createHash("sha256").update(parts.join("\u0000")).digest("base64url").slice(0, 32);
@@ -82,6 +82,32 @@ export const answerForwardIdsFor = (eventId: ChannelTaskEventId) => ({
   commandId: CommandId.make(stableId("channel-answer", [eventId])),
   messageId: MessageId.make(stableId("channel-answer-message", [eventId])),
 });
+
+/**
+ * Stopping a task's worker and its subagents for one recorded stop; a replay stops once. A stop
+ * the orchestrator refused for good is tried again under ids keyed by its attempt, so a retry is
+ * a new command rather than the refused one replayed.
+ */
+export const stopIdsFor = (eventId: ChannelTaskEventId, attempt?: string) => {
+  const key = attempt === undefined ? [eventId] : [eventId, attempt];
+  return {
+    interrupt: CommandId.make(stableId("channel-stop", key)),
+    subagents: CommandId.make(stableId("channel-stop-subagents", [eventId])),
+  };
+};
+
+/**
+ * A follow-up sent to the worker already doing its work; a retried input sends it once. The
+ * "queued" attempt is the second and last one, used only after the orchestrator rejected the
+ * first, since a rejected command id is refused for good.
+ */
+export const turnSteerIdsFor = (inputId: ChannelInputId, attempt: "first" | "queued" = "first") => {
+  const key = attempt === "first" ? [inputId] : [inputId, "queued"];
+  return {
+    commandId: CommandId.make(stableId("channel-steer", key)),
+    messageId: MessageId.make(stableId("channel-steer-message", key)),
+  };
+};
 
 /**
  * The report binding of one task generation on another machine. The remote stores it before it

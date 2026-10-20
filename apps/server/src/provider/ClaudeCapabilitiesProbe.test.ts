@@ -9,14 +9,16 @@ import {
   ProviderDriverKind,
   ProviderInstanceId,
   type ServerProvider,
-} from "@t3tools/contracts";
+} from "@goat/contracts";
 import * as NodeFSP from "node:fs/promises";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
+import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
+import * as Result from "effect/Result";
 
 import {
   buildClaudeCapabilitiesProbeQueryOptions,
@@ -24,7 +26,7 @@ import {
   probeClaudeCapabilities,
   probeClaudeWorkspaceSnapshot,
 } from "./ClaudeProvider.ts";
-import { COMPACT_SLASH_COMMAND } from "@t3tools/provider-core/server/snapshotProbe";
+import { COMPACT_SLASH_COMMAND } from "@goat/provider-core/server/snapshotProbe";
 
 vi.mock("@anthropic-ai/claude-agent-sdk", { spy: true });
 
@@ -41,6 +43,7 @@ it("isolates Claude capability probes without dropping workspace setting sources
       FORCE_CODE_TERMINAL: "1",
     },
     cwd: "/workspace/project",
+    managedMcpConfig: false,
   });
 
   assert.deepEqual(options.mcpServers, {});
@@ -59,6 +62,21 @@ it("isolates Claude capability probes without dropping workspace setting sources
   assert.equal(options.env?.CLAUDE_CODE_IDE_SKIP_AUTO_INSTALL, "1");
 });
 
+it("drops strict MCP mode, and only that, next to an administrator's managed-mcp.json", () => {
+  const options = buildClaudeCapabilitiesProbeQueryOptions({
+    executablePath: "/usr/bin/claude",
+    abortController: new AbortController(),
+    environment: { HOME: "/home/user" },
+    cwd: undefined,
+    managedMcpConfig: true,
+  });
+
+  // Claude exits before initializing when handed --strict-mcp-config here.
+  assert.equal(options.strictMcpConfig, undefined);
+  assert.deepEqual(options.mcpServers, {});
+  assert.equal(options.env?.ENABLE_CLAUDEAI_MCP_SERVERS, "false");
+});
+
 it.layer(NodeServices.layer)("Claude capability probe SDK boundary", (it) => {
   it.effect(
     "discovers commands and skills separately for each cwd without replacing machine metadata",
@@ -66,7 +84,7 @@ it.layer(NodeServices.layer)("Claude capability probe SDK boundary", (it) => {
       Effect.gen(function* () {
         const fs = yield* FileSystem.FileSystem;
         const path = yield* Path.Path;
-        const tempDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-claude-workspaces-" });
+        const tempDir = yield* fs.makeTempDirectoryScoped({ prefix: "goat-claude-workspaces-" });
         const configDir = path.join(tempDir, "claude-home");
         const workspaces = [path.join(tempDir, "one"), path.join(tempDir, "two")];
         for (const cwd of workspaces) {
@@ -93,7 +111,7 @@ it.layer(NodeServices.layer)("Claude capability probe SDK boundary", (it) => {
         let usageCalls = 0;
         const query = vi.spyOn(ClaudeSdk, "query").mockImplementation(({ options }) => {
           assert.equal(options?.env?.CLAUDE_CONFIG_DIR, configDir);
-          assert.equal(options?.env?.T3_WORKSPACE_PROBE, "owned-instance");
+          assert.equal(options?.env?.GOAT_WORKSPACE_PROBE, "owned-instance");
           return {
             initializationResult: async () => ({
               account: { email: "workspace@example.com" },
@@ -121,7 +139,7 @@ it.layer(NodeServices.layer)("Claude capability probe SDK boundary", (it) => {
             decodeClaudeSettings({ homePath: configDir }),
             machineSnapshot,
             cwd,
-            { ...process.env, T3_WORKSPACE_PROBE: "owned-instance" },
+            { ...process.env, GOAT_WORKSPACE_PROBE: "owned-instance" },
           );
           assert.deepEqual(scoped, {
             ...machineSnapshot,
@@ -159,7 +177,7 @@ it.layer(NodeServices.layer)("Claude capability probe SDK boundary", (it) => {
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
-      const cwd = yield* fs.makeTempDirectoryScoped({ prefix: "t3-claude-workspace-retry-" });
+      const cwd = yield* fs.makeTempDirectoryScoped({ prefix: "goat-claude-workspace-retry-" });
       const skillDir = path.join(cwd, ".claude", "skills", "existing-skill");
       yield* fs.makeDirectory(skillDir, { recursive: true });
       yield* fs.writeFileString(
@@ -240,7 +258,7 @@ it.layer(NodeServices.layer)("Claude capability probe SDK boundary", (it) => {
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
-      const tempDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-claude-probe-sdk-" });
+      const tempDir = yield* fs.makeTempDirectoryScoped({ prefix: "goat-claude-probe-sdk-" });
       const executablePath = yield* path.fromFileUrl(
         new URL("./testing/ClaudeCapabilitiesProbe.fixture.mjs", import.meta.url),
       );
@@ -249,11 +267,9 @@ it.layer(NodeServices.layer)("Claude capability probe SDK boundary", (it) => {
       // Windows a directory that is still some process's cwd cannot be
       // removed. Keep the workspace outside the scoped directory and let it
       // go with a retrying removal once the child has gone.
-      const workspaceCwd = yield* fs.makeTempDirectory({ prefix: "t3-claude-probe-cwd-" });
+      const workspaceCwd = yield* fs.makeTempDirectory({ prefix: "goat-claude-probe-cwd-" });
       // Node's own retry rather than an Effect schedule: it.effect runs on a
       // TestClock, so a scheduled retry would wait for time nobody advances.
-      // If the child still holds the directory after that, an empty temp
-      // directory is left behind rather than failing the test for it.
       yield* Effect.addFinalizer(() =>
         Effect.promise(() =>
           NodeFSP.rm(workspaceCwd, {
@@ -269,7 +285,7 @@ it.layer(NodeServices.layer)("Claude capability probe SDK boundary", (it) => {
         decodeClaudeSettings({ binaryPath: executablePath }),
         {
           ...process.env,
-          T3_PROBE_INVOCATION_PATH: invocationPath,
+          GOAT_PROBE_INVOCATION_PATH: invocationPath,
           ENABLE_CLAUDEAI_MCP_SERVERS: "true",
         },
         workspaceCwd,
@@ -350,6 +366,36 @@ it.effect("preserves initialized capabilities when optional usage times out", ()
     ]);
     assert.equal(capabilities?.usage, undefined);
     assert.equal(abortSignal?.aborted, true);
+  }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+);
+
+it.effect("fails a hung initialization probe with a timeout", () =>
+  Effect.gen(function* () {
+    const initializationStarted = yield* Deferred.make<void>();
+    const query = vi.spyOn(ClaudeSdk, "query").mockImplementation(
+      () =>
+        ({
+          initializationResult: () => {
+            Deferred.doneUnsafe(initializationStarted, Effect.void);
+            return new Promise(() => {});
+          },
+          usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET: async () => ({
+            rate_limits_available: true,
+            rate_limits: {},
+          }),
+        }) as ReturnType<typeof ClaudeSdk.query>,
+    );
+    yield* Effect.addFinalizer(() => Effect.sync(() => query.mockRestore()));
+    const probe = yield* probeClaudeCapabilities(
+      decodeClaudeSettings({ binaryPath: "claude" }),
+    ).pipe(Effect.result, Effect.forkChild);
+
+    yield* Deferred.await(initializationStarted);
+    yield* TestClock.adjust("25 seconds");
+    const result = yield* Fiber.join(probe);
+
+    assert.isTrue(Result.isFailure(result));
+    if (Result.isFailure(result)) assert.isTrue(Cause.isTimeoutError(result.failure));
   }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
 );
 

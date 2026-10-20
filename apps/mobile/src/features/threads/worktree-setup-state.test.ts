@@ -1,5 +1,5 @@
-import { ThreadId, type WorktreeSetupSnapshot } from "@t3tools/contracts";
-import { resolveVisibleWorktreeSetup } from "@t3tools/client-runtime/worktree-setup";
+import { ThreadId, type WorktreeSetupSnapshot } from "@goat/contracts";
+import { resolveVisibleWorktreeSetup } from "@goat/client-runtime/worktree-setup";
 import { describe, expect, it } from "vite-plus/test";
 import { resolveWorktreeSetupSnapshot } from "./worktree-setup-state";
 
@@ -39,7 +39,6 @@ describe("mobile worktree setup handoff", () => {
         followUpSent: false,
       }),
     ).toBeNull();
-    // Closing the live query must not lose the handoff anchor.
     expect(resolveWorktreeSetupSnapshot(threadId, undefined, held)).toBe(done);
   });
 

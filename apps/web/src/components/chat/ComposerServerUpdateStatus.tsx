@@ -1,6 +1,6 @@
 import { Spinner } from "~/components/ui/spinner";
-import type { ServerUpdateState } from "@t3tools/client-runtime/state/server";
-import { CircleAlertIcon, DownloadIcon } from "lucide-react";
+import type { ServerUpdateState } from "@goat/client-runtime/state/server";
+import { CircleAlertIcon, DownloadIcon } from "~/components/solar";
 import { useId, useState } from "react";
 
 import { serverUpdateStageLabel } from "../ServerUpdateAction";
@@ -21,7 +21,6 @@ export function ComposerServerUpdateIcon({
   return <DownloadIcon aria-hidden />;
 }
 
-/** One text line, clipped at the end so the error detail never squeezes its title. */
 export function ComposerServerUpdateStatus({
   state,
   serverLabel = "server",

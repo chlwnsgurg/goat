@@ -2,26 +2,27 @@ import type {
   AuthClientMetadata,
   AuthClientMetadataDeviceType,
   AuthClientPresentationMetadata,
-} from "@t3tools/contracts";
+} from "@goat/contracts";
 import type * as HttpServerRequest from "effect/http/HttpServerRequest";
 // @effect-diagnostics-next-line nodeBuiltinImport:off -- Effect's Crypto has no createHmac or timingSafeEqual.
 import * as NodeCrypto from "node:crypto";
 import * as Base64Url from "effect/encoding/Base64Url";
 import * as Result from "effect/Result";
 
-const SESSION_COOKIE_NAME = "t3_session";
+import { LEGACY_SESSION_COOKIE_NAME } from "@goat/contracts/legacyT3Names";
+
+const SESSION_COOKIE_NAME = "goat_session";
+
+/** The scoped name issued by builds before the rename, with identical isolation. */
+export function legacyScopedSessionCookieName(cookieName: string): string {
+  return `${LEGACY_SESSION_COOKIE_NAME}${cookieName.slice(SESSION_COOKIE_NAME.length)}`;
+}
 
 /**
  * Cookies are scoped by host but *not* by port, so any two servers that can be
  * live on one hostname at once need separate names — otherwise the second
  * clobbers the first's session and both sides see "Invalid session token
  * signature" until someone clears cookies by hand.
- *
- * Remote web servers use their persisted environment identity and omit the
- * port, so the name survives state-directory moves and public port changes.
- *
- * Desktop scans upward from 3773 for a free port and binds
- *   127.0.0.1, so a second instance lands on a different port and the same host.
  */
 export function resolveSessionCookieName(input: {
   readonly mode: "web" | "desktop";
@@ -48,9 +49,6 @@ export function resolveSessionCookieName(input: {
     return `${SESSION_COOKIE_NAME}_${instanceHash}`;
   }
 
-  // Cookies are scoped by host, not port. Loopback development servers need an
-  // instance-specific name or parallel agents overwrite each other's session,
-  // and a server that later reuses the port receives a token signed elsewhere.
   return `${SESSION_COOKIE_NAME}_${input.port}_${instanceHash}`;
 }
 
@@ -60,7 +58,7 @@ export function resolveLegacySessionCookieName(input: {
   readonly development: boolean;
 }): string | undefined {
   return input.mode === "web" && !input.development && isRemoteReachableHost(input.host)
-    ? SESSION_COOKIE_NAME
+    ? LEGACY_SESSION_COOKIE_NAME
     : undefined;
 }
 

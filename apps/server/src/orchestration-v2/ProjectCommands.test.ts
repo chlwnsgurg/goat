@@ -6,7 +6,7 @@ import {
   ProviderInstanceId,
   type ModelSelection,
   type ProjectScript,
-} from "@t3tools/contracts";
+} from "@goat/contracts";
 import * as DateTime from "effect/DateTime";
 import * as Result from "effect/Result";
 
@@ -135,7 +135,6 @@ describe("planProjectCommand", () => {
       assert.equal(failure._tag, "ProjectCommandInvariantError");
       assert.include(failure.message, "Script ID");
       assert.include(failure.message, "24");
-      // The detail is persisted in the rejected receipt, so it omits the raw ID.
       assert.notInclude(failure.message, `'${id}'`);
     },
   );

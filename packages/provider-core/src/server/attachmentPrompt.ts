@@ -5,7 +5,7 @@ import {
   PROVIDER_SEND_TURN_MAX_INPUT_CHARS,
   type SnapShotAccessibility,
   type SnapShotAccessibilityNode,
-} from "@t3tools/contracts";
+} from "@goat/contracts";
 import * as Schema from "effect/Schema";
 
 const encodePromptJson = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
@@ -159,7 +159,6 @@ export function isProviderNativeImageAttachment(attachment: ChatAttachment): boo
 export function providerMessageTextWithAttachmentPaths(input: {
   readonly text: string;
   readonly attachments: ReadonlyArray<ChatAttachment>;
-  /** Absolute path of a stored attachment, such as `ProviderHost.resolveAttachmentPath`. */
   readonly resolveAttachmentPath: (attachment: ChatAttachment) => string | null;
 }): string {
   let text = input.text;

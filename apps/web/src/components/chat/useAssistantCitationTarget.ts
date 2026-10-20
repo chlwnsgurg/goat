@@ -1,6 +1,6 @@
 import type { LegendListRef } from "@legendapp/list/react";
-import type { RunId } from "@t3tools/contracts";
-import { useCallback, useEffect, useRef, useState, type RefObject } from "react";
+import type { RunId } from "@goat/contracts";
+import { useEffect, useRef, useState, type RefObject } from "react";
 import type { TimelineEntry } from "../../session-logic";
 import type { MessagesTimelineRow } from "./MessagesTimeline.logic";
 import type { AssistantCitationRequest, AssistantCitationTarget } from "./AssistantCitationSource";
@@ -9,10 +9,10 @@ import { toastManager } from "../ui/toast";
 export interface CitationHistoryPage {
   readonly loading: boolean;
   readonly cursor?: string | null;
+  readonly error?: string | null;
   readonly onLoadEarlier: () => void;
 }
 
-/** Fetch, unfold, and mount the source before its measured quote owns scrolling. */
 export function useAssistantCitationTarget({
   request,
   entries,
@@ -21,6 +21,7 @@ export function useAssistantCitationTarget({
   viewport,
   historyLoading,
   loadEarlier,
+  getTurnFoldRunId,
   onExpandTurn,
   onManualNavigation,
 }: {
@@ -31,18 +32,28 @@ export function useAssistantCitationTarget({
   viewport: HTMLElement | null;
   historyLoading: boolean;
   loadEarlier: CitationHistoryPage | null;
+  getTurnFoldRunId: (entryId: string) => RunId | undefined;
   onExpandTurn: (runId: RunId) => void;
   onManualNavigation: () => void;
 }) {
   const [ready, setReady] = useState<AssistantCitationTarget | null>(null);
   const [finishedKey, setFinishedKey] = useState<string | null>(null);
   const [listLoaded, setListLoaded] = useState(false);
-  const onListLoad = useCallback(() => setListLoaded(true), []);
+  const onListLoad = () => setListLoaded(true);
   const navigationRef = useRef<{
     target: AssistantCitationTarget;
     requestedPages: Set<string>;
+    pageLoadingObserved: boolean;
     done: boolean;
   } | null>(null);
+
+  // A target belongs to one request, so returning to an earlier key never reuses it.
+  if (ready !== null && ready.key !== request?.key) {
+    setReady(null);
+  }
+  if (!request && finishedKey !== null) {
+    setFinishedKey(null);
+  }
 
   useEffect(() => {
     if (navigationRef.current && navigationRef.current.target.key !== request?.key) {
@@ -51,8 +62,6 @@ export function useAssistantCitationTarget({
     }
     if (!request) {
       navigationRef.current = null;
-      setReady(null);
-      setFinishedKey(null);
       return;
     }
     if (navigationRef.current?.target.key !== request.key) {
@@ -70,9 +79,9 @@ export function useAssistantCitationTarget({
       navigationRef.current = {
         target,
         requestedPages: new Set(),
+        pageLoadingObserved: false,
         done: false,
       };
-      setReady(null);
       onManualNavigation();
     }
     if (!viewport || historyLoading) return;
@@ -89,9 +98,16 @@ export function useAssistantCitationTarget({
     );
     if (!source) {
       if (loadEarlier) {
-        if (loadEarlier.loading) return;
+        if (loadEarlier.loading) {
+          navigation.pageLoadingObserved = true;
+          return;
+        }
         const cursor = loadEarlier.cursor ?? entries[0]?.id ?? "first";
-        if (navigation.requestedPages.has(cursor) || navigation.requestedPages.size >= 20) {
+        const alreadyRequested = navigation.requestedPages.has(cursor);
+        // List mounting or a row update can rerun this effect before the history
+        // store publishes loading. Only judge a repeated cursor after its request settles.
+        if (alreadyRequested && !navigation.pageLoadingObserved && !loadEarlier.error) return;
+        if (loadEarlier.error || alreadyRequested || navigation.requestedPages.size >= 20) {
           fail(
             "Could not load the cited response",
             "Load earlier turns, then click the citation to try again. Your saved quote is unchanged.",
@@ -99,6 +115,7 @@ export function useAssistantCitationTarget({
           return;
         }
         navigation.requestedPages.add(cursor);
+        navigation.pageLoadingObserved = false;
         loadEarlier.onLoadEarlier();
         return;
       }
@@ -119,12 +136,21 @@ export function useAssistantCitationTarget({
       (row) => row.kind === "message" && row.message.id === navigation.target.citation.messageId,
     );
     if (index < 0) {
-      if (source.message.runId) onExpandTurn(source.message.runId);
+      const foldRunId = getTurnFoldRunId(source.id);
+      if (foldRunId) {
+        onExpandTurn(foldRunId);
+      } else {
+        fail(
+          "The cited response is unavailable",
+          "It cannot be displayed. The selected text is still saved in your citation.",
+        );
+      }
       return;
     }
     if (listLoaded && listRef.current) setReady(navigation.target);
   }, [
     entries,
+    getTurnFoldRunId,
     historyLoading,
     listLoaded,
     listRef,

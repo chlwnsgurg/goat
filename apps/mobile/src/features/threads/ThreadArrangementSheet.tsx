@@ -1,8 +1,8 @@
 import { appAtomRegistry } from "../../state/atom-registry";
 import { useAtomValue } from "@effect/atom-react";
-import type { EnvironmentThreadShell } from "@t3tools/client-runtime/state/shell";
-import { effectiveSnoozed } from "@t3tools/client-runtime/state/thread-settled";
-import { sortInboxThreadsByReturn } from "@t3tools/client-runtime/state/thread-inbox";
+import type { EnvironmentThreadShell } from "@goat/client-runtime/state/shell";
+import { effectiveSnoozed } from "@goat/client-runtime/state/thread-settled";
+import { sortInboxThreadsByReturn } from "@goat/client-runtime/state/thread-inbox";
 import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import { Animated, FlatList, Modal, Pressable, View } from "react-native";
 import { Gesture, GestureDetector, GestureHandlerRootView } from "react-native-gesture-handler";
@@ -10,8 +10,9 @@ import Reanimated, { ReduceMotion, useAnimatedStyle, withTiming } from "react-na
 import { threadDragGapOffset } from "./threadDragGap";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
-import { AppText as Text } from "../../components/AppText";
-import { SymbolView } from "../../components/AppSymbol";
+import { AppText as Text } from "../../components/ui/AppText";
+import { SymbolView } from "../../components/ui/AppSymbol";
+import { IconButton } from "../../components/ui/IconButton";
 import { scopedThreadKey } from "../../lib/scopedEntities";
 import { environmentServerConfigsAtom } from "../../state/server";
 import { environmentThreadShells } from "../../state/threads";
@@ -79,7 +80,6 @@ function ArrangementRow(props: {
   );
 }
 
-/** Native pan recognition wins over list scrolling only inside the handle. */
 function DragHandle(props: {
   title: string;
   disabled: boolean;
@@ -198,7 +198,6 @@ export function ThreadArrangementSheet(props: { onClose: () => void }) {
     );
     return {
       pinned,
-      // The Working beta orders the inbox by time; show that order here too.
       active: workingShelfEnabled
         ? sortInboxThreadsByReturn(active, threadListInboxReturns.returnedAt)
         : active,
@@ -212,8 +211,6 @@ export function ThreadArrangementSheet(props: { onClose: () => void }) {
         ordered: sections[section],
         allThreads: threads,
         section,
-        // A time-ordered inbox has no slots, so Active takes no drops while
-        // the Working beta is on. The saved arrangement stays untouched.
         reorderableEnvironmentIds: new Set(
           [...configs].flatMap(([id, config]) =>
             (
@@ -381,14 +378,12 @@ export function ThreadArrangementSheet(props: { onClose: () => void }) {
           style={{ paddingTop: insets.top, paddingBottom: insets.bottom }}
         >
           <View className="flex-row items-center justify-between gap-3 px-5 py-3">
-            <Text className="flex-1 text-xl font-t3-semibold">Arrange threads</Text>
-            <Pressable
-              accessibilityRole="button"
+            <Text className="flex-1 text-xl font-goat-semibold">Arrange threads</Text>
+            <IconButton
+              accessibilityLabel="Close arrange threads"
+              icon="xmark"
               onPress={props.onClose}
-              className="min-h-11 justify-center px-3"
-            >
-              <Text className="text-base text-primary-text">Done</Text>
-            </Pressable>
+            />
           </View>
           <Text className="px-5 pb-3 text-sm text-foreground-muted">
             Drag to reorder, pin, or settle. Changes save when you drop.
@@ -510,7 +505,6 @@ export function ThreadArrangementSheet(props: { onClose: () => void }) {
                             if (frame.current !== null) cancelAnimationFrame(frame.current);
                             frame.current = null;
                             drag.current = null;
-                            // Retain the gap until the saved order arrives, avoiding a flash back.
                             void moveThread(current.thread, current.destination).finally(stop);
                           }}
                         />
@@ -525,7 +519,7 @@ export function ThreadArrangementSheet(props: { onClose: () => void }) {
                             setExpanded((value) => ({ ...value, [section]: !value[section] }));
                         }}
                       >
-                        <Text className="text-sm font-t3-semibold text-foreground-muted">
+                        <Text className="text-sm font-goat-semibold text-foreground-muted">
                           {item.section[0]!.toUpperCase() + item.section.slice(1)} (
                           {sections[item.section].length})
                         </Text>
@@ -543,7 +537,7 @@ export function ThreadArrangementSheet(props: { onClose: () => void }) {
               >
                 <Text
                   numberOfLines={visiblePreview.destination?.section ? 1 : 2}
-                  className="text-base font-t3-medium"
+                  className="text-base font-goat-medium"
                 >
                   {visiblePreview.thread.title}
                 </Text>

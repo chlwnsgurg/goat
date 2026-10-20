@@ -6,6 +6,7 @@ import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
 
 import { discoverClaudeSkills, skillOverrideSettingsPaths } from "./ClaudeSkills.ts";
+import { planClaudeSkillDispatch } from "./ClaudeSkillDispatch.ts";
 
 const writeSkill = Effect.fn(function* (
   skillsDir: string,
@@ -24,7 +25,7 @@ it.layer(NodeServices.layer)("discoverClaudeSkills", (it) => {
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
-      const tempDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-claude-skills-" });
+      const tempDir = yield* fs.makeTempDirectoryScoped({ prefix: "goat-claude-skills-" });
       const configDir = path.join(tempDir, "claude-home");
       const workspace = path.join(tempDir, "workspace");
 
@@ -67,11 +68,70 @@ it.layer(NodeServices.layer)("discoverClaudeSkills", (it) => {
     }),
   );
 
+  it.effect("discovers skills from the instance's --add-dir launch args", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const tempDir = yield* fs.makeTempDirectoryScoped({ prefix: "goat-claude-skills-" });
+      const configDir = path.join(tempDir, "claude-home");
+      const workspace = path.join(tempDir, "workspace");
+      const extraDir = path.join(workspace, "extra skills");
+      yield* fs.makeDirectory(workspace, { recursive: true });
+      yield* writeSkill(
+        path.join(extraDir, ".claude", "skills"),
+        "demo",
+        ["---", "description: From an additional directory.", "---"].join("\n"),
+      );
+
+      assert.deepEqual(yield* discoverClaudeSkills({ homePath: configDir }, workspace), []);
+      for (const launchArgs of [
+        `--add-dir "${extraDir}"`,
+        `--add-dir="${extraDir}"`,
+        '--add-dir "extra skills"',
+        '--add-dir="extra skills"',
+        `--add-dir missing --add-dir "${extraDir}"`,
+      ]) {
+        const settings = { homePath: configDir, launchArgs };
+        const skills = yield* discoverClaudeSkills(settings, workspace);
+        assert.deepEqual(skills, [
+          {
+            name: "demo",
+            path: path.join(extraDir, ".claude", "skills", "demo", "SKILL.md"),
+            enabled: true,
+            scope: "project",
+            description: "From an additional directory.",
+          },
+        ]);
+      }
+      const settings = { homePath: configDir, launchArgs: `--add-dir "${extraDir}"` };
+      const skills = yield* discoverClaudeSkills(settings, workspace);
+      assert.deepEqual(
+        planClaudeSkillDispatch("$demo", new Set(skills.map((skill) => skill.name))),
+        {
+          leadingText: undefined,
+          commandText: "/demo",
+          skillName: "demo",
+        },
+      );
+      yield* writeSkill(
+        path.join(workspace, ".claude", "skills"),
+        "demo",
+        "---\ndescription: Project copy.\n---",
+      );
+      const projectSkills = yield* discoverClaudeSkills(settings, workspace);
+      assert.equal(projectSkills[0]?.description, "Project copy.");
+      for (const launchArgs of ["--add-dir", '--add-dir=""', '--add-dir "extra skills"']) {
+        const settings = { homePath: configDir, launchArgs };
+        assert.deepEqual(yield* discoverClaudeSkills(settings), []);
+      }
+    }),
+  );
+
   it.effect("ignores .agents/skills, which Claude Code does not load", () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
-      const tempDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-claude-skills-" });
+      const tempDir = yield* fs.makeTempDirectoryScoped({ prefix: "goat-claude-skills-" });
       const configDir = path.join(tempDir, "claude-home");
       const workspace = path.join(tempDir, "workspace");
 
@@ -93,7 +153,7 @@ it.layer(NodeServices.layer)("discoverClaudeSkills", (it) => {
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
-      const tempDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-claude-skills-" });
+      const tempDir = yield* fs.makeTempDirectoryScoped({ prefix: "goat-claude-skills-" });
       const configDir = path.join(tempDir, "claude-home");
       const workspace = path.join(tempDir, "workspace");
 
@@ -131,7 +191,7 @@ it.layer(NodeServices.layer)("discoverClaudeSkills", (it) => {
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
-      const tempDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-claude-skills-" });
+      const tempDir = yield* fs.makeTempDirectoryScoped({ prefix: "goat-claude-skills-" });
       const configDir = path.join(tempDir, "claude-home");
       const workspace = path.join(tempDir, "workspace");
 
@@ -158,7 +218,7 @@ it.layer(NodeServices.layer)("discoverClaudeSkills", (it) => {
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
-      const tempDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-claude-skills-" });
+      const tempDir = yield* fs.makeTempDirectoryScoped({ prefix: "goat-claude-skills-" });
       const configDir = path.join(tempDir, "claude-home");
 
       for (const [description, comment] of [
@@ -200,7 +260,7 @@ it.layer(NodeServices.layer)("discoverClaudeSkills", (it) => {
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
-      const tempDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-claude-skills-" });
+      const tempDir = yield* fs.makeTempDirectoryScoped({ prefix: "goat-claude-skills-" });
       const configDir = path.join(tempDir, "claude-home");
       const skillsDir = path.join(configDir, "skills");
 
@@ -216,7 +276,6 @@ it.layer(NodeServices.layer)("discoverClaudeSkills", (it) => {
           ["---", "description: Run: browser objectives.", field, "---"].join("\n"),
         );
       }
-      // A stray file (not a directory with SKILL.md) must be skipped.
       yield* fs.makeDirectory(skillsDir, { recursive: true });
       yield* fs.writeFileString(path.join(skillsDir, "README.md"), "not a skill");
 
@@ -237,7 +296,7 @@ it.layer(NodeServices.layer)("discoverClaudeSkills", (it) => {
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
-      const tempDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-claude-skills-" });
+      const tempDir = yield* fs.makeTempDirectoryScoped({ prefix: "goat-claude-skills-" });
       const environmentConfigDir = path.join(tempDir, "env-config");
 
       yield* writeSkill(
@@ -255,8 +314,6 @@ it.layer(NodeServices.layer)("discoverClaudeSkills", (it) => {
         ["env-skill"],
       );
 
-      // An explicit homePath wins over the environment variable, matching
-      // makeClaudeEnvironment which overwrites CLAUDE_CONFIG_DIR for the CLI.
       const explicitHome = path.join(tempDir, "explicit-home");
       yield* writeSkill(
         path.join(explicitHome, "skills"),
@@ -277,7 +334,7 @@ it.layer(NodeServices.layer)("discoverClaudeSkills", (it) => {
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
-      const tempDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-claude-skills-" });
+      const tempDir = yield* fs.makeTempDirectoryScoped({ prefix: "goat-claude-skills-" });
       const workspace = path.join(tempDir, "workspace");
       yield* fs.makeDirectory(workspace, { recursive: true });
 
@@ -305,7 +362,7 @@ it.layer(NodeServices.layer)("discoverClaudeSkills", (it) => {
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
-      const tempDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-claude-skills-" });
+      const tempDir = yield* fs.makeTempDirectoryScoped({ prefix: "goat-claude-skills-" });
       const configDir = path.join(tempDir, "claude-home");
       const workspace = path.join(tempDir, "workspace");
 
@@ -347,7 +404,7 @@ it.layer(NodeServices.layer)("discoverClaudeSkills", (it) => {
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
-      const tempDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-claude-skills-" });
+      const tempDir = yield* fs.makeTempDirectoryScoped({ prefix: "goat-claude-skills-" });
       const configDir = path.join(tempDir, "claude-home");
       const workspace = path.join(tempDir, "workspace");
 
@@ -387,7 +444,7 @@ it.layer(NodeServices.layer)("discoverClaudeSkills", (it) => {
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
-      const tempDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-claude-skills-" });
+      const tempDir = yield* fs.makeTempDirectoryScoped({ prefix: "goat-claude-skills-" });
       const configDir = path.join(tempDir, "claude-home");
 
       yield* writeSkill(
@@ -410,7 +467,7 @@ it.layer(NodeServices.layer)("discoverClaudeSkills", (it) => {
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
-      const tempDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-claude-skills-" });
+      const tempDir = yield* fs.makeTempDirectoryScoped({ prefix: "goat-claude-skills-" });
       const configDir = path.join(tempDir, "claude-home");
 
       yield* writeSkill(
@@ -436,7 +493,7 @@ it.layer(NodeServices.layer)("discoverClaudeSkills", (it) => {
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
-      const tempDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-claude-skills-" });
+      const tempDir = yield* fs.makeTempDirectoryScoped({ prefix: "goat-claude-skills-" });
       const configDir = path.join(tempDir, "claude-home");
 
       for (const name of ["unknown-mode", "boolean-false", "sibling-off"]) {
@@ -470,7 +527,7 @@ it.layer(NodeServices.layer)("discoverClaudeSkills", (it) => {
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
-      const tempDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-claude-skills-" });
+      const tempDir = yield* fs.makeTempDirectoryScoped({ prefix: "goat-claude-skills-" });
       const configDir = path.join(tempDir, "claude-home");
       const repo = path.join(tempDir, "repo");
       const workspace = path.join(repo, "packages", "app");
@@ -517,7 +574,7 @@ it.layer(NodeServices.layer)("discoverClaudeSkills", (it) => {
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
-      const tempDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-claude-skills-" });
+      const tempDir = yield* fs.makeTempDirectoryScoped({ prefix: "goat-claude-skills-" });
       const configDir = path.join(tempDir, "claude-home");
       const parent = path.join(tempDir, "not-a-repo");
       const workspace = path.join(parent, "workspace");
@@ -545,9 +602,6 @@ it.layer(NodeServices.layer)("discoverClaudeSkills", (it) => {
 
   it.effect("lets the administrator's managed policy outrank every other settings file", () =>
     Effect.gen(function* () {
-      // The function is pure on its `path` argument, so hand it the
-      // implementation matching each platform under test rather than the
-      // host's.
       const path = yield* Path.Path.pipe(Effect.provide(NodePath.layerPosix));
       const win32Path = yield* Path.Path.pipe(Effect.provide(NodePath.layerWin32));
 
@@ -575,8 +629,6 @@ it.layer(NodeServices.layer)("discoverClaudeSkills", (it) => {
         ["C:\\Users\\me\\.claude\\settings.json"],
       );
 
-      // Only the repository root's local file joins in, after the
-      // workspace's own local file so it wins.
       assert.deepEqual(
         skillOverrideSettingsPaths(
           path,
@@ -594,7 +646,6 @@ it.layer(NodeServices.layer)("discoverClaudeSkills", (it) => {
           "/etc/claude-code/managed-settings.json",
         ],
       );
-      // A workspace that is the root itself is not read twice.
       assert.deepEqual(
         skillOverrideSettingsPaths(path, "/home/.claude", "/repo", "linux", {}, "/repo"),
         [
@@ -611,7 +662,7 @@ it.layer(NodeServices.layer)("discoverClaudeSkills", (it) => {
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
-      const tempDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-claude-skills-" });
+      const tempDir = yield* fs.makeTempDirectoryScoped({ prefix: "goat-claude-skills-" });
       const configDir = path.join(tempDir, "claude-home");
 
       yield* writeSkill(
@@ -633,7 +684,7 @@ it.layer(NodeServices.layer)("discoverClaudeSkills", (it) => {
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
-      const tempDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-claude-skills-" });
+      const tempDir = yield* fs.makeTempDirectoryScoped({ prefix: "goat-claude-skills-" });
       const configDir = path.join(tempDir, "claude-home");
 
       yield* writeSkill(
@@ -648,8 +699,6 @@ it.layer(NodeServices.layer)("discoverClaudeSkills", (it) => {
 
       const skills = yield* discoverClaudeSkills({ homePath: configDir });
 
-      // The frontmatter name is not the command, so an override naming it is
-      // not the override Claude Code would apply either.
       assert.deepEqual(
         skills.map((skill) => [skill.name, skill.enabled]),
         [["probe-alias", true]],
@@ -661,7 +710,7 @@ it.layer(NodeServices.layer)("discoverClaudeSkills", (it) => {
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
-      const tempDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-claude-skills-" });
+      const tempDir = yield* fs.makeTempDirectoryScoped({ prefix: "goat-claude-skills-" });
       const configDir = path.join(tempDir, "claude-home");
 
       yield* writeSkill(
@@ -687,7 +736,7 @@ it.layer(NodeServices.layer)("discoverClaudeSkills", (it) => {
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
-      const tempDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-claude-skills-" });
+      const tempDir = yield* fs.makeTempDirectoryScoped({ prefix: "goat-claude-skills-" });
       const configDir = path.join(tempDir, "claude-home");
       const skillsDir = path.join(configDir, "skills");
 
@@ -728,7 +777,7 @@ it.layer(NodeServices.layer)("discoverClaudeSkills", (it) => {
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
-      const tempDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-claude-skills-" });
+      const tempDir = yield* fs.makeTempDirectoryScoped({ prefix: "goat-claude-skills-" });
 
       const skills = yield* discoverClaudeSkills(
         { homePath: path.join(tempDir, "missing-home") },

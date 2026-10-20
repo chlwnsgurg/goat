@@ -1,21 +1,31 @@
+import { agentSurfaceRegistry } from "@goat/contracts/agentSurface";
+import { agentSurfaceAnnotations } from "../../agentSurface.ts";
 import {
-  CHANNEL_MCP_TOOL_NAMES,
+  ChannelBotHomeClaimResult,
+  ChannelBotHomeStatus,
   ChannelIngestResult,
   ChannelInputId,
   ChannelInputSnapshot,
   ChannelListTasksInput,
   ChannelListTasksResult,
   ChannelTask,
+  ChannelTaskExportInput,
+  ChannelTaskExportResult,
   ChannelTaskId,
   ChannelTaskReportInput,
+  ChannelTaskMoveInput,
+  ChannelTaskMoveResult,
   OrchestratorMcpFailure,
   TrimmedNonEmptyString,
-} from "@t3tools/contracts";
+} from "@goat/contracts";
 import * as Schema from "effect/Schema";
 import { Tool, Toolkit } from "effect/ai";
 
+import * as ChannelBotHome from "../../../channels/ChannelBotHome.ts";
 import * as ChannelGateway from "../../../channels/ChannelGateway.ts";
 import * as ChannelLedger from "../../../channels/ChannelLedger.ts";
+import * as ChannelRemoteWorkers from "../../../channels/ChannelRemoteWorkers.ts";
+import * as ChannelRuntime from "../../../channels/ChannelRuntime.ts";
 import * as ChannelWorkerReports from "../../../channels/ChannelWorkerReports.ts";
 import * as ThreadManagementService from "../../../orchestration-v2/ThreadManagementService.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
@@ -32,71 +42,88 @@ const shared = {
   ],
 };
 
-const ChannelIngestTool = Tool.make(CHANNEL_MCP_TOOL_NAMES.ingest, {
+const ChannelIngestTool = Tool.make(agentSurfaceRegistry["channel.ingest"].name, {
   ...shared,
-  description:
-    "Send a message to GOAT's front desk as an agent. It answers within seconds; read the answer with channel_input_get and the returned inputId. Agents can ask how work is going; only people can start work or answer a task's questions. Reuse clientRequestId to retry safely. conversationKey keeps related messages in one conversation (default: one per caller).",
+  description: agentSurfaceRegistry["channel.ingest"].description,
   parameters: Schema.Struct({
     text: Schema.String.check(Schema.isMaxLength(20_000)),
     clientRequestId: TrimmedNonEmptyString,
     conversationKey: Schema.optional(TrimmedNonEmptyString),
   }),
   success: ChannelIngestResult,
-})
-  .annotate(Tool.Title, "Message GOAT's front desk")
-  .annotate(Tool.Destructive, false)
-  .annotate(Tool.Idempotent, true);
+}).annotateMerge(agentSurfaceAnnotations(agentSurfaceRegistry["channel.ingest"]));
 
-const ChannelInputGetTool = Tool.make(CHANNEL_MCP_TOOL_NAMES.inputGet, {
+const ChannelInputGetTool = Tool.make(agentSurfaceRegistry["channel.input_read"].name, {
   ...shared,
-  description:
-    "Read a message you sent with channel_ingest: its state and the front desk's reply once it has one (reply.text), or failure. Only your own messages are visible.",
+  description: agentSurfaceRegistry["channel.input_read"].description,
   parameters: Schema.Struct({ inputId: ChannelInputId }),
   success: ChannelInputSnapshot,
-})
-  .annotate(Tool.Title, "Read a front desk reply")
-  .annotate(Tool.Readonly, true)
-  .annotate(Tool.Destructive, false)
-  .annotate(Tool.Idempotent, true);
+}).annotateMerge(agentSurfaceAnnotations(agentSurfaceRegistry["channel.input_read"]));
 
-const ChannelTaskGetTool = Tool.make(CHANNEL_MCP_TOOL_NAMES.taskGet, {
+const ChannelTaskGetTool = Tool.make(agentSurfaceRegistry["channel.task_read"].name, {
   ...shared,
-  description:
-    "Read one GOAT ledger task: status, worker thread, result summary, and open questions.",
+  description: agentSurfaceRegistry["channel.task_read"].description,
   parameters: Schema.Struct({ taskId: ChannelTaskId }),
   success: ChannelTask,
-})
-  .annotate(Tool.Title, "Read a GOAT ledger task")
-  .annotate(Tool.Readonly, true)
-  .annotate(Tool.Destructive, false)
-  .annotate(Tool.Idempotent, true);
+}).annotateMerge(agentSurfaceAnnotations(agentSurfaceRegistry["channel.task_read"]));
 
-const ChannelTaskListTool = Tool.make(CHANNEL_MCP_TOOL_NAMES.taskList, {
+const ChannelTaskListTool = Tool.make(agentSurfaceRegistry["channel.task_list"].name, {
   ...shared,
-  description: "List GOAT ledger tasks, newest change first, optionally filtered by status.",
+  description: agentSurfaceRegistry["channel.task_list"].description,
   parameters: ChannelListTasksInput,
   success: ChannelListTasksResult,
-})
-  .annotate(Tool.Title, "List GOAT ledger tasks")
-  .annotate(Tool.Readonly, true)
-  .annotate(Tool.Destructive, false)
-  .annotate(Tool.Idempotent, true);
+}).annotateMerge(agentSurfaceAnnotations(agentSurfaceRegistry["channel.task_list"]));
 
-const ChannelTaskReportTool = Tool.make(CHANNEL_MCP_TOOL_NAMES.taskReport, {
+const ChannelTaskExportTool = Tool.make(agentSurfaceRegistry["channel.task_export"].name, {
   ...shared,
-  description:
-    "Report on the GOAT ledger task this thread is working on: progress (running), a question for the person who asked (waiting_input, with question; then stop), a proposed completion (completed; recorded when your run ends), or failure. Only the task's worker thread can report, with the task's current generation. Use a new eventId for each report.",
+  description: agentSurfaceRegistry["channel.task_export"].description,
+  parameters: ChannelTaskExportInput,
+  success: ChannelTaskExportResult,
+}).annotateMerge(agentSurfaceAnnotations(agentSurfaceRegistry["channel.task_export"]));
+
+const ChannelTaskReportTool = Tool.make(agentSurfaceRegistry["channel.task_report"].name, {
+  ...shared,
+  description: agentSurfaceRegistry["channel.task_report"].description,
   parameters: ChannelTaskReportInput,
   success: Schema.Struct({}),
-})
-  .annotate(Tool.Title, "Report on a GOAT ledger task")
-  .annotate(Tool.Destructive, false)
-  .annotate(Tool.Idempotent, true);
+}).annotateMerge(agentSurfaceAnnotations(agentSurfaceRegistry["channel.task_report"]));
+
+const ChannelTaskMoveTool = Tool.make(agentSurfaceRegistry["channel.task_move"].name, {
+  ...shared,
+  dependencies: [
+    ...shared.dependencies,
+    ChannelRemoteWorkers.ChannelRemoteWorkers,
+    ChannelRuntime.ChannelRuntime,
+  ],
+  description: agentSurfaceRegistry["channel.task_move"].description,
+  parameters: ChannelTaskMoveInput,
+  success: ChannelTaskMoveResult,
+}).annotateMerge(agentSurfaceAnnotations(agentSurfaceRegistry["channel.task_move"]));
+
+const ChannelBotHomeTool = Tool.make(agentSurfaceRegistry["channel.bot_home_read"].name, {
+  ...shared,
+  dependencies: [...shared.dependencies, ChannelBotHome.ChannelBotHome],
+  description: agentSurfaceRegistry["channel.bot_home_read"].description,
+  parameters: Tool.EmptyParams,
+  success: ChannelBotHomeStatus,
+}).annotateMerge(agentSurfaceAnnotations(agentSurfaceRegistry["channel.bot_home_read"]));
+
+const ChannelBotHomeClaimTool = Tool.make(agentSurfaceRegistry["channel.bot_home_claim"].name, {
+  ...shared,
+  dependencies: [...shared.dependencies, ChannelBotHome.ChannelBotHome],
+  description: agentSurfaceRegistry["channel.bot_home_claim"].description,
+  parameters: Tool.EmptyParams,
+  success: ChannelBotHomeClaimResult,
+}).annotateMerge(agentSurfaceAnnotations(agentSurfaceRegistry["channel.bot_home_claim"]));
 
 export const ChannelToolkit = Toolkit.make(
   ChannelIngestTool,
   ChannelInputGetTool,
   ChannelTaskGetTool,
   ChannelTaskListTool,
+  ChannelTaskExportTool,
   ChannelTaskReportTool,
+  ChannelTaskMoveTool,
+  ChannelBotHomeTool,
+  ChannelBotHomeClaimTool,
 );

@@ -24,8 +24,10 @@ import { Route as SettingsScheduledTasksRouteImport } from './routes/settings.sc
 import { Route as SettingsProvidersRouteImport } from './routes/settings.providers'
 import { Route as SettingsProjectsRouteImport } from './routes/settings.projects'
 import { Route as SettingsOpenSourceLicensesRouteImport } from './routes/settings.open-source-licenses'
+import { Route as SettingsMemoryRouteImport } from './routes/settings.memory'
 import { Route as SettingsKeybindingsRouteImport } from './routes/settings.keybindings'
 import { Route as SettingsIntegrationsRouteImport } from './routes/settings.integrations'
+import { Route as SettingsGoatBotRouteImport } from './routes/settings.goat-bot'
 import { Route as SettingsGeneralRouteImport } from './routes/settings.general'
 import { Route as SettingsDiagnosticsRouteImport } from './routes/settings.diagnostics'
 import { Route as SettingsConnectionsRouteImport } from './routes/settings.connections'
@@ -33,6 +35,9 @@ import { Route as SettingsArchivedRouteImport } from './routes/settings.archived
 import { Route as SettingsAppearanceRouteImport } from './routes/settings.appearance'
 import { Route as ProjectsProjectKeyRouteImport } from './routes/projects.$projectKey'
 import { Route as ChatPullRequestsRouteImport } from './routes/_chat.pull-requests'
+import { Route as ChatNewRouteImport } from './routes/_chat.new'
+import { Route as ChatFleetRouteImport } from './routes/_chat.fleet'
+import { Route as ChatDecisionsRouteImport } from './routes/_chat.decisions'
 import { Route as ChatBotRouteImport } from './routes/_chat.bot'
 import { Route as ChatDraftDraftIdRouteImport } from './routes/_chat.draft.$draftId'
 import { Route as ChatEnvironmentIdThreadIdRouteImport } from './routes/_chat.$environmentId.$threadId'
@@ -112,6 +117,11 @@ const SettingsOpenSourceLicensesRoute =
     path: '/open-source-licenses',
     getParentRoute: () => SettingsRoute,
   } as any)
+const SettingsMemoryRoute = SettingsMemoryRouteImport.update({
+  id: '/memory',
+  path: '/memory',
+  getParentRoute: () => SettingsRoute,
+} as any)
 const SettingsKeybindingsRoute = SettingsKeybindingsRouteImport.update({
   id: '/keybindings',
   path: '/keybindings',
@@ -120,6 +130,11 @@ const SettingsKeybindingsRoute = SettingsKeybindingsRouteImport.update({
 const SettingsIntegrationsRoute = SettingsIntegrationsRouteImport.update({
   id: '/integrations',
   path: '/integrations',
+  getParentRoute: () => SettingsRoute,
+} as any)
+const SettingsGoatBotRoute = SettingsGoatBotRouteImport.update({
+  id: '/goat-bot',
+  path: '/goat-bot',
   getParentRoute: () => SettingsRoute,
 } as any)
 const SettingsGeneralRoute = SettingsGeneralRouteImport.update({
@@ -157,6 +172,21 @@ const ChatPullRequestsRoute = ChatPullRequestsRouteImport.update({
   path: '/pull-requests',
   getParentRoute: () => ChatRoute,
 } as any)
+const ChatNewRoute = ChatNewRouteImport.update({
+  id: '/new',
+  path: '/new',
+  getParentRoute: () => ChatRoute,
+} as any)
+const ChatFleetRoute = ChatFleetRouteImport.update({
+  id: '/fleet',
+  path: '/fleet',
+  getParentRoute: () => ChatRoute,
+} as any)
+const ChatDecisionsRoute = ChatDecisionsRouteImport.update({
+  id: '/decisions',
+  path: '/decisions',
+  getParentRoute: () => ChatRoute,
+} as any)
 const ChatBotRoute = ChatBotRouteImport.update({
   id: '/bot',
   path: '/bot',
@@ -183,6 +213,9 @@ export interface FileRoutesByFullPath {
   '/usage': typeof UsageRoute
   '/welcome': typeof WelcomeRoute
   '/bot': typeof ChatBotRoute
+  '/decisions': typeof ChatDecisionsRoute
+  '/fleet': typeof ChatFleetRoute
+  '/new': typeof ChatNewRoute
   '/pull-requests': typeof ChatPullRequestsRoute
   '/projects/$projectKey': typeof ProjectsProjectKeyRoute
   '/settings/appearance': typeof SettingsAppearanceRoute
@@ -190,8 +223,10 @@ export interface FileRoutesByFullPath {
   '/settings/connections': typeof SettingsConnectionsRoute
   '/settings/diagnostics': typeof SettingsDiagnosticsRoute
   '/settings/general': typeof SettingsGeneralRoute
+  '/settings/goat-bot': typeof SettingsGoatBotRoute
   '/settings/integrations': typeof SettingsIntegrationsRoute
   '/settings/keybindings': typeof SettingsKeybindingsRoute
+  '/settings/memory': typeof SettingsMemoryRoute
   '/settings/open-source-licenses': typeof SettingsOpenSourceLicensesRoute
   '/settings/projects': typeof SettingsProjectsRoute
   '/settings/providers': typeof SettingsProvidersRoute
@@ -210,6 +245,9 @@ export interface FileRoutesByTo {
   '/usage': typeof UsageRoute
   '/welcome': typeof WelcomeRoute
   '/bot': typeof ChatBotRoute
+  '/decisions': typeof ChatDecisionsRoute
+  '/fleet': typeof ChatFleetRoute
+  '/new': typeof ChatNewRoute
   '/pull-requests': typeof ChatPullRequestsRoute
   '/projects/$projectKey': typeof ProjectsProjectKeyRoute
   '/settings/appearance': typeof SettingsAppearanceRoute
@@ -217,8 +255,10 @@ export interface FileRoutesByTo {
   '/settings/connections': typeof SettingsConnectionsRoute
   '/settings/diagnostics': typeof SettingsDiagnosticsRoute
   '/settings/general': typeof SettingsGeneralRoute
+  '/settings/goat-bot': typeof SettingsGoatBotRoute
   '/settings/integrations': typeof SettingsIntegrationsRoute
   '/settings/keybindings': typeof SettingsKeybindingsRoute
+  '/settings/memory': typeof SettingsMemoryRoute
   '/settings/open-source-licenses': typeof SettingsOpenSourceLicensesRoute
   '/settings/projects': typeof SettingsProjectsRoute
   '/settings/providers': typeof SettingsProvidersRoute
@@ -240,6 +280,9 @@ export interface FileRoutesById {
   '/usage': typeof UsageRoute
   '/welcome': typeof WelcomeRoute
   '/_chat/bot': typeof ChatBotRoute
+  '/_chat/decisions': typeof ChatDecisionsRoute
+  '/_chat/fleet': typeof ChatFleetRoute
+  '/_chat/new': typeof ChatNewRoute
   '/_chat/pull-requests': typeof ChatPullRequestsRoute
   '/projects/$projectKey': typeof ProjectsProjectKeyRoute
   '/settings/appearance': typeof SettingsAppearanceRoute
@@ -247,8 +290,10 @@ export interface FileRoutesById {
   '/settings/connections': typeof SettingsConnectionsRoute
   '/settings/diagnostics': typeof SettingsDiagnosticsRoute
   '/settings/general': typeof SettingsGeneralRoute
+  '/settings/goat-bot': typeof SettingsGoatBotRoute
   '/settings/integrations': typeof SettingsIntegrationsRoute
   '/settings/keybindings': typeof SettingsKeybindingsRoute
+  '/settings/memory': typeof SettingsMemoryRoute
   '/settings/open-source-licenses': typeof SettingsOpenSourceLicensesRoute
   '/settings/projects': typeof SettingsProjectsRoute
   '/settings/providers': typeof SettingsProvidersRoute
@@ -271,6 +316,9 @@ export interface FileRouteTypes {
     | '/usage'
     | '/welcome'
     | '/bot'
+    | '/decisions'
+    | '/fleet'
+    | '/new'
     | '/pull-requests'
     | '/projects/$projectKey'
     | '/settings/appearance'
@@ -278,8 +326,10 @@ export interface FileRouteTypes {
     | '/settings/connections'
     | '/settings/diagnostics'
     | '/settings/general'
+    | '/settings/goat-bot'
     | '/settings/integrations'
     | '/settings/keybindings'
+    | '/settings/memory'
     | '/settings/open-source-licenses'
     | '/settings/projects'
     | '/settings/providers'
@@ -298,6 +348,9 @@ export interface FileRouteTypes {
     | '/usage'
     | '/welcome'
     | '/bot'
+    | '/decisions'
+    | '/fleet'
+    | '/new'
     | '/pull-requests'
     | '/projects/$projectKey'
     | '/settings/appearance'
@@ -305,8 +358,10 @@ export interface FileRouteTypes {
     | '/settings/connections'
     | '/settings/diagnostics'
     | '/settings/general'
+    | '/settings/goat-bot'
     | '/settings/integrations'
     | '/settings/keybindings'
+    | '/settings/memory'
     | '/settings/open-source-licenses'
     | '/settings/projects'
     | '/settings/providers'
@@ -327,6 +382,9 @@ export interface FileRouteTypes {
     | '/usage'
     | '/welcome'
     | '/_chat/bot'
+    | '/_chat/decisions'
+    | '/_chat/fleet'
+    | '/_chat/new'
     | '/_chat/pull-requests'
     | '/projects/$projectKey'
     | '/settings/appearance'
@@ -334,8 +392,10 @@ export interface FileRouteTypes {
     | '/settings/connections'
     | '/settings/diagnostics'
     | '/settings/general'
+    | '/settings/goat-bot'
     | '/settings/integrations'
     | '/settings/keybindings'
+    | '/settings/memory'
     | '/settings/open-source-licenses'
     | '/settings/projects'
     | '/settings/providers'
@@ -466,6 +526,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof SettingsOpenSourceLicensesRouteImport
       parentRoute: typeof SettingsRoute
     }
+    '/settings/memory': {
+      id: '/settings/memory'
+      path: '/memory'
+      fullPath: '/settings/memory'
+      preLoaderRoute: typeof SettingsMemoryRouteImport
+      parentRoute: typeof SettingsRoute
+    }
     '/settings/keybindings': {
       id: '/settings/keybindings'
       path: '/keybindings'
@@ -478,6 +545,13 @@ declare module '@tanstack/react-router' {
       path: '/integrations'
       fullPath: '/settings/integrations'
       preLoaderRoute: typeof SettingsIntegrationsRouteImport
+      parentRoute: typeof SettingsRoute
+    }
+    '/settings/goat-bot': {
+      id: '/settings/goat-bot'
+      path: '/goat-bot'
+      fullPath: '/settings/goat-bot'
+      preLoaderRoute: typeof SettingsGoatBotRouteImport
       parentRoute: typeof SettingsRoute
     }
     '/settings/general': {
@@ -529,6 +603,27 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ChatPullRequestsRouteImport
       parentRoute: typeof ChatRoute
     }
+    '/_chat/new': {
+      id: '/_chat/new'
+      path: '/new'
+      fullPath: '/new'
+      preLoaderRoute: typeof ChatNewRouteImport
+      parentRoute: typeof ChatRoute
+    }
+    '/_chat/fleet': {
+      id: '/_chat/fleet'
+      path: '/fleet'
+      fullPath: '/fleet'
+      preLoaderRoute: typeof ChatFleetRouteImport
+      parentRoute: typeof ChatRoute
+    }
+    '/_chat/decisions': {
+      id: '/_chat/decisions'
+      path: '/decisions'
+      fullPath: '/decisions'
+      preLoaderRoute: typeof ChatDecisionsRouteImport
+      parentRoute: typeof ChatRoute
+    }
     '/_chat/bot': {
       id: '/_chat/bot'
       path: '/bot'
@@ -555,6 +650,9 @@ declare module '@tanstack/react-router' {
 
 interface ChatRouteChildren {
   ChatBotRoute: typeof ChatBotRoute
+  ChatDecisionsRoute: typeof ChatDecisionsRoute
+  ChatFleetRoute: typeof ChatFleetRoute
+  ChatNewRoute: typeof ChatNewRoute
   ChatPullRequestsRoute: typeof ChatPullRequestsRoute
   ChatIndexRoute: typeof ChatIndexRoute
   ChatEnvironmentIdThreadIdRoute: typeof ChatEnvironmentIdThreadIdRoute
@@ -563,6 +661,9 @@ interface ChatRouteChildren {
 
 const ChatRouteChildren: ChatRouteChildren = {
   ChatBotRoute: ChatBotRoute,
+  ChatDecisionsRoute: ChatDecisionsRoute,
+  ChatFleetRoute: ChatFleetRoute,
+  ChatNewRoute: ChatNewRoute,
   ChatPullRequestsRoute: ChatPullRequestsRoute,
   ChatIndexRoute: ChatIndexRoute,
   ChatEnvironmentIdThreadIdRoute: ChatEnvironmentIdThreadIdRoute,
@@ -577,8 +678,10 @@ interface SettingsRouteChildren {
   SettingsConnectionsRoute: typeof SettingsConnectionsRoute
   SettingsDiagnosticsRoute: typeof SettingsDiagnosticsRoute
   SettingsGeneralRoute: typeof SettingsGeneralRoute
+  SettingsGoatBotRoute: typeof SettingsGoatBotRoute
   SettingsIntegrationsRoute: typeof SettingsIntegrationsRoute
   SettingsKeybindingsRoute: typeof SettingsKeybindingsRoute
+  SettingsMemoryRoute: typeof SettingsMemoryRoute
   SettingsOpenSourceLicensesRoute: typeof SettingsOpenSourceLicensesRoute
   SettingsProjectsRoute: typeof SettingsProjectsRoute
   SettingsProvidersRoute: typeof SettingsProvidersRoute
@@ -594,8 +697,10 @@ const SettingsRouteChildren: SettingsRouteChildren = {
   SettingsConnectionsRoute: SettingsConnectionsRoute,
   SettingsDiagnosticsRoute: SettingsDiagnosticsRoute,
   SettingsGeneralRoute: SettingsGeneralRoute,
+  SettingsGoatBotRoute: SettingsGoatBotRoute,
   SettingsIntegrationsRoute: SettingsIntegrationsRoute,
   SettingsKeybindingsRoute: SettingsKeybindingsRoute,
+  SettingsMemoryRoute: SettingsMemoryRoute,
   SettingsOpenSourceLicensesRoute: SettingsOpenSourceLicensesRoute,
   SettingsProjectsRoute: SettingsProjectsRoute,
   SettingsProvidersRoute: SettingsProvidersRoute,

@@ -49,7 +49,7 @@ describe("remote folder browsing over POSIX sh", () => {
   beforeAll(() => {
     // Canonicalize macOS's /var -> /private/var alias before making path assertions.
     home = NodeFS.realpathSync(
-      NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-remote-browse-")),
+      NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "goat-remote-browse-")),
     );
     repo = NodePath.join(home, "repo");
     worktree = NodePath.join(home, "linked worktree");
@@ -204,4 +204,87 @@ describe("remote folder browsing over POSIX sh", () => {
       expect(browse(path)).toEqual({ _tag: "NotADirectory", home, path });
     },
   );
+});
+
+describe("remote folder browsing on a Windows shell", () => {
+  let home: string;
+  let shims: string;
+
+  beforeAll(() => {
+    home = NodeFS.realpathSync(
+      NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "goat-remote-browse-win-")),
+    );
+    shims = NodePath.join(home, ".shims");
+    NodeFS.mkdirSync(NodePath.join(home, "Developer", "goat", "apps"), { recursive: true });
+    NodeFS.mkdirSync(shims);
+    // Stand-ins for Git Bash's uname and cygpath: HOME is the user's folder on C:.
+    NodeFS.writeFileSync(NodePath.join(shims, "uname"), "#!/bin/sh\necho MINGW64_NT-10.0-26200\n", {
+      mode: 0o755,
+    });
+    NodeFS.writeFileSync(
+      NodePath.join(shims, "cygpath"),
+      `#!/bin/sh\n[ "$1" = -w ] && shift\nprintf '%s\\n' "$1" | sed "s|^${home}|C:/Users/super|" | tr / '\\\\'\n`,
+      { mode: 0o755 },
+    );
+  });
+
+  afterAll(() => {
+    if (home !== undefined) NodeFS.rmSync(home, { recursive: true, force: true });
+  });
+
+  it("reports the native Windows form of every folder path", () => {
+    const result = parseRemoteBrowseOutput(
+      NodeChildProcess.execFileSync("/bin/sh", [], {
+        input: buildRemoteBrowseScript({
+          path: "~/Developer/goat",
+          showHidden: false,
+          maxEntries: 10,
+        }),
+        cwd: home,
+        env: { HOME: home, PATH: `${shims}:${process.env.PATH}`, LC_ALL: "C" },
+        encoding: "utf8",
+        timeout: 10_000,
+      }),
+    );
+    expect(result).toMatchObject({
+      _tag: "Listing",
+      os: "MINGW64_NT-10.0-26200",
+      home: "C:\\Users\\super",
+      path: "C:\\Users\\super\\Developer\\goat",
+      realPath: "C:\\Users\\super\\Developer\\goat",
+      entries: [{ name: "apps", path: "C:\\Users\\super\\Developer\\goat\\apps" }],
+    });
+  });
+
+  it("maps drive mounts itself when the host has no cygpath", () => {
+    const result = parseRemoteBrowseOutput(
+      [
+        "T3B\t1",
+        "HOME\t/c/Users/super",
+        "OS\tMINGW64_NT-10.0-26200",
+        "PATH\t/c/Users/super/Developer/goat",
+        "REAL\t/c/Users/super/Developer/goat",
+        "GITROOT\tC:/Users/super/Developer/goat",
+        "BRANCH\tdev",
+        "WT\tworktree C:/Users/super/Developer/goat",
+        "WT\tbranch refs/heads/dev",
+        "E\tD\t1\tapps",
+      ].join("\n"),
+    );
+    expect(result).toMatchObject({
+      home: "C:\\Users\\super",
+      path: "C:\\Users\\super\\Developer\\goat",
+      realPath: "C:\\Users\\super\\Developer\\goat",
+      gitRoot: "C:\\Users\\super\\Developer\\goat",
+      worktrees: [{ path: "C:\\Users\\super\\Developer\\goat", branch: "dev" }],
+      entries: [{ name: "apps", path: "C:\\Users\\super\\Developer\\goat\\apps" }],
+    });
+  });
+
+  it("leaves POSIX hosts' paths alone, even ones shaped like a drive mount", () => {
+    const result = parseRemoteBrowseOutput(
+      ["T3B\t1", "HOME\t/home/x", "OS\tLinux", "PATH\t/c/data", "REAL\t/c/data"].join("\n"),
+    );
+    expect(result).toMatchObject({ home: "/home/x", path: "/c/data", realPath: "/c/data" });
+  });
 });

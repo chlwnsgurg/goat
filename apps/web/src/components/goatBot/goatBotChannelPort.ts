@@ -1,12 +1,13 @@
 import type {
   ChannelBotRef,
   ChannelEnsureBotInput,
+  ChannelGetBotStatusResult,
   ChannelIngestInput,
   ChannelIngestResult,
   ChannelListTasksInput,
   ChannelListTasksResult,
   EnvironmentId,
-} from "@t3tools/contracts";
+} from "@goat/contracts";
 import { createContext } from "react";
 
 /**
@@ -22,6 +23,8 @@ export interface GoatBotChannelPort {
     environmentId: EnvironmentId,
     input: ChannelEnsureBotInput,
   ) => Promise<ChannelBotRef>;
+  /** Which thread is the bot and how many GOAT tasks wait; never creates the bot. */
+  readonly getBotStatus: (environmentId: EnvironmentId) => Promise<ChannelGetBotStatusResult>;
   readonly ingest: (
     environmentId: EnvironmentId,
     input: ChannelIngestInput,

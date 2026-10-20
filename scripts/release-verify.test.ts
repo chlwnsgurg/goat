@@ -6,7 +6,8 @@ import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
 import * as Layer from "effect/Layer";
 import type * as Scope from "effect/Scope";
-import * as HostProcess from "@t3tools/shared/HostProcess";
+import * as HostProcess from "@goat/shared/HostProcess";
+import { GOAT_CONNECT_COMING_SOON } from "@goat/shared/goatConnect";
 import {
   archiveMemberProblems,
   assembleRelease,
@@ -30,6 +31,11 @@ import {
   type ReleaseCommandRunner,
   type ReleaseReport,
 } from "./lib/release-verify.ts";
+import {
+  ownRuntimeManifest,
+  releaseRuntimeManifest,
+  runtimeManifestAssetName,
+} from "@goat/shared/runtimeManifest";
 import { finalizeMacosDmgs, rewriteDmgManifest } from "./finalize-macos-dmg.ts";
 import { verifyMacPayload, verifyReleaseDirectory } from "./verify-release-artifacts.ts";
 import { mergeUpdateManifestFiles } from "./merge-update-manifests.ts";
@@ -130,8 +136,11 @@ describe("release payload helpers", () => {
       "C:\\a\\goat",
       "$GITHUB_WORKSPACE",
       "https://github.com/goat-si/goat/issues",
+      "https://github.com/goat-si/goat/blob/dev/docs/user/remote-access.md#tailscale-https",
     ])
       expect(exposureProblems("main.js", content).length).toBeGreaterThan(0);
+    // Clients and the CLI ship this link; a source-repository URL here blocks every nightly.
+    expect(exposureProblems("main.js", GOAT_CONNECT_COMING_SOON.guideUrl)).toEqual([]);
     expect(exposureProblems("node_modules/pkg/types.d.ts")).toEqual([]);
     expect(
       exposureProblems(
@@ -149,8 +158,8 @@ describe("release payload helpers", () => {
     ] as const)
       expect(exposureProblems(name, content, [])).toEqual([]);
     // GOAT workspace packages are GOAT sources wherever they are installed.
-    expect(exposureProblems("app.asar!/node_modules/@t3tools/shared/src/x.ts", "", [])).toEqual([
-      "app.asar!/node_modules/@t3tools/shared/src/x.ts: original source",
+    expect(exposureProblems("app.asar!/node_modules/@goat/shared/src/x.ts", "", [])).toEqual([
+      "app.asar!/node_modules/@goat/shared/src/x.ts: original source",
     ]);
     expect(
       exposureProblems("x.js", "C:\\Users\\runneradmin\\work\\x", ["C:\\Users\\runneradmin"]),
@@ -168,7 +177,35 @@ describe("release payload helpers", () => {
     expect(
       exposureProblems("node_modules/pkg/addon.node", `${roots[0]}/node_modules/x`, roots),
     ).toEqual(["node_modules/pkg/addon.node: absolute build path"]);
+    // Every GitHub-hosted Linux runner's home is /home/runner, so a dependency built
+    // on one carries it; only this checkout's paths count in third-party files.
+    const hosted = ["/home/runner", "/home/runner/work/goat/goat"];
+    const sandbox = "node_modules/@cursor/sdk-linux-arm64/bin/cursorsandbox";
+    expect(
+      exposureProblems(sandbox, "/home/runner/.cargo/registry/src/x/lib.rs", hosted, true),
+    ).toEqual([]);
+    expect(exposureProblems(sandbox, "/home/runner/work/goat/goat/x", hosted, true)).toEqual([
+      `${sandbox}: absolute build path`,
+    ]);
+    expect(exposureProblems("goat", "/home/runner/.cargo/registry/src/x.rs", hosted, true)).toEqual(
+      ["goat: absolute build path"],
+    );
     expect(exposureProblems("main.js", "'C:\\a\\b\\c'")).toEqual([]);
+    // Electron's own executable and libraries carry Chromium's inline source maps.
+    for (const name of [
+      "win-arm64-unpacked/GOAT (Nightly).exe",
+      "win-unpacked/ffmpeg.dll",
+      "linux-unpacked/goat",
+      "__appImage-arm64/locales/en-US.pak",
+    ])
+      expect(exposureProblems(name, "sourceMappingURL=data:x", [])).toEqual([]);
+    // GOAT code under resources/ is still checked, and so are this machine's paths.
+    expect(
+      exposureProblems("win-unpacked/resources/app/main.js", "sourceMappingURL=data:x", []),
+    ).toEqual(["win-unpacked/resources/app/main.js: inline source map"]);
+    expect(
+      exposureProblems("win-unpacked/GOAT.exe", "D:\\a\\goat\\goat\\x", ["D:\\a\\goat\\goat"]),
+    ).toEqual(["win-unpacked/GOAT.exe: absolute build path"]);
     expect(exposureProblems("main.js", "C:\\a\\b\\c\\build")).not.toEqual([]);
   });
   it("rejects unsafe archive members before extraction", () => {
@@ -614,7 +651,25 @@ it.effect(
             path.join(dir, name),
             serializeUpdateManifest(manifest(selected), { platformLabel: "release" }),
           );
+        const runtimeName = runtimeManifestAssetName(version);
+        const runtime = releaseRuntimeManifest(
+          ownRuntimeManifest({ version, commitTime: 123 }),
+          new Map(final.map((a) => [a.name, a.sha256])),
+        );
+        yield* fs.writeFileString(path.join(dir, runtimeName), JSON.stringify(runtime));
         expect((yield* assembleRelease(dir, reportsDir, version)).ok).toBe(true);
+        const runtimeSource = yield* fs.readFileString(path.join(dir, runtimeName));
+        for (const bad of ["invalid", JSON.stringify({ ...runtime, platforms: {} })]) {
+          yield* fs.writeFileString(path.join(dir, runtimeName), bad);
+          expect((yield* Effect.result(assembleRelease(dir, reportsDir, version)))._tag).toBe(
+            "Failure",
+          );
+        }
+        yield* fs.remove(path.join(dir, runtimeName));
+        expect((yield* Effect.result(assembleRelease(dir, reportsDir, version)))._tag).toBe(
+          "Failure",
+        );
+        yield* fs.writeFileString(path.join(dir, runtimeName), runtimeSource);
         const sums = yield* fs.readFileString(path.join(dir, "SHA256SUMS"));
         expect(sums.split("\n").filter(Boolean)).toHaveLength(
           requiredReleaseAssets(version).length,

@@ -1,21 +1,29 @@
+import {
+  LEGACY_DESKTOP_BOOTSTRAP_HOME_KEY,
+  GOAT_DESKTOP_BOOTSTRAP_HOME_KEY,
+} from "@goat/contracts/legacyT3Names";
 import * as Schema from "effect/Schema";
+import * as SchemaGetter from "effect/SchemaGetter";
 
 import { PortSchema, PositiveInt, TrimmedNonEmptyString } from "./baseSchemas.ts";
 
-export const DesktopBackendBootstrap = Schema.Struct({
+// A supervisor must not restart a server refused by the state-directory owner.
+export const SERVER_EXIT_CODE_STATE_DIR_OWNED = 78;
+
+const GoatDesktopBackendBootstrap = Schema.Struct({
   mode: Schema.Literal("desktop"),
   noBrowser: Schema.Boolean,
   port: PortSchema,
   // Omitted when the desktop launches the backend inside WSL, since the
   // Windows-side baseDir maps to /mnt/c/... and the Linux side should use its
   // own home directory instead.
-  t3Home: Schema.optional(Schema.String),
+  [GOAT_DESKTOP_BOOTSTRAP_HOME_KEY]: Schema.optional(Schema.String),
   host: Schema.String,
   desktopBootstrapToken: Schema.String,
   // Present when the desktop rotates the renderer's bootstrap token: the
   // backend derives the accepted tokens from this secret instead of trusting
   // `desktopBootstrapToken` for its whole run. See
-  // `@t3tools/shared/desktopBootstrapToken`.
+  // `@goat/shared/desktopBootstrapToken`.
   desktopBootstrapSecret: Schema.optionalKey(Schema.String),
   // Set only when the desktop already merged the user's shell environment into
   // the environment it hands this backend. Absent means the backend hydrates
@@ -28,16 +36,30 @@ export const DesktopBackendBootstrap = Schema.Struct({
   otlpLogsUrl: Schema.optional(Schema.String),
   desktopTelemetryFd: Schema.optionalKey(PositiveInt),
   desktopTelemetryControlFd: Schema.optionalKey(PositiveInt),
-  /** Desktop -> server: the desktop's browser tabs, as newline-delimited JSON. */
   desktopBrowserFd: Schema.optionalKey(PositiveInt),
-  /** Server -> desktop: commands for those tabs. */
   desktopBrowserControlFd: Schema.optionalKey(PositiveInt),
   resourceMonitorPath: Schema.optionalKey(TrimmedNonEmptyString),
 });
 
+/** Normalize both input spellings while encoding only the GOAT peer key. */
+export const DesktopBackendBootstrap = Schema.Struct({
+  ...GoatDesktopBackendBootstrap.fields,
+  [LEGACY_DESKTOP_BOOTSTRAP_HOME_KEY]: Schema.optionalKey(Schema.String),
+}).pipe(
+  Schema.decodeTo(Schema.toType(GoatDesktopBackendBootstrap), {
+    decode: SchemaGetter.transform(
+      ({ [LEGACY_DESKTOP_BOOTSTRAP_HOME_KEY]: legacyHome, ...bootstrap }) => ({
+        ...bootstrap,
+        [GOAT_DESKTOP_BOOTSTRAP_HOME_KEY]: bootstrap[GOAT_DESKTOP_BOOTSTRAP_HOME_KEY] ?? legacyHome,
+      }),
+    ),
+    encode: SchemaGetter.transform((bootstrap) => bootstrap),
+  }),
+);
+
 export type DesktopBackendBootstrap = typeof DesktopBackendBootstrap.Type;
 
-/** Written to `<t3Home>/runtime` just before the desktop app stops its
+/** Written to `<goatHome>/runtime` just before the desktop app stops its
     backend to install an update. The updated app starts a new backend right
     away, so a backend that sees a fresh marker at shutdown keeps its managed
     tunnel. */

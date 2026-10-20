@@ -4,7 +4,7 @@ import {
   isModifierPairShortcut,
   type DesktopSnapShotSetupAction,
   type DesktopSnapShotState,
-} from "@t3tools/contracts";
+} from "@goat/contracts";
 import { useState, type ReactNode } from "react";
 import { MacAccessibilityIcon, MacScreenRecordingIcon } from "../Icons";
 import { CaptureShortcutConfig } from "./CaptureShortcutConfig";
@@ -138,11 +138,8 @@ export function SnapShotSetupDialog({
     if (busy) return;
     setChecking(true);
     setChecked(false);
-    try {
-      setChecked((await onRefresh()) !== undefined);
-    } finally {
-      setChecking(false);
-    }
+    const refreshed = await onRefresh().finally(() => setChecking(false));
+    setChecked(refreshed !== undefined);
   };
   const accessCopy =
     state.message && !macPermissions

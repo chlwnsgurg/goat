@@ -1,4 +1,4 @@
-import { EnvironmentId } from "@t3tools/contracts";
+import { EnvironmentId } from "@goat/contracts";
 import { describe, expect, it } from "@effect/vitest";
 import * as Schema from "effect/Schema";
 import * as Effect from "effect/Effect";
@@ -28,6 +28,10 @@ import {
   ConnectionCatalogDocument,
   EMPTY_CONNECTION_CATALOG_DOCUMENT,
   catalogRoutes,
+  readCatalogHub,
+  setCatalogHub,
+  replaceCatalogValue,
+  removeCatalogValue,
   setRoutesInCatalog,
   putRemoteDpopTokenInCatalog,
   registerConnectionInCatalog,
@@ -73,6 +77,103 @@ const REMOTE_TOKEN = new TokenStore.RemoteDpopAccessToken({
 });
 
 describe("ConnectionCatalogDocument", () => {
+  it("decodes a version 1 catalog without hub and round-trips an optional hub", () => {
+    const schema = Schema.fromJsonString(ConnectionCatalogDocument);
+    const withoutHub = Schema.decodeSync(schema)(
+      Schema.encodeSync(schema)(EMPTY_CONNECTION_CATALOG_DOCUMENT),
+    );
+    expect(readCatalogHub(withoutHub)).toBeNull();
+    expect(withoutHub).not.toHaveProperty("hub");
+    const document = setCatalogHub(withoutHub, ENVIRONMENT_ID);
+    const restored = Schema.decodeSync(schema)(Schema.encodeSync(schema)(document));
+    expect(restored.schemaVersion).toBe(1);
+    expect(readCatalogHub(restored)).toBe(ENVIRONMENT_ID);
+    expect(setCatalogHub(restored, null)).toEqual(EMPTY_CONNECTION_CATALOG_DOCUMENT);
+    expect(setCatalogHub(restored, null)).not.toHaveProperty("hub");
+  });
+
+  it("accepts future fields inside hub without rejecting the catalog", () => {
+    const decoded = decodeCatalogDocument({
+      ...EMPTY_CONNECTION_CATALOG_DOCUMENT,
+      hub: { environmentId: ENVIRONMENT_ID, futureSetting: { enabled: true } },
+    });
+    expect(decoded.schemaVersion).toBe(1);
+    expect(readCatalogHub(decoded)).toBe(ENVIRONMENT_ID);
+  });
+
+  it("keeps hub through every catalog rewrite except removing that environment", () => {
+    let document = setCatalogHub(EMPTY_CONNECTION_CATALOG_DOCUMENT, ENVIRONMENT_ID);
+    const bearer = new BearerConnectionRegistration({
+      target: BEARER_TARGET,
+      profile: BEARER_PROFILE,
+      credential: BEARER_CREDENTIAL,
+    });
+    const rewrites: ReadonlyArray<
+      (current: ConnectionCatalogDocument) => ConnectionCatalogDocument
+    > = [
+      (current) => registerConnectionInCatalog(current, bearer),
+      (current) =>
+        registerConnectionInCatalog(
+          current,
+          new RelayConnectionRegistration({ target: RELAY_TARGET }),
+          [BEARER_TARGET, RELAY_TARGET],
+        ),
+      (current) => setRoutesInCatalog(current, ENVIRONMENT_ID, [RELAY_TARGET]),
+      (current) => setConnectionEnabledInCatalog(current, ENVIRONMENT_ID, false),
+      (current) => setConnectionEnabledInCatalog(current, ENVIRONMENT_ID, true),
+      (current) => putRemoteDpopTokenInCatalog(current, REMOTE_TOKEN),
+      (current) => ({
+        ...current,
+        profiles: replaceCatalogValue(
+          current.profiles,
+          (value) => value.connectionId,
+          BEARER_PROFILE,
+        ),
+      }),
+      (current) => ({
+        ...current,
+        profiles: removeCatalogValue(
+          current.profiles,
+          (value) => value.connectionId,
+          BEARER_PROFILE.connectionId,
+        ),
+      }),
+      (current) => ({
+        ...current,
+        credentials: replaceCatalogValue(current.credentials, (value) => value.connectionId, {
+          connectionId: BEARER_TARGET.connectionId,
+          credential: BEARER_CREDENTIAL,
+        }),
+      }),
+      (current) => ({
+        ...current,
+        credentials: removeCatalogValue(
+          current.credentials,
+          (value) => value.connectionId,
+          BEARER_TARGET.connectionId,
+        ),
+      }),
+      (current) => ({
+        ...current,
+        remoteDpopTokens: removeCatalogValue(
+          current.remoteDpopTokens,
+          (value) => value.environmentId,
+          ENVIRONMENT_ID,
+        ),
+      }),
+      (current) => setRoutesInCatalog(current, ENVIRONMENT_ID, []),
+      (current) => removeConnectionFromCatalog(current, EnvironmentId.make("another-environment")),
+    ];
+    for (const rewrite of rewrites) {
+      document = decodeCatalogDocument(rewrite(document));
+      expect(document.schemaVersion).toBe(1);
+      expect(readCatalogHub(document)).toBe(ENVIRONMENT_ID);
+    }
+    const removed = removeConnectionFromCatalog(document, ENVIRONMENT_ID);
+    expect(readCatalogHub(removed)).toBeNull();
+    expect(removed).not.toHaveProperty("hub");
+  });
+
   it.effect("persists explicit GitHub trust and forgets it when a connection is removed", () =>
     Effect.gen(function* () {
       let document = EMPTY_CONNECTION_CATALOG_DOCUMENT;
@@ -365,7 +466,6 @@ describe("ConnectionCatalogDocument", () => {
     expect(disabled.disabledEnvironmentIds).toEqual([ENVIRONMENT_ID]);
     expect(disabled.targets).toEqual(registered.targets);
     expect(disabled.credentials).toEqual(registered.credentials);
-    // Idempotent: switching off twice stores the id once.
     expect(
       setConnectionEnabledInCatalog(disabled, ENVIRONMENT_ID, false).disabledEnvironmentIds,
     ).toEqual([ENVIRONMENT_ID]);
@@ -373,7 +473,6 @@ describe("ConnectionCatalogDocument", () => {
     expect(
       setConnectionEnabledInCatalog(disabled, ENVIRONMENT_ID, true).disabledEnvironmentIds,
     ).toEqual([]);
-    // Re-registering (editing label or URL) keeps the flag.
     expect(
       registerConnectionInCatalog(
         disabled,
@@ -389,7 +488,7 @@ describe("ConnectionCatalogDocument", () => {
     );
   });
 
-  it("persists the normalized SSH profile beside its target", () => {
+  it("persists the normalized SSH profile and its paired token beside its target", () => {
     const target = new SshConnectionTarget({
       environmentId: ENVIRONMENT_ID,
       label: "SSH",
@@ -408,12 +507,16 @@ describe("ConnectionCatalogDocument", () => {
     });
     const document = registerConnectionInCatalog(
       EMPTY_CONNECTION_CATALOG_DOCUMENT,
-      new SshConnectionRegistration({ target, profile }),
+      new SshConnectionRegistration({ target, profile, credential: BEARER_CREDENTIAL }),
     );
 
     expect(document.targets).toEqual([target]);
     expect(document.profiles).toEqual([profile]);
-    expect(document.credentials).toEqual([]);
+    expect(document.credentials).toEqual([
+      { connectionId: target.connectionId, credential: BEARER_CREDENTIAL },
+    ]);
+    // Removing the route forgets its token too.
+    expect(removeConnectionFromCatalog(document, ENVIRONMENT_ID).credentials).toEqual([]);
   });
 
   it("keeps every route of an environment and drops only a removed route's records", () => {
@@ -433,14 +536,12 @@ describe("ConnectionCatalogDocument", () => {
     expect(catalogRoutes(withRelay, ENVIRONMENT_ID)).toEqual([BEARER_TARGET, RELAY_TARGET]);
     expect(withRelay.credentials).toHaveLength(1);
 
-    // Dropping the bearer route forgets its credential; T3 Connect keeps its token.
     const relayOnly = setRoutesInCatalog(withRelay, ENVIRONMENT_ID, [RELAY_TARGET]);
     expect(relayOnly.targets).toEqual([RELAY_TARGET]);
     expect(relayOnly.profiles).toEqual([]);
     expect(relayOnly.credentials).toEqual([]);
     expect(relayOnly.remoteDpopTokens).toEqual([REMOTE_TOKEN]);
 
-    // Dropping T3 Connect forgets its token; the bearer route keeps its records.
     const bearerOnly = setRoutesInCatalog(withRelay, ENVIRONMENT_ID, [BEARER_TARGET]);
     expect(bearerOnly.credentials).toHaveLength(1);
     expect(bearerOnly.remoteDpopTokens).toEqual([]);

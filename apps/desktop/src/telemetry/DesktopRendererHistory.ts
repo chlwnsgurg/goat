@@ -26,7 +26,7 @@ export class DesktopRendererHistory extends Context.Service<
     readonly recordMetrics: (metrics: ReadonlyArray<Electron.ProcessMetric>) => Effect.Effect<void>;
     readonly shutdown: Effect.Effect<void>;
   }
->()("@t3tools/desktop/telemetry/DesktopRendererHistory") {}
+>()("@goat/desktop/telemetry/DesktopRendererHistory") {}
 
 interface RendererMemory {
   readonly sampledAtUnixMs: number;
@@ -72,7 +72,6 @@ interface TrackedRenderer {
 const nonnegative = (value: number): number | null =>
   Number.isFinite(value) && value >= 0 ? Math.round(value) : null;
 
-/** Small restart-surviving PID history; never reads URLs or page content. */
 const make = Effect.fn("DesktopRendererHistory.make")(function* () {
   const environment = yield* DesktopEnvironment.DesktopEnvironment;
   const path = yield* Path.Path;

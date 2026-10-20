@@ -1,8 +1,12 @@
 {
-  "name": "@t3tools/source-control-core",
+  "name": "@goat/source-control-core",
   "private": true,
   "type": "module",
   "exports": {
+    "./client/definition": {
+      "types": "./src/client/definition.ts",
+      "import": "./src/client/definition.ts"
+    },
     "./server/diffFileRevisions": {
       "types": "./src/server/diffFileRevisions.ts",
       "import": "./src/server/diffFileRevisions.ts"
@@ -41,12 +45,12 @@
     }
   },
   "scripts": {
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc-rs --noEmit",
     "test": "vp test run --config ../../vite.config.ts --dir ."
   },
   "dependencies": {
-    "@t3tools/contracts": "workspace:*",
-    "@t3tools/shared": "workspace:*",
+    "@goat/contracts": "workspace:*",
+    "@goat/shared": "workspace:*",
     "effect": "catalog:"
   },
   "devDependencies": {

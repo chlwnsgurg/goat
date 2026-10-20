@@ -1,8 +1,8 @@
-import { SSH_RUNTIME_PROTOCOL_VERSION } from "@t3tools/shared/sshRuntimeProtocol";
-import { ORCHESTRATION_PROTOCOL_VERSION } from "@t3tools/contracts";
+import { SSH_RUNTIME_PROTOCOL_VERSION } from "@goat/shared/sshRuntimeProtocol";
+import { ORCHESTRATION_PROTOCOL_VERSION } from "@goat/contracts";
 import { assert, describe, it } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import * as HostProcess from "@t3tools/shared/HostProcess";
+import * as HostProcess from "@goat/shared/HostProcess";
 import * as Effect from "effect/Effect";
 import * as Result from "effect/Result";
 import { ARCHIVE } from "./tunnel.fixture.ts";
@@ -23,6 +23,7 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")(
           live: true,
           kind: "managed",
           oldVersion: version,
+          drain: true,
           ssh: SSH_RUNTIME_PROTOCOL_VERSION,
           orchestration: ORCHESTRATION_PROTOCOL_VERSION,
         });
@@ -45,6 +46,7 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")(
           live: true,
           kind: "managed",
           oldVersion: "1.2.3-preview.9",
+          drain: true,
           ssh: SSH_RUNTIME_PROTOCOL_VERSION,
           orchestration: ORCHESTRATION_PROTOCOL_VERSION,
         });
@@ -55,6 +57,10 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")(
         assert.isTrue(Result.isSuccess(result));
         if (Result.isSuccess(result)) assert.equal(result.success.refresh, "replaced");
         assert.equal(yield* f.fs.readFileString(`${f.test}/activity-requests`), "2");
+        const events = yield* f.fs.readFileString(`${f.test}/events`);
+        for (const type of ["drain", "self-stop", "supervise"])
+          assert.include(events, `"type":"${type}"`);
+        assert.notInclude(events, '"type":"stop"');
       }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
     );
 
@@ -71,6 +77,7 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")(
           live: true,
           kind: "managed",
           oldVersion: "1.2.2",
+          drain: true,
           ssh: SSH_RUNTIME_PROTOCOL_VERSION,
           orchestration: ORCHESTRATION_PROTOCOL_VERSION,
         });

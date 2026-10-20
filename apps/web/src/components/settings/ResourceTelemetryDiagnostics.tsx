@@ -1,17 +1,17 @@
 import { ProcessSignalActions } from "./ProcessSignalActions";
-import { AuthEnvironmentMaintainScope } from "@t3tools/contracts";
+import { AuthEnvironmentMaintainScope } from "@goat/contracts";
 import { RefreshIcon } from "~/components/ui/refresh-icon";
 import {
   ActivityIcon,
-  AlertTriangleIcon,
+  TriangleAlertIcon as AlertTriangleIcon,
   BatteryIcon,
   CpuIcon,
   DatabaseIcon,
   GaugeIcon,
   HardDriveIcon,
   MemoryStickIcon,
-} from "lucide-react";
-import { ChevronDown, ChevronRight } from "lucide";
+} from "~/components/solar";
+import { ChevronDown, ChevronRight } from "~/components/solar/nodes";
 import type {
   BackgroundBooleanState,
   EnvironmentId,
@@ -25,14 +25,14 @@ import type {
   ResourceTelemetrySourceHealth,
   ResourceTelemetrySourceStatus,
   ServerProcessSignal,
-} from "@t3tools/contracts";
+} from "@goat/contracts";
 import * as DateTime from "effect/DateTime";
 import * as Option from "effect/Option";
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import {
   isAtomCommandInterrupted,
   squashAtomCommandFailure,
-} from "@t3tools/client-runtime/state/runtime";
+} from "@goat/client-runtime/state/runtime";
 
 import {
   useResourceTelemetry,
@@ -44,7 +44,7 @@ import { ensureLocalApi } from "../../localApi";
 import { serverEnvironment } from "../../state/server";
 import { readEnvironmentScope, useEnvironmentScope } from "../../state/session";
 import { useAtomCommand } from "../../state/use-atom-command";
-import { formatRelativeTime } from "../../timestampFormat";
+import { useRelativeTimeState } from "../../hooks/useRelativeTimeState";
 import { Button } from "../ui/button";
 import { MorphIcon } from "~/components/MorphIcon";
 import { ScrollArea } from "../ui/scroll-area";
@@ -57,7 +57,7 @@ import {
   shouldShowResourceMonitorRetry,
   visibleResourceTelemetryProcesses,
 } from "./ResourceTelemetryDiagnostics.logic";
-import { SettingsSection, useRelativeTimeTick } from "./settingsLayout";
+import { SettingsSection } from "./settingsLayout";
 
 const HISTORY_WINDOWS = [
   { label: "5m", windowMs: 5 * 60_000, bucketMs: 15_000 },
@@ -207,13 +207,13 @@ function SourceStatusBadge({
 }
 
 function LastSampleLabel({ sampledAt }: { sampledAt: DateTime.Utc | null }) {
-  useRelativeTimeTick();
-  if (!sampledAt) {
-    return <span className="text-2xs text-muted-foreground/55">Waiting for sample</span>;
-  }
-  const relative = formatRelativeTime(DateTime.formatIso(sampledAt));
-  if (!relative) {
-    return <span className="text-2xs text-muted-foreground/55">Waiting for sample</span>;
+  const relative = useRelativeTimeState(sampledAt ? DateTime.formatIso(sampledAt) : null);
+  if (relative.status !== "relative") {
+    return (
+      <span className="text-2xs text-muted-foreground/55 dark:text-muted-foreground/60">
+        Waiting for sample
+      </span>
+    );
   }
   return (
     <span className="text-2xs text-muted-foreground/60">
@@ -293,7 +293,7 @@ function AggregateCard({
 function MetricPair({ label, value }: { label: string; value: string }) {
   return (
     <div className="min-w-0">
-      <div className="text-3xs font-semibold uppercase tracking-widest text-muted-foreground/45">
+      <div className="text-3xs font-semibold uppercase tracking-widest text-muted-foreground/45 dark:text-muted-foreground/60">
         {label}
       </div>
       <div className="truncate font-mono text-xs font-medium tabular-nums text-foreground/90">
@@ -544,11 +544,8 @@ function ProcessTable({
   onSignal: (process: ResourceTelemetryProcess, signal: ServerProcessSignal) => void;
 }) {
   const [collapsed, setCollapsed] = useState<ReadonlySet<string>>(() => new Set());
-  const visible = useMemo(
-    () => visibleResourceTelemetryProcesses(processes, collapsed),
-    [collapsed, processes],
-  );
-  const toggle = useCallback((process: ResourceTelemetryProcess) => {
+  const visible = visibleResourceTelemetryProcesses(processes, collapsed);
+  const toggle = (process: ResourceTelemetryProcess) => {
     const identityKey = processIdentityKey(process);
     setCollapsed((current) => {
       const next = new Set(current);
@@ -559,7 +556,7 @@ function ProcessTable({
       }
       return next;
     });
-  }, []);
+  };
 
   return (
     <div className="border-t border-border/60">
@@ -845,92 +842,89 @@ export function ResourceTelemetryDiagnostics({
   const snapshot = telemetry.data;
   const allT3 = snapshot?.groups.allT3;
 
-  const signalProcess = useCallback(
-    async (process: ResourceTelemetryProcess, signal: ServerProcessSignal) => {
-      const targetEnvironmentId = environmentIdRef.current;
-      if (
-        targetEnvironmentId === null ||
-        !readEnvironmentScope(targetEnvironmentId, AuthEnvironmentMaintainScope)
-      )
-        return;
-      const identityKey = processIdentityKey(process);
-      if (signalingKeysRef.current.has(identityKey)) return;
-      const nextSignalingKeys = new Set(signalingKeysRef.current).add(identityKey);
-      signalingKeysRef.current = nextSignalingKeys;
-      setSignalingKeys(nextSignalingKeys);
-      const clearSignaling = () => {
-        const next = new Set(signalingKeysRef.current);
-        next.delete(identityKey);
-        signalingKeysRef.current = next;
-        setSignalingKeys(next);
-      };
+  const signalProcess = async (process: ResourceTelemetryProcess, signal: ServerProcessSignal) => {
+    const targetEnvironmentId = environmentIdRef.current;
+    if (
+      targetEnvironmentId === null ||
+      !readEnvironmentScope(targetEnvironmentId, AuthEnvironmentMaintainScope)
+    )
+      return;
+    const identityKey = processIdentityKey(process);
+    if (signalingKeysRef.current.has(identityKey)) return;
+    const nextSignalingKeys = new Set(signalingKeysRef.current).add(identityKey);
+    signalingKeysRef.current = nextSignalingKeys;
+    setSignalingKeys(nextSignalingKeys);
+    const clearSignaling = () => {
+      const next = new Set(signalingKeysRef.current);
+      next.delete(identityKey);
+      signalingKeysRef.current = next;
+      setSignalingKeys(next);
+    };
 
-      if (signal === "SIGKILL") {
-        let confirmed = false;
-        try {
-          confirmed = await ensureLocalApi().dialogs.confirm(
-            `Send SIGKILL to process ${process.identity.pid}? This cannot be handled by the process.`,
-            { variant: "destructive" },
-          );
-        } catch (error) {
-          clearSignaling();
-          toastManager.add({
-            type: "error",
-            title: "Could not confirm signal",
-            description: error instanceof Error ? error.message : `Failed to send ${signal}.`,
-          });
-          return;
-        }
-        if (!confirmed) {
-          clearSignaling();
-          return;
-        }
+    if (signal === "SIGKILL") {
+      let confirmed = false;
+      try {
+        confirmed = await ensureLocalApi().dialogs.confirm(
+          `Send SIGKILL to process ${process.identity.pid}? This cannot be handled by the process.`,
+          { variant: "destructive" },
+        );
+      } catch (error) {
+        clearSignaling();
+        toastManager.add({
+          type: "error",
+          title: "Could not confirm signal",
+          description: error instanceof Error ? error.message : `Failed to send ${signal}.`,
+        });
+        return;
       }
-      if (
-        environmentIdRef.current !== targetEnvironmentId ||
-        !readEnvironmentScope(targetEnvironmentId, AuthEnvironmentMaintainScope)
-      ) {
+      if (!confirmed) {
         clearSignaling();
         return;
       }
-      void signalServerProcess({
-        environmentId: targetEnvironmentId,
-        input: {
-          pid: process.identity.pid,
-          startTimeMs: process.identity.startTimeMs,
-          signal,
-        },
-      })
-        .then((result) => {
-          if (result._tag === "Failure") {
-            if (isAtomCommandInterrupted(result)) return;
-            throw squashAtomCommandFailure(result);
-          }
-          if (result.value.signaled) return;
-          toastManager.add({
-            type: "error",
-            title: `Could not send ${signal}`,
-            description: Option.getOrElse(
-              result.value.message,
-              () => `Failed to send ${signal} to process ${process.identity.pid}.`,
-            ),
-          });
-        })
-        .catch((error: unknown) => {
-          toastManager.add({
-            type: "error",
-            title: `Could not send ${signal}`,
-            description: error instanceof Error ? error.message : `Failed to send ${signal}.`,
-          });
-        })
-        .finally(() => {
-          clearSignaling();
+    }
+    if (
+      environmentIdRef.current !== targetEnvironmentId ||
+      !readEnvironmentScope(targetEnvironmentId, AuthEnvironmentMaintainScope)
+    ) {
+      clearSignaling();
+      return;
+    }
+    void signalServerProcess({
+      environmentId: targetEnvironmentId,
+      input: {
+        pid: process.identity.pid,
+        startTimeMs: process.identity.startTimeMs,
+        signal,
+      },
+    })
+      .then((result) => {
+        if (result._tag === "Failure") {
+          if (isAtomCommandInterrupted(result)) return;
+          throw squashAtomCommandFailure(result);
+        }
+        if (result.value.signaled) return;
+        toastManager.add({
+          type: "error",
+          title: `Could not send ${signal}`,
+          description: Option.getOrElse(
+            result.value.message,
+            () => `Failed to send ${signal} to process ${process.identity.pid}.`,
+          ),
         });
-    },
-    [signalServerProcess],
-  );
+      })
+      .catch((error: unknown) => {
+        toastManager.add({
+          type: "error",
+          title: `Could not send ${signal}`,
+          description: error instanceof Error ? error.message : `Failed to send ${signal}.`,
+        });
+      })
+      .finally(() => {
+        clearSignaling();
+      });
+  };
 
-  const retryCollector = useCallback(() => {
+  const retryCollector = () => {
     const environmentId = environmentIdRef.current;
     if (
       environmentId === null ||
@@ -950,7 +944,7 @@ export function ResourceTelemetryDiagnostics({
       .finally(() => {
         setIsRetrying(false);
       });
-  }, [retryTelemetry]);
+  };
 
   const speedLimit = snapshot ? Option.getOrNull(snapshot.speedLimitPercent) : null;
   const collectorNeedsRetry = shouldShowResourceMonitorRetry({
@@ -1257,7 +1251,7 @@ export function ResourceTelemetryDiagnostics({
         icon={<CpuIcon className="size-4 text-muted-foreground" />}
         headerAction={
           snapshot ? (
-            <span className="text-3xs text-muted-foreground/55">
+            <span className="text-3xs text-muted-foreground/55 dark:text-muted-foreground/60">
               Identity: <span className="font-mono">PID + start time</span>
             </span>
           ) : null
@@ -1277,7 +1271,9 @@ export function ResourceTelemetryDiagnostics({
         title="Instrumented application I/O"
         icon={<DatabaseIcon className="size-4 text-muted-foreground" />}
         headerAction={
-          <span className="text-3xs text-muted-foreground/55">Logical bytes by operation</span>
+          <span className="text-3xs text-muted-foreground/55 dark:text-muted-foreground/60">
+            Logical bytes by operation
+          </span>
         }
       >
         <div className="overflow-hidden rounded-2xl border border-border/70 bg-card shadow-xs/5">

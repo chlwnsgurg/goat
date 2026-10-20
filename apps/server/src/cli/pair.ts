@@ -1,29 +1,21 @@
-/**
- * `goat pair` - mint a pairing token for an already-running server and print it
- * as a QR code, without restarting anything.
- *
- * Discovery reads the `server-runtime.json` a live server persists next to its
- * database, then confirms the process is actually answering by fetching its
- * public environment descriptor. Inside a linked git worktree the worktree's
- * own `.t3` is checked first (matching dev-runner precedence); otherwise the
- * shared T3 home. `--tailscale` publishes the server over Tailscale Serve
- * HTTPS and pairs through the tailnet URL instead.
- */
+import { GOAT_ENVIRONMENT_PATH, LEGACY_ENVIRONMENT_PATH } from "@goat/contracts/legacyT3Names";
 import {
   type AuthEnvironmentScope,
   AuthStandardClientScopes,
   ExecutionEnvironmentDescriptor,
   PortSchema,
-} from "@t3tools/contracts";
-import { resolveWorktreeT3Home } from "@t3tools/shared/devHome";
-import { DEFAULT_SIGNAL_EXPORT } from "@t3tools/shared/observability";
-import * as OtelEnvironment from "@t3tools/shared/otelEnvironment";
+} from "@goat/contracts";
+import { resolveWorktreeHome } from "@goat/shared/devHome";
+import { isGoatConnectEnabled } from "@goat/shared/goatConnect";
+import { buildMobilePairingLink } from "@goat/shared/mobilePairingLink";
+import { DEFAULT_SIGNAL_EXPORT } from "@goat/shared/observability";
+import * as OtelEnvironment from "@goat/shared/otelEnvironment";
 import {
   buildTailscaleHttpsBaseUrl,
   DEFAULT_TAILSCALE_SERVE_PORT,
   ensureTailscaleServe,
   readTailscaleStatus,
-} from "@t3tools/tailscale";
+} from "@goat/tailscale";
 import * as Config from "effect/Config";
 import * as Console from "effect/Console";
 import * as DateTime from "effect/DateTime";
@@ -55,7 +47,7 @@ import {
 import { authScopesFlag } from "./authScopes.ts";
 import { baseDirFlag, DurationFromString } from "./config.ts";
 
-const WELL_KNOWN_ENVIRONMENT_PATH = "/.well-known/t3/environment";
+const WELL_KNOWN_ENVIRONMENT_PATH = GOAT_ENVIRONMENT_PATH;
 const PAIR_PROBE_TIMEOUT = Duration.millis(2_500);
 // Tailscale provisions an HTTPS certificate on the first request to a fresh
 // serve mapping, which can take a few seconds.
@@ -78,13 +70,13 @@ export class NoRunningServerError extends Schema.TaggedError<NoRunningServerErro
     return [
       "No running GOAT server found.",
       ...this.checkedStatePaths.map((statePath) => `  checked ${statePath}`),
-      "Start one with `npx t3 serve`, or connect this machine with T3 Connect: `npx t3 connect`.",
+      isGoatConnectEnabled()
+        ? "Start one with `npx t3 serve`, or connect this machine with T3 Connect: `npx t3 connect`."
+        : "Start one with `goat serve`.",
     ].join("\n");
   }
 }
 
-// Each tailscale failure gets its own class (same reasoning as
-// scripts/lib/dev-share.ts): distinct caller-visible message, distinct remedy.
 export class TailscaleUnavailableError extends Schema.TaggedError<TailscaleUnavailableError>()(
   "TailscaleUnavailableError",
   { cause: Schema.Defect() },
@@ -130,7 +122,6 @@ export class ServePortOccupiedError extends Schema.TaggedError<ServePortOccupied
   }
 }
 
-/** The URL a browser or phone should pair through, absent Tailscale. */
 export const resolveDirectPairingBaseUrl = (state: PersistedServerRuntimeState): string =>
   state.devUrl ?? resolveHeadlessConnectionString(state.host, state.port);
 
@@ -146,10 +137,9 @@ export class DevServerNotProxiableError extends Schema.TaggedError<DevServerNotP
 const isDevServerNotProxiableError = Schema.is(DevServerNotProxiableError);
 
 /**
- * The local endpoint Tailscale Serve should proxy to. Dev servers are
- * single-origin, so the web dev server's port is the one to publish; the
- * backend rides along behind Vite's proxy. Serve targets are always plain
- * HTTP, so an HTTPS dev URL cannot be proxied and is rejected.
+ * Dev servers are single-origin, so the web dev server's port is the one to publish; the
+ * backend rides along behind Vite's proxy. Serve targets are always plain HTTP, so an HTTPS dev
+ * URL cannot be proxied and is rejected.
  */
 export const resolveTailscaleLocalTarget = (
   state: PersistedServerRuntimeState,
@@ -164,8 +154,6 @@ export const resolveTailscaleLocalTarget = (
       ? { localPort }
       : { localPort, localHost: devUrl.hostname };
   }
-  // A server bound to one specific interface does not answer on loopback, so
-  // the proxy has to target that interface directly.
   if (state.host !== undefined && !isWildcardHost(state.host) && !isLoopbackHost(state.host)) {
     return { localPort: state.port, localHost: formatHostForUrl(state.host) };
   }
@@ -183,7 +171,8 @@ const formatPairOutput = (input: {
   [
     `Pairing with ${input.serverLabel} (${input.origin}).`,
     "",
-    renderTerminalQrCode(input.pairingUrl),
+    // The QR is for the phone app; browsers use the printed URL.
+    renderTerminalQrCode(buildMobilePairingLink(input.pairingUrl)),
     "",
     `Pairing URL: ${input.pairingUrl}`,
     `Token: ${input.token}`,
@@ -192,11 +181,6 @@ const formatPairOutput = (input: {
     "",
   ].join("\n");
 
-/**
- * Three outcomes, because they drive different decisions: a T3 descriptor
- * (pair with it), nothing answering (safe to configure Tailscale Serve), or
- * something answering that is not a T3 server (do NOT overwrite its mapping).
- */
 type EnvironmentProbeResult =
   | { readonly _tag: "descriptor"; readonly descriptor: ExecutionEnvironmentDescriptor }
   | { readonly _tag: "unreachable" }
@@ -209,8 +193,12 @@ const probeEnvironmentDescriptor = (
     const client = yield* HttpClient.HttpClient;
     const request = HttpClientRequest.get(new URL(WELL_KNOWN_ENVIRONMENT_PATH, baseUrl).toString());
     const response = yield* client.execute(request).pipe(
+      Effect.flatMap((response) =>
+        response.status === 404
+          ? client.get(new URL(LEGACY_ENVIRONMENT_PATH, baseUrl).toString())
+          : Effect.succeed(response),
+      ),
       Effect.timeout(PAIR_PROBE_TIMEOUT),
-      // Transport failure or timeout: nothing (reachable) is listening there.
       Effect.mapError(() => ({ _tag: "unreachable" }) as const),
     );
     // Bad-gateway family means a proxy (Tailscale Serve) answered for a
@@ -220,8 +208,6 @@ const probeEnvironmentDescriptor = (
     if (response.status === 502 || response.status === 503 || response.status === 504) {
       return { _tag: "unreachable" } as const;
     }
-    // Anything else that answered HTTP but not with a valid descriptor is
-    // some other service.
     const descriptor = yield* HttpClientResponse.filterStatusOk(response).pipe(
       Effect.flatMap(HttpClientResponse.schemaBodyJson(ExecutionEnvironmentDescriptor)),
       Effect.mapError(() => ({ _tag: "not-a-goat-server" }) as const),
@@ -246,12 +232,16 @@ const discoverPairTarget = Effect.fn("pair.discoverPairTarget")(function* (
     // Same precedence as dev-runner: inside a linked worktree its own `.t3`
     // outranks the shared home, so `goat pair` in a worktree pairs with the dev
     // server under test rather than the daily-driver install.
-    const worktreeHome = yield* resolveWorktreeT3Home(process.cwd());
+    const worktreeHome = yield* resolveWorktreeHome(process.cwd());
     if (worktreeHome !== undefined) {
       bases.push(worktreeHome);
     }
-    const envHome = yield* Config.String("T3CODE_HOME").pipe(Config.option);
-    bases.push(yield* resolveBaseDir(Option.getOrUndefined(envHome)));
+    const envHome = yield* Config.String("GOAT_HOME").pipe(Config.option);
+    // Without an explicit home, an implicit dev server and an installed one may each live
+    // in a different default home (see resolveGoatHome).
+    for (const variant of ["userdata", "dev"] as const) {
+      bases.push(yield* resolveBaseDir(Option.getOrUndefined(envHome), variant));
+    }
   }
 
   const checkedStatePaths: Array<string> = [];
@@ -290,11 +280,9 @@ const discoverPairTarget = Effect.fn("pair.discoverPairTarget")(function* (
 });
 
 /**
- * Server config pointed at the discovered server's state directory, so the
- * minted token lands in the database the running server reads from. Built by
- * hand rather than through `resolveServerConfig` to keep the dev-vs-userdata
- * choice pinned to where the runtime state was actually found, independent of
- * ambient environment variables.
+ * Built by hand rather than through `resolveServerConfig` to keep the dev-vs-userdata choice
+ * pinned to where the runtime state was actually found, independent of ambient environment
+ * variables.
  */
 const makePairServerConfig = Effect.fn(function* (input: {
   readonly target: DiscoveredPairTarget;
@@ -375,7 +363,7 @@ const resolveTailscalePairingBase = Effect.fn("pair.resolveTailscalePairingBase"
     });
 
     // Only an unreachable port, or a mapping already fronting this exact
-    // environment, is safe to (re)configure. Any other responder — T3 or not
+    // environment, is safe to (re)configure. Any other responder — GOAT or not
     // — must not have its mapping silently replaced.
     const existing = yield* probeEnvironmentDescriptor(baseUrl);
     if (existing._tag === "descriptor") {
@@ -490,8 +478,6 @@ export const pairCommand = Command.make("pair", {
   Command.withHandler((flags) =>
     Effect.gen(function* () {
       const cliLogLevel = yield* GlobalFlag.LogLevel;
-      // Default to Warn so storage/migration chatter cannot bury the QR code;
-      // an explicit --log-level still wins.
       const logLevel = Option.getOrElse(cliLogLevel, () => "Warn" as const);
 
       const target = yield* discoverPairTarget(Option.getOrUndefined(flags.baseDir));

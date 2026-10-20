@@ -1,7 +1,8 @@
-import * as HttpObservability from "@t3tools/shared/httpObservability";
-import { makeLocalFileTracer, makeTraceSink } from "@t3tools/shared/observability";
-import * as SharedObservability from "@t3tools/shared/observability";
-import * as OtelEnvironment from "@t3tools/shared/otelEnvironment";
+import * as HostProcess from "@goat/shared/HostProcess";
+import * as HttpObservability from "@goat/shared/httpObservability";
+import { makeLocalFileTracer, makeTraceSink } from "@goat/shared/observability";
+import * as SharedObservability from "@goat/shared/observability";
+import * as OtelEnvironment from "@goat/shared/otelEnvironment";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as References from "effect/References";
@@ -9,6 +10,7 @@ import * as Tracer from "effect/Tracer";
 import * as OtlpExporter from "effect/observability/OtlpExporter";
 import * as OtlpMetrics from "effect/observability/OtlpMetrics";
 import * as OtlpTracer from "effect/observability/OtlpTracer";
+import * as Statement from "effect/sql/Statement";
 
 import * as ServerConfig from "../config.ts";
 import * as ResourceAttribution from "../resourceTelemetry/ResourceAttribution.ts";
@@ -24,12 +26,15 @@ export const layer = Layer.unwrap(
     // The trace serializer stays in the returned context because the browser
     // trace forwarder exports on the same signal.
     const layerSerialization = SharedObservability.layerOtlpSerialization(traces.protocol);
-    const resource = ServerConfig.otlpResource(config);
+    const resource = ServerConfig.otlpResource(config, yield* HostProcess.Hostname);
     const attribution = yield* ResourceAttribution.ResourceAttribution;
 
     const layerTraceReferences = Layer.mergeAll(
       Layer.succeed(Tracer.MinimumTraceLevel, config.traceMinLevel),
       Layer.succeed(References.TracerTimingEnabled, config.traceTimingEnabled),
+      // Keeps each SQL statement's span current while it waits for a connection,
+      // so the client can record the lock wait on it.
+      Layer.succeed(Statement.SpanPropagationEnabled, true),
       HttpObservability.layer,
     );
 
@@ -85,7 +90,6 @@ export const layer = Layer.unwrap(
             resource,
           }).pipe(Layer.provide(SharedObservability.layerOtlpSerialization(metrics.protocol)));
 
-    // Logged once the server's loggers are installed, so the warnings use them.
     const layerOtelWarnings = Layer.effectDiscard(
       Effect.forEach(config.otelEnvironment.warnings, (warning) => Effect.logWarning(warning)),
     );

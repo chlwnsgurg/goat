@@ -1,8 +1,9 @@
 import {
   type ReviewDiffPreviewInput,
+  type ReviewDiffPreviewSourceKind,
   VcsUnsupportedOperationError,
   WS_METHODS,
-} from "@t3tools/contracts";
+} from "@goat/contracts";
 import * as Effect from "effect/Effect";
 import * as Semaphore from "effect/Semaphore";
 import { request } from "../rpc/client.ts";
@@ -15,6 +16,14 @@ import {
   createEnvironmentRpcQueryAtomFamily,
 } from "./runtime.ts";
 import type { EnvironmentRegistry } from "../connection/registry.ts";
+
+export const GIT_REVIEW_SCOPES = {
+  branch: { sourceKind: "branch-range", title: "Changes" },
+  uncommitted: { sourceKind: "working-tree", title: "Uncommitted" },
+  staged: { sourceKind: "staged", title: "Staged" },
+  unstaged: { sourceKind: "unstaged", title: "Unstaged" },
+} as const satisfies Record<string, { sourceKind: ReviewDiffPreviewSourceKind; title: string }>;
+export type GitReviewScope = keyof typeof GIT_REVIEW_SCOPES;
 
 export function createReviewEnvironmentAtoms<R, E>(
   runtime: Atom.AtomRuntime<EnvironmentRegistry | R, E>,
@@ -34,7 +43,10 @@ export function createReviewEnvironmentAtoms<R, E>(
         request: ReviewDiffPreviewInput & { file: NonNullable<ReviewDiffPreviewInput["file"]> };
         cacheKey: string;
       }) =>
-        request(WS_METHODS.reviewGetDiffPreview, input.request).pipe(
+        request(WS_METHODS.reviewGetDiffPreview, {
+          ...input.request,
+          scope: input.request.file.sourceKind,
+        }).pipe(
           patchReads.withPermit,
           Effect.flatMap((result) => {
             const source = result.sources.find(

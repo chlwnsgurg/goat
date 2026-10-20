@@ -1,4 +1,4 @@
-import type { OrchestrationV2ThreadProjection } from "@t3tools/contracts";
+import type { OrchestrationV2ThreadProjection } from "@goat/contracts";
 import * as Option from "effect/Option";
 
 import { EMPTY_THREAD_HISTORY_META, type ThreadHistoryMeta } from "./threadHistoryMerge.ts";
@@ -10,9 +10,8 @@ export interface EnvironmentThreadState {
   readonly status: EnvironmentThreadStatus;
   readonly error: Option.Option<string>;
   /**
-   * Progressive history cursor for bounded hydration. Absent/cleared on full
-   * snapshot paths. Errors here are thread/history-local and must not be
-   * promoted into the environment disconnect path.
+   * Errors here are thread/history-local and must not be promoted into the environment
+   * disconnect path.
    */
   readonly history: ThreadHistoryMeta;
 }

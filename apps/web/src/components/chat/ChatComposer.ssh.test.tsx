@@ -14,12 +14,12 @@ import {
   ProviderDriverKind,
   type ServerProvider,
   type SshWorkspaceLaunchResult,
-} from "@t3tools/contracts";
-import { DEFAULT_CLIENT_SETTINGS } from "@t3tools/contracts/settings";
-import { DEFAULT_RESOLVED_KEYBINDINGS } from "@t3tools/shared/keybindings";
-import { createModelSelection } from "@t3tools/shared/model";
-import { scopeProjectRef } from "@t3tools/client-runtime/environment";
-import { SshConnectionProfile, SshConnectionTarget } from "@t3tools/client-runtime/connection";
+} from "@goat/contracts";
+import { DEFAULT_CLIENT_SETTINGS } from "@goat/contracts/settings";
+import { DEFAULT_RESOLVED_KEYBINDINGS } from "@goat/shared/keybindings";
+import { createModelSelection } from "@goat/shared/model";
+import { scopeProjectRef } from "@goat/client-runtime/environment";
+import { SshConnectionProfile, SshConnectionTarget } from "@goat/client-runtime/connection";
 import { DraftId, useComposerDraftStore } from "../../composerDraftStore";
 import type { ChatComposer } from "./ChatComposer";
 const state = vi.hoisted(() => ({
@@ -32,6 +32,8 @@ const state = vi.hoisted(() => ({
   toast: vi.fn(),
   shell: vi.fn(),
   composer: null as ComponentProps<typeof ChatComposer> | null,
+  // Stable like the real store selectors; a fresh array per render loops the timeline.
+  empty: [] as never[],
 }));
 vi.mock("../ui/toast", () => ({
   toastManager: { add: state.toast },
@@ -109,6 +111,7 @@ vi.mock("../../state/device", async (original) => ({
 vi.mock("../../state/environments", async (original) => ({
   ...(await original<typeof import("../../state/environments")>()),
   useEnvironments: () => ({ environments: [primary] }),
+  useEnvironmentProviders: () => new Map([[local, primary.serverConfig.providers]]),
   usePrimaryEnvironment: () => primary,
   usePrimaryEnvironmentId: () => local,
   useEnvironment: () => primary,
@@ -121,10 +124,10 @@ vi.mock("../../state/entities", async (original) => ({
   useThreadProjection: () => null,
   useThreadStatus: () => null,
   useThreadHistory: () => ({ hasMoreHistory: false }),
-  useThreadVisibleTurnItems: () => [],
-  useThreadRefs: () => [],
-  useEnvironmentThreadRefs: () => [],
-  useChildThreadInputs: () => [],
+  useThreadVisibleTurnItems: () => state.empty,
+  useThreadRefs: () => state.empty,
+  useEnvironmentThreadRefs: () => state.empty,
+  useChildThreadInputs: () => state.empty,
   useEnvironmentSupportsServerBrowser: () => false,
   resolveThreadDetailRef: () => null,
   waitForThreadShell: state.shell,
@@ -146,7 +149,10 @@ vi.mock("../BranchToolbar", () => ({ BranchToolbar: () => null }));
 vi.mock("./ThreadDetailsPanel", () => ({ ThreadDetailsPanel: () => null }));
 vi.mock("./MessagesTimeline", () => ({ MessagesTimeline: () => null }));
 vi.mock("./DraftHeroHeadline", () => ({ DraftHeroHeadline: () => null }));
-vi.mock("./ExpandedImageDialog", () => ({ ExpandedImageDialog: () => null }));
+vi.mock("./ExpandedImageDialog", () => ({
+  ExpandedImageDialogHost: () => null,
+  openExpandedImagePreview: () => {},
+}));
 vi.mock("../PullRequestThreadDialog", () => ({ PullRequestThreadDialog: () => null }));
 vi.mock("../ThreadTerminalDrawer", () => ({ default: () => null }));
 vi.mock("../ui/sidebar", () => ({

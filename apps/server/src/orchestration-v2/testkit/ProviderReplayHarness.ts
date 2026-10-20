@@ -1,13 +1,14 @@
 import * as RemoteReportInbox from "../../remoteReports/RemoteReportInbox.ts";
-import * as OtelEnvironment from "@t3tools/shared/otelEnvironment";
-import { DEFAULT_SIGNAL_EXPORT } from "@t3tools/shared/observability";
+import * as OtelEnvironment from "@goat/shared/otelEnvironment";
+import { DEFAULT_SIGNAL_EXPORT } from "@goat/shared/observability";
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import type { ProviderDriverKind, ProviderReplayTranscript } from "@t3tools/contracts";
+import type { ProviderDriverKind, ProviderReplayTranscript } from "@goat/contracts";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
 import * as PlatformError from "effect/PlatformError";
+import type * as Scope from "effect/Scope";
 import type * as SqlClient from "effect/sql/SqlClient";
 import type { MigrationError } from "effect/sql/Migrator";
 import type { SqlError } from "effect/sql/SqlError";
@@ -17,9 +18,10 @@ import * as ServerConfig from "../../config.ts";
 import * as SqlitePersistence from "../../persistence/Sqlite.ts";
 import * as ServerSettings from "../../serverSettings.ts";
 import * as ThreadManagementService from "../ThreadManagementService.ts";
-import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
+import * as McpProviderSessions from "@goat/provider-core/server/McpProviderSessions";
 import * as McpSessionRegistryTestkit from "../../mcp/McpSessionRegistry.testkit.ts";
 import * as VcsDriverRegistry from "../../vcs/VcsDriverRegistry.ts";
+import * as GitVcsDriver from "../../vcs/GitVcsDriver.ts";
 import * as VcsProcess from "../../vcs/VcsProcess.ts";
 import * as CheckpointCaptureService from "../CheckpointCaptureService.ts";
 import * as CheckpointService from "../CheckpointService.ts";
@@ -31,17 +33,18 @@ import * as EffectOutbox from "../EffectOutbox.ts";
 import * as EffectWorker from "../EffectWorker.ts";
 import * as EventSink from "../EventSink.ts";
 import * as EventStore from "../EventStore.ts";
-import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
+import * as IdAllocator from "@goat/provider-core/server/IdAllocator";
 import * as Orchestrator from "../Orchestrator.ts";
 import * as ProjectionStore from "../ProjectionStore.ts";
 import * as ProjectStore from "../ProjectStore.ts";
 import * as ProviderAdapterRegistry from "../ProviderAdapterRegistry.ts";
 import * as ProviderAuthService from "../../provider/ProviderAuthService.ts";
-import * as ProviderContinuationRequests from "@t3tools/provider-core/server/ProviderContinuationRequests";
+import * as ProviderContinuationRequests from "@goat/provider-core/server/ProviderContinuationRequests";
 import * as ProviderContinuationService from "../ProviderContinuationService.ts";
 import * as ProviderEventIngestor from "../ProviderEventIngestor.ts";
 import * as ProviderRuntimeRecoveryService from "../ProviderRuntimeRecoveryService.ts";
 import * as ProviderSessionManager from "../ProviderSessionManager.ts";
+import * as CommandOutputRecorder from "./CommandOutputRecorder.ts";
 import * as ProviderSwitchService from "../ProviderSwitchService.ts";
 import * as ProviderTurnControlService from "../ProviderTurnControlService.ts";
 import * as ProviderTurnStartService from "../ProviderTurnStartService.ts";
@@ -53,6 +56,8 @@ import * as ThreadTitleRegenerationService from "../ThreadTitleRegenerationServi
 import * as RuntimePolicy from "../RuntimePolicy.ts";
 import * as TurnItemPositionStore from "../TurnItemPositionStore.ts";
 import * as RuntimeRequestService from "../RuntimeRequestService.ts";
+import * as CloudTaskSource from "../CloudTaskSourceService.ts";
+import * as ProjectService from "../../project/ProjectService.ts";
 import * as ThreadCommandExecutor from "../ThreadCommandExecutor.ts";
 import * as ChannelBotDirectory from "../../channels/ChannelBotDirectory.ts";
 import * as ThreadForkService from "../ThreadForkService.ts";
@@ -62,24 +67,21 @@ import {
   type OrchestratorV2Scenario,
   type OrchestratorV2ScenarioResult,
 } from "./OrchestratorScenario.ts";
-import {
-  makeProviderReplayGate,
-  type ProviderReplayGate,
-} from "@t3tools/provider-testing/replayGate";
+import { makeProviderReplayGate, type ProviderReplayGate } from "@goat/provider-testing/replayGate";
 
 export function makeReplayServerConfig(
   scenario: string,
 ): Effect.Effect<
   ServerConfig.ServerConfig["Service"],
   PlatformError.PlatformError,
-  FileSystem.FileSystem | Path.Path
+  FileSystem.FileSystem | Path.Path | Scope.Scope
 > {
   const safeScenario = scenario.replace(/[^a-z0-9_-]+/gi, "-");
   return Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
-    const baseDir = yield* fs.makeTempDirectory({
-      prefix: `t3-orchestration-v2-replay-${safeScenario}-`,
+    const baseDir = yield* fs.makeTempDirectoryScoped({
+      prefix: `goat-orchestration-v2-replay-${safeScenario}-`,
     });
     const stateDir = path.join(baseDir, "userdata");
     const logsDir = path.join(stateDir, "logs");
@@ -192,11 +194,7 @@ export function runOrchestratorV2ProviderReplayScenario<
       MigrationError | PlatformError.PlatformError | SqlError
     >;
     readonly runEffectWorker?: boolean;
-    // Start continuation runs for provider wake turns, as the live runtime does.
-    // Off by default: most fixtures record no wake turn.
     readonly runContinuationWorker?: boolean;
-    // Reconcile a previous runtime's state before the effect worker starts,
-    // as server startup does after a crash or restart.
     readonly recoverOnStartup?: boolean;
     readonly continueThreadsAfterServerUpdate?: boolean;
   } = {},
@@ -222,7 +220,11 @@ export function runOrchestratorV2ProviderReplayScenario<
     replayGate,
   });
 
-  return runOrchestratorV2Scenario(scenario, { replayGate }).pipe(Effect.provide(layer));
+  return Effect.gen(function* () {
+    const result = yield* runOrchestratorV2Scenario(scenario, { replayGate });
+    const recorder = yield* CommandOutputRecorder.CommandOutputRecorder;
+    return { ...result, commandOutput: yield* recorder.snapshot };
+  }).pipe(Effect.provide(layer));
 }
 
 export function layerProviderReplay<Transcript extends ProviderReplayTranscript, Error>(
@@ -234,17 +236,17 @@ export function layerProviderReplay<Transcript extends ProviderReplayTranscript,
       MigrationError | PlatformError.PlatformError | SqlError
     >;
     readonly runEffectWorker?: boolean;
-    // Start continuation runs for provider wake turns, as the live runtime does.
-    // Off by default: most fixtures record no wake turn.
     readonly runContinuationWorker?: boolean;
-    // Reconcile a previous runtime's state before the effect worker starts,
-    // as server startup does after a crash or restart.
     readonly recoverOnStartup?: boolean;
     readonly continueThreadsAfterServerUpdate?: boolean;
     readonly replayGate?: ProviderReplayGate;
   } = {},
 ): Layer.Layer<
-  Orchestrator.OrchestratorV2 | EffectWorker.OrchestrationEffectWorkerV2 | EventSink.EventSinkV2,
+  | Orchestrator.OrchestratorV2
+  | EffectWorker.OrchestrationEffectWorkerV2
+  | EventSink.EventSinkV2
+  | CommandOutputRecorder.CommandOutputRecorder
+  | ProviderSessionManager.ProviderSessionManagerV2,
   Error | MigrationError | PlatformError.PlatformError | SqlError
 > {
   const layerRegistry = harness.makeProviderAdapterRegistryLayer(
@@ -262,16 +264,15 @@ export function layerWithRegistry<Error>(
     McpProviderSessions.McpProviderSessions
   >,
   options: {
+    readonly cloudSources?: Layer.Layer<CloudTaskSource.CloudTaskSourceService>;
+    readonly projects?: Layer.Layer<ProjectService.ProjectService>;
+    readonly continuationRequests?: Layer.Layer<never>;
     readonly databaseLayer?: Layer.Layer<
       SqlClient.SqlClient,
       MigrationError | PlatformError.PlatformError | SqlError
     >;
     readonly runEffectWorker?: boolean;
-    // Start continuation runs for provider wake turns, as the live runtime does.
-    // Off by default: most fixtures record no wake turn.
     readonly runContinuationWorker?: boolean;
-    // Reconcile a previous runtime's state before the effect worker starts,
-    // as server startup does after a crash or restart.
     readonly recoverOnStartup?: boolean;
     readonly continueThreadsAfterServerUpdate?: boolean;
   } = {},
@@ -279,7 +280,13 @@ export function layerWithRegistry<Error>(
   | Orchestrator.OrchestratorV2
   | EffectWorker.OrchestrationEffectWorkerV2
   | EventSink.EventSinkV2
-  | ProviderSessionManager.ProviderSessionManagerV2,
+  | EffectOutbox.EffectOutboxV2
+  | ProjectionStore.ProjectionStoreV2
+  | ProviderTurnStartService.ProviderTurnStartServiceV2
+  | ProviderTurnControlService.ProviderTurnControlServiceV2
+  | ThreadManagementService.ThreadManagementService
+  | ProviderSessionManager.ProviderSessionManagerV2
+  | CommandOutputRecorder.CommandOutputRecorder,
   Error | MigrationError | PlatformError.PlatformError | SqlError
 > {
   const layerServerConfig = Layer.effect(
@@ -296,7 +303,8 @@ export function layerWithRegistry<Error>(
   // One queue shared by the adapters, the orchestrator, and the worker, like
   // runtimeLayer.ts; layer memoization keeps it a single instance.
   const layerContinuationRequests =
-    options.runContinuationWorker === true ? ProviderContinuationRequests.layer : Layer.empty;
+    options.continuationRequests ??
+    (options.runContinuationWorker === true ? ProviderContinuationRequests.layer : Layer.empty);
   const layerProvidedRegistry = registryLayer.pipe(
     Layer.provide(Layer.merge(layerContinuationRequests, McpProviderSessions.layer)),
   );
@@ -327,6 +335,10 @@ export function layerWithRegistry<Error>(
         layerEventSinkProvided,
         IdAllocator.layer,
         ThreadCommandExecutor.layer,
+        GitVcsDriver.layer.pipe(
+          Layer.provide(layerServerConfig),
+          Layer.provide(NodeServices.layer),
+        ),
       ),
     ),
   );
@@ -352,11 +364,16 @@ export function layerWithRegistry<Error>(
     IdAllocator.layer,
     layerProviderEventIngestorProvided,
   );
+  // The real hub, recording what each command streamed so fixtures can assert it.
+  const layerCommandOutputHubProvided = CommandOutputRecorder.layer.pipe(
+    Layer.provide(Layer.merge(layerEventSinkProvided, layerStores)),
+  );
   const layerProviderSessionManagerProvided = ProviderSessionManager.layerWithOptions({
     configureMcp: false,
   }).pipe(
     Layer.provide(
       Layer.mergeAll(
+        layerCommandOutputHubProvided,
         layerProvidedRegistry,
         layerEventSinkProvided,
         IdAllocator.layer,
@@ -380,12 +397,15 @@ export function layerWithRegistry<Error>(
         IdAllocator.layer,
         layerProviderEventIngestorProvided,
         layerServerSettings,
+        layerStores,
       ),
     ),
   );
   const layerProviderTurnStartServiceProvided = ProviderTurnStartService.layer.pipe(
     Layer.provide(
       Layer.mergeAll(
+        layerProvidedRegistry,
+        options.cloudSources ?? Layer.empty,
         layerContextHandoffServiceProvided,
         layerEventSinkProvided,
         IdAllocator.layer,
@@ -396,6 +416,8 @@ export function layerWithRegistry<Error>(
         }),
         layerRunExecutionServiceProvided,
         layerRuntime,
+        layerServerConfig,
+        layerServerSettings,
       ),
     ),
   );
@@ -415,6 +437,8 @@ export function layerWithRegistry<Error>(
         layerProviderSessionManagerProvided,
         ThreadCommandExecutor.layer,
         layerRuntime,
+        layerServerConfig,
+        layerServerSettings,
       ),
     ),
   );
@@ -450,6 +474,7 @@ export function layerWithRegistry<Error>(
         layerProviderSessionManagerProvided,
         layerProviderSwitchServiceProvided,
         layerRunExecutionServiceProvided,
+        layerServerSettings,
         ThreadForkService.layer,
         ChannelBotDirectory.layer.pipe(Layer.provide(layerDatabase)),
       ),
@@ -460,8 +485,33 @@ export function layerWithRegistry<Error>(
       const orchestrator = yield* Orchestrator.OrchestratorV2;
       return Layer.mock(ThreadManagementService.ThreadManagementService)({
         dispatch: orchestrator.dispatch,
+        getThreadShell: orchestrator.getThreadShell,
+        getThreadEventSequence: orchestrator.getThreadEventSequence,
+        streamStoredEventsFrom: orchestrator.streamStoredEventsFrom,
         getThreadRecords: orchestrator.getThreadRecords,
+        getProjectThreadRecords: (target, fields, options) =>
+          orchestrator.getThreadRecords(target.threadId, fields, options).pipe(
+            Effect.mapError(
+              (cause) =>
+                new ThreadManagementService.ThreadManagementProjectionLoadError({
+                  projectId: target.projectId,
+                  threadId: target.threadId,
+                  cause,
+                }),
+            ),
+            Effect.flatMap((records) =>
+              records.thread.projectId === target.projectId && records.thread.deletedAt === null
+                ? Effect.succeed(records)
+                : Effect.fail(
+                    new ThreadManagementService.ThreadManagementThreadNotFoundError({
+                      projectId: target.projectId,
+                      threadId: target.threadId,
+                    }),
+                  ),
+            ),
+          ),
         getThreadProjection: orchestrator.getThreadProjection,
+        getTimelinePage: orchestrator.getTimelinePage,
         recoverDelegatedTask: orchestrator.recoverDelegatedTask,
         delegatedTaskResultPending: orchestrator.delegatedTaskResultPending,
         stopDelegatedTasks: ThreadManagementService.makeStopDelegatedTasks(orchestrator),
@@ -500,15 +550,24 @@ export function layerWithRegistry<Error>(
   );
   const layerReplayRuntime = Layer.mergeAll(
     layerOrchestratorProvided,
+    layerStores,
+    layerProviderTurnStartServiceProvided,
+    layerProviderTurnControlServiceProvided,
+    layerThreadManagementProvided,
     layerProviderSessionManagerProvided,
     layerEffectWorkerProvided,
     layerEventSinkProvided,
     layerContinuationWorkerProvided,
-  ).pipe(Layer.provide(ProviderTurnStartServiceTestkit.layer), Layer.provide(NodeServices.layer));
+    layerCommandOutputHubProvided,
+  ).pipe(
+    Layer.provide(
+      options.projects === undefined
+        ? ProviderTurnStartServiceTestkit.layer
+        : Layer.merge(ProviderTurnStartServiceTestkit.layer, options.projects),
+    ),
+    Layer.provide(NodeServices.layer),
+  );
 
-  // Build the daemon from the exact worker instance exposed alongside the
-  // orchestrator. Keeping this acquisition in the replay layer makes the
-  // outbox lifecycle explicit and prevents test-only command-side draining.
   if (options.runEffectWorker === false) {
     return layerReplayRuntime;
   }
@@ -539,7 +598,6 @@ export function layerWithRegistry<Error>(
     Orchestrator.OrchestratorV2,
     Effect.gen(function* () {
       const orchestrator = yield* Orchestrator.OrchestratorV2;
-      // As in serverRuntimeStartup: after runtime recovery, before the worker.
       yield* orchestrator.recoverDelegatedTasks;
       yield* EffectWorker.runDaemon.pipe(Effect.forkScoped);
       return orchestrator;

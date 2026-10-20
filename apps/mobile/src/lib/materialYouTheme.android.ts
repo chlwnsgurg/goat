@@ -1,6 +1,11 @@
 import { Hct, argbFromHex, hexFromArgb } from "@material/material-color-utilities";
+import { deriveSemanticColorsFrom } from "@goat/shared/themePalettes";
 
-import type { MobileThemeAppearance, MobileThemeVariables } from "./mobileTheme";
+import {
+  themeColorWithAlpha,
+  type MobileThemeAppearance,
+  type MobileThemeVariables,
+} from "./mobileTheme";
 import type { MaterialYouPalette } from "./materialYouPalette";
 
 function withAlpha(color: string, alpha: number): string {
@@ -29,9 +34,30 @@ export function materialYouPaletteToMobileThemeVariables(
   const dark = appearance === "dark";
   const userBubble = dark ? materialTone(palette.inversePrimary, 30) : palette.primary;
   const userBubbleForeground = dark ? materialTone(palette.inversePrimary, 90) : palette.onPrimary;
+  const semantic = deriveSemanticColorsFrom({
+    text: palette.onSurface,
+    canvas: palette.surface,
+    mutedForeground: palette.onSurfaceVariant,
+    messageAction: palette.primary,
+    errorForeground: palette.onErrorContainer,
+    appearance,
+  });
+  const prSurfaceAlpha = dark ? 0.16 : 0.12;
 
   return {
     ...base,
+    "--color-pr-open": semantic.prOpen,
+    "--color-pr-open-surface": themeColorWithAlpha(semantic.prOpen, prSurfaceAlpha),
+    "--color-pr-closed": semantic.prClosed,
+    "--color-pr-closed-surface": themeColorWithAlpha(semantic.prClosed, prSurfaceAlpha),
+    "--color-pr-merged": semantic.prMerged,
+    "--color-pr-merged-surface": themeColorWithAlpha(semantic.prMerged, prSurfaceAlpha),
+    "--color-composer-send": semantic.composerSend,
+    // Material You exposes error containers, not a solid destructive color.
+    // Stop retains the base palette's GOAT red.
+    "--color-goat-avatar": semantic.goatAvatar,
+    "--color-goat-avatar-border": semantic.goatAvatarBorder,
+    "--color-goat-avatar-foreground": semantic.goatAvatarForeground,
     "--color-screen": palette.surface,
     "--color-sheet": withAlpha(palette.surfaceContainerLow, 0.98),
     "--color-sheet-solid": palette.surfaceContainerLow,

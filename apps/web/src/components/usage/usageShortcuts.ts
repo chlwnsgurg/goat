@@ -1,4 +1,4 @@
-import type { KeybindingCommand, ResolvedKeybindingsConfig } from "@t3tools/contracts";
+import type { KeybindingCommand, ResolvedKeybindingsConfig } from "@goat/contracts";
 import type { UsageChartMetric } from "./UsageProviderChart";
 import { resolveShortcutCommand, type ShortcutEventLike } from "../../keybindings";
 
@@ -16,7 +16,6 @@ export const WINDOW_OPTIONS = [
   { days: 90, label: "90 days", command: "usage.period.quarter" },
 ] as const;
 
-/** Resolves page shortcuts without taking letters from fields or popup controls. */
 export function resolveUsageShortcut(
   event: ShortcutEventLike & { target: EventTarget | null },
   keybindings: ResolvedKeybindingsConfig,

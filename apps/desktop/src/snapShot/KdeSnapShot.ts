@@ -6,7 +6,7 @@ import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 import * as NodeURL from "node:url";
 import * as Schema from "effect/Schema";
-import type { DesktopCaptureHelperState } from "@t3tools/contracts";
+import type { DesktopCaptureHelperState } from "@goat/contracts";
 
 import { escapeDesktopEntryExecArgument } from "../app/DesktopLinuxUrlHandler.ts";
 import type { LinuxWindowSnapshot } from "./LinuxSnapShot.ts";
@@ -95,7 +95,6 @@ async function regularFile(path: string): Promise<Buffer | undefined> {
   return NodeFSP.readFile(path);
 }
 
-/** No install on launch: writes happen only after the user chooses Install helper. */
 export class KdeCaptureSetup {
   private readonly paths: KdeCapturePaths;
   constructor(paths: KdeCapturePaths) {
@@ -144,7 +143,6 @@ export class KdeCaptureSetup {
       throw new Error(
         "Another desktop entry uses the capture helper's name. Rename it before continuing.",
       );
-    // Never overwrite/follow a symlink, including the installation directory itself.
     const directory = NodePath.dirname(executable);
     const existing = await NodeFSP.lstat(directory).catch((error: NodeJS.ErrnoException) => {
       if (error.code !== "ENOENT") throw error;
@@ -184,7 +182,6 @@ export class KdeCaptureSetup {
     await run("kbuildsycoca6", ["--noincremental"]);
     // AppImages change XDG search paths, and KService caches are also locale-specific.
     // Refresh Plasma's cache in its session environment, not just the app's cache.
-    // Non-systemd sessions use the direct refresh and atomic directory notification above.
     await run("systemd-run", [
       "--user",
       "--quiet",
@@ -220,7 +217,7 @@ export async function captureKdeWindow(
   if (state.status !== "ready")
     throw new Error(`${state.message} Open Settings → SnapShots to continue setup.`);
   const { executable } = kdeCapturePaths(paths);
-  const directory = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-kde-capture-"));
+  const directory = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "goat-kde-capture-"));
   let retained = false;
   const cleanup = () => NodeFSP.rm(directory, { recursive: true, force: true });
   try {
@@ -254,7 +251,7 @@ export async function captureKdeWindow(
         activate: async (title) => {
           targetTitle = title;
           const activation = await NodeFSP.mkdtemp(
-            NodePath.join(NodeOS.tmpdir(), "t3-kde-activate-"),
+            NodePath.join(NodeOS.tmpdir(), "goat-kde-activate-"),
           );
           try {
             await run(

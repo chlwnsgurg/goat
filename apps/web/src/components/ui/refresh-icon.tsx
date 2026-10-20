@@ -1,4 +1,4 @@
-import { RefreshCwIcon } from "lucide-react";
+import { RefreshCwIcon } from "~/components/solar";
 import { cva, type VariantProps } from "class-variance-authority";
 
 import { cn } from "~/lib/utils";
@@ -16,7 +16,6 @@ const refreshIconVariants = cva("", {
   },
 });
 
-/** Keep the refresh glyph in place while its owning action is running. */
 export function RefreshIcon({
   refreshing = false,
   className,

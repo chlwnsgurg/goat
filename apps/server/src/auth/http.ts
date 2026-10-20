@@ -17,10 +17,10 @@ import {
   EnvironmentScopeRequiredError,
   EnvironmentAuthenticatedAuth,
   EnvironmentAuthenticatedPrincipal,
-} from "@t3tools/contracts";
-import type { AuthEnvironmentScope, DpopFailureReason } from "@t3tools/contracts";
-import { parseOAuthScope } from "@t3tools/shared/oauthScope";
-import { causeErrorTag } from "@t3tools/shared/observability";
+} from "@goat/contracts";
+import type { AuthEnvironmentScope, DpopFailureReason } from "@goat/contracts";
+import { parseOAuthScope } from "@goat/shared/oauthScope";
+import { causeErrorTag } from "@goat/shared/observability";
 import * as Clock from "effect/Clock";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
@@ -35,7 +35,7 @@ import * as HttpApiBuilder from "effect/http-api/HttpApiBuilder";
 import * as EnvironmentAuth from "./EnvironmentAuth.ts";
 import * as SessionStore from "./SessionStore.ts";
 import { traceAuthenticatedRelayRequest, traceRelayRequest } from "../cloud/traceRelayRequest.ts";
-import { deriveAuthClientMetadata } from "./utils.ts";
+import { legacyScopedSessionCookieName, deriveAuthClientMetadata } from "./utils.ts";
 import { verifyRequestDpopProof } from "./dpop.ts";
 
 const CREDENTIAL_RESPONSE_HEADERS = {
@@ -156,11 +156,9 @@ export function failEnvironmentNotFound(reason: EnvironmentResourceNotFoundReaso
 }
 
 /**
- * `<img>` and WebSocket cannot set headers, so media routes (device hub,
- * preview stream) authenticate the way the `/ws` upgrade does: a cookie for browser
- * sessions, or a short-lived `wsTicket` minted over authenticated HTTP for
- * bearer and DPoP clients. The upgrade authenticator already implements that
- * fallback order, so it is used for plain requests as well.
+ * `<img>` and WebSocket cannot set headers, so media routes (device hub, preview stream)
+ * authenticate the way the `/ws` upgrade does: a cookie for browser sessions, or a short-lived
+ * `wsTicket` minted over authenticated HTTP for bearer and DPoP clients.
  */
 export const authenticateMediaRequest = (requiredScope: AuthEnvironmentScope) =>
   Effect.gen(function* () {
@@ -309,8 +307,8 @@ export const layer = HttpApiBuilder.group(
             const result = yield* serverAuth.createBrowserSession(
               args.payload.credential,
               deriveAuthClientMetadata({ request }),
-              previousCredential?.source === "cookie" ||
-                previousCredential?.source === "legacy-cookie"
+              previousCredential &&
+                EnvironmentAuth.isBrowserCookieCredential(previousCredential.source)
                 ? previousCredential.token
                 : undefined,
             );
@@ -323,15 +321,25 @@ export const layer = HttpApiBuilder.group(
                 sameSite: "lax",
               }),
             ).pipe(Effect.catch(() => failEnvironmentInternal("browser_session_cookie_failed")));
-            const sessionCookies = result.expireNormalCookie
-              ? yield* Effect.fromResult(
-                  Cookies.expireCookie(selectedCookie, sessions.cookieName, {
+            let sessionCookies = selectedCookie;
+            if (result.expireNormalCookie) {
+              for (const name of [
+                sessions.cookieName,
+                legacyScopedSessionCookieName(sessions.cookieName),
+                sessions.legacyCookieName,
+              ]) {
+                if (name === undefined) continue;
+                sessionCookies = yield* Effect.fromResult(
+                  Cookies.expireCookie(sessionCookies, name, {
                     httpOnly: true,
                     path: "/",
                     sameSite: "lax",
                   }),
-                ).pipe(Effect.catch(() => failEnvironmentInternal("browser_session_cookie_failed")))
-              : selectedCookie;
+                ).pipe(
+                  Effect.catch(() => failEnvironmentInternal("browser_session_cookie_failed")),
+                );
+              }
+            }
 
             yield* HttpEffect.appendPreResponseHandler((_request, response) =>
               Effect.succeed(HttpServerResponse.mergeCookies(response, sessionCookies)),

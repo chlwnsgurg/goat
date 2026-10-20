@@ -1,7 +1,7 @@
 import { Toolbar } from "@base-ui/react/toolbar";
-import { type ProviderInstanceId } from "@t3tools/contracts";
+import { type ProviderInstanceId } from "@goat/contracts";
 import { memo, useLayoutEffect, useRef, useState } from "react";
-import { SparklesIcon, StarIcon } from "lucide-react";
+import { PlusIcon, SparklesIcon, StarIcon } from "~/components/solar";
 import { ProviderInstanceIcon } from "./ProviderInstanceIcon";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { cn } from "~/lib/utils";
@@ -11,11 +11,6 @@ import {
   type ProviderInstanceEntry,
 } from "../../providerInstances";
 
-/**
- * Build the hover tooltip for an instance button. Mirrors the old
- * kind-based copy but uses the entry's configured `displayName` so custom
- * instances get their user-authored name (e.g. "Codex Personal — Unavailable.").
- */
 function describeUnavailableInstance(entry: ProviderInstanceEntry): string {
   const label = entry.displayName;
   if (!entry.enabled || entry.status === "disabled") {
@@ -36,7 +31,6 @@ const BADGE_BASE_CLASS =
   "pointer-events-none absolute -right-0.5 top-0.5 z-10 flex size-3.5 items-center justify-center rounded-full bg-transparent shadow-sm ";
 const NEW_BADGE_CLASS = `${BADGE_BASE_CLASS} text-update-foreground `;
 
-/** Opens toward the rail so the list stays readable (not over the model names). */
 const PICKER_TOOLTIP_SIDE = "left" as const;
 const PICKER_TOOLTIP_SIDE_OFFSET = 8;
 
@@ -44,26 +38,15 @@ export const ModelPickerSidebar = memo(function ModelPickerSidebar(props: {
   selectedInstanceId: ProviderInstanceId | "favorites";
   onSelectInstance: (instanceId: ProviderInstanceId | "favorites") => void;
   onFocusSearch: () => void;
-  /**
-   * Instance entries to render as rail buttons. Each entry becomes one icon
-   * keyed by `instanceId`, so the default built-in Codex and a user-authored
-   * `codex_personal` appear as two distinct rail items, each routing to
-   * their own model list.
-   */
   instanceEntries: ReadonlyArray<ProviderInstanceEntry>;
-  /** Render the favorites rail entry. Hidden for locked-provider instance switching. */
   showFavorites?: boolean;
-  /** Instance ids shown in the rail but unavailable for the current picker context. */
   disabledInstanceIds?: ReadonlySet<ProviderInstanceId>;
-  /** Non-ready instances whose selected unavailable model remains reachable. */
   selectableUnavailableInstanceIds?: ReadonlySet<ProviderInstanceId>;
   getDisabledInstanceTooltip?: (entry: ProviderInstanceEntry) => string;
-  /**
-   * Instance id values that should render the "new" sparkle badge. Callers
-   * pass the subset of default built-in ids they want flagged (custom
-   * instances are never flagged — the user just made them).
-   */
   newBadgeInstanceIds?: ReadonlySet<ProviderInstanceId>;
+  /** Shows an "Add provider" button at the bottom of the rail. */
+  onAddProvider?: () => void;
+  addProviderDisabledReason?: string | null;
 }) {
   const handleSelect = (instanceId: ProviderInstanceId | "favorites") => {
     props.onSelectInstance(instanceId);
@@ -85,7 +68,12 @@ export const ModelPickerSidebar = memo(function ModelPickerSidebar(props: {
       return;
     }
     setSelectedIndicatorTop(selectedItem.offsetTop + selectedItem.offsetHeight / 2 - 10);
-  }, [props.instanceEntries, props.selectedInstanceId, showFavorites]);
+  }, [
+    // oxlint-disable-next-line react/exhaustive-effect-dependencies -- Adding, removing or reordering providers moves the selected item, so the indicator re-measures.
+    props.instanceEntries,
+    props.selectedInstanceId,
+    showFavorites,
+  ]);
 
   return (
     <Toolbar.Root
@@ -114,7 +102,6 @@ export const ModelPickerSidebar = memo(function ModelPickerSidebar(props: {
               style={{ top: selectedIndicatorTop }}
             />
           ) : null}
-          {/* Favorites section */}
           {showFavorites ? (
             <>
               <div className="relative w-full" data-model-picker-provider="favorites">
@@ -147,7 +134,6 @@ export const ModelPickerSidebar = memo(function ModelPickerSidebar(props: {
             </>
           ) : null}
 
-          {/* Instance buttons (one per configured instance — built-in + custom) */}
           {props.instanceEntries.map((entry) => {
             const isUnavailable = !isProviderInstancePickerReady(entry);
             const isContextDisabled = props.disabledInstanceIds?.has(entry.instanceId) ?? false;
@@ -247,8 +233,53 @@ export const ModelPickerSidebar = memo(function ModelPickerSidebar(props: {
               </div>
             );
           })}
+          {props.onAddProvider ? (
+            <AddProviderRailButton
+              onAddProvider={props.onAddProvider}
+              disabledReason={props.addProviderDisabledReason ?? null}
+            />
+          ) : null}
         </div>
       </div>
     </Toolbar.Root>
   );
 });
+
+function AddProviderRailButton(props: {
+  onAddProvider: () => void;
+  disabledReason: string | null;
+}) {
+  const disabled = props.disabledReason !== null;
+  return (
+    <div className="mt-auto w-full pt-1" data-model-picker-add-provider="true">
+      <Tooltip>
+        <TooltipTrigger
+          render={
+            <Toolbar.Button
+              className={cn(
+                "relative isolate flex w-full cursor-pointer aspect-square items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-foreground/10 hover:text-foreground focus-visible:bg-foreground/10 focus-visible:text-foreground focus-visible:outline-none",
+                disabled && "opacity-50 cursor-not-allowed hover:bg-transparent",
+              )}
+              type="button"
+              disabled={disabled}
+              focusableWhenDisabled
+              aria-label={props.disabledReason ?? "Add provider"}
+              onClick={() => {
+                if (!disabled) props.onAddProvider();
+              }}
+            >
+              <PlusIcon className="size-5 shrink-0" aria-hidden />
+            </Toolbar.Button>
+          }
+        />
+        <TooltipPopup
+          side={PICKER_TOOLTIP_SIDE}
+          sideOffset={PICKER_TOOLTIP_SIDE_OFFSET}
+          align="center"
+        >
+          {props.disabledReason ?? "Add provider"}
+        </TooltipPopup>
+      </Tooltip>
+    </div>
+  );
+}

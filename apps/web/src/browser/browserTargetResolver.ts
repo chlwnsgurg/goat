@@ -1,12 +1,8 @@
-import type {
-  BrowserNavigationTarget,
-  EnvironmentId,
-  PreviewUrlResolution,
-} from "@t3tools/contracts";
-import { isLoopbackHost, normalizePreviewUrl } from "@t3tools/shared/preview";
-import { isLocalLoopbackHost, isPrivateNetworkHost } from "@t3tools/shared/hostClassification";
+import type { BrowserNavigationTarget, EnvironmentId, PreviewUrlResolution } from "@goat/contracts";
+import { isLoopbackHost, normalizePreviewUrl } from "@goat/shared/preview";
+import { isLocalLoopbackHost, isPrivateNetworkHost } from "@goat/shared/hostClassification";
 
-import type { ConnectionTarget } from "@t3tools/client-runtime/connection";
+import type { ConnectionTarget } from "@goat/client-runtime/connection";
 
 import { isDesktopLocalConnectionTarget } from "~/connection/desktopLocal";
 import { isElectron } from "~/env";
@@ -17,7 +13,7 @@ export {
   isLocalLoopbackHost,
   isPrivateNetworkHost,
   isPublicFaviconHost,
-} from "@t3tools/shared/hostClassification";
+} from "@goat/shared/hostClassification";
 
 const readEnvironmentUrl = (environmentId: EnvironmentId): URL => {
   const connection = readPreparedConnection(environmentId);
@@ -80,11 +76,10 @@ export function resolveBrowserNavigationTarget(
 }
 
 /**
- * Whether a discovered loopback server is reachable as-is from this client's
- * own browser tabs. The desktop app draws tabs on the machine that runs its
- * primary backend and any desktop-local backend (WSL). Its connection URL can
- * still be a LAN address (WSL NAT mode binds the distro IP), but a dev server
- * bound to loopback only answers on `localhost` there.
+ * The desktop app draws tabs on the machine that runs its primary backend and
+ * any desktop-local backend (WSL). Its connection URL can still be a LAN
+ * address (WSL NAT mode binds the distro IP), but a dev server bound to
+ * loopback only answers on `localhost` there.
  */
 const reachesEnvironmentLoopback = (target: ConnectionTarget): boolean =>
   isElectron &&

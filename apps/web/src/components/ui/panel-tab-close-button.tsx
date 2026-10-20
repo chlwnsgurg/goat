@@ -1,4 +1,4 @@
-import { X } from "lucide-react";
+import { XIcon as X } from "~/components/solar";
 import type { ReactNode } from "react";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "~/components/ui/tooltip";
 
@@ -9,7 +9,6 @@ interface PanelTabCloseButtonProps {
   tooltip?: string;
 }
 
-/** Inside a `group/tab` row, swaps the tab identity for its close action on hover or focus. */
 export function PanelTabCloseButton({
   children,
   label,

@@ -1,23 +1,44 @@
 // @effect-diagnostics nodeBuiltinImport:off
-/**
- * WorkspaceFileSystem - Effect service contract for workspace file mutations.
+/*
+ * Adapted from Emanuele-web04/synara @ 566efb1b1, workspace text format detection
+ * and preservation in Layers/WorkspaceFileSystem.ts (MIT).
  *
- * Owns workspace-root-relative file read/write operations and their associated
- * safety checks and cache invalidation hooks. Reads also accept absolute host
- * paths so clients can show files an agent left outside the workspace; writes
- * never leave the root.
+ * Copyright (c) 2026 T3 Tools Inc.
+ * Copyright (c) 2026 Emanuele Di Pietro
  *
- * @module WorkspaceFileSystem
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to deal
+ * in the Software without restriction, including without limitation the rights
+ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ * copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included in all
+ * copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ * SOFTWARE.
  */
 import * as NodeFS from "node:fs";
 import * as NodeFSP from "node:fs/promises";
 
 import type {
+  FilesystemEntryMetadata,
+  FilesystemGetMetadataInput,
+  FilesystemGetMetadataResult,
   ProjectReadFileInput,
   ProjectReadFileResult,
+  ProjectTextFormat,
   ProjectWriteFileInput,
   ProjectWriteFileResult,
-} from "@t3tools/contracts";
+} from "@goat/contracts";
+import { expandHomePath } from "@goat/provider-core/server/pathExpansion";
+import * as HostProcess from "@goat/shared/HostProcess";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -25,10 +46,29 @@ import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 
+import * as KnownWorkspaces from "./KnownWorkspaces.ts";
 import * as WorkspaceEntries from "./WorkspaceEntries.ts";
 import * as WorkspacePaths from "./WorkspacePaths.ts";
+import { fileHeaderMimeType } from "./fileHeaderMimeType.ts";
+import {
+  atomicWorkspaceWrite,
+  workspaceFileVersion,
+  WorkspaceFileChangedOnDiskError,
+  WorkspaceFileDeletedOnDiskError,
+  isAtomicWriteOperationError,
+  isWorkspaceFileChangedOnDiskError,
+  isWorkspaceFileDeletedOnDiskError,
+  isAtomicWritePathEscapeError,
+} from "./atomicWorkspaceWrite.ts";
 
 const PROJECT_READ_FILE_MAX_BYTES = 1024 * 1024;
+
+// Windows also reaches `.git` through trailing dots or spaces, a `:` stream
+// suffix, or the 8.3 short name `GIT~1`. Names compare upcased, as NTFS does.
+const isGitMetadataName = (segment: string) => {
+  const name = (segment.split(":")[0] ?? "").replace(/[. ]+$/, "").toUpperCase();
+  return name === ".GIT" || name === "GIT~1";
+};
 
 export class WorkspaceFileSystemOperationError extends Schema.TaggedError<WorkspaceFileSystemOperationError>()(
   "WorkspaceFileSystemOperationError",
@@ -95,54 +135,138 @@ export class WorkspaceBinaryFileError extends Schema.TaggedError<WorkspaceBinary
   }
 }
 
+export class WorkspaceUnsupportedTextFormatError extends Schema.TaggedError<WorkspaceUnsupportedTextFormatError>()(
+  "WorkspaceUnsupportedTextFormatError",
+  {},
+) {}
+
 export const WorkspaceFileSystemError = Schema.Union([
   WorkspaceFileSystemOperationError,
   WorkspaceFilePathEscapeError,
   WorkspacePathNotFileError,
   WorkspaceBinaryFileError,
+  WorkspaceFileChangedOnDiskError,
+  WorkspaceFileDeletedOnDiskError,
+  WorkspaceUnsupportedTextFormatError,
 ]);
 export type WorkspaceFileSystemError = typeof WorkspaceFileSystemError.Type;
 
-/** Service tag for workspace file operations. */
 export class WorkspaceFileSystem extends Context.Service<
   WorkspaceFileSystem,
   {
-    /**
-     * Read a UTF-8 text file relative to the workspace root, or any host file by
-     * absolute path.
-     */
+    readonly getMetadata: (
+      input: FilesystemGetMetadataInput,
+    ) => Effect.Effect<FilesystemGetMetadataResult>;
+
     readonly readFile: (
       input: ProjectReadFileInput,
     ) => Effect.Effect<
       ProjectReadFileResult,
       WorkspaceFileSystemError | WorkspacePaths.WorkspacePathOutsideRootError
     >;
-    /**
-     * Write a file relative to the workspace root.
-     *
-     * Creates parent directories as needed and rejects paths that escape the
-     * workspace root.
-     */
+    /** Writes inside a known workspace only. */
     readonly writeFile: (
       input: ProjectWriteFileInput,
     ) => Effect.Effect<
       ProjectWriteFileResult,
-      WorkspaceFileSystemError | WorkspacePaths.WorkspacePathOutsideRootError
+      | WorkspaceFileSystemError
+      | WorkspacePaths.WorkspacePathOutsideRootError
+      | KnownWorkspaces.UnknownWorkspaceError
     >;
   }
->()("t3/workspace/WorkspaceFileSystem") {}
+>()("goat/workspace/WorkspaceFileSystem") {}
 
 /** @public Service construction is part of the canonical Effect module API. */
 export const make = Effect.gen(function* () {
   const fileSystem = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const workspacePaths = yield* WorkspacePaths.WorkspacePaths;
+  const knownWorkspaces = yield* KnownWorkspaces.KnownWorkspaces;
   const workspaceEntries = yield* WorkspaceEntries.WorkspaceEntries;
 
+  const metadataForPath = Effect.fnUntraced(function* (requestedPath: string) {
+    const expandedPath = expandHomePath(requestedPath, yield* HostProcess.HomeDirectory);
+    if (!path.isAbsolute(expandedPath)) return null;
+    const stat = yield* fileSystem.stat(expandedPath).pipe(Effect.option);
+    if (stat._tag === "None") return null;
+    if (stat.value.type === "Directory") return { kind: "directory" } as const;
+    if (stat.value.type !== "File") return { kind: "other" } as const;
+    let mimeType: string | undefined;
+    if (path.extname(expandedPath) === "" && stat.value.size > 0) {
+      mimeType = yield* Effect.tryPromise({
+        try: async () => {
+          const handle = await NodeFSP.open(
+            expandedPath,
+            NodeFS.constants.O_RDONLY | NodeFS.constants.O_NONBLOCK,
+          );
+          try {
+            if (!(await handle.stat()).isFile()) return undefined;
+            const buffer = Buffer.alloc(512);
+            const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
+            return fileHeaderMimeType(buffer.subarray(0, bytesRead));
+          } finally {
+            await handle.close();
+          }
+        },
+        catch: () => undefined,
+      }).pipe(Effect.catch(() => Effect.succeed(undefined)));
+    }
+    return {
+      kind: "file",
+      byteLength: Number(stat.value.size),
+      ...(mimeType === undefined ? {} : { mimeType }),
+    } satisfies FilesystemEntryMetadata;
+  });
+
+  const getMetadata: WorkspaceFileSystem["Service"]["getMetadata"] = Effect.fn(
+    "WorkspaceFileSystem.getMetadata",
+  )(function* (input) {
+    const paths = [...new Set(input.paths)];
+    const entries = yield* Effect.forEach(paths, metadataForPath, { concurrency: 8 });
+    const byPath = new Map(paths.map((value, index) => [value, entries[index] ?? null]));
+    return { entries: input.paths.map((value) => byPath.get(value) ?? null) };
+  });
+
+  /** Both paths must already be real paths. */
+  const isInsideRealRoot = (realWorkspaceRoot: string, realPath: string) => {
+    const relative = path.relative(realWorkspaceRoot, realPath);
+    return !(
+      relative.startsWith(`..${path.sep}`) ||
+      relative === ".." ||
+      path.isAbsolute(relative)
+    );
+  };
+
   /**
-   * Resolves the file a read targets. Workspace-relative paths must stay inside the
-   * root, symlinks included. An absolute path reads a host file in place, such as a
-   * report an agent wrote to a temp directory; it gets no root check.
+   * Git runs config and hooks from its own folders, so a write never lands in one:
+   * a `.git` entry, or a repository folder under another name such as `.bare`.
+   * Folders are checked upward to a linked worktree's top, which holds a `.git`
+   * file, since worktrees can sit inside a bare repository. `absolutePath` must
+   * be normalized.
+   */
+  const isInGitFolder = async (absolutePath: string) => {
+    if (absolutePath.split(path.sep).some(isGitMetadataName)) return true;
+    for (let folder = path.dirname(absolutePath); ; folder = path.dirname(folder)) {
+      const [head, commondir, objects, refs, dotGit] = await Promise.all(
+        ["HEAD", "commondir", "objects", "refs", ".git"].map((name) =>
+          NodeFSP.lstat(path.join(folder, name)).catch((error: NodeJS.ErrnoException) => {
+            // Any other failure leaves the folder unknown, so the write is refused.
+            if (error.code === "ENOENT" || error.code === "ENOTDIR") return null;
+            throw error;
+          }),
+        ),
+      );
+      // What git reads as a repository: HEAD, plus objects and refs here or in
+      // the folder a `commondir` file names, as in a linked worktree's git folder.
+      if (head && (commondir || (objects && refs))) return true;
+      if (dotGit?.isFile() || path.dirname(folder) === folder) return false;
+    }
+  };
+
+  /**
+   * Workspace-relative paths must stay inside the root, symlinks included. An
+   * absolute path reads a host file in place, such as a report an agent wrote to a
+   * temp directory; it gets no root check.
    */
   const resolveReadTarget = Effect.fn("WorkspaceFileSystem.resolveReadTarget")(function* (
     input: ProjectReadFileInput,
@@ -170,7 +294,7 @@ export const make = Effect.gen(function* () {
     });
 
     const realWorkspaceRoot = yield* Effect.tryPromise({
-      try: () => NodeFSP.realpath(input.cwd),
+      try: () => NodeFSP.realpath(path.resolve(input.cwd)),
       catch: (cause) =>
         new WorkspaceFileSystemOperationError({
           workspaceRoot: input.cwd,
@@ -193,12 +317,7 @@ export const make = Effect.gen(function* () {
           cause,
         }),
     });
-    const relativeRealPath = path.relative(realWorkspaceRoot, realTargetPath);
-    if (
-      relativeRealPath.startsWith(`..${path.sep}`) ||
-      relativeRealPath === ".." ||
-      path.isAbsolute(relativeRealPath)
-    ) {
+    if (!isInsideRealRoot(realWorkspaceRoot, realTargetPath)) {
       return yield* new WorkspaceFilePathEscapeError({
         workspaceRoot: input.cwd,
         relativePath: input.relativePath,
@@ -279,11 +398,38 @@ export const make = Effect.gen(function* () {
             });
           }
 
+          let contents: string;
+          let encoding: ProjectTextFormat["encoding"] = "utf-8";
+          try {
+            contents = new TextDecoder("utf-8", { fatal: true }).decode(fileBytes);
+          } catch {
+            contents = new TextDecoder("utf-8").decode(fileBytes);
+            encoding = "unsupported";
+          }
+          const crlf = /\r\n/.test(contents);
+          const lf = /(?<!\r)\n/.test(contents);
+          const cr = /\r(?!\n)/.test(contents);
+          const textFormat: ProjectTextFormat = {
+            encoding,
+            bom: fileBytes[0] === 0xef && fileBytes[1] === 0xbb && fileBytes[2] === 0xbf,
+            lineEnding:
+              Number(crlf) + Number(lf) + Number(cr) > 1
+                ? "mixed"
+                : crlf
+                  ? "crlf"
+                  : cr
+                    ? "cr"
+                    : "lf",
+          };
           return {
             relativePath: target.relativePath,
-            contents: new TextDecoder("utf-8").decode(fileBytes),
+            contents,
+            textFormat,
+            ...(stat.size === bytesRead && stat.size <= PROJECT_READ_FILE_MAX_BYTES
+              ? { version: workspaceFileVersion(fileBytes) }
+              : {}),
             byteLength: stat.size,
-            truncated: stat.size > PROJECT_READ_FILE_MAX_BYTES,
+            truncated: stat.size > PROJECT_READ_FILE_MAX_BYTES || bytesRead < stat.size,
           };
         }),
       (handle) =>
@@ -302,45 +448,152 @@ export const make = Effect.gen(function* () {
     );
   });
 
-  const writeFile: WorkspaceFileSystem["Service"]["writeFile"] = Effect.fn(
-    "WorkspaceFileSystem.writeFile",
-  )(function* (input) {
+  /**
+   * Resolves the file a write targets. The deepest existing ancestor resolves to
+   * its real path before the root check, so neither the file nor the directories
+   * created for it can follow a symlink out of the root. A dangling symlink is
+   * rejected rather than written through.
+   */
+  const resolveWriteTarget = Effect.fn("WorkspaceFileSystem.resolveWriteTarget")(function* (
+    input: ProjectWriteFileInput,
+  ) {
     const target = yield* workspacePaths.resolveRelativePathWithinRoot({
       workspaceRoot: input.cwd,
       relativePath: input.relativePath,
     });
+    const realWorkspaceRoot = yield* Effect.tryPromise({
+      // Resolve `..` in cwd the way the relative path was resolved, before following links.
+      try: () => NodeFSP.realpath(path.resolve(input.cwd)),
+      catch: (cause) =>
+        new WorkspaceFileSystemOperationError({
+          workspaceRoot: input.cwd,
+          relativePath: input.relativePath,
+          resolvedPath: target.absolutePath,
+          operationPath: input.cwd,
+          operation: "realpath-workspace-root",
+          cause,
+        }),
+    });
 
-    yield* fileSystem.makeDirectory(path.dirname(target.absolutePath), { recursive: true }).pipe(
-      Effect.mapError(
-        (cause) =>
+    // Split the host path, not the display relativePath: on POSIX `\` is a file name character.
+    const segments = path.relative(input.cwd, target.absolutePath).split(path.sep);
+    const realTargetPath = yield* Effect.tryPromise({
+      try: async () => {
+        for (let depth = segments.length; depth > 0; depth--) {
+          const candidate = path.join(realWorkspaceRoot, ...segments.slice(0, depth));
+          try {
+            return path.join(await NodeFSP.realpath(candidate), ...segments.slice(depth));
+          } catch (error) {
+            // Only a missing entry is skipped; one that exists but cannot resolve is a dangling link.
+            const exists = await NodeFSP.lstat(candidate).then(
+              () => true,
+              () => false,
+            );
+            if ((error as NodeJS.ErrnoException).code !== "ENOENT" || exists) throw error;
+          }
+        }
+        return path.join(realWorkspaceRoot, ...segments);
+      },
+      catch: (cause) =>
+        new WorkspaceFileSystemOperationError({
+          workspaceRoot: input.cwd,
+          relativePath: input.relativePath,
+          resolvedPath: target.absolutePath,
+          operationPath: target.absolutePath,
+          operation: "realpath-target",
+          cause,
+        }),
+    });
+    // The path as named is checked too: a `.git/config` symlink resolves away the `.git`.
+    const namedTargetPath = path.join(realWorkspaceRoot, ...segments);
+    const inGitFolder = Effect.fn("WorkspaceFileSystem.inGitFolder")((checkedPath: string) =>
+      Effect.tryPromise({
+        try: () => isInGitFolder(checkedPath),
+        catch: (cause) =>
           new WorkspaceFileSystemOperationError({
             workspaceRoot: input.cwd,
             relativePath: input.relativePath,
-            resolvedPath: target.absolutePath,
-            operationPath: path.dirname(target.absolutePath),
-            operation: "make-directory",
+            resolvedPath: realTargetPath,
+            operationPath: checkedPath,
+            operation: "stat",
             cause,
           }),
-      ),
+      }),
     );
-    yield* fileSystem.writeFileString(target.absolutePath, input.contents).pipe(
-      Effect.mapError(
-        (cause) =>
-          new WorkspaceFileSystemOperationError({
-            workspaceRoot: input.cwd,
-            relativePath: input.relativePath,
-            resolvedPath: target.absolutePath,
-            operationPath: target.absolutePath,
-            operation: "write-file",
-            cause,
-          }),
-      ),
-    );
-    yield* workspaceEntries.refresh(input.cwd);
-    return { relativePath: target.relativePath };
+    if (
+      !isInsideRealRoot(realWorkspaceRoot, realTargetPath) ||
+      (yield* inGitFolder(realTargetPath)) ||
+      (yield* inGitFolder(namedTargetPath))
+    ) {
+      return yield* new WorkspaceFilePathEscapeError({
+        workspaceRoot: input.cwd,
+        relativePath: input.relativePath,
+        resolvedWorkspaceRoot: realWorkspaceRoot,
+        resolvedPath: realTargetPath,
+      });
+    }
+    return { relativePath: target.relativePath, absolutePath: target.absolutePath, realTargetPath };
   });
 
-  return WorkspaceFileSystem.of({ readFile, writeFile });
+  const writeFile: WorkspaceFileSystem["Service"]["writeFile"] = Effect.fn(
+    "WorkspaceFileSystem.writeFile",
+  )(function* (input) {
+    yield* knownWorkspaces.assertContains(input.cwd);
+    const target = yield* resolveWriteTarget(input);
+
+    const format = input.textFormat;
+    if (format && (format.encoding !== "utf-8" || format.lineEnding === "mixed")) {
+      return yield* new WorkspaceUnsupportedTextFormatError({});
+    }
+    const normalized = format ? input.contents.replace(/\r\n|\r/g, "\n") : input.contents;
+    const contents = format
+      ? (format.bom ? "\ufeff" : "") +
+        (format.lineEnding === "lf"
+          ? normalized
+          : normalized.replaceAll("\n", format.lineEnding === "crlf" ? "\r\n" : "\r"))
+      : normalized;
+    const bytes = new TextEncoder().encode(contents);
+    const platform = yield* HostProcess.Platform;
+    yield* Effect.tryPromise({
+      try: () =>
+        atomicWorkspaceWrite({
+          // Resolve `..` in cwd by name, as resolveWriteTarget did, before following links.
+          workspaceRoot: path.resolve(input.cwd),
+          absolutePath: target.absolutePath,
+          contents: bytes,
+          ...(input.expectedVersion !== undefined
+            ? { expectedVersion: input.expectedVersion }
+            : {}),
+          platform,
+        }),
+      catch: (cause) => {
+        if (isWorkspaceFileChangedOnDiskError(cause) || isWorkspaceFileDeletedOnDiskError(cause))
+          return cause;
+        if (isAtomicWritePathEscapeError(cause)) {
+          return new WorkspaceFilePathEscapeError({
+            workspaceRoot: input.cwd,
+            relativePath: input.relativePath,
+            resolvedWorkspaceRoot: cause.resolvedWorkspaceRoot,
+            resolvedPath: cause.resolvedPath,
+          });
+        }
+        return new WorkspaceFileSystemOperationError({
+          workspaceRoot: input.cwd,
+          relativePath: input.relativePath,
+          resolvedPath: target.absolutePath,
+          operationPath: isAtomicWriteOperationError(cause)
+            ? cause.operationPath
+            : target.absolutePath,
+          operation: isAtomicWriteOperationError(cause) ? cause.operation : "write-file",
+          cause,
+        });
+      },
+    });
+    yield* workspaceEntries.refresh(input.cwd);
+    return { relativePath: target.relativePath, version: workspaceFileVersion(bytes) };
+  });
+
+  return WorkspaceFileSystem.of({ getMetadata, readFile, writeFile });
 });
 
 export const layer = Layer.effect(WorkspaceFileSystem, make);

@@ -1,5 +1,5 @@
 import type { LegendListRef } from "@legendapp/list/react";
-import type { AssistantCitation, MessageId, ScopedThreadRef } from "@t3tools/contracts";
+import type { AssistantCitation, MessageId, ScopedThreadRef } from "@goat/contracts";
 import { useEffect, useRef, type ReactNode, type RefObject } from "react";
 import {
   resolveAssistantCitationRange,
@@ -9,17 +9,14 @@ import { toastManager } from "../ui/toast";
 import { observeResize } from "~/lib/observeResize";
 
 const CITATION_PULSE_DURATION_MS = 650;
-// The second pulse settles into a held highlight so late glances still find the quote.
 const CITATION_HIGHLIGHT_HOLD_MS = 1575;
 const CITATION_HIGHLIGHT_FADE_MS = 450;
 const CITATION_HIGHLIGHT_TOTAL_MS =
   1.5 * CITATION_PULSE_DURATION_MS + CITATION_HIGHLIGHT_HOLD_MS + CITATION_HIGHLIGHT_FADE_MS;
 const CITATION_HIGHLIGHT_OPACITY = "--assistant-citation-highlight-opacity";
-// Matches the comment-editing highlight strength in index.css.
 const CITATION_HIGHLIGHT_PEAK = 0.45;
-const COMMENT_HIGHLIGHT_NAME = "t3-assistant-citation-comment";
+const COMMENT_HIGHLIGHT_NAME = "goat-assistant-citation-comment";
 
-/** Keep source text marked while its comment editor is open, without changing native selection. */
 export function observeAssistantCitationCommentSource({
   anchor,
   citation,
@@ -102,7 +99,6 @@ export interface AssistantCitationTarget extends AssistantCitationRequest {
   onComplete: () => void;
 }
 
-/** Observe only the active source, including virtual containers moved above its root. */
 export function observeAssistantCitationSource({
   root,
   itemKey,
@@ -136,8 +132,8 @@ export function observeAssistantCitationSource({
     selected.range.endContainer === selected.snapshot.endContainer &&
     selected.range.endOffset === selected.snapshot.endOffset;
   const clear = () => {
-    if (highlighted && CSS.highlights.get("t3-assistant-citation") === highlighted) {
-      CSS.highlights.delete("t3-assistant-citation");
+    if (highlighted && CSS.highlights.get("goat-assistant-citation") === highlighted) {
+      CSS.highlights.delete("goat-assistant-citation");
     }
     highlighted = null;
     ownedRange = null;
@@ -166,7 +162,6 @@ export function observeAssistantCitationSource({
     }
     const state = list.getState();
     const index = state.indexByKey(itemKey);
-    // alwaysRender mounts this row before navigation. Estimates are not measurements.
     if (index === undefined || !(state.sizeAtIndex(index) > 0)) return;
     const range = resolveAssistantCitationRange(root, request.citation);
     const rect = (range ?? root).getBoundingClientRect();
@@ -206,7 +201,6 @@ export function observeAssistantCitationSource({
         );
         return;
       }
-      // A prepend or row measurement can still change geometry during the scroll promise.
       if (rect.bottom <= scrollRect.top || rect.top >= scrollRect.bottom) return;
       activation.scrolled = true;
       request.onComplete();
@@ -224,12 +218,11 @@ export function observeAssistantCitationSource({
     }
     if (typeof Highlight !== "undefined" && typeof CSS !== "undefined" && CSS.highlights) {
       highlighted = new Highlight(range);
-      CSS.highlights.set("t3-assistant-citation", highlighted);
+      CSS.highlights.set("goat-assistant-citation", highlighted);
       ownedRange = range;
       root.dataset.citationHighlighted = "true";
     } else {
       const selection = root.ownerDocument.getSelection();
-      // Only a fresh activation may replace a selection we do not own.
       if (selection && (canReplaceSelection || ownsSelection(selection))) {
         selection.removeAllRanges();
         selection.addRange(range);
@@ -243,7 +236,6 @@ export function observeAssistantCitationSource({
       }
     }
     if (!pulseAnimation) {
-      // Preserve the original deadline through virtual remounts and range repairs.
       const pulse = (activation.pulse ??= {
         startedAt: performance.now(),
         reducedMotion,
@@ -273,7 +265,7 @@ export function observeAssistantCitationSource({
             ],
         { duration: CITATION_HIGHLIGHT_TOTAL_MS, easing: "ease-in-out" },
       );
-      pulseAnimation.id = "t3-assistant-citation-pulse";
+      pulseAnimation.id = "goat-assistant-citation-pulse";
       pulseAnimation.currentTime = Math.max(0, performance.now() - pulse.startedAt);
       void pulseAnimation.finished.then(finishHighlight, () => {});
     }
@@ -314,7 +306,6 @@ export function observeAssistantCitationSource({
   const cancelScroll = () => {
     if (scrolling) {
       scrolling = false;
-      // Supersede a queued list scroll before the user's gesture or minimap action runs.
       void list.scrollToOffset({
         // Legend may defer this call too. Read the user's position when it executes.
         get offset() {

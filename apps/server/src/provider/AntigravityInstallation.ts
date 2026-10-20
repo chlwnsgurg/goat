@@ -1,8 +1,8 @@
 // @effect-diagnostics nodeBuiltinImport:off - Effect has no incremental digest or free-space query.
 import * as EffectNodeStream from "@effect/platform-node/NodeStream";
-import { ProviderDriverKind, type ProviderInstallState } from "@t3tools/contracts";
-import * as HostProcess from "@t3tools/shared/HostProcess";
-import { resolveNodeExecutable, nodeRuntimeUnavailableMessage } from "@t3tools/shared/nodeRuntime";
+import { ProviderDriverKind, type ProviderInstallState } from "@goat/contracts";
+import * as HostProcess from "@goat/shared/HostProcess";
+import { resolveNodeExecutable, nodeRuntimeUnavailableMessage } from "@goat/shared/nodeRuntime";
 import * as Clock from "effect/Clock";
 import * as Cause from "effect/Cause";
 import * as Context from "effect/Context";
@@ -15,6 +15,7 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
+import * as Schedule from "effect/Schedule";
 import * as Scope from "effect/Scope";
 import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
@@ -102,7 +103,7 @@ interface AntigravityInstallationService {
 export class AntigravityInstallation extends Context.Service<
   AntigravityInstallation,
   AntigravityInstallationService
->()("t3/provider/AntigravityInstallation") {
+>()("goat/provider/AntigravityInstallation") {
   static readonly layer = Layer.effect(
     AntigravityInstallation,
     Effect.gen(function* () {
@@ -349,9 +350,23 @@ export const makeAntigravityInstallation = Effect.fn("AntigravityInstallation.ma
     options.validate ??
     Effect.fn("AntigravityInstallation.validate")(
       function* (executable: AntigravityExecutable, expectedVersion: string) {
-        const profileDirectory = yield* fs.makeTempDirectoryScoped({
-          prefix: "t3-antigravity-validate-",
-        });
+        const validationScope = yield* Effect.scope;
+        const profileDirectory = yield* Effect.acquireRelease(
+          fs.makeTempDirectory({ prefix: "goat-antigravity-validate-" }),
+          (directory) =>
+            fs.remove(directory, { recursive: true, force: true }).pipe(
+              // Windows may retain DLL handles briefly after taskkill returns.
+              Effect.retry({
+                times: platform === "win32" ? 10 : 0,
+                schedule: Schedule.spaced("100 millis"),
+                while: (error) =>
+                  error.reason._tag === "PermissionDenied" ||
+                  error.reason._tag === "Busy" ||
+                  error.reason._tag === "Unknown",
+              }),
+              Effect.orDie,
+            ),
+        );
         const profile = yield* prepareAntigravityProfile({
           profileDirectory,
           platform,
@@ -368,7 +383,22 @@ export const makeAntigravityInstallation = Effect.fn("AntigravityInstallation.ma
             baseEnv: environment,
           }),
           cwd: profileDirectory,
-          childProcessSpawner: spawner,
+          childProcessSpawner:
+            platform === "win32"
+              ? ChildProcessSpawner.make(
+                  Effect.fnUntraced(function* (command) {
+                    const child = yield* spawner.spawn(command);
+                    // Stop PyInstaller's tree before ACP closes its pipes. Once
+                    // the launcher exits, taskkill cannot reach its children,
+                    // which keep the executable and unpacked DLLs locked.
+                    yield* Scope.addFinalizer(
+                      validationScope,
+                      child.kill({ forceKillAfter: "1 second" }).pipe(Effect.orDie),
+                    );
+                    return child;
+                  }),
+                )
+              : spawner,
           clientInfo: { name: "t3-code", version: "0.0.0" },
         });
         const initialized = yield* runtime.initialize();
@@ -688,7 +718,7 @@ export const makeAntigravityInstallation = Effect.fn("AntigravityInstallation.ma
             `Google does not publish an Antigravity runtime for ${platform}-${arch}. Use a supported remote environment or a custom executable.`,
           );
         }
-        const operationId = yield* crypto.randomUUIDv4;
+        const operationId = yield* crypto.randomUUIDv4();
         const next: ProviderInstallState = {
           driver: DRIVER,
           operationId,

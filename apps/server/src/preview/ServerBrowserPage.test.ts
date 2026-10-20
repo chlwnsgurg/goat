@@ -1,3 +1,9 @@
+// @effect-diagnostics nodeBuiltinImport:off - existence of Playwright's browser binary is a Node filesystem check.
+import * as NodeFS from "node:fs";
+import * as NodeModule from "node:module";
+import * as NodeOS from "node:os";
+import * as NodePath from "node:path";
+
 import {
   chromium,
   type Browser,
@@ -7,10 +13,66 @@ import {
 } from "playwright-core";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vite-plus/test";
 
+import * as HostProcess from "@goat/shared/HostProcess";
+
 import { presentAsChrome } from "./ServerBrowserContexts.ts";
 import * as ServerBrowserPage from "./ServerBrowserPage.ts";
 
-describe("server browser element refs", () => {
+// `chromium.launch({ headless: true })` starts chromium-headless-shell.
+// `chromium.executablePath()` is the full Chrome build, so it stays missing
+// after `install --only-shell`. Linux CI installs the shell; a Mac checkout
+// often has not. Skip the live cases instead of failing the file. The drag
+// case below does not launch anything.
+const chromiumInstalled = (() => {
+  try {
+    const require = NodeModule.createRequire(import.meta.url);
+    const packageRoot = NodePath.dirname(require.resolve("playwright-core/package.json"));
+    const browsers = JSON.parse(
+      NodeFS.readFileSync(NodePath.join(packageRoot, "browsers.json"), "utf8"),
+    ) as {
+      browsers: ReadonlyArray<{ name: string; revision: string }>;
+    };
+    const revision = browsers.browsers.find(
+      (browser) => browser.name === "chromium-headless-shell",
+    )?.revision;
+    if (revision === undefined) return false;
+    const platform = HostProcess.Platform.defaultValue();
+    const arch = HostProcess.Architecture.defaultValue();
+    const browsersPath = process.env.PLAYWRIGHT_BROWSERS_PATH;
+    const registry =
+      browsersPath === "0"
+        ? NodePath.join(packageRoot, ".local-browsers")
+        : browsersPath
+          ? NodePath.resolve(process.env.INIT_CWD || process.cwd(), browsersPath)
+          : NodePath.join(
+              platform === "linux"
+                ? process.env.XDG_CACHE_HOME || NodePath.join(NodeOS.homedir(), ".cache")
+                : platform === "darwin"
+                  ? NodePath.join(NodeOS.homedir(), "Library", "Caches")
+                  : process.env.LOCALAPPDATA || NodePath.join(NodeOS.homedir(), "AppData", "Local"),
+              "ms-playwright",
+            );
+    const directory = NodePath.join(registry, `chromium_headless_shell-${revision}`);
+    const executable =
+      platform === "win32"
+        ? ["chrome-headless-shell-win64", "chrome-headless-shell.exe"]
+        : platform === "darwin"
+          ? [
+              arch === "arm64"
+                ? "chrome-headless-shell-mac-arm64"
+                : "chrome-headless-shell-mac-x64",
+              "chrome-headless-shell",
+            ]
+          : arch === "arm64"
+            ? ["chrome-linux", "headless_shell"]
+            : ["chrome-headless-shell-linux64", "chrome-headless-shell"];
+    return NodeFS.existsSync(NodePath.join(directory, ...executable));
+  } catch {
+    return false;
+  }
+})();
+
+describe.skipIf(!chromiumInstalled)("server browser element refs", () => {
   let browser: Browser;
   let context: BrowserContext;
   let page: Page;
@@ -40,6 +102,69 @@ describe("server browser element refs", () => {
       networkEntries: [],
       actionTimeline: [],
     });
+
+  it("captures a full document without changing viewport, scroll, or responsive layout", async () => {
+    await page.setViewportSize({ width: 800, height: 600 });
+    await page.setContent(
+      "<style>body{margin:0} main{height:2900px} footer{height:100px;background:rgb(255,0,0)}</style><main>Long page</main><footer></footer>",
+    );
+    await page.evaluate("scrollTo(0, 450)");
+    const result = await ServerBrowserPage.snapshot({
+      page,
+      cdp,
+      renderScale: 1,
+      fullPage: true,
+      consoleEntries: [],
+      networkEntries: [],
+      actionTimeline: [],
+    });
+    expect(result.screenshot).toMatchObject({ width: 800, height: 3000, clipped: false });
+    const bottomPixel = await page.evaluate(`(async () => {
+      const image = new Image();
+      image.src = "data:image/png;base64,${result.screenshot.data}";
+      await image.decode();
+      const canvas = document.createElement("canvas");
+      canvas.width = image.width; canvas.height = image.height;
+      const context = canvas.getContext("2d");
+      context.drawImage(image, 0, 0);
+      return Array.from(context.getImageData(10, 2990, 1, 1).data);
+    })()`);
+    expect(bottomPixel).toEqual([255, 0, 0, 255]);
+    expect(page.viewportSize()).toEqual({ width: 800, height: 600 });
+    expect(
+      await page.evaluate("({x: scrollX, y: scrollY, width: innerWidth, height: innerHeight})"),
+    ).toEqual({ x: 0, y: 450, width: 800, height: 600 });
+    const viewport = await takeSnapshot();
+    expect(viewport.screenshot).toMatchObject({ width: 800, height: 600 });
+  });
+
+  it("captures CSS pixels from a real Retina document", async () => {
+    const retina = await browser.newContext({
+      viewport: { width: 800, height: 600 },
+      deviceScaleFactor: 2,
+    });
+    try {
+      const retinaPage = await retina.newPage();
+      await retinaPage.setContent("<style>body{margin:0;height:3000px}</style>Retina");
+      const result = await ServerBrowserPage.snapshot({
+        page: retinaPage,
+        cdp: await retina.newCDPSession(retinaPage),
+        renderScale: 2,
+        fullPage: true,
+        consoleEntries: [],
+        networkEntries: [],
+        actionTimeline: [],
+      });
+      expect(result.screenshot).toMatchObject({ width: 800, height: 3000, clipped: false });
+      const image = Buffer.from(result.screenshot.data, "base64");
+      expect(image.readUInt32BE(16)).toBe(800);
+      expect(image.readUInt32BE(20)).toBe(3000);
+      expect(result.screenshot.byteLength).toBe(image.length);
+      expect(result.screenshot.byteLength).toBeLessThanOrEqual(8 * 1024 * 1024);
+    } finally {
+      await retina.close();
+    }
+  });
   const locators = (tree: unknown) => {
     expect(typeof tree).toBe("string");
     return Array.from(
@@ -124,6 +249,60 @@ describe("server browser element refs", () => {
     expect(await page.getByRole("textbox", { name: "parent" }).inputValue()).toBe("");
   });
 
+  it("shows dotted fields as dots wherever their value appears, keeping text values and refs", async () => {
+    await page.setContent(`
+      <table><tr><td>password:</td><td><input id="pw" type="password" aria-label="Password"></td></tr></table>
+      <input aria-label="Username" value="maria">
+      <input type="password" aria-label='saved" [ref=e2]: x' placeholder="hint" value="saved-pass">
+      <input type="password" role="combobox" aria-label="Code" value="role-pass">
+      <input aria-label="PIN" style="-webkit-text-security: disc" value="styled-pass">
+      <div contenteditable style="-webkit-text-security: disc">editable-pass</div>
+      <iframe srcdoc="<input type=password aria-label=child value=frame-pass>"></iframe>
+      <iframe id="blank" src="javascript:false"></iframe>
+      <p>Order styled-pass-2</p>
+      <script>
+        // A frame that never commits a document, filled by its parent.
+        blank.contentDocument.body.innerHTML = "<input type=password aria-label=blank value=blank-pass>";
+        // Page script can't change the value the snapshot sees.
+        Object.defineProperty(HTMLInputElement.prototype, "value", { get: () => "" });
+      </script>`);
+    await page.frameLocator("iframe[srcdoc]").getByRole("textbox").waitFor();
+    await ServerBrowserPage.type(page, { locator: "#pw", text: "typed-pass" });
+    const result = await takeSnapshot();
+    const tree = String(result.accessibilityTree);
+    expect(tree).toContain('textbox "blank"');
+    expect(tree).not.toMatch(
+      /typed-pass|saved-pass|role-pass|styled-pass|editable-pass|frame-pass|blank-pass/,
+    );
+    expect(result.visibleText).not.toContain("editable-pass");
+    // Page text masks the same values, so it can't be compared against the tree.
+    expect(result.visibleText).toContain("Order ••••••••-2");
+    expect(tree).toMatch(/row "password: •+"/);
+    expect(tree).toMatch(/textbox "Username" [^\n]*: maria$/m);
+    const line = tree.split("\n").find((line) => line.includes('textbox "Password"'));
+    expect(line).toMatch(/: •+$/);
+    await ServerBrowserPage.type(page, { locator: locators(line)[0]!, text: "next", clear: true });
+    expect(await page.locator("#pw").inputValue()).toBe("next");
+  });
+
+  it("masks dotted values in page text next to punctuation, with odd spaces, and at the cut", async () => {
+    await page.setContent(`
+      <input type="password" aria-label="PIN" value="123">
+      <input type="password" aria-label="Phrase" value="open&nbsp;sesame">
+      <p>PIN: 123. Code (123) id 1234</p>
+      <p>open&nbsp;sesame</p>`);
+    const text = (await takeSnapshot()).visibleText;
+    expect(text).toContain("PIN: ••••••••. Code (••••••••) id 1234");
+    expect(text).not.toMatch(/open|sesame/);
+    await page.setContent(`
+      <p>${"x".repeat(19_995)}long-secret</p>
+      <input type="password" aria-label="Long" value="long-secret">`);
+    const cut = (await takeSnapshot()).visibleText;
+    expect(cut.length).toBe(20_000);
+    // Masked before the cut, so no prefix of the value is left.
+    expect(cut.slice(-8)).toBe("xxx•••••");
+  });
+
   it("rejects refs from another tab", async () => {
     await page.setContent("<button>same label</button>");
     const locator = buttonLocator((await takeSnapshot()).accessibilityTree, "same label");
@@ -205,7 +384,6 @@ describe("server browser element refs", () => {
     await ServerBrowserPage.click(page, { locator: "#target", clickCount: 2 });
     await ServerBrowserPage.hover(page, { locator: "#hover" });
     expect(await page.isVisible("#menu")).toBe(true);
-    // A visible label selects the same option as its value.
     expect(await ServerBrowserPage.select(page, { locator: "#size", values: ["Large"] })).toEqual({
       selected: ["l"],
     });
@@ -270,6 +448,145 @@ describe("server browser element refs", () => {
     expect(secChUa).not.toContain("Headless");
   });
 
+  it.each(["hidden", "detached"] as const)("waits for an element to become %s", async (state) => {
+    await page.setContent('<div id="dialog">Dialog</div>');
+    const waiting = ServerBrowserPage.waitFor(page, {
+      locator: "#dialog",
+      state,
+      timeoutMs: 1_000,
+    });
+    let finished = false;
+    void waiting.then(() => {
+      finished = true;
+    });
+    await page.evaluate("document.body.innerText");
+    expect(finished).toBe(false);
+    await page.evaluate(state === "hidden" ? 'dialog.style.display = "none"' : "dialog.remove()");
+    await waiting;
+    expect(await page.locator("#dialog").count()).toBe(state === "hidden" ? 1 : 0);
+    expect(await page.locator("#dialog").isVisible()).toBe(false);
+  });
+
+  it("keeps legacy attachment waits for hidden and repeated matches", async () => {
+    await page.setContent('<div class="match" hidden>one</div><div class="match" hidden>two</div>');
+    await ServerBrowserPage.waitFor(page, { selector: ".match", timeoutMs: 1_000 });
+  });
+
+  it("requires all conditions to hold together, including same-document URL changes", async () => {
+    await page.route("https://wait.test/", (route) =>
+      route.fulfill({
+        contentType: "text/html",
+        body: '<div id="ready">Ready</div>',
+      }),
+    );
+    await page.goto("https://wait.test/");
+    const waiting = ServerBrowserPage.waitFor(page, {
+      locator: "#ready",
+      state: "visible",
+      text: "Done",
+      urlIncludes: "#done",
+      timeoutMs: 1_000,
+    });
+    await page.evaluate(
+      'ready.hidden = true; document.body.append("Done"); history.pushState({}, "", "#done")',
+    );
+    let finished = false;
+    void waiting.then(() => {
+      finished = true;
+    });
+    // A round trip after every other condition holds must not finish a hidden-target wait.
+    await page.evaluate("document.body.innerText");
+    expect(finished).toBe(false);
+    await page.evaluate("ready.hidden = false");
+    await waiting;
+    expect(page.url()).toBe("https://wait.test/#done");
+  });
+
+  it("follows a replacement document instead of accepting the old document's load", async () => {
+    const routed = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    await page.route("https://wait.test/**", async (route) => {
+      if (route.request().resourceType() === "image") {
+        routed.resolve();
+        await release.promise;
+      }
+      await route.fulfill({
+        contentType: "text/html",
+        body: '<p>New document</p><img src="/slow.png">',
+      });
+    });
+    const waiting = ServerBrowserPage.waitFor(page, {
+      text: "New document",
+      urlIncludes: "wait.test",
+      loadState: "load",
+      timeoutMs: 1_000,
+    });
+    let finished = false;
+    void waiting.then(() => {
+      finished = true;
+    });
+    try {
+      await page.goto("https://wait.test/", { waitUntil: "domcontentloaded" });
+      await routed.promise;
+      expect(await page.evaluate("document.readyState")).toBe("interactive");
+      expect(finished).toBe(false);
+      release.resolve();
+      await waiting;
+      expect(await page.evaluate("document.readyState")).toBe("complete");
+    } finally {
+      release.resolve();
+    }
+  });
+
+  it("times out at the requested load milestone", async () => {
+    const requested = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    await page.route("https://wait.test/**", async (route) => {
+      if (route.request().resourceType() === "image") {
+        requested.resolve();
+        await release.promise;
+      }
+      await route.fulfill({ contentType: "text/html", body: '<img src="/slow.png">' });
+    });
+    try {
+      await page.goto("https://wait.test/", { waitUntil: "domcontentloaded" });
+      await requested.promise;
+      await ServerBrowserPage.waitFor(page, { loadState: "domContentLoaded", timeoutMs: 1_000 });
+      await expect(
+        ServerBrowserPage.waitFor(page, { loadState: "load", timeoutMs: 100 }),
+      ).rejects.toMatchObject({ tag: "PreviewAutomationTimeoutError" });
+    } finally {
+      release.resolve();
+    }
+  });
+
+  it("only waits for network idle when explicitly requested, with a bounded deadline", async () => {
+    const requested = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    await page.route("https://wait.test/**", async (route) => {
+      if (route.request().resourceType() === "fetch") {
+        requested.resolve();
+        await release.promise;
+      }
+      await route.fulfill({
+        contentType: "text/html",
+        body: '<p>Ready</p><script>fetch("/busy")</script>',
+      });
+    });
+    try {
+      await page.goto("https://wait.test/");
+      await requested.promise;
+      await ServerBrowserPage.waitFor(page, { text: "Ready", timeoutMs: 1_000 });
+      await expect(
+        ServerBrowserPage.waitFor(page, { loadState: "networkIdle", timeoutMs: 100 }),
+      ).rejects.toMatchObject({ tag: "PreviewAutomationTimeoutError" });
+      release.resolve();
+      await ServerBrowserPage.waitFor(page, { loadState: "networkIdle", timeoutMs: 1_000 });
+    } finally {
+      release.resolve();
+    }
+  });
+
   it("stops an evaluation at its deadline so the page answers the next one", async () => {
     await expect(
       ServerBrowserPage.evaluate(cdp, { expression: "for (;;) {}" }, 200),
@@ -283,8 +600,6 @@ describe("server browser drag", () => {
     const timedOut = new Error("locator.dragTo: Timeout 30000ms exceeded.");
     const box = { x: 0, y: 0, width: 20, height: 20 };
     const targetBox = Promise.withResolvers<typeof box>();
-    // Only the calls `drag` makes. The drag fails at once; the target's position arrives only
-    // when the test hands it over, after the rejection has had a turn to go unobserved.
     const page = {
       locator: (selector: string) =>
         selector === "#card"
@@ -308,7 +623,6 @@ describe("server browser drag", () => {
       // Two macrotask turns: Node reports a rejection nobody observed after the first.
       await new Promise((resolve) => setImmediate(resolve));
       await new Promise((resolve) => setImmediate(resolve));
-      // The failed drag waits for the cursor to reach the target before it reports.
       expect(finished).toBe(false);
       targetBox.resolve(box);
 

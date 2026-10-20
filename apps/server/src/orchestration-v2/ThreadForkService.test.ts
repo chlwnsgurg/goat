@@ -11,7 +11,8 @@ import {
   ProviderThreadId,
   RunId,
   ThreadId,
-} from "@t3tools/contracts";
+  type ThreadPullRequestLink,
+} from "@goat/contracts";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 
@@ -91,9 +92,12 @@ function makeSourceRun(status: OrchestrationV2Run["status"]): OrchestrationV2Run
   };
 }
 
-function makeSourceProjection(sourceRun: OrchestrationV2Run): OrchestrationV2ThreadProjection {
+function makeSourceProjection(
+  sourceRun: OrchestrationV2Run,
+  sourceThread: OrchestrationV2AppThread = makeSourceThread(),
+): OrchestrationV2ThreadProjection {
   return {
-    thread: makeSourceThread(),
+    thread: sourceThread,
     runs: [sourceRun],
     attempts: [],
     nodes: [],
@@ -114,11 +118,16 @@ function makeSourceProjection(sourceRun: OrchestrationV2Run): OrchestrationV2Thr
   };
 }
 
-const planFork = (sourceRun: OrchestrationV2Run) =>
+const planFork = (
+  sourceRun: OrchestrationV2Run,
+  options: { readonly sideChat?: boolean; readonly sourceThread?: OrchestrationV2AppThread } = {},
+  sourceProjection = makeSourceProjection(sourceRun, options.sourceThread),
+) =>
   Effect.gen(function* () {
     const service = yield* ThreadForkService.ThreadForkServiceV2;
     return yield* service.plan({
-      sourceProjection: makeSourceProjection(sourceRun),
+      sourceProjection,
+      ...(options.sideChat === undefined ? {} : { sideChat: options.sideChat }),
       sourceRun,
       sourceProviderThread: undefined,
       canonicalSourcePoint: {
@@ -189,6 +198,77 @@ it.effect("forks from a usage-limited failed run", () =>
   }),
 );
 
+it.effect("preserves pull request context without inheriting any watches", () =>
+  Effect.gen(function* () {
+    const sourceRun = makeSourceRun("completed");
+    const watch = {
+      startedAt: DateTime.formatIso(sourceCreatedAt),
+      headSha: "source-head",
+      failedChecks: ["lint"],
+      passed: false,
+      passedChecks: [],
+      remarksThrough: DateTime.formatIso(snoozedAt),
+      remarkIds: ["review-1"],
+      conflicting: true,
+      wakes: 2,
+    };
+    const links = (["agent", "stack", "manual", "stack-dismissed"] as const).map(
+      (source, index) =>
+        ({
+          host: "github.com",
+          repository: "example/repo",
+          number: index + 1,
+          url: `https://github.com/example/repo/pull/${index + 1}`,
+          source,
+          linkedAt: DateTime.formatIso(sourceCreatedAt),
+          snapshot: {
+            state: "open",
+            title: `Pull request ${index + 1}`,
+            headBranch: `feature-${index + 1}`,
+            baseBranch: "main",
+            isDraft: false,
+            updatedAt: null,
+            syncedAt: DateTime.formatIso(snoozedAt),
+          },
+          stack: {
+            kind: "native",
+            id: "stack-1",
+            number: 1,
+            url: "https://github.com/example/repo/stack/1",
+            base: "main",
+            layers: [{ number: 1, headBranch: "feature-1", state: "open" }],
+          },
+        }) satisfies ThreadPullRequestLink,
+    );
+    const watchedLinks: ReadonlyArray<ThreadPullRequestLink> = links.map((link, index) =>
+      index < 2 ? { ...link, watch } : link,
+    );
+    const legacyLink = {
+      projectId: makeSourceThread().projectId,
+      repository: "example/repo",
+      number: 1,
+      url: links[0]!.url,
+    };
+    const sourceProjection = {
+      ...makeSourceProjection(sourceRun),
+      thread: {
+        ...makeSourceThread(),
+        pullRequests: watchedLinks,
+        linkedPullRequest: legacyLink,
+        branchPullRequest: legacyLink,
+      },
+    };
+    const result = yield* planFork(sourceRun, {}, sourceProjection);
+
+    assert.deepEqual(result.targetThread.pullRequests, links);
+    assert.deepEqual(result.targetThread.linkedPullRequest, legacyLink);
+    assert.deepEqual(result.targetThread.branchPullRequest, legacyLink);
+    assert.deepEqual(sourceProjection.thread.pullRequests, watchedLinks);
+    assert.deepEqual(sourceProjection.thread.pullRequests[0]?.watch, watch);
+    assert.deepEqual(sourceProjection.thread.pullRequests[1]?.watch, watch);
+  }),
+);
+
 it.effect("rejects in-progress and rolled-back fork sources", () =>
   Effect.gen(function* () {
     for (const status of ["running", "rolled_back"] as const) {
@@ -199,5 +279,26 @@ it.effect("rejects in-progress and rolled-back fork sources", () =>
       assert.equal(error.targetThreadId, targetThreadId);
       assert.equal(error.cause, ThreadForkService.forkableSourceRunStatusError(sourceRun));
     }
+  }),
+);
+
+it.effect("makes a side-chat fork a side chat of its source", () =>
+  Effect.gen(function* () {
+    const sideChat = yield* planFork(makeSourceRun("completed"), { sideChat: true });
+    assert.equal(sideChat.targetThread.sideChatOf, sourceThreadId);
+
+    const fork = yield* planFork(makeSourceRun("completed"));
+    assert.isUndefined(fork.targetThread.sideChatOf);
+  }),
+);
+
+it.effect("does not carry side-chat status into an ordinary fork of a side chat", () =>
+  Effect.gen(function* () {
+    const sourceThread = {
+      ...makeSourceThread(),
+      sideChatOf: ThreadId.make("thread:side-chat-parent"),
+    };
+    const fork = yield* planFork(makeSourceRun("completed"), { sourceThread });
+    assert.isUndefined(fork.targetThread.sideChatOf);
   }),
 );

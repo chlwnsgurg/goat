@@ -1,14 +1,12 @@
 /**
- * Muse Code instance settings. Shared by the server driver and the client
- * settings form, so it holds only browser-safe schema code.
- *
- * @module provider-muse/settings
+ * Shared by the server driver and the client settings form, so it holds only browser-safe schema
+ * code.
  */
 import {
   CustomModelSetting,
   makeBinaryPathSetting,
   makeProviderSettingsSchema,
-} from "@t3tools/contracts";
+} from "@goat/contracts";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 

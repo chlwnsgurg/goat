@@ -1,14 +1,10 @@
 #!/usr/bin/env node
-// This CLI uses Node argument parsing and random ordering at the application boundary.
 // @effect-diagnostics nodeBuiltinImport:off
-// Run with --model <configured-model> --out /tmp/title-eval.
-// Pass --baseline /tmp/previous-eval/results.json to compare two generation runs.
-// Add --initial to evaluate only the opening request.
 import * as NodeUtil from "node:util";
 import * as NodeCrypto from "node:crypto";
 import * as FetchHttpClient from "effect/http/FetchHttpClient";
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import { CodexSettings, ProviderInstanceId } from "@t3tools/contracts";
+import { CodexSettings, ProviderInstanceId } from "@goat/contracts";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Duration from "effect/Duration";
@@ -20,7 +16,7 @@ import { threadTitleEvaluationCases } from "./threadTitleEvaluationCases.ts";
 import {
   formatThreadTitleContext,
   type ThreadTitleMessage,
-} from "@t3tools/provider-core/server/threadTitleContext";
+} from "@goat/provider-core/server/threadTitleContext";
 import * as ThreadTitleLinks from "../src/textGeneration/ThreadTitleLinks.ts";
 import * as SourceControlProviderRegistry from "../src/sourceControl/SourceControlProviderRegistry.ts";
 import * as SourceControlBuiltInDrivers from "../src/sourceControl/builtInDrivers.ts";
@@ -62,7 +58,7 @@ await Effect.runPromise(
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
-    const cwd = yield* fs.makeTempDirectoryScoped({ prefix: "t3-title-evaluation-" });
+    const cwd = yield* fs.makeTempDirectoryScoped({ prefix: "goat-title-evaluation-" });
     const generation = yield* CodexTextGeneration.makeCodexTextGeneration(
       yield* decodeSettings({}),
     );
@@ -147,7 +143,6 @@ await Effect.runPromise(
         ProcessRunner.layer,
         SourceControlProviderRegistry.layer.pipe(
           Layer.provide(SourceControlBuiltInDrivers.layer),
-          // Default settings: no saved Bitbucket token, gh's own GitHub account choice.
           Layer.provide(ServerSettings.layerTest()),
           Layer.provide(VcsDriverRegistry.layer.pipe(Layer.provide(VcsProjectConfig.layer))),
           Layer.provide(GitVcsDriver.layer),
@@ -156,7 +151,7 @@ await Effect.runPromise(
         ),
       ).pipe(
         Layer.provideMerge(
-          ServerConfig.layerTest(process.cwd(), { prefix: "t3-title-evaluation-state-" }),
+          ServerConfig.layerTest(process.cwd(), { prefix: "goat-title-evaluation-state-" }),
         ),
         Layer.provideMerge(NodeServices.layer),
       ),

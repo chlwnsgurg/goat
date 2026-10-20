@@ -1,7 +1,7 @@
 import type {
   RelayAgentActivityState,
   RelayDeviceRegistrationRequest,
-} from "@t3tools/contracts/relay";
+} from "@goat/contracts/relay";
 import type { SignedApnsDeliveryJob } from "./apnsDeliveryJobs.ts";
 import * as NodeCryptoLayer from "@effect/platform-node/NodeCrypto";
 import { describe, expect, it } from "@effect/vitest";
@@ -483,9 +483,6 @@ describe("MobileRegistrations", () => {
           },
         });
 
-        // Activities are armed by the app in the foreground; a device
-        // registration alone never remote-starts one, even when work is
-        // already active and a push-to-start token is on file.
         expect(result).toEqual({ ok: true });
         expect(registeredDevices).toHaveLength(1);
         expect(queuedStarts).toEqual([]);

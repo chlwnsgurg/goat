@@ -1,5 +1,5 @@
-import type { EnvironmentId, ProjectId } from "@t3tools/contracts";
-import { CircleIcon } from "lucide-react";
+import type { EnvironmentId, ProjectId } from "@goat/contracts";
+import { CircleIcon } from "~/components/solar";
 import { Children, isValidElement, type ReactElement, type ReactNode } from "react";
 import { describe, expect, it, vi } from "vite-plus/test";
 
@@ -28,7 +28,6 @@ function findValueChange(
   return undefined;
 }
 
-/** The nested radio-group component element carrying this label, invoked so its group shows. */
 function findLabeledGroup(node: ReactNode, label: string): ReactNode {
   for (const child of Children.toArray(node)) {
     if (!isValidElement(child)) continue;

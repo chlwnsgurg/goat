@@ -15,7 +15,7 @@ Neither path depends on the connected environment or an RPC.
 ## What the build collects
 
 The generator follows installed production and optional dependencies, including dependencies of
-workspace packages, and omits first-party `@t3tools/*` packages. The web manifest starts from the
+workspace packages, and omits first-party `@goat/*` packages. The web manifest starts from the
 web, server, and desktop package manifests. The mobile manifest starts from the mobile package
 manifest. During the web bundle, the generator also checks emitted module ids to catch a bundled
 npm import missing from a package manifest.
@@ -59,6 +59,10 @@ source tree already carries an intrinsic license file that should remain beside 
 relative to the config file. `bundles` controls which generated manifests include the entry and
 supplies the label shown to users. Use `includeInBundles` when those differ, such as an optional
 server tool that should appear in both client manifests but is not bundled into either client.
+
+The `agent-device` and `expo-device-hub` custom notices take their versions from the
+[installer pins](../../apps/server/src/device/deviceToolVersions.json). Keep their package names
+in the config; their versions do not need manual updates.
 
 Use `packageOverrides` only when an installed npm archive omits its notice or has incorrect
 metadata:

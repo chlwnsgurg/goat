@@ -3,7 +3,7 @@ import type {
   OrchestrationV2ThreadProjection,
   ProviderReplayTranscript,
   ThreadId,
-} from "@t3tools/contracts";
+} from "@goat/contracts";
 
 import type { OrchestratorV2ScenarioResult } from "../../OrchestratorScenario.ts";
 import {
@@ -26,10 +26,6 @@ function projectionById(
   return projection;
 }
 
-/**
- * Codex names each v2 agent by its path from the root. The model picks the
- * leaf names, so the check is that each path extends its parent's by one segment.
- */
 function assertCompletedProviderNativeSubagent(input: {
   readonly projection: OrchestrationV2ThreadProjection;
   readonly parentPath: string;

@@ -1,5 +1,5 @@
 import { assert, describe, it } from "@effect/vitest";
-import { ProviderDriverKind } from "@t3tools/contracts";
+import { ProviderDriverKind } from "@goat/contracts";
 import * as Deferred from "effect/Deferred";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
@@ -172,7 +172,6 @@ describe("withMetrics", () => {
       );
       yield* Deferred.await(started);
       yield* TestClock.adjust(Duration.millis(10));
-      // A backward wall-clock correction must not shorten the measured duration.
       yield* TestClock.setTime(0);
       yield* Deferred.succeed(finish, undefined);
       yield* Fiber.join(fiber);

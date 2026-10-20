@@ -14,19 +14,14 @@ import {
 } from "react-native";
 
 import { cn } from "../lib/cn";
-import { AppText as Text } from "./AppText";
-import { SymbolView } from "./AppSymbol";
-import { useAndroidControlSizing } from "./useAndroidControlSizing";
+import { AppText as Text } from "./ui/AppText";
+import { SymbolView } from "./ui/AppSymbol";
+import { useAndroidControlSizing } from "./ui/useAndroidControlSizing";
 
 const COMPOSER_TOOLBAR_GAP = 8;
 const COMPOSER_TOOLBAR_FADE_WIDTH = 18;
 const COMPOSER_TOOLBAR_SCROLL_EPSILON = 4;
 
-/**
- * Quiet inline composer control used inside cards and their context rows.
- * Unlike ComposerToolbarButton, this does not draw another pill inside the
- * composer surface, so model and workspace controls read as part of the card.
- */
 export function ComposerInlineControl(props: {
   readonly accessibilityHint?: string;
   readonly accessibilityLabel?: string;
@@ -75,7 +70,7 @@ export function ComposerInlineControl(props: {
       ) : null}
       <Text
         className={cn(
-          "shrink text-sm font-t3-medium",
+          "shrink text-sm font-goat-medium",
           props.emphasized || props.selected ? "text-foreground" : "text-foreground-muted",
         )}
         numberOfLines={1}
@@ -123,11 +118,8 @@ export function ComposerToolbarRow(props: {
 export function ComposerToolbarScroller(props: {
   readonly children: ReactNode;
   readonly align?: "start" | "end";
-  /** Only for non-Uniwind surfaces such as the native terminal palette. */
   readonly fadeOpaque?: string;
-  /** Only for non-Uniwind surfaces such as the native terminal palette. */
   readonly fadeTransparent?: string;
-  /** Semantic Uniwind surface behind the toolbar. Defaults to card. */
   readonly fadeSurface?: "card" | "sheet";
   readonly contentPaddingRight?: number;
 }) {
@@ -232,7 +224,7 @@ export function ComposerActionButton(props: {
   readonly icon: ComponentProps<typeof SymbolView>["name"];
   readonly onPress: () => void;
   readonly variant?: "primary" | "danger";
-  // Forwarded so a ControlPillMenu can drive this button as its long-press
+  // Forwarded so a Menu can drive this button as its long-press
   // anchor: Android injects onLongPress, iOS injects onTouchStart and onPress.
   readonly onLongPress?: PressableProps["onLongPress"];
   readonly onTouchStart?: PressableProps["onTouchStart"];
@@ -255,10 +247,10 @@ export function ComposerActionButton(props: {
         className={cn(
           "items-center justify-center rounded-full",
           props.variant === "danger"
-            ? "bg-danger"
+            ? "bg-composer-stop"
             : props.disabled
               ? "bg-primary/15"
-              : "bg-primary",
+              : "bg-composer-send",
         )}
       >
         <SymbolView
@@ -266,7 +258,9 @@ export function ComposerActionButton(props: {
           size={smallIconSize}
           weight="semibold"
           tintColorClassName={
-            props.variant === "danger" ? "accent-danger-foreground" : "accent-primary-foreground"
+            props.variant === "danger"
+              ? "accent-composer-stop-foreground"
+              : "accent-primary-foreground"
           }
           type="monochrome"
         />
@@ -309,10 +303,6 @@ export function ComposerToolbarButton(props: {
       disabled={props.disabled}
       onPress={props.onPress}
       className={cn(
-        // Default width cap lives in the class chain (not the inline style)
-        // so callers can lift it with max-w-full — flex-filling pills in the
-        // thread composer stretch to the row's edge. The numeric maxWidth
-        // prop still wins via the inline style below.
         "h-11 max-w-[172px] flex-row items-center justify-center rounded-full border active:opacity-70",
         variant === "primary" && "shadow-lg shadow-adaptive-black-a10-a25 disabled:shadow-none",
         isCircle ? "w-11" : "gap-2 px-3.5",
@@ -358,7 +348,7 @@ export function ComposerToolbarButton(props: {
       {props.label ? (
         <Text
           className={cn(
-            "shrink text-center text-sm font-t3-bold",
+            "shrink text-center text-sm font-goat-bold",
             variant === "primary"
               ? props.disabled
                 ? "text-foreground-muted"

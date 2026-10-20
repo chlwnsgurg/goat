@@ -4,7 +4,7 @@ import {
   SLACK_CHANNEL_WS_METHODS,
   WS_METHODS,
   type WsRpcGroup,
-} from "@t3tools/contracts";
+} from "@goat/contracts";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as References from "effect/References";
@@ -16,13 +16,13 @@ import { rpcRequestDuration, rpcRequestsTotal, withMetrics } from "./Metrics.ts"
 type WsRpcMethod = RpcGroup.Rpcs<typeof WsRpcGroup>["_tag"];
 
 /**
- * The `rpc.aggregate` span attribute of every WebSocket RPC. Trace queries and dashboards group by
- * these labels, so they keep their historical values even where they differ from the method
- * prefix. Adding an RPC to `WsRpcGroup` without a label is a type error.
+ * Trace queries and dashboards group by these labels, so they keep their historical values
+ * even where they differ from the method prefix.
  */
 const RPC_AGGREGATES = {
   [ORCHESTRATION_V2_WS_METHODS.dispatchCommand]: "orchestrationV2",
   [ORCHESTRATION_V2_WS_METHODS.getWorkflowScript]: "orchestration",
+  [ORCHESTRATION_V2_WS_METHODS.stopWorkflow]: "orchestration",
   [ORCHESTRATION_V2_WS_METHODS.getTurnItem]: "orchestration",
   [ORCHESTRATION_V2_WS_METHODS.getTurnDiff]: "orchestration",
   [ORCHESTRATION_V2_WS_METHODS.getFullThreadDiff]: "orchestration",
@@ -35,6 +35,7 @@ const RPC_AGGREGATES = {
   [ORCHESTRATION_V2_WS_METHODS.subscribeArchivedShell]: "orchestration",
   [ORCHESTRATION_V2_WS_METHODS.subscribeShell]: "orchestrationV2",
   [ORCHESTRATION_V2_WS_METHODS.subscribeThread]: "orchestrationV2",
+  [ORCHESTRATION_V2_WS_METHODS.subscribeCommandOutput]: "orchestrationV2",
   [WS_METHODS.projectsMutate]: "orchestration",
   [WS_METHODS.serverProbe]: "server",
   [WS_METHODS.serverGetConfig]: "server",
@@ -55,6 +56,10 @@ const RPC_AGGREGATES = {
   [WS_METHODS.providerInstallCancel]: "provider",
   [WS_METHODS.providerInstallSubscribe]: "provider",
   [WS_METHODS.providerInstallRemove]: "provider",
+  [WS_METHODS.providerHostMatrix]: "provider",
+  [WS_METHODS.providerHostSyncStart]: "provider",
+  [WS_METHODS.providerHostSyncStatus]: "provider",
+  [WS_METHODS.providerHostSyncCancel]: "provider",
   [WS_METHODS.serverUpdateServer]: "server",
   [WS_METHODS.serverUpdateServerWithProgress]: "server",
   [WS_METHODS.serverCommitDesktopUpdate]: "server",
@@ -62,6 +67,8 @@ const RPC_AGGREGATES = {
   [WS_METHODS.serverRemoveKeybinding]: "server",
   [WS_METHODS.serverRunStorageCleanup]: "server",
   [WS_METHODS.serverGetStorageCleanupReport]: "server",
+  [WS_METHODS.serverGetWorktreesDirectoryStatus]: "server",
+  [WS_METHODS.serverGetDatabaseStorage]: "server",
   [WS_METHODS.serverGetSettings]: "server",
   [WS_METHODS.serverUpdateSettings]: "server",
   [WS_METHODS.serverSearchAcpRegistry]: "server",
@@ -79,9 +86,11 @@ const RPC_AGGREGATES = {
   [WS_METHODS.serverGetTraceDiagnostics]: "server",
   [WS_METHODS.serverGetProcessDiagnostics]: "server",
   [WS_METHODS.serverGetHostResources]: "server",
+  [WS_METHODS.serverGetHostStatus]: "server",
   [WS_METHODS.serverGetProcessResourceHistory]: "server",
   [WS_METHODS.serverGetResourceTelemetryHistory]: "server",
   [WS_METHODS.serverRetryResourceTelemetry]: "server",
+  [WS_METHODS.serverCheckOtlpEndpoint]: "server",
   [WS_METHODS.serverGetUsageSummary]: "server",
   [WS_METHODS.serverRefreshUsageRates]: "server",
   [WS_METHODS.serverSignalProcess]: "server",
@@ -97,8 +106,23 @@ const RPC_AGGREGATES = {
   [WS_METHODS.scheduledTasksRotateWebhookToken]: "scheduledTasks",
   [WS_METHODS.scheduledTasksListWebhookDeliveries]: "scheduledTasks",
   [WS_METHODS.scheduledTasksGetWebhookDelivery]: "scheduledTasks",
+  [WS_METHODS.remoteLaunchesList]: "remoteLaunches",
+  [WS_METHODS.cloudMachinesList]: "cloudMachines",
+  [WS_METHODS.cloudAgentsListRuns]: "cloudAgents",
+  [WS_METHODS.cloudMachinesConfigure]: "cloudMachines",
+  [WS_METHODS.cloudMachinesDisconnect]: "cloudMachines",
+  [WS_METHODS.cloudMachinesCreate]: "cloudMachines",
+  [WS_METHODS.cloudMachinesStop]: "cloudMachines",
+  [WS_METHODS.cloudMachinesResume]: "cloudMachines",
+  [WS_METHODS.cloudMachinesDelete]: "cloudMachines",
+  [WS_METHODS.cloudMachinesForget]: "cloudMachines",
+  [WS_METHODS.cloudMachinesDismissUnconfirmed]: "cloudMachines",
+  [WS_METHODS.cloudMachinesEnsureReady]: "cloudMachines",
   [WS_METHODS.secretsAnswerRequest]: "secrets",
+  [WS_METHODS.handoffsOpen]: "handoffs",
+  [WS_METHODS.handoffsRespond]: "handoffs",
   [CHANNEL_GATEWAY_WS_METHODS.ensureBot]: "channel",
+  [CHANNEL_GATEWAY_WS_METHODS.getBotStatus]: "channel",
   [CHANNEL_GATEWAY_WS_METHODS.ingest]: "channel",
   [CHANNEL_GATEWAY_WS_METHODS.getTask]: "channel",
   [CHANNEL_GATEWAY_WS_METHODS.listTasks]: "channel",
@@ -122,6 +146,8 @@ const RPC_AGGREGATES = {
   [WS_METHODS.pullRequestsPreview]: "pull-requests",
   [WS_METHODS.pullRequestsChecks]: "pull-requests",
   [WS_METHODS.pullRequestsActivity]: "pull-requests",
+  [WS_METHODS.pullRequestsReviewGuide]: "pull-requests",
+  [WS_METHODS.pullRequestsGenerateReviewGuide]: "pull-requests",
   [WS_METHODS.pullRequestsThreadComments]: "pull-requests",
   [WS_METHODS.pullRequestsDiffFileContents]: "pull-requests",
   [WS_METHODS.pullRequestsFilesViewed]: "pull-requests",
@@ -157,6 +183,7 @@ const RPC_AGGREGATES = {
   [WS_METHODS.projectsCreateNew]: "orchestration",
   [WS_METHODS.shellOpenInEditor]: "workspace",
   [WS_METHODS.filesystemBrowse]: "workspace",
+  [WS_METHODS.filesystemGetMetadata]: "workspace",
   [WS_METHODS.agentSessionsScan]: "workspace",
   [WS_METHODS.agentSessionsImport]: "workspace",
   [WS_METHODS.assetsCreateUrl]: "workspace",
@@ -183,6 +210,12 @@ const RPC_AGGREGATES = {
   [WS_METHODS.vcsCreateRef]: "vcs",
   [WS_METHODS.vcsSwitchRef]: "vcs",
   [WS_METHODS.vcsInit]: "vcs",
+  [WS_METHODS.sshHostStatus]: "ssh",
+  [WS_METHODS.sshHostHandoffProgress]: "ssh",
+  [WS_METHODS.sshHostProbe]: "ssh",
+  [WS_METHODS.sshHostTrust]: "ssh",
+  [WS_METHODS.sshHostPrepare]: "ssh",
+  [WS_METHODS.sshHostForget]: "ssh",
   [WS_METHODS.sshWorkspaceLaunch]: "sshWorkspace",
   [WS_METHODS.sshWorkspaceFetchBack]: "sshWorkspace",
   [WS_METHODS.reviewGetDiffPreview]: "review",
@@ -239,19 +272,13 @@ const RPC_METHODS_WITH_TRACING_DISABLED: ReadonlySet<string> = new Set([
 ]);
 
 /**
- * Records each WebSocket RPC's span and request metrics. `ws.ts` adds it to the server's group
- * after `RpcScopeAuthorization`, so it wraps authorization and also records rejected calls.
+ * `ws.ts` adds it to the server's group after `RpcScopeAuthorization`, so it wraps
+ * authorization and also records rejected calls.
  */
 export class RpcInstrumentation extends RpcMiddleware.Service<RpcInstrumentation>()(
-  "t3/server/RpcInstrumentation",
+  "goat/server/RpcInstrumentation",
 ) {}
 
-/**
- * Wraps each WebSocket RPC call in its `ws.rpc.<method>` span and records its request counter and
- * duration. For a stream RPC, the middleware receives the whole stream run, so the span and the
- * metrics cover the subscription until it ends, fails, or is interrupted. Methods in
- * `RPC_METHODS_WITH_TRACING_DISABLED` record metrics but no spans, for the call or anything it runs.
- */
 export const rpcInstrumentationLayer = Layer.succeed(RpcInstrumentation)((effect, { rpc }) => {
   const method = rpc._tag;
   const measured = effect.pipe(

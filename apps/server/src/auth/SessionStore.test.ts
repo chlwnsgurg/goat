@@ -1,5 +1,5 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import { AuthStandardClientScopes, EnvironmentId } from "@t3tools/contracts";
+import { AuthSessionId, AuthStandardClientScopes, EnvironmentId } from "@goat/contracts";
 import { expect, it } from "@effect/vitest";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
@@ -34,7 +34,9 @@ const layerServerConfig = (overrides?: Partial<ServerConfig.ServerConfig["Servic
         ...overrides,
       } satisfies ServerConfig.ServerConfig["Service"];
     }),
-  ).pipe(Layer.provide(ServerConfig.layerTest(process.cwd(), { prefix: "t3-auth-session-test-" })));
+  ).pipe(
+    Layer.provide(ServerConfig.layerTest(process.cwd(), { prefix: "goat-auth-session-test-" })),
+  );
 
 const layerServerEnvironment = (environmentId: EnvironmentId) =>
   Layer.succeed(ServerEnvironment.ServerEnvironmentIdentity, {
@@ -141,7 +143,6 @@ it.layer(NodeServices.layer)("SessionStore.layer", (it) => {
         yield* Fiber.join(first);
         yield* Fiber.join(second);
         expect(yield* Deferred.isDone(ownerInvalidated)).toBe(false);
-        // A connection whose upgrade authenticated just before revocation must also stop.
         yield* sessions.awaitInvalidation(client.sessionId);
       }).pipe(Effect.scoped, Effect.provide(Layer.merge(layerSessionStore(), TestClock.layer()))),
   );
@@ -191,8 +192,8 @@ it.layer(NodeServices.layer)("SessionStore.layer", (it) => {
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const token = "reusable-dev-auth-token-that-is-long-enough";
-      const baseA = yield* fs.makeTempDirectoryScoped({ prefix: "t3-dev-auth-a-" });
-      const baseB = yield* fs.makeTempDirectoryScoped({ prefix: "t3-dev-auth-b-" });
+      const baseA = yield* fs.makeTempDirectoryScoped({ prefix: "goat-dev-auth-a-" });
+      const baseB = yield* fs.makeTempDirectoryScoped({ prefix: "goat-dev-auth-b-" });
       const layerA = yield* makeDiskSessionStoreLayer(baseA, token);
       const fromA = yield* Effect.gen(function* () {
         const sessions = yield* SessionStore.SessionStore;
@@ -236,7 +237,7 @@ it.layer(NodeServices.layer)("SessionStore.layer", (it) => {
   it.effect("invalidates old dev credentials and tickets after rotation or removal", () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
-      const baseDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-dev-auth-rotation-" });
+      const baseDir = yield* fs.makeTempDirectoryScoped({ prefix: "goat-dev-auth-rotation-" });
       const oldToken = "old-reusable-dev-auth-token-that-is-long-enough";
       const newToken = "new-reusable-dev-auth-token-that-is-long-enough";
       const layerInitial = yield* makeDiskSessionStoreLayer(baseDir, oldToken);
@@ -350,7 +351,6 @@ it.layer(NodeServices.layer)("SessionStore.layer", (it) => {
       const secrets = yield* ServerSecretStore.ServerSecretStore;
       const legacyScopes = ["orchestration:read", "terminal:operate", "review:write"] as const;
       const issued = yield* sessions.issue({ subject: "one-time-token", scopes: legacyScopes });
-      // Accept prerelease v2 credentials without widening their recorded grant.
       const [encodedPayload] = issued.token.split(".");
       const currentClaims = base64UrlDecodeUtf8(encodedPayload!);
       expect(currentClaims).toContain('"v":1');
@@ -389,6 +389,12 @@ it.layer(NodeServices.layer)("SessionStore.layer", (it) => {
         subject: "repository-failure",
       });
       const websocket = yield* sessions.issueWebSocketToken(issued.sessionId);
+      // This repository rejects getById; live reauthorization reads only the committed Ref, so a
+      // miss fails as unknown without SQL (memory transactions call it holding the writer).
+      expect(yield* sessions.readActiveScopes(issued.sessionId)).toEqual(AuthStandardClientScopes);
+      expect(
+        (yield* Effect.flip(sessions.readActiveScopes(AuthSessionId.make("never-issued"))))._tag,
+      ).toBe("UnknownSessionTokenError");
 
       const sessionError = yield* Effect.flip(sessions.verify(issued.token));
       const websocketError = yield* Effect.flip(sessions.verifyWebSocketToken(websocket.token));
@@ -845,7 +851,6 @@ it.layer(NodeServices.layer)("SessionStore.layer", (it) => {
       });
       expect((yield* readRow)[0]).toEqual({ surface: "mobile", appVersion: "1.2.0" });
 
-      // A partial report (old or minimal client) must not null out stored data.
       yield* sessions.recordClientConnection(issued.sessionId, { appVersion: "1.3.0" });
       expect((yield* readRow)[0]).toEqual({ surface: "mobile", appVersion: "1.3.0" });
 
@@ -854,3 +859,179 @@ it.layer(NodeServices.layer)("SessionStore.layer", (it) => {
     }).pipe(Effect.provide(Layer.mergeAll(layerSessionStore(), SqlitePersistence.layerMemory))),
   );
 });
+
+it.effect("reads live scopes without a token and fences replacement, revocation and expiry", () =>
+  Effect.gen(function* () {
+    const store = yield* SessionStore.SessionStore;
+    const first = yield* store.issue({
+      subject: "memory-client",
+      method: "bearer-access-token",
+      scopes: ["memory:read", "memory:write"],
+    });
+    expect(yield* store.readActiveScopes(first.sessionId)).toEqual(["memory:read", "memory:write"]);
+    const second = yield* store.issue({
+      subject: "memory-client",
+      method: "bearer-access-token",
+      scopes: ["memory:read"],
+      replaceSessionId: first.sessionId,
+      ttl: Duration.seconds(1),
+    });
+    expect((yield* store.readActiveScopes(first.sessionId).pipe(Effect.flip))._tag).toBe(
+      "UnknownSessionTokenError",
+    );
+    expect(yield* store.readActiveScopes(second.sessionId)).toEqual(["memory:read"]);
+    yield* TestClock.adjust(Duration.seconds(1));
+    expect((yield* store.readActiveScopes(second.sessionId).pipe(Effect.flip))._tag).toBe(
+      "SessionTokenExpiredError",
+    );
+    const third = yield* store.issue({ scopes: ["memory:write"] });
+    yield* store.revoke(third.sessionId);
+    expect((yield* store.readActiveScopes(third.sessionId).pipe(Effect.flip))._tag).toBe(
+      "UnknownSessionTokenError",
+    );
+  }).pipe(Effect.provide(layerSessionStore().pipe(Layer.provideMerge(NodeServices.layer)))),
+);
+
+it.effect("serves live scopes for sessions another process issued after startup", () =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const baseDir = yield* fs.makeTempDirectoryScoped({ prefix: "goat-session-read-through-" });
+    const running = yield* makeDiskSessionStoreLayer(baseDir);
+    // A separate store on the same database stands in for `goat auth session issue`; a local
+    // memo map keeps it from reusing the running store's instance.
+    const cli = yield* makeDiskSessionStoreLayer(baseDir);
+    const fromCli = <A, E>(
+      use: (store: SessionStore.SessionStore["Service"]) => Effect.Effect<A, E>,
+    ) =>
+      SessionStore.SessionStore.pipe(
+        Effect.flatMap(use),
+        Effect.provide(cli, { local: true }),
+        Effect.scoped,
+      );
+
+    yield* Effect.gen(function* () {
+      const store = yield* SessionStore.SessionStore;
+      const issue = (ttl: Duration.Duration) =>
+        fromCli((other) =>
+          other.issue({ method: "bearer-access-token", scopes: ["memory:read"], ttl }),
+        );
+
+      const active = yield* issue(Duration.hours(1));
+      // Before this server verifies the token it has no grant for it.
+      expect((yield* store.readActiveScopes(active.sessionId).pipe(Effect.flip))._tag).toBe(
+        "UnknownSessionTokenError",
+      );
+      expect((yield* store.verify(active.token)).sessionId).toBe(active.sessionId);
+      expect(yield* store.readActiveScopes(active.sessionId)).toEqual(["memory:read"]);
+      yield* store.revoke(active.sessionId);
+      expect((yield* store.readActiveScopes(active.sessionId).pipe(Effect.flip))._tag).toBe(
+        "UnknownSessionTokenError",
+      );
+      expect((yield* store.verify(active.token).pipe(Effect.flip))._tag).toBe(
+        "SessionTokenRevokedError",
+      );
+
+      const revoked = yield* issue(Duration.hours(1));
+      yield* fromCli((other) => other.revoke(revoked.sessionId));
+      expect((yield* store.verify(revoked.token).pipe(Effect.flip))._tag).toBe(
+        "SessionTokenRevokedError",
+      );
+      expect((yield* store.readActiveScopes(revoked.sessionId).pipe(Effect.flip))._tag).toBe(
+        "UnknownSessionTokenError",
+      );
+
+      const expiring = yield* issue(Duration.seconds(1));
+      yield* store.verify(expiring.token);
+      yield* TestClock.adjust(Duration.seconds(1));
+      expect((yield* store.readActiveScopes(expiring.sessionId).pipe(Effect.flip))._tag).toBe(
+        "SessionTokenExpiredError",
+      );
+      // Remembering the next verified session prunes the expired one.
+      yield* store.verify((yield* issue(Duration.hours(1))).token);
+      expect((yield* store.readActiveScopes(expiring.sessionId).pipe(Effect.flip))._tag).toBe(
+        "UnknownSessionTokenError",
+      );
+    }).pipe(Effect.provide(running), Effect.scoped);
+  }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+);
+
+it.effect("a verify that read the row before a revocation cannot restore the grant", () =>
+  Effect.gen(function* () {
+    const read = yield* Deferred.make<void>();
+    const resume = yield* Deferred.make<void>();
+    let paused = false;
+    // Pauses the first armed getById after it read the still-active row.
+    const layerPausingRepository = Layer.effect(
+      AuthSessions.AuthSessionRepository,
+      Effect.map(AuthSessions.make, (repository) => ({
+        ...repository,
+        getById: (input: Parameters<typeof repository.getById>[0]) =>
+          repository.getById(input).pipe(
+            Effect.tap(() =>
+              paused
+                ? Effect.void
+                : Effect.suspend(() => {
+                    paused = true;
+                    return Deferred.succeed(read, undefined).pipe(
+                      Effect.andThen(Deferred.await(resume)),
+                    );
+                  }),
+            ),
+          ),
+      })),
+    );
+    const layerStore = Layer.effect(SessionStore.SessionStore, SessionStore.make).pipe(
+      Layer.provide(layerPausingRepository),
+      Layer.provide(ServerSecretStore.layer),
+      Layer.provide(SqlitePersistence.layerMemory),
+      Layer.provide(layerServerEnvironment(EnvironmentId.make("test-environment"))),
+      Layer.provide(layerServerConfig()),
+    );
+    yield* Effect.gen(function* () {
+      const store = yield* SessionStore.SessionStore;
+      const issued = yield* store.issue({
+        method: "bearer-access-token",
+        scopes: ["memory:write"],
+      });
+      const verifying = yield* store
+        .verify(issued.token)
+        .pipe(Effect.forkScoped({ startImmediately: true }));
+      yield* Deferred.await(read);
+      yield* store.revoke(issued.sessionId);
+      yield* Deferred.succeed(resume, undefined);
+      yield* Fiber.join(verifying);
+      expect((yield* store.readActiveScopes(issued.sessionId).pipe(Effect.flip))._tag).toBe(
+        "UnknownSessionTokenError",
+      );
+    }).pipe(Effect.provide(layerStore), Effect.scoped);
+  }).pipe(Effect.provide(NodeServices.layer)),
+);
+
+it.effect("next issuance prunes all expired live authority entries without reading them", () =>
+  Effect.gen(function* () {
+    const store = yield* SessionStore.SessionStore;
+    const expired = yield* Effect.forEach(
+      Array.from({ length: 40 }, (_, n) => n),
+      (n) =>
+        store.issue({
+          subject: `synthetic-expiry-${n}`,
+          scopes: ["memory:read"],
+          ttl: Duration.seconds(1),
+        }),
+    );
+    const retained = yield* store.issue({ scopes: ["memory:write"], ttl: Duration.minutes(1) });
+    yield* TestClock.adjust(Duration.seconds(1));
+    const next = yield* store.issue({ scopes: ["memory:read"] });
+    for (const session of expired)
+      expect((yield* store.readActiveScopes(session.sessionId).pipe(Effect.flip))._tag).toBe(
+        "UnknownSessionTokenError",
+      );
+    expect(yield* store.readActiveScopes(retained.sessionId)).toEqual(["memory:write"]);
+    expect(yield* store.readActiveScopes(next.sessionId)).toEqual(["memory:read"]);
+    yield* store.revokeAllExcept(next.sessionId);
+    expect((yield* store.readActiveScopes(retained.sessionId).pipe(Effect.flip))._tag).toBe(
+      "UnknownSessionTokenError",
+    );
+    expect(yield* store.readActiveScopes(next.sessionId)).toEqual(["memory:read"]);
+  }).pipe(Effect.provide(layerSessionStore().pipe(Layer.provideMerge(NodeServices.layer)))),
+);

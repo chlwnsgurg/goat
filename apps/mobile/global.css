@@ -40,15 +40,20 @@
 }
 
 /* ─── Custom utilities ──────────────────────────────────────────────── */
-@utility font-t3-medium {
+@utility font-goat-medium {
   font-family: var(--font-medium);
 }
 
-@utility font-t3-bold {
+@utility font-goat-bold {
   font-family: var(--font-bold);
 }
 
-@utility font-t3-extrabold {
+/* No 600 face is bundled; like CSS weight matching, semibold resolves to the 700 face. */
+@utility font-goat-semibold {
+  font-family: var(--font-bold);
+}
+
+@utility font-goat-extrabold {
   font-family: var(--font-bold);
   font-weight: 800;
 }

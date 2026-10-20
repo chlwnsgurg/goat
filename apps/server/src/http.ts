@@ -1,15 +1,24 @@
+import * as RuntimeDrain from "./runtimeDrain.ts";
+import * as RuntimeControl from "./runtimeControl.ts";
 import packageJson from "../package.json" with { type: "json" };
 import * as ProjectionStore from "./orchestration-v2/ProjectionStore.ts";
 import * as Mime from "effect/http/Mime";
 import {
   AuthOrchestrationOperateScope,
   AuthOrchestrationReadScope,
+  GOAT_RUNTIME_DRAIN_PATH,
+  GOAT_RUNTIME_CONTROL_HEADER,
+  RuntimeDrainRequest,
   EnvironmentHttpApi,
   EnvironmentHttpForbiddenError,
-} from "@t3tools/contracts";
-import { isDevProxiedPath } from "@t3tools/shared/devProxy";
-import { decodeOtlpTraceRecords } from "@t3tools/shared/observability";
+} from "@goat/contracts";
+import { isDevProxiedPath } from "@goat/shared/devProxy";
+import { injectMcpAppCookieBootstrap, injectMcpAppThemeBootstrap } from "@goat/shared/mcpApp";
+import { decodeOtlpTraceRecords } from "@goat/shared/observability";
+import * as Clock from "effect/Clock";
+import * as ByteSize from "effect/ByteSize";
 import * as Data from "effect/Data";
+import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
@@ -31,7 +40,7 @@ import * as HttpApiBuilder from "effect/http-api/HttpApiBuilder";
 import { OtlpTracer, OtlpSerialization } from "effect/observability";
 
 import * as ServerConfig from "./config.ts";
-import { ASSET_ROUTE_PREFIX, resolveAsset } from "./assets/AssetAccess.ts";
+import { ASSET_ROUTE_PREFIX, readMcpAppHtml, resolveAsset } from "./assets/AssetAccess.ts";
 import { githubMediaResponse } from "./assets/GitHubMediaFetch.ts";
 import { statMediaFile, streamMediaFile, type OpenMediaFile } from "./assets/MediaFile.ts";
 import {
@@ -41,6 +50,7 @@ import {
 } from "./assets/AttachmentUpload.ts";
 import * as BrowserTraceCollector from "./observability/BrowserTraceCollector.ts";
 import * as EnvironmentAuth from "./auth/EnvironmentAuth.ts";
+import { base64UrlDecodeUtf8 } from "./auth/utils.ts";
 import { traceRelayRequest } from "./cloud/traceRelayRequest.ts";
 import {
   annotateEnvironmentRequest,
@@ -50,18 +60,19 @@ import {
 } from "./auth/http.ts";
 import * as ServerEnvironment from "./environment/ServerEnvironment.ts";
 import { WEBHOOK_ROUTE_PREFIX } from "./scheduledTasks/ScheduledTaskService.ts";
-import { browserApiCorsAllowedHeaders, browserApiCorsAllowedMethods } from "./httpCors.ts";
+import {
+  browserApiCorsAllowedHeaders,
+  browserApiCorsAllowedMethods,
+  DESKTOP_RENDERER_ORIGINS,
+} from "./httpCors.ts";
 
 const OTLP_TRACES_PROXY_PATH = "/api/observability/v1/traces";
 const LOOPBACK_HOSTNAMES = new Set(["127.0.0.1", "::1", "localhost"]);
-const DESKTOP_RENDERER_ORIGINS = ["t3code://app", "t3code-dev://app"];
 const SVG_CONTENT_SECURITY_POLICY = "default-src 'none'; style-src 'unsafe-inline'; sandbox";
-// HTML previews are agent output, not the app. The sandbox gives the document an
-// opaque origin: scripts run, but same-origin cookies, storage, and API calls are
-// out of reach. Relative sibling assets still load through their signed URLs.
-// No modals: agent HTML can open without a click (inline renders, and mobile
-// loads it as the top document), and must not raise blocking dialogs. Downloads
-// stay allowed so download links and buttons in the page work.
+// The sandbox gives the document an opaque origin: scripts run, but same-origin
+// cookies, storage, and API calls are out of reach. No modals: agent HTML can
+// open without a click (inline renders, and mobile loads it as the top document),
+// and must not raise blocking dialogs.
 const HTML_CONTENT_SECURITY_POLICY =
   "sandbox allow-scripts allow-forms allow-popups allow-downloads";
 
@@ -76,7 +87,6 @@ const isSafeInlineMediaMimeType = (mimeType: string): boolean =>
 const isSafeInlineDocumentMimeType = (mimeType: string): boolean =>
   mimeType.toLowerCase() === "application/pdf" || mimeType.toLowerCase() === "text/html";
 
-/** RFC 6266 disposition with an ASCII fallback name plus a UTF-8 `filename*`. */
 export function downloadContentDisposition(fileName?: string): string {
   if (fileName === undefined) {
     return "attachment";
@@ -140,7 +150,6 @@ export function assetResponseHeaders(
   };
 }
 
-/** A single byte range for native media readers; unsupported range syntax uses the full file. */
 function assetByteRange(header: string, size: bigint) {
   const match = /^bytes=(\d*)-(\d*)$/i.exec(header.trim());
   if (!match || (!match[1] && !match[2])) return null;
@@ -163,6 +172,41 @@ function assetByteRange(header: string, size: bigint) {
   };
 }
 
+const decodeAssetExpiry = Schema.decodeUnknownOption(
+  Schema.fromJsonString(Schema.Struct({ expiresAt: Schema.Finite })),
+);
+
+/** Read only after resolveAsset has authenticated this exact token. */
+function verifiedAssetExpiry(token: string) {
+  try {
+    return Option.getOrUndefined(decodeAssetExpiry(base64UrlDecodeUtf8(token.split(".")[0]!)))
+      ?.expiresAt;
+  } catch {
+    return undefined;
+  }
+}
+
+function assetNotModified(
+  etag: string | undefined,
+  lastModified: string | undefined,
+  conditions: { readonly ifNoneMatch?: string; readonly ifModifiedSince?: string },
+) {
+  if (conditions.ifNoneMatch !== undefined) {
+    return (
+      conditions.ifNoneMatch.trim() === "*" ||
+      (etag !== undefined &&
+        conditions.ifNoneMatch
+          .split(",")
+          .some((candidate) => candidate.trim().replace(/^W\//, "") === etag.replace(/^W\//, "")))
+    );
+  }
+  return (
+    lastModified !== undefined &&
+    conditions.ifModifiedSince !== undefined &&
+    Date.parse(lastModified) <= Date.parse(conditions.ifModifiedSince)
+  );
+}
+
 export const assetFileResponse = Effect.fn("assetFileResponse")(function* (
   asset: {
     readonly path: string;
@@ -170,35 +214,96 @@ export const assetFileResponse = Effect.fn("assetFileResponse")(function* (
     readonly fileName?: string;
     readonly mimeType?: string;
     readonly file?: OpenMediaFile;
+    readonly renderIntent?: "mcp-app";
+    readonly expiresAt?: number;
   },
   rangeHeader?: string,
   ifRangeHeader?: string,
   method: "GET" | "HEAD" = "GET",
+  conditions: { readonly ifNoneMatch?: string; readonly ifModifiedSince?: string } = {},
 ) {
   const headers = assetResponseHeaders(asset.path, asset);
+  if (
+    asset.renderIntent === "mcp-app" &&
+    !asset.download &&
+    headers["Content-Type"] === "text/html; charset=utf-8"
+  ) {
+    const bytes = yield* readMcpAppHtml(asset.path);
+    if (bytes === null) {
+      return HttpServerResponse.text("MCP app is too large to preview.", { status: 413 });
+    }
+    const body = new TextEncoder().encode(
+      injectMcpAppCookieBootstrap(injectMcpAppThemeBootstrap(new TextDecoder().decode(bytes))),
+    );
+    headers["Content-Length"] = String(body.byteLength);
+    return method === "HEAD"
+      ? HttpServerResponse.empty({ status: 200, headers })
+      : HttpServerResponse.uint8Array(body, { headers });
+  }
   const mediaFile = asset.file;
   const mediaInfo = mediaFile ? yield* statMediaFile(asset.path, mediaFile) : undefined;
-  const isMedia = /^(?:audio|video)\//i.test(headers["Content-Type"] ?? "");
-  if (isMedia) {
-    // Host media can change in place. Do not invite conditional range requests
-    // with validators that cannot establish byte-for-byte identity. Attachment media
-    // carries no `file`, and must not outlive the signed URL that granted it either.
-    headers["Cache-Control"] = "private, no-store";
-  }
+  const contentType = headers["Content-Type"] ?? "";
+  const isMedia = /^(?:audio|video)\//i.test(contentType);
   let status = 200;
   let offset = 0n;
   let bytesToRead: bigint | undefined;
   if (isMedia) {
+    const fs = yield* FileSystem.FileSystem;
+    const info = mediaInfo
+      ? {
+          size: mediaInfo.size,
+          mtime: mediaInfo.mtime,
+          // ctime cannot be set back by utimes, so an in-place rewrite always changes it.
+          revision: [mediaInfo.ino, mediaInfo.mtimeNs, mediaInfo.ctimeNs]
+            .map((part) => part.toString(16))
+            .join("-"),
+          strong: true,
+        }
+      : yield* fs.stat(asset.path).pipe(
+          Effect.map((info) => ({
+            strong: false,
+            size: info.size,
+            mtime: Option.getOrNull(info.mtime),
+            revision: Option.map(info.mtime, (mtime) => mtime.getTime().toString(16)).pipe(
+              Option.getOrElse(() => ""),
+            ),
+          })),
+        );
+    const mtime = info.mtime;
+    const now = yield* Clock.currentTimeMillis;
+    const remainingSeconds = Math.floor(((asset.expiresAt ?? now) - now) / 1000);
+    headers["Content-Type"] = contentType;
+    headers["Cache-Control"] =
+      remainingSeconds > 0
+        ? `private, max-age=${remainingSeconds}, must-revalidate`
+        : "private, no-store";
     headers["Accept-Ranges"] = "bytes";
-    // If-Range requires a matching validator. A full response is safe when we cannot validate it.
-    if (method === "GET" && rangeHeader && ifRangeHeader === undefined) {
-      const fs = yield* FileSystem.FileSystem;
-      const info = mediaInfo ?? (yield* fs.stat(asset.path));
+    // A guarded descriptor pins the inode, and its size, mtime and ctime identify the bytes it
+    // serves, so that ETag is strong. Unguarded metadata stays weak: revalidation only.
+    if (mtime !== null) {
+      headers.ETag = `${info.strong ? "" : "W/"}"${info.size.toString(16)}-${info.revision}"`;
+      headers["Last-Modified"] = DateTime.toDateUtc(
+        DateTime.makeUnsafe(Math.min(mtime.getTime(), now)),
+      ).toUTCString();
+    }
+    if (assetNotModified(headers.ETag, headers["Last-Modified"], conditions)) {
+      return HttpServerResponse.empty({ status: 304, headers });
+    }
+    // If-Range joins bytes from two reads, so it needs an exact strong ETag match. Dates and weak
+    // ETags fall back to the full body.
+    const ifRangeMatches =
+      ifRangeHeader === undefined ||
+      (info.strong && headers.ETag !== undefined && ifRangeHeader.trim() === headers.ETag);
+    if (method === "GET" && rangeHeader && ifRangeMatches) {
       const range = assetByteRange(rangeHeader, info.size);
       if (range?._tag === "Unsatisfiable") {
         return HttpServerResponse.empty({
           status: 416,
-          headers: { ...headers, "Content-Range": `bytes */${info.size}` },
+          headers: {
+            ...headers,
+            "Cache-Control": "private, no-store",
+            "Content-Range": `bytes */${info.size}`,
+          },
         });
       }
       if (range?._tag === "Range") {
@@ -207,6 +312,10 @@ export const assetFileResponse = Effect.fn("assetFileResponse")(function* (
         bytesToRead = range.bytesToRead;
         headers["Content-Range"] = range.contentRange;
       }
+    }
+    if (method === "HEAD") {
+      headers["Content-Length"] = String(info.size);
+      return HttpServerResponse.empty({ status, headers });
     }
   }
   if (mediaFile && mediaInfo) {
@@ -232,7 +341,13 @@ export const assetFileResponse = Effect.fn("assetFileResponse")(function* (
       headers,
     });
   }
-  return yield* HttpServerResponse.file(asset.path, { status, offset, bytesToRead, headers });
+  const response = yield* HttpServerResponse.file(asset.path, {
+    status,
+    offset,
+    bytesToRead,
+    headers,
+  });
+  return isMedia ? HttpServerResponse.setHeaders(response, headers) : response;
 });
 
 export const layerHttpCompression = HttpRouter.middleware(HttpMiddleware.compression(), {
@@ -245,11 +360,6 @@ export const layerBrowserApiCors = Layer.unwrap(
     const devOrigin = config.devUrl?.origin;
     // Dev uses credentialed requests from Vite or the Electron custom origin, so both must be
     // explicit. Packaged desktop omits credentials and uses Effect's default wildcard origin.
-    //
-    // T3CODE_DEV_ALLOWED_ORIGINS covers dev servers reached from a second
-    // origin — a tailnet name, a LAN IP, a phone. Browser dev normally proxies
-    // through Vite and is same-origin (no preflight at all), so this is a
-    // safety net for the desktop renderer and any direct-to-backend caller.
     return HttpRouter.cors({
       ...(devOrigin
         ? {
@@ -313,30 +423,29 @@ export const layerServerEnvironmentHttpApi = HttpApiBuilder.group(
   Effect.fnUntraced(function* (handlers) {
     const serverEnvironment = yield* ServerEnvironment.ServerEnvironment;
     const projections = yield* ProjectionStore.ProjectionStoreV2;
+    const descriptor = (endpointName: string) =>
+      Effect.fn("environment.metadata.descriptor")(function* () {
+        yield* annotateEnvironmentRequest(endpointName);
+        return yield* serverEnvironment.getDescriptor;
+      }, traceRelayRequest);
+    const sshActivity = Effect.fn("environment.metadata.sshActivity")(function* () {
+      const request = yield* HttpServerRequest.HttpServerRequest;
+      const remoteAddress = Option.getOrUndefined(request.remoteAddress);
+      if (remoteAddress !== undefined && !isLoopbackHostname(remoteAddress)) {
+        return yield* new EnvironmentHttpForbiddenError({
+          message: "SSH activity requires a loopback peer.",
+        });
+      }
+      const activity = yield* projections
+        .getServerActivity()
+        .pipe(Effect.catch((cause) => failEnvironmentInternal("internal_error", cause)));
+      return { activity, serverVersion: packageJson.version, pid: process.pid };
+    });
     return handlers
-      .handle(
-        "descriptor",
-        Effect.fn("environment.metadata.descriptor")(function* (args) {
-          yield* annotateEnvironmentRequest(args.endpoint.name);
-          return yield* serverEnvironment.getDescriptor;
-        }, traceRelayRequest),
-      )
-      .handle(
-        "sshActivity",
-        Effect.fn("environment.metadata.sshActivity")(function* () {
-          const request = yield* HttpServerRequest.HttpServerRequest;
-          const remoteAddress = Option.getOrUndefined(request.remoteAddress);
-          if (remoteAddress !== undefined && !isLoopbackHostname(remoteAddress)) {
-            return yield* new EnvironmentHttpForbiddenError({
-              message: "SSH activity requires a loopback peer.",
-            });
-          }
-          const activity = yield* projections
-            .getServerActivity()
-            .pipe(Effect.catch((cause) => failEnvironmentInternal("internal_error", cause)));
-          return { activity, serverVersion: packageJson.version, pid: process.pid };
-        }),
-      );
+      .handle("descriptor", descriptor("descriptor"))
+      .handle("legacyDescriptor", descriptor("legacyDescriptor"))
+      .handle("sshActivity", sshActivity)
+      .handle("legacySshActivity", sshActivity);
   }),
 ).pipe(Layer.provide(ProjectionStore.layer));
 
@@ -346,8 +455,6 @@ class DecodeOtlpTraceRecordsError extends Data.TaggedError("DecodeOtlpTraceRecor
 
 // Renderers export up to once a second while they have spans buffered, so
 // tracing this proxy would add more server spans than it forwards.
-// withTracerEnabled(false) drops the handler's spans, including the forward.
-// untracedRequestsLayer drops the HTTP server span.
 export const layerOtlpTracesProxyRoute = HttpRouter.add(
   "POST",
   OTLP_TRACES_PROXY_PATH,
@@ -404,12 +511,9 @@ export const layerOtlpTracesProxyRoute = HttpRouter.add(
 
 const UNTRACED_REQUEST_PATHS: ReadonlySet<string> = new Set([OTLP_TRACES_PROXY_PATH]);
 
-// Skips the HTTP server span for UNTRACED_REQUEST_PATHS. That span starts
-// before routing, so a route handler cannot skip it. TracerDisabledWhen is one
-// predicate for the whole server, and HttpRouter.serve builds its routes
-// privately, so it is provided to the served layer, never merged into the
-// routes. Add paths here instead of providing it again. The query string is
-// ignored, as in routing.
+// TracerDisabledWhen is one predicate for the whole server, and
+// HttpRouter.serve builds its routes privately, so it is provided to the served
+// layer, never merged into the routes.
 const layerUntracedRequests = Layer.succeed(HttpMiddleware.TracerDisabledWhen)((request) => {
   const queryIndex = request.url.indexOf("?");
   const path = queryIndex === -1 ? request.url : request.url.slice(0, queryIndex);
@@ -461,11 +565,20 @@ export const layerAssetRoute = HttpRouter.add(
         ),
       );
     }
+    const expiresAt = verifiedAssetExpiry(suffix.slice(0, separatorIndex));
     return yield* assetFileResponse(
-      asset,
+      { ...asset, ...(expiresAt !== undefined ? { expiresAt } : {}) },
       request.method === "GET" ? request.headers.range : undefined,
       request.headers["if-range"],
       request.method === "HEAD" ? "HEAD" : "GET",
+      {
+        ...(request.headers["if-none-match"] !== undefined
+          ? { ifNoneMatch: request.headers["if-none-match"] }
+          : {}),
+        ...(request.headers["if-modified-since"] !== undefined
+          ? { ifModifiedSince: request.headers["if-modified-since"] }
+          : {}),
+      },
     ).pipe(
       Effect.orElseSucceed(() => HttpServerResponse.text("Internal Server Error", { status: 500 })),
     );
@@ -549,11 +662,17 @@ const loadImmutableBuildAssets = Effect.gen(function* () {
 
 const openStaticFile = Effect.fn("openStaticFile")(function* (filePath: string) {
   const fileSystem = yield* FileSystem.FileSystem;
-  // Reject directories and special files before opening. Response metadata comes from the handle.
   const pathInfo = yield* fileSystem.stat(filePath).pipe(Effect.orElseSucceed(() => null));
   if (pathInfo?.type !== "File") return null;
-  const file = yield* fileSystem.open(filePath, { flag: "r" });
-  const info = yield* file.stat;
+  const file = yield* fileSystem.open(filePath, { flag: "r" }).pipe(
+    Effect.catchTags({
+      PlatformError: (error) =>
+        error.reason._tag === "NotFound" ? Effect.succeed(null) : Effect.fail(error),
+    }),
+  );
+  // Electron asar can stat and read files even when opening a handle returns NotFound.
+  // Refresh path metadata because the file may have been replaced since the first stat.
+  const info = yield* file === null ? fileSystem.stat(filePath) : file.stat;
   return info.type === "File" ? { file, info } : null;
 });
 
@@ -648,18 +767,23 @@ const handleStaticAndDevRequest = Effect.fn("handleStaticAndDevRequest")(
       !isHtml &&
       /^assets\/.+-[\w-]{8}\.[^/]+$/.test(relativePath) &&
       immutableBuildAssets.has(relativePath);
-    const headers: Record<string, string> = {
-      "Cache-Control": immutable ? "public, max-age=31536000, immutable" : "no-cache",
+    const cacheControl = immutable ? "public, max-age=31536000, immutable" : "no-cache";
+    const validators = (info: FileSystem.File.Info) => {
+      // Deployments can preserve HTML size and mtime while changing its bundle URLs.
+      const modifiedAt = isHtml ? undefined : Option.getOrUndefined(info.mtime);
+      return modifiedAt
+        ? {
+            ETag: `W/"${info.size.toString(16)}-${modifiedAt.getTime().toString(16)}"`,
+            "Last-Modified": modifiedAt.toUTCString(),
+          }
+        : {};
     };
-    // Deployments can preserve HTML size and mtime while changing its bundle URLs.
-    const modifiedAt = isHtml ? undefined : Option.getOrUndefined(fileInfo.mtime);
-    const etag = modifiedAt
-      ? `W/"${fileInfo.size.toString(16)}-${modifiedAt.getTime().toString(16)}"`
-      : undefined;
-    if (etag !== undefined && modifiedAt !== undefined) {
-      headers.ETag = etag;
-      headers["Last-Modified"] = modifiedAt.toUTCString();
-    }
+    const headers: Record<string, string> = {
+      "Cache-Control": cacheControl,
+      ...validators(fileInfo),
+    };
+    const etag = headers.ETag;
+    const lastModified = headers["Last-Modified"];
 
     // If-None-Match takes precedence over dates and uses weak comparison for
     // GET/HEAD, including when compression changes the transferred bytes.
@@ -675,8 +799,8 @@ const handleStaticAndDevRequest = Effect.fn("handleStaticAndDevRequest")(
             );
           })
         : ifModifiedSince !== undefined &&
-          modifiedAt !== undefined &&
-          Date.parse(modifiedAt.toUTCString()) <= Date.parse(ifModifiedSince);
+          lastModified !== undefined &&
+          Date.parse(lastModified) <= Date.parse(ifModifiedSince);
     if (!isHtml && unchanged) {
       return HttpServerResponse.empty({
         status: 304,
@@ -685,13 +809,29 @@ const handleStaticAndDevRequest = Effect.fn("handleStaticAndDevRequest")(
     }
 
     const contentType = isHtml ? "text/html; charset=utf-8" : mimeType;
+    if (opened.file === null && request.method !== "HEAD") {
+      const fileSystem = yield* FileSystem.FileSystem;
+      // Complete fallback reads before success headers; stream errors arrive too late for a 500.
+      const bytes = yield* fileSystem.readFile(filePath);
+      const info = yield* fileSystem.stat(filePath);
+      return HttpServerResponse.uint8Array(bytes, {
+        headers: {
+          "Cache-Control": cacheControl,
+          ...validators({ ...info, size: ByteSize.bytes(bytes.byteLength) }),
+        },
+        contentType,
+      });
+    }
     // The request scope closes the handle for GET, HEAD, 304, errors, and cancellation.
     // HEAD still passes through compression, which selects headers without reading the stream.
-    return HttpServerResponse.stream(streamStaticFile(opened.file, fileInfo.size), {
-      headers,
-      contentType,
-      contentLength: Number(fileInfo.size),
-    });
+    return HttpServerResponse.stream(
+      opened.file === null ? Stream.empty : streamStaticFile(opened.file, fileInfo.size),
+      {
+        headers,
+        contentType,
+        contentLength: Number(fileInfo.size),
+      },
+    );
   },
   Effect.catchTags({
     PlatformError: () =>
@@ -699,9 +839,40 @@ const handleStaticAndDevRequest = Effect.fn("handleStaticAndDevRequest")(
   }),
 );
 
-// Read the installed build's manifest once. Unknown files use revalidation.
 export const layerStaticAndDevRoute = Layer.unwrap(
   loadImmutableBuildAssets.pipe(
     Effect.map((assets) => HttpRouter.add("GET", "*", handleStaticAndDevRequest(assets))),
   ),
+);
+
+/** Local runtime control is authenticated independently of browser/relay sessions. */
+export const layerRuntimeDrainRoute = HttpRouter.add(
+  "POST",
+  GOAT_RUNTIME_DRAIN_PATH,
+  Effect.gen(function* () {
+    const request = yield* HttpServerRequest.HttpServerRequest;
+    const control = yield* RuntimeControl.RuntimeControl;
+    const peer = Option.getOrUndefined(request.remoteAddress);
+    if (
+      peer === undefined ||
+      !isLoopbackHostname(peer) ||
+      !control.authenticate(request.headers[GOAT_RUNTIME_CONTROL_HEADER])
+    ) {
+      return yield* HttpServerResponse.json(
+        { message: "Runtime drain requires a loopback peer and runtime control token." },
+        { status: 403 },
+      );
+    }
+    const input = yield* request.json.pipe(
+      Effect.flatMap(Schema.decodeUnknownEffect(RuntimeDrainRequest)),
+      Effect.result,
+    );
+    if (input._tag === "Failure")
+      return yield* HttpServerResponse.json(
+        { message: "Invalid runtime drain request." },
+        { status: 400 },
+      );
+    const drain = yield* RuntimeDrain.RuntimeDrain;
+    return yield* HttpServerResponse.json(yield* drain.request(input.success));
+  }),
 );

@@ -4,7 +4,7 @@ import {
   type DesktopAppActivationFailure,
   type DesktopAppActivationRequest,
   type DesktopAppActivationResponse,
-} from "@t3tools/contracts";
+} from "@goat/contracts";
 
 interface PendingActivation {
   readonly request: DesktopAppActivationRequest;
@@ -29,7 +29,6 @@ function failure(
   };
 }
 
-/** Holds CLI requests until the real desktop renderer is ready to handle them. */
 export class DesktopAppActivationBroker {
   readonly #pending = new Map<string, PendingActivation>();
   readonly #requestTimeoutMs: number;

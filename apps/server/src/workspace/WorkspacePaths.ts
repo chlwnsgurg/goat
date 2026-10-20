@@ -1,12 +1,3 @@
-/**
- * WorkspacePaths - Effect service contract for workspace path handling.
- *
- * Owns normalization and validation of workspace roots plus safe resolution of
- * workspace-root-relative paths.
- *
- * @module WorkspacePaths
- */
-
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -14,8 +5,9 @@ import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 
-import { expandHomePath } from "@t3tools/provider-core/server/pathExpansion";
-import * as HostProcess from "@t3tools/shared/HostProcess";
+import { expandHomePath } from "@goat/provider-core/server/pathExpansion";
+import * as HostProcess from "@goat/shared/HostProcess";
+import { msysDrivePathToWindows } from "@goat/shared/path";
 
 export class WorkspaceRootNotExistsError extends Schema.TaggedError<WorkspaceRootNotExistsError>()(
   "WorkspaceRootNotExistsError",
@@ -89,11 +81,9 @@ export const WorkspacePathsError = Schema.Union([
 ]);
 export type WorkspacePathsError = typeof WorkspacePathsError.Type;
 
-/** Service tag for workspace path normalization and resolution. */
 export class WorkspacePaths extends Context.Service<
   WorkspacePaths,
   {
-    /** Normalize a user-provided workspace root and verify it exists as a directory. */
     readonly normalizeWorkspaceRoot: (
       workspaceRoot: string,
       options?: { readonly createIfMissing?: boolean },
@@ -104,11 +94,6 @@ export class WorkspacePaths extends Context.Service<
       | WorkspaceRootStatFailedError
       | WorkspaceRootNotDirectoryError
     >;
-    /**
-     * Resolve a relative path within a validated workspace root.
-     *
-     * Rejects absolute paths and traversal attempts outside the workspace root.
-     */
     readonly resolveRelativePathWithinRoot: (input: {
       workspaceRoot: string;
       relativePath: string;
@@ -117,10 +102,18 @@ export class WorkspacePaths extends Context.Service<
       WorkspacePathOutsideRootError
     >;
   }
->()("t3/workspace/WorkspacePaths") {}
+>()("goat/workspace/WorkspacePaths") {}
 
 function toPosixRelativePath(input: string): string {
   return input.replaceAll("\\", "/");
+}
+
+/**
+ * A Windows GOAT driven over SSH from Git Bash or Cygwin can be sent the shell's `/c/…` or
+ * `/cygdrive/c/…` form, which Node would resolve against the current drive as `C:\c\…`.
+ */
+export function nativeWorkspacePath(platform: NodeJS.Platform, value: string): string {
+  return platform === "win32" ? (msysDrivePathToWindows(value) ?? value) : value;
 }
 
 export const make = Effect.gen(function* () {
@@ -154,7 +147,10 @@ export const make = Effect.gen(function* () {
     "WorkspacePaths.normalizeWorkspaceRoot",
   )(function* (workspaceRoot, options) {
     const normalizedWorkspaceRoot = path.resolve(
-      expandHomePath(workspaceRoot.trim(), yield* HostProcess.HomeDirectory),
+      expandHomePath(
+        nativeWorkspacePath(yield* HostProcess.Platform, workspaceRoot.trim()),
+        yield* HostProcess.HomeDirectory,
+      ),
     );
     let workspaceStat = yield* statWorkspaceRoot(
       workspaceRoot,

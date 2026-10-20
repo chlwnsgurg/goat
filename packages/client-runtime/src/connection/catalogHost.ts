@@ -1,10 +1,11 @@
+import { isGoatConnectEnabled } from "@goat/shared/goatConnect";
 import type {
   ConnectionCatalogOperation,
   ConnectionCatalogResult,
   DesktopSshEnvironmentTarget,
   SavedConnection,
   SavedConnectionRoute,
-} from "@t3tools/contracts";
+} from "@goat/contracts";
 import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
@@ -141,7 +142,10 @@ export const handleConnectionCatalogOperation = <E>(
             reason: "refused",
             message: "Platform-managed local environments cannot be removed.",
           };
-        if (connectionRoutes(entry).some((route) => route.target._tag === "RelayConnectionTarget"))
+        if (
+          isGoatConnectEnabled() &&
+          connectionRoutes(entry).some((route) => route.target._tag === "RelayConnectionTarget")
+        )
           return {
             type: "failure",
             reason: "refused",

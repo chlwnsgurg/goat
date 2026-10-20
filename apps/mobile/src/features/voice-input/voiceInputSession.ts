@@ -3,11 +3,10 @@ import {
   voiceInputBlocksSubmission,
   type VoiceDraftSnapshot,
   type VoiceInputControllerDependencies,
-} from "@t3tools/client-runtime/voice-input";
+} from "@goat/client-runtime/voice-input";
 
 export type VoiceInputTarget = {
   readonly ownerKey: string;
-  /** Names the draft being dictated into while its composer is off screen. */
   readonly label?: string;
   readonly readDraft: () => VoiceDraftSnapshot | null;
   readonly commitDraft: VoiceInputControllerDependencies["commitDraft"];

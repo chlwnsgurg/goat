@@ -1,14 +1,19 @@
-import { scopeThreadRef } from "@t3tools/client-runtime/environment";
+import type {
+  GoatBotCardTarget,
+  GoatBotCardTone,
+  GoatBotTaskCard,
+} from "@goat/client-runtime/goatBot";
+import { scopeThreadRef } from "@goat/client-runtime/environment";
 import { Link } from "@tanstack/react-router";
 import {
   ArrowUpRightIcon,
+  ChevronRightIcon,
   CircleAlertIcon,
   CircleCheckIcon,
   CircleDotIcon,
   CircleIcon,
   MessageCircleQuestionIcon,
-} from "lucide-react";
-import { useMemo } from "react";
+} from "~/components/solar";
 
 import { usePrimarySettings } from "~/hooks/useSettings";
 import { formatShortTimestamp } from "~/timestampFormat";
@@ -17,7 +22,6 @@ import { useEnvironmentShellsBootstrapped, useThreadShell } from "~/state/entiti
 import { useConnectedEnvironmentIds } from "~/state/environments";
 
 import { Button } from "../ui/button";
-import type { GoatBotCardTarget, GoatBotCardTone, GoatBotTaskCard } from "./goatBotRows";
 
 const TONE_ICON = {
   neutral: CircleIcon,
@@ -36,30 +40,69 @@ const TONE_TEXT = {
 } satisfies Record<GoatBotCardTone, string>;
 
 /** One piece of work GOAT Bot started. Its details live in the worker's own thread. */
-export function GoatBotTaskChip({ card }: { readonly card: GoatBotTaskCard }) {
+export function GoatBotTaskChip({
+  card,
+  tail,
+}: {
+  readonly card: GoatBotTaskCard;
+  readonly tail: boolean;
+}) {
   const timestampFormat = usePrimarySettings((settings) => settings.timestampFormat);
   const Icon = TONE_ICON[card.tone];
   return (
-    <div className="flex w-72 max-w-full flex-col gap-1.5 rounded-xl border border-border bg-card p-3 text-card-foreground">
-      <div className={cn("flex items-center gap-1.5 text-xs font-medium", TONE_TEXT[card.tone])}>
-        <Icon className="size-3.5 shrink-0" />
-        <span className="truncate">{card.statusLabel}</span>
-        {card.attentionLabel ? (
-          <span className="ml-auto shrink-0 text-warning-foreground">{card.attentionLabel}</span>
-        ) : null}
-      </div>
-      <div className="text-sm font-medium break-words">{card.title}</div>
-      {card.sourceLabel ? (
-        <div className="truncate text-xs text-muted-foreground">{card.sourceLabel}</div>
-      ) : null}
-      {card.summary ? (
-        <p className="line-clamp-2 text-xs text-muted-foreground">{card.summary}</p>
-      ) : null}
-      <time dateTime={card.updatedAt} className="text-xs text-muted-foreground">
-        Updated {formatShortTimestamp(card.updatedAt, timestampFormat)}
-      </time>
-      <div className="pt-0.5">
-        <GoatBotTaskTarget target={card.target} />
+    <div
+      className={cn(
+        "relative w-72 max-w-full rounded-2xl bg-goat-bubble-in text-goat-bubble-in-foreground",
+        tail && "goat-bubble-tail-in",
+      )}
+    >
+      <div className="overflow-hidden rounded-2xl">
+        <div className="flex items-center gap-1.5 px-3 pt-2.5 text-2xs leading-4 font-medium">
+          <Icon className={cn("size-3.5 shrink-0", TONE_TEXT[card.tone])} />
+          <span className="truncate">{card.statusLabel}</span>
+          {card.attentionLabel ? (
+            <span className="ml-auto shrink-0 text-warning-foreground">{card.attentionLabel}</span>
+          ) : null}
+        </div>
+        <div className="space-y-1.5 px-3 pt-1.5 pb-2">
+          <div className="goat-task-title font-semibold break-words">{card.title}</div>
+          {card.summary ? (
+            <p className="goat-task-summary line-clamp-3 text-goat-bubble-in-foreground/80">
+              {card.summary}
+            </p>
+          ) : null}
+          {card.sourceLabel ? (
+            <div className="truncate text-xs text-goat-bubble-in-foreground/65">
+              {card.sourceLabel}
+            </div>
+          ) : null}
+          {card.continuationLabel ? (
+            <div className="truncate text-xs text-goat-bubble-in-foreground/65">
+              {card.continuationLabel}
+            </div>
+          ) : null}
+          {card.pullRequests.length > 0 ? (
+            <div className="flex flex-wrap gap-x-2 gap-y-0.5 text-xs">
+              {card.pullRequests.map((pullRequest) => (
+                <a
+                  key={pullRequest.key}
+                  href={pullRequest.url}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="text-info-foreground hover:underline"
+                >
+                  {pullRequest.label}
+                </a>
+              ))}
+            </div>
+          ) : null}
+        </div>
+        <div className="flex min-h-9 flex-wrap items-center justify-between gap-1 border-t border-black/10 px-3 py-1 text-xs text-muted-foreground dark:border-white/10">
+          <time dateTime={card.updatedAt} className="shrink-0">
+            Updated {formatShortTimestamp(card.updatedAt, timestampFormat)}
+          </time>
+          <GoatBotTaskTarget target={card.target} />
+        </div>
       </div>
     </div>
   );
@@ -75,14 +118,20 @@ function GoatBotThreadTarget({
 }: {
   readonly target: Extract<GoatBotCardTarget, { kind: "thread" }>;
 }) {
-  const threadRef = useMemo(
-    () => scopeThreadRef(target.environmentId, target.threadId),
-    [target.environmentId, target.threadId],
-  );
+  const threadRef = scopeThreadRef(target.environmentId, target.threadId);
   const shell = useThreadShell(threadRef);
   const bootstrapped = useEnvironmentShellsBootstrapped(target.environmentId);
   const connected = useConnectedEnvironmentIds().includes(target.environmentId);
-  if (!connected) return <DisabledTarget label="Can't reach the work computer" />;
+  if (!connected) {
+    // Remote work names its machine, so point at where that machine is connected.
+    if (target.host === undefined) return <DisabledTarget label="Can't reach the work computer" />;
+    return (
+      <Button size="xs" variant="ghost" render={<Link to="/settings/connections" />}>
+        Connect {target.host} in Settings
+        <ArrowUpRightIcon />
+      </Button>
+    );
+  }
   if (bootstrapped && (shell === null || shell.deletedAt != null)) {
     return <DisabledTarget label="Work history not found" />;
   }
@@ -90,7 +139,7 @@ function GoatBotThreadTarget({
   return (
     <Button
       size="xs"
-      variant="outline"
+      variant="ghost"
       render={
         <Link
           to="/$environmentId/$threadId"
@@ -99,14 +148,14 @@ function GoatBotThreadTarget({
       }
     >
       Open thread
-      <ArrowUpRightIcon />
+      <ChevronRightIcon />
     </Button>
   );
 }
 
 function DisabledTarget({ label }: { readonly label: string }) {
   return (
-    <Button size="xs" variant="outline" disabled>
+    <Button size="xs" variant="ghost" disabled>
       {label}
     </Button>
   );

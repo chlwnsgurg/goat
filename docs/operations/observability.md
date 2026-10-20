@@ -1,8 +1,8 @@
 # Observability
 
-> For maintainers. Using T3 Code? See [docs/user](../user/).
+> For maintainers. Using GOAT? See [docs/user](../user/).
 
-T3 Code has one server-side observability model:
+GOAT has one server-side observability model:
 
 - pretty logs go to stdout for humans
 - completed spans go to a local NDJSON trace file
@@ -10,7 +10,7 @@ T3 Code has one server-side observability model:
 
 The local trace file is the persisted source of truth for normal local launches. Those launches do not
 write a separate server log file, but SSH-managed launches also persist the remote process's
-stdout/stderr at `~/.t3/ssh-launch/<state>/server.log`.
+stdout/stderr at `~/.goat/ssh-launch/runtime/server.log`.
 
 ## Where To Find Things
 
@@ -21,7 +21,7 @@ Logs are human-facing:
 - destination: stdout
 - format: `Logger.consolePretty()`
 - normal local persistence: none
-- SSH-managed launch persistence: `~/.t3/ssh-launch/<state>/server.log`
+- SSH-managed launch persistence: `~/.goat/ssh-launch/runtime/server.log`
 - remote export: OTLP only, when configured
 
 If you want a log message to show up in the trace file, emit it inside an active span with `Effect.log...`. `Logger.tracerLogger` will attach it as a span event.
@@ -56,6 +56,13 @@ records instead carry OTLP resource, scope, and optional status fields.
 The `TraceRecord`, `EffectTraceRecord`, and `OtlpTraceRecord` schemas live in
 `packages/shared/src/observability.ts`.
 
+SQL statement spans (named `sqlite`) and `sql.transaction` spans carry `db.connection` and
+`db.lock_wait_ms`. `db.connection` is `writer` for the main connection, which runs on the event loop,
+or `reader` for the read-only connection in a worker thread. `db.lock_wait_ms` is the part of the
+span spent waiting for that connection, behind other SQL. That wait does not block the event loop,
+so subtract it before you blame a slow span on the query. Statements inside a transaction use its
+connection and do not carry these attributes.
+
 DPoP proof failures include the safe `environment.dpop.failure_code` span
 attribute. A `time_window` failure means that a signed proof was too old or too
 far in the future for the environment server's allowed window. It can point to
@@ -72,9 +79,9 @@ it to measure background work or to compare two builds.
 goat trace summary --since 30m --limit 40
 ```
 
-It reads `T3CODE_TRACE_FILE` if set, else `<home>/userdata/logs/server.trace.ndjson` for
-`--base-dir` or `T3CODE_HOME`, plus the `T3CODE_TRACE_MAX_FILES` rotated backups. For a dev run or
-a copied file, set `T3CODE_TRACE_FILE`. `--since 30m` keeps spans that ended in the last 30
+It reads `GOAT_TRACE_FILE` if set, else `<home>/userdata/logs/server.trace.ndjson` for
+`--base-dir` or `GOAT_HOME`, plus the `GOAT_TRACE_MAX_FILES` rotated backups. For a dev run or
+a copied file, set `GOAT_TRACE_FILE`. `--since 30m` keeps spans that ended in the last 30
 minutes. The rate is per minute between the first and last span end.
 
 ### Metrics
@@ -92,8 +99,13 @@ If OTLP is not configured, metrics still exist in-process, but you will not have
 `apps/server/src/observability/EventLoopMonitor.ts` samples the server's event loop every 30 s. When
 the loop stalled for more than 2 s since the previous sample, it records a root
 `server.eventLoop.stall` span with a warning. The span has trace level `Warn`, so it stays when
-`T3CODE_TRACE_MIN_LEVEL` is `Warn`. The warning shows in Settings > Diagnostics unless OTLP logs are
+`GOAT_TRACE_MIN_LEVEL` is `Warn`. The warning shows in Settings > Diagnostics unless OTLP logs are
 on. The span time is when the sample ran, not when the stall happened.
+
+The trace file rotates in well under an hour on a busy server, so each stall is also appended as one
+NDJSON line to `event-loop-stalls.ndjson`, next to the trace file. A line has `time` and the span
+attributes. The file keeps the last 1000 or more stalls, with one rotated backup
+(`event-loop-stalls.ndjson.1`). Use it to see how often a server stalls over days.
 
 Some delay is not recorded:
 
@@ -172,18 +184,22 @@ Default Grafana login:
 
 #### 2. Export OTLP env vars
 
+For endpoint settings and startup precedence, see the
+[user telemetry guide](../user/telemetry.md#export-diagnostics-to-your-own-receiver).
+In a worktree, use `vp run dev` instead of `npx t3` to keep state isolated.
+
 ```bash
-export T3CODE_OTLP_TRACES_URL=http://localhost:4318/v1/traces
-export T3CODE_OTLP_METRICS_URL=http://localhost:4318/v1/metrics
-export T3CODE_OTLP_LOGS_URL=http://localhost:4318/v1/logs
+export GOAT_OTLP_TRACES_URL=http://localhost:4318/v1/traces
+export GOAT_OTLP_METRICS_URL=http://localhost:4318/v1/metrics
+export GOAT_OTLP_LOGS_URL=http://localhost:4318/v1/logs
 export OTEL_RESOURCE_ATTRIBUTES=deployment.environment.name=development
 ```
 
 Optional:
 
 ```bash
-export T3CODE_TRACE_MIN_LEVEL=Info
-export T3CODE_TRACE_TIMING_ENABLED=true
+export GOAT_TRACE_MIN_LEVEL=Info
+export GOAT_TRACE_TIMING_ENABLED=true
 ```
 
 #### 3. Launch the app from that same shell
@@ -208,23 +224,23 @@ node --run dev:desktop
 
 Packaged desktop app:
 
-Launch the actual app executable from the same shell so the desktop app and embedded backend inherit `T3CODE_OTLP_*`.
+Launch the actual app executable from the same shell so the desktop app and embedded backend inherit `GOAT_OTLP_*`.
 
 macOS app bundle example:
 
 ```bash
-T3CODE_OTLP_TRACES_URL=http://localhost:4318/v1/traces \
-T3CODE_OTLP_METRICS_URL=http://localhost:4318/v1/metrics \
-T3CODE_OTLP_LOGS_URL=http://localhost:4318/v1/logs \
+GOAT_OTLP_TRACES_URL=http://localhost:4318/v1/traces \
+GOAT_OTLP_METRICS_URL=http://localhost:4318/v1/metrics \
+GOAT_OTLP_LOGS_URL=http://localhost:4318/v1/logs \
 "/Applications/T3 Code.app/Contents/MacOS/T3 Code"
 ```
 
 Direct binary example:
 
 ```bash
-T3CODE_OTLP_TRACES_URL=http://localhost:4318/v1/traces \
-T3CODE_OTLP_METRICS_URL=http://localhost:4318/v1/metrics \
-T3CODE_OTLP_LOGS_URL=http://localhost:4318/v1/logs \
+GOAT_OTLP_TRACES_URL=http://localhost:4318/v1/traces \
+GOAT_OTLP_METRICS_URL=http://localhost:4318/v1/metrics \
+GOAT_OTLP_LOGS_URL=http://localhost:4318/v1/logs \
 ./path/to/your/desktop-app-binary
 ```
 
@@ -244,7 +260,7 @@ Resolve the path for the launch mode once. Production and explicitly configured 
 state under the base directory's `userdata` folder:
 
 ```bash
-TRACE_FILE="${T3CODE_HOME:-$HOME/.t3}/userdata/logs/server.trace.ndjson"
+TRACE_FILE="${GOAT_HOME:-$HOME/.t3}/userdata/logs/server.trace.ndjson"
 ```
 
 A dev server started from a linked worktree defaults to that worktree's local home:
@@ -356,12 +372,12 @@ Recommended flow in Grafana:
 2. Pick the `Tempo` data source.
 3. Set the time range to something recent like `Last 15 minutes`.
 4. Start broad. Do not begin with a very narrow query.
-5. Look for spans from the `t3code-server` or `t3code-desktop` service, then narrow by span name or
+5. Look for spans from the `goat-server` or `goat-desktop` service, then narrow by span name or
    attributes.
 
 Good first searches:
 
-- service name `t3code-server` or `t3code-desktop`, plus a resource attribute such as
+- service name `goat-server` or `goat-desktop`, plus a resource attribute such as
   `deployment.environment.name`
 - span names like `sendTurn` or a Git operation such as `GitVcsDriver.statusDetails.status`
 - Git spans whose `git.operation` attribute identifies the operation
@@ -376,28 +392,28 @@ Traces are best for one request. Metrics are best for trends.
 
 Good metric families to watch:
 
-- `t3_rpc_request_duration`
-- `t3_provider_turn_duration` (how long the provider adapter takes to start a turn, not the turn's run time)
-- `t3_git_command_duration`
+- `goat_rpc_request_duration`
+- `goat_provider_turn_duration` (how long the provider adapter takes to start a turn, not the turn's run time)
+- `goat_git_command_duration`
 
 Counters tell you volume and failure rate:
 
-- `t3_rpc_requests_total`
-- `t3_provider_turns_total`
-- `t3_git_commands_total`
+- `goat_rpc_requests_total`
+- `goat_provider_turns_total`
+- `goat_git_commands_total`
 
 Webhooks have their own families:
 
-- `t3_webhook_deliveries_total` by `outcome` and `source` (`relay` or `direct`). Beyond what the
+- `goat_webhook_deliveries_total` by `outcome` and `source` (`relay` or `direct`). Beyond what the
   sender sees, `queue_full` means a task already had its limit of deliveries waiting,
   `prompt_too_long` means the filled-in prompt passed the provider limit, and `duplicate` means
   the relay delivered a request this environment had already run.
-- `t3_webhook_runs_total` by `outcome` (`started`, `skipped`, `failed`) for the runs those
+- `goat_webhook_runs_total` by `outcome` (`started`, `skipped`, `failed`) for the runs those
   deliveries start, which happen after the sender has its answer.
-- `t3_webhook_held_delay` for how long requests the relay held waited before arriving.
+- `goat_webhook_held_delay` for how long requests the relay held waited before arriving.
 
-- `t3_secret_requests_total` by `status` (`saved`, `declined`, `cancelled`, `timed_out`) for secrets
-  agents asked users for, and `t3_secret_refs_consumed_total` by `result` (`used`, `rejected`) for
+- `goat_secret_requests_total` by `status` (`saved`, `declined`, `cancelled`, `timed_out`) for secrets
+  agents asked users for, and `goat_secret_refs_consumed_total` by `result` (`used`, `rejected`) for
   tools redeeming them. Neither ever carries a value.
 
 `ScheduledTaskService.triggerWebhook` spans carry the same outcome per request, and each run
@@ -443,7 +459,7 @@ Use traces when the question is:
 
 Usually one of these is true:
 
-- `T3CODE_OTLP_TRACES_URL` was not set
+- `GOAT_OTLP_TRACES_URL` was not set
 - the app was launched from a different environment than the one where you exported the vars
 - the app was not fully restarted after changing env
 - Grafana is looking at the wrong time range or service name
@@ -565,10 +581,10 @@ It provides:
 - Effect trace-level and timing refs
 
 The desktop main process is a second producer, assembled in
-`apps/desktop/src/app/DesktopObservability.ts`. It reads the same `T3CODE_OTLP_*` names and the same
+`apps/desktop/src/app/DesktopObservability.ts`. It reads the same `GOAT_OTLP_*` names and the same
 Settings entries as the backend it supervises, and covers work the backend cannot see: app startup,
 window and menu handling, backend supervision, and updates. It reports as service
-`t3code-desktop`, so a collector shows it alongside the backend rather than mixed into it. It
+`goat-desktop`, so a collector shows it alongside the backend rather than mixed into it. It
 exports traces and logs only; the main process records no metrics, so the metrics endpoint applies
 to the backend alone.
 
@@ -576,58 +592,66 @@ to the backend alone.
 
 Local trace file:
 
-- `T3CODE_TRACE_FILE`: override trace file path
-- `T3CODE_TRACE_MAX_BYTES`: per-file rotation size, default `10485760`
-- `T3CODE_TRACE_MAX_FILES`: rotated file count, default `10`
-- `T3CODE_TRACE_BATCH_WINDOW_MS`: flush window, default `1000`
-- `T3CODE_TRACE_MIN_LEVEL`: minimum trace level, default `Info`
-- `T3CODE_TRACE_TIMING_ENABLED`: enable timing metadata, default `true`
+- `GOAT_TRACE_FILE`: override trace file path
+- `GOAT_TRACE_MAX_BYTES`: per-file rotation size, default `10485760`
+- `GOAT_TRACE_MAX_FILES`: rotated file count, default `10`
+- `GOAT_TRACE_BATCH_WINDOW_MS`: flush window, default `1000`
+- `GOAT_TRACE_MIN_LEVEL`: minimum trace level, default `Info`
+- `GOAT_TRACE_TIMING_ENABLED`: enable timing metadata, default `true`
 
 OTLP export:
 
-- `T3CODE_OTLP_TRACES_URL`: OTLP trace endpoint
-- `T3CODE_OTLP_METRICS_URL`: OTLP metric endpoint
-- `T3CODE_OTLP_LOGS_URL`: OTLP log endpoint
-- `T3CODE_OTLP_EXPORT_INTERVAL_MS`: export interval, default `10000`
-- `T3CODE_OTLP_HEADERS`: extra headers for all three exporters, same format as
+- `GOAT_OTLP_TRACES_URL`: OTLP trace endpoint
+- `GOAT_OTLP_METRICS_URL`: OTLP metric endpoint
+- `GOAT_OTLP_LOGS_URL`: OTLP log endpoint
+- `GOAT_OTLP_EXPORT_INTERVAL_MS`: export interval, default `10000`
+- `GOAT_OTLP_HEADERS`: extra headers for all three exporters, same format as
   `OTEL_EXPORTER_OTLP_HEADERS`: comma-separated `key=value` pairs with percent-encoded values.
-- `T3CODE_OTLP_PROTOCOL`: `http/json` (default) or `http/protobuf`
+- `GOAT_OTLP_PROTOCOL`: `http/json` (default) or `http/protobuf`
 
 The server and the desktop app also read the standard
 `OTEL_EXPORTER_OTLP_{TRACES,METRICS,LOGS}_ENDPOINT` and generic `OTEL_EXPORTER_OTLP_ENDPOINT` (with
 `/v1/traces`, `/v1/metrics`, or `/v1/logs` appended), for a collector expecting those instead. A
-non-blank `T3CODE_OTLP_*_URL` wins over either, and a per-signal endpoint wins over the generic one
+non-blank `GOAT_OTLP_*_URL` wins over either, and a per-signal endpoint wins over the generic one
 for its signal. A blank value counts as unset. A signal with an OTEL endpoint takes its headers from
 `OTEL_EXPORTER_OTLP_HEADERS` and its protocol from `OTEL_EXPORTER_OTLP_PROTOCOL` (default
 `http/protobuf`, read case-insensitively), and a per-signal
 `OTEL_EXPORTER_OTLP_{TRACES,METRICS,LOGS}_HEADERS` or `_PROTOCOL` wins over the generic one for its
-signal. `T3CODE_OTLP_HEADERS` and `T3CODE_OTLP_PROTOCOL` never apply to it. An endpoint that is not
+signal. `GOAT_OTLP_HEADERS` and `GOAT_OTLP_PROTOCOL` never apply to it. An endpoint that is not
 an `http` or `https` URL, a protocol other than `http/protobuf` or `http/json` such as `grpc`, or
 headers that are not `key=value` pairs with percent-encoded values turn that signal's export off
 with a startup warning, rather than sending it to the Settings endpoint.
 
-Service names are fixed: `t3code-server` for the backend and `t3code-desktop` for the desktop main
-process, both in `service.namespace` `t3code`. `OTEL_SERVICE_NAME` and a `service.name` or
+Service names are fixed: `goat-server` for the backend, `goat-desktop` for the desktop main
+process, and `goat-web` for web client spans the backend forwards, all in `service.namespace`
+`goat`. `OTEL_SERVICE_NAME` and a `service.name` or
 `service.namespace` in `OTEL_RESOURCE_ATTRIBUTES` are ignored. Tell installations apart with other
 resource attributes, such as `OTEL_RESOURCE_ATTRIBUTES=deployment.environment.name=development`.
+
+Releases before the GOAT rename reported `t3code-server`, `t3code-desktop`, and `t3code-web` in
+namespace `t3code`, with `service.runtime` `t3-server` or `t3-web`, and tagged SSH runtime
+spans with `t3.runtime.*` attributes, now `goat.runtime.*`. Dashboards and alerts that filter on
+those values need the new ones. To cover hosts on both sides of an upgrade, match both, for example
+`{ resource.service.name =~ "goat-server|t3code-server" }` in TraceQL. Spans sent to the T3
+Connect relay keep the relay's `t3code-*` names, because the relay's dataset owns them.
 
 If the OTLP URLs are unset, local tracing still works, metrics stay in-process only, and logs stay
 on stdout only.
 
 ### The Kill Switch
 
-`T3CODE_OTEL_SDK_DISABLED` and `OTEL_SDK_DISABLED` turn off every OTLP export in both the server and
+`GOAT_OTEL_SDK_DISABLED` and `OTEL_SDK_DISABLED` turn off every OTLP export in both the server and
 the desktop main process, overriding any endpoint from the environment or Settings. Local trace
 files and stdout logs are unaffected.
 
-`T3CODE_OTEL_SDK_DISABLED` wins when set, so `T3CODE_OTEL_SDK_DISABLED=false` re-enables export on a
+`GOAT_OTEL_SDK_DISABLED` wins when set, so `GOAT_OTEL_SDK_DISABLED=false` re-enables export on a
 machine that sets `OTEL_SDK_DISABLED` for everything else. It accepts the usual boolean spellings
 (`true`/`false`, `yes`/`no`, `on`/`off`, `1`/`0`, `y`/`n`). `OTEL_SDK_DISABLED` follows the
 OpenTelemetry specification and only `true` disables export, so `OTEL_SDK_DISABLED=1` does not.
 Values are case-insensitive and trimmed. An unrecognized value is ignored with a startup warning.
 
 `OTEL_TRACES_EXPORTER`, `OTEL_METRICS_EXPORTER`, or `OTEL_LOGS_EXPORTER` set to `none` turns off
-just that signal, overriding an OTEL endpoint and the Settings endpoint. A `T3CODE_OTLP_*_URL` still
+just that signal, overriding an OTEL endpoint and the Settings endpoint. A `GOAT_OTLP_*_URL` still
 wins for its signal. `otlp` is the default, and any other exporter name, such as `console` or
 `prometheus`, is ignored with a startup warning.
 
@@ -642,7 +666,8 @@ Current high-value span and metric boundaries include:
 - provider session and turn operations
 - git command execution and git hook events
 - terminal session lifecycle
-- sqlite query execution
+- sqlite query execution, except the statements inside `orchestrationV2.EventSink.write`, which
+  its `sql.transaction` span times as one
 - event loop stalls (`server.eventLoop.stall`)
 
 ### Current Constraints
@@ -664,11 +689,11 @@ handler exits on `SIGUSR2`. After a crash the file can keep a stale pid that now
 different process, so check the pid first.
 
 ```bash
-pid="$(jq .pid "${T3CODE_HOME:-$HOME/.t3}/userdata/server-runtime.json")"
+pid="$(jq .pid "${GOAT_HOME:-$HOME/.t3}/userdata/server-runtime.json")"
 ps -p "$pid" -o command=
 ```
 
-If `ps` shows the T3 Code server, send the signal:
+If `ps` shows the GOAT server, send the signal:
 
 ```bash
 kill -USR2 "$pid"

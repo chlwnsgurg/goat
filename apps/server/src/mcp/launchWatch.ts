@@ -5,8 +5,9 @@ import {
   type OrchestrationV2RunStatus,
   ProjectId,
   RunId,
+  RuntimeMode,
   ThreadId,
-} from "@t3tools/contracts";
+} from "@goat/contracts";
 import * as Schema from "effect/Schema";
 import * as Effect from "effect/Effect";
 
@@ -15,7 +16,8 @@ import * as Effect from "effect/Effect";
  * tested directly. A launch watch is a launcher thread's standing request to
  * hear about another thread it started (goat_thread_launch,
  * goat_ssh_thread_launch) or asked to watch; LaunchWatchService stores and
- * follows them.
+ * follows them. A launch from outside any thread can opt into a launcherless
+ * watch, which has no thread to wake and reports only to the completion webhook.
  */
 
 export const LaunchWatchOutage = Schema.Struct({
@@ -30,11 +32,38 @@ export const LaunchWatchOutage = Schema.Struct({
 });
 export type LaunchWatchOutage = typeof LaunchWatchOutage.Type;
 
+/**
+ * Where a launch routed its webhook reports, kept with the watch so it survives a restart. A
+ * named target is looked up in settings on each post; an inline one keeps its signing secret
+ * in the server secret store under `secretName`, never in this file.
+ */
+export const LaunchWatchWebhookTarget = Schema.Union([
+  Schema.Struct({ type: Schema.Literal("named"), name: Schema.String }),
+  Schema.Struct({
+    type: Schema.Literal("inline"),
+    url: Schema.String,
+    secretName: Schema.NullOr(Schema.String),
+  }),
+]);
+export type LaunchWatchWebhookTarget = typeof LaunchWatchWebhookTarget.Type;
+
 export const LaunchWatch = Schema.Struct({
   id: Schema.String,
   /** Fresh whenever an absent watch is registered, so a stale follower cannot act on it. */
   incarnation: Schema.String,
-  launcherThreadId: ThreadId,
+  /** Null for a launch from outside any thread, whose reports go only to the completion webhook. */
+  launcherThreadId: Schema.NullOr(ThreadId),
+  /**
+   * The outside caller a launcherless watch belongs to (its MCP request namespace),
+   * so another outside caller cannot see or re-arm it. Null for a thread launcher's
+   * watch, and for launcherless watches from before owners were recorded.
+   */
+  owner: Schema.NullOr(Schema.String).pipe(Schema.withDecodingDefault(Effect.succeed(null))),
+  /**
+   * The runtime mode a launcherless watch's remote reads run at: what its outside
+   * caller was approved for at launch. A thread launcher's current mode is used instead.
+   */
+  ceiling: Schema.NullOr(RuntimeMode).pipe(Schema.withDecodingDefault(Effect.succeed(null))),
   /** SSH alias of the target's environment; null for this environment. */
   host: Schema.NullOr(Schema.String),
   threadId: ThreadId,
@@ -58,6 +87,14 @@ export const LaunchWatch = Schema.Struct({
   deliveryAttempts: Schema.Record(Schema.String, Schema.Number).pipe(
     Schema.withDecodingDefault(Effect.succeed({})),
   ),
+  /** Whether reports also go to the default completion webhook (`completionWebhook.url`). */
+  notifyWebhook: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
+  /** The one receiver this launch chose; when set, the default webhook never gets its reports. */
+  webhookTarget: Schema.NullOr(LaunchWatchWebhookTarget).pipe(
+    Schema.withDecodingDefault(Effect.succeed(null)),
+  ),
+  /** When a run was last added; a launcherless watch's retention counts from it. */
+  armedAt: Schema.NullOr(Schema.Number).pipe(Schema.withDecodingDefault(Effect.succeed(null))),
   createdAt: Schema.Number,
   updatedAt: Schema.Number,
 });
@@ -97,28 +134,41 @@ export function normalizeHost(host: string | null | undefined): string | null {
 }
 
 export function launchWatchId(input: {
-  readonly launcherThreadId: string;
+  readonly launcherThreadId: string | null;
+  readonly owner?: string | null;
   readonly host: string | null;
   readonly threadId: string;
 }): string {
-  return [input.launcherThreadId, input.host ?? "", input.threadId]
+  const owner = input.launcherThreadId === null ? (input.owner ?? null) : null;
+  return [
+    input.launcherThreadId ?? "",
+    input.host ?? "",
+    input.threadId,
+    ...(owner === null ? [] : [owner]),
+  ]
     .map(encodeURIComponent)
     .join(":");
 }
 
 export function newLaunchWatch(input: {
-  readonly launcherThreadId: ThreadId;
+  readonly launcherThreadId: ThreadId | null;
+  readonly owner?: string | null;
+  readonly ceiling?: RuntimeMode | null;
   readonly host: string | null;
   readonly threadId: ThreadId;
   readonly projectId: ProjectId | null;
   readonly title: string | null;
   readonly incarnation: string;
+  readonly notifyWebhook: boolean;
+  readonly webhookTarget?: LaunchWatchWebhookTarget | null;
   readonly now: number;
 }): LaunchWatch {
   return {
     id: launchWatchId(input),
     incarnation: input.incarnation,
     launcherThreadId: input.launcherThreadId,
+    owner: input.launcherThreadId === null ? (input.owner ?? null) : null,
+    ceiling: input.ceiling ?? null,
     host: input.host,
     threadId: input.threadId,
     projectId: input.projectId,
@@ -129,6 +179,9 @@ export function newLaunchWatch(input: {
     lastEpisode: 0,
     outage: null,
     deliveryAttempts: {},
+    notifyWebhook: input.notifyWebhook,
+    webhookTarget: input.webhookTarget ?? null,
+    armedAt: null,
     createdAt: input.now,
     updatedAt: input.now,
   };
@@ -169,7 +222,7 @@ const keepRecent = <A>(values: ReadonlyArray<A>, value: A) =>
 /** Adds a run to report; a run already pending or reported is left alone. */
 export function addPendingRun(watch: LaunchWatch, runId: RunId, now: number): LaunchWatch {
   if (watch.pendingRuns.includes(runId) || watch.reportedRuns.includes(runId)) return watch;
-  return { ...watch, pendingRuns: [...watch.pendingRuns, runId], updatedAt: now };
+  return { ...watch, pendingRuns: [...watch.pendingRuns, runId], armedAt: now, updatedAt: now };
 }
 
 /** Moves a run from pending to reported, whether or not a wake went out for it. */

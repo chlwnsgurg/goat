@@ -3,7 +3,7 @@ import {
   ChatAttachmentId,
   getProviderAttachmentLimitError,
   type ChatAttachment,
-} from "@t3tools/contracts";
+} from "@goat/contracts";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 
@@ -52,12 +52,8 @@ export const releaseClaimedAttachments = Effect.fn("AttachmentClaims.releaseClai
 );
 
 /**
- * Claims pending uploads into the target thread's attachment store before the
- * command enters the orchestrator: verifies the staged file, copies it under a
- * thread-scoped id, and rewrites the attachment ref. A copy, not a move — the
- * pending file stays behind as the retry source for a failed bootstrap, and
- * the periodic pending sweep reclaims it later. Already-claimed attachments
- * pass through untouched.
+ * A copy, not a move — the pending file stays behind as the retry source for a
+ * failed bootstrap, and the periodic pending sweep reclaims it later.
  */
 export const claimPendingAttachments = Effect.fn("AttachmentClaims.claimPendingAttachments")(
   function* (input: {

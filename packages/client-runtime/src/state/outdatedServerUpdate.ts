@@ -1,4 +1,4 @@
-import type { EnvironmentId, ServerSelfUpdateInput } from "@t3tools/contracts";
+import type { EnvironmentId, ServerSelfUpdateInput } from "@goat/contracts";
 import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
@@ -24,10 +24,6 @@ export interface OutdatedServerUpdateTarget {
   readonly fromVersion?: string;
 }
 
-/**
- * Updates a host too old for this client to connect to. Progress lands in the
- * same per-environment update state as a normal server update.
- */
 export function createOutdatedServerUpdateCommand<E>(
   runtime: Atom.AtomRuntime<
     | EnvironmentRegistry.EnvironmentRegistry

@@ -1,10 +1,10 @@
-import { SymbolView } from "../../components/AppSymbol";
+import { SymbolView } from "../../components/ui/AppSymbol";
 import { Platform, Pressable, View } from "react-native";
 
-import { AppText as Text } from "../../components/AppText";
-import { MaterialNewThreadButton } from "../../components/MaterialNewThreadButton";
-import { MaterialFloatingActionButton } from "../../components/MaterialFloatingActionButton";
-import { EmptyState } from "../../components/EmptyState";
+import { AppText as Text } from "../../components/ui/AppText";
+import { NewThreadButton } from "../../components/NewThreadButton";
+import { FloatingActionButton } from "../../components/ui/FloatingActionButton";
+import { EmptyState } from "../../components/ui/EmptyState";
 
 export function WorkspaceEmptyDetail(props: {
   readonly onStartNewTask?: () => void;
@@ -21,13 +21,13 @@ export function WorkspaceEmptyDetail(props: {
       {props.onAddConnection ? (
         <View className="w-full max-w-[430px]">
           <EmptyState
-            title="No environments connected"
-            detail="Add an environment to load projects and start coding sessions."
+            title="Connect your hub"
+            detail="Scan the QR code your hub shows to see its sessions here."
             variant="plain"
             action={
-              <MaterialFloatingActionButton
-                label="Add environment"
-                icon="plus"
+              <FloatingActionButton
+                label="Scan QR code"
+                icon="qrcode.viewfinder"
                 variant="extended"
                 tone="primary"
                 onPress={props.onAddConnection}
@@ -43,7 +43,7 @@ export function WorkspaceEmptyDetail(props: {
             tintColorClassName="accent-icon-subtle"
             type="hierarchical"
           />
-          <Text className="text-center text-xl font-t3-bold">Select a thread</Text>
+          <Text className="text-center text-xl font-goat-bold">Select a thread</Text>
           <Text className="text-center text-base text-foreground-muted">
             {Platform.OS === "android"
               ? "Choose a thread from the sidebar or start a new thread."
@@ -51,14 +51,14 @@ export function WorkspaceEmptyDetail(props: {
           </Text>
           {props.onStartNewTask ? (
             Platform.OS === "android" ? (
-              <MaterialNewThreadButton extended className="mt-2" onPress={props.onStartNewTask} />
+              <NewThreadButton extended className="mt-2" onPress={props.onStartNewTask} />
             ) : (
               <Pressable
                 accessibilityRole="button"
                 className="mt-2 flex-row items-center gap-2 rounded-full bg-primary px-5 py-3 active:opacity-70"
                 onPress={props.onStartNewTask}
               >
-                <Text className="text-base font-t3-bold text-primary-foreground">New Task</Text>
+                <Text className="text-base font-goat-bold text-primary-foreground">New Task</Text>
               </Pressable>
             )
           ) : null}

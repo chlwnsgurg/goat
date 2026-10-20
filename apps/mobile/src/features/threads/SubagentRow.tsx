@@ -1,12 +1,13 @@
-import { scopeProjectRef, scopeThreadRef } from "@t3tools/client-runtime/environment";
-import { resolveProviderInstanceDisplayName } from "@t3tools/client-runtime/state/provider-instance-display";
-import { resolveSubagentMetadata } from "@t3tools/client-runtime/state/subagent-display";
-import type { EnvironmentId, OrchestrationV2Subagent } from "@t3tools/contracts";
+import { scheduledMemoryAccess } from "../settings/scheduledTaskPresentation";
+import { scopeProjectRef, scopeThreadRef } from "@goat/client-runtime/environment";
+import { resolveProviderInstanceDisplayName } from "@goat/client-runtime/state/provider-instance-display";
+import { resolveSubagentMetadata } from "@goat/client-runtime/state/subagent-display";
+import type { EnvironmentId, OrchestrationV2Subagent } from "@goat/contracts";
 import type { ReactNode } from "react";
 import { View } from "react-native";
 
-import { AppText as Text } from "../../components/AppText";
-import { SymbolView } from "../../components/AppSymbol";
+import { AppText as Text } from "../../components/ui/AppText";
+import { SymbolView } from "../../components/ui/AppSymbol";
 import { ProviderIcon } from "../../components/ProviderIcon";
 import { cn } from "../../lib/cn";
 import { useEnvironmentServerConfig, useProject, useThreadShell } from "../../state/entities";
@@ -16,6 +17,8 @@ import { resolveSubagentRowPresentation } from "./threadAgentsPresentation";
 
 type SubagentRowSubagent = Pick<
   OrchestrationV2Subagent,
+  | "currentMemoryAccess"
+  | "memoryGrantCeiling"
   | "threadId"
   | "childThreadId"
   | "model"
@@ -28,11 +31,6 @@ type SubagentRowSubagent = Pick<
   | "result"
 >;
 
-/**
- * One agent as shown in the Agents sheet and transcript cards: status, model,
- * workspace changes, and recent progress or result. Callers own the press
- * target and pass their own elapsed timer so ticking stays isolated.
- */
 export function SubagentRow(props: {
   readonly environmentId: EnvironmentId;
   readonly subagent: SubagentRowSubagent;
@@ -50,7 +48,7 @@ export function SubagentRow(props: {
           <View className="min-w-0 flex-1 flex-row items-baseline gap-1.5">
             <Text
               numberOfLines={1}
-              className="min-w-0 shrink font-t3-medium text-sm text-foreground"
+              className="min-w-0 shrink font-goat-medium text-sm text-foreground"
             >
               {presentation.title}
             </Text>
@@ -63,7 +61,7 @@ export function SubagentRow(props: {
             </Text>
             <Text
               className={cn(
-                "shrink-0 text-xs font-t3-medium",
+                "shrink-0 text-xs font-goat-medium",
                 SUBAGENT_TONE_TEXT_CLASS[presentation.tone],
               )}
             >
@@ -76,6 +74,7 @@ export function SubagentRow(props: {
           ) : null}
         </View>
         <SubagentMetadata environmentId={props.environmentId} subagent={props.subagent} />
+        <SubagentMemoryAccess subagent={props.subagent} />
         {detail ? (
           <Text
             numberOfLines={3}
@@ -92,7 +91,6 @@ export function SubagentRow(props: {
   );
 }
 
-/** Uses shell data already held by the client, without loading child transcripts. */
 function SubagentMetadata(props: {
   readonly environmentId: EnvironmentId;
   readonly subagent: SubagentRowSubagent;
@@ -152,4 +150,13 @@ function SubagentMetadata(props: {
       ))}
     </View>
   );
+}
+
+export function SubagentMemoryAccess({
+  subagent,
+}: {
+  readonly subagent: Pick<OrchestrationV2Subagent, "memoryGrantCeiling" | "currentMemoryAccess">;
+}) {
+  const label = scheduledMemoryAccess(subagent);
+  return label ? <Text className="text-xs text-foreground-muted">{label}</Text> : null;
 }

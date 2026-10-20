@@ -1,4 +1,4 @@
-import type { ProviderInstanceEnvironment, ProviderInstanceId } from "@t3tools/contracts";
+import type { ProviderInstanceEnvironment, ProviderInstanceId } from "@goat/contracts";
 import type { AcpRegistrySettings } from "../settings.ts";
 import * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
@@ -9,7 +9,7 @@ import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
 import * as Semaphore from "effect/Semaphore";
 
-import { writeFileStringAtomically } from "@t3tools/shared/atomicWrite";
+import { writeFileStringAtomically } from "@goat/shared/atomicWrite";
 
 const decodeState = Schema.decodeUnknownEffect(
   Schema.fromJsonString(Schema.Struct({ binding: Schema.String, authenticated: Schema.Boolean })),
@@ -22,7 +22,6 @@ const hash = Effect.fn("AcpRegistryAuthenticationState.hash")(function* (value: 
   return Hex.encode(digest);
 });
 
-/** Remember explicit sign-in success, never discovery success or the agent's credentials. */
 export const makeAcpRegistryAuthenticationState = Effect.fn("makeAcpRegistryAuthenticationState")(
   function* (input: {
     readonly cacheDir: string;

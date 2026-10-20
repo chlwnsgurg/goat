@@ -5,10 +5,10 @@ import * as Layer from "effect/Layer";
 import * as Redacted from "effect/Redacted";
 import { ChildProcessSpawner } from "effect/process";
 
-import { DEFAULT_SERVER_SETTINGS } from "@t3tools/contracts";
-import type * as SourceControlHost from "@t3tools/source-control-core/server/SourceControlHost";
-import { applyServerSettingsPatch } from "@t3tools/shared/serverSettings";
-import * as TestSourceControlHost from "@t3tools/source-control-testing/TestSourceControlHost";
+import { DEFAULT_SERVER_SETTINGS } from "@goat/contracts";
+import type * as SourceControlHost from "@goat/source-control-core/server/SourceControlHost";
+import { applyServerSettingsPatch } from "@goat/shared/serverSettings";
+import * as TestSourceControlHost from "@goat/source-control-testing/TestSourceControlHost";
 import * as GitHubCredentials from "./GitHubCredentials.ts";
 
 const TOKEN_VARIABLES = [
@@ -18,7 +18,6 @@ const TOKEN_VARIABLES = [
   "GITHUB_ENTERPRISE_TOKEN",
 ] as const;
 
-/** Settings keep `enabled` explicit; a host the test leaves it off is enabled. */
 const hostSettings = (
   hosts: Record<string, { readonly account?: string; readonly enabled?: boolean }>,
 ) =>
@@ -57,7 +56,7 @@ function harness(
     Layer.provideMerge(
       TestSourceControlHost.layer({
         settings: applyServerSettingsPatch(DEFAULT_SERVER_SETTINGS, {
-          github: { hosts: hostSettings(hosts), tokens },
+          sourceControlHosts: { github: { hosts: hostSettings(hosts), tokens } },
         }),
         process: { run },
       }),
@@ -128,18 +127,21 @@ describe("GitHubCredentials", () => {
       expect(Redacted.value((yield* credentials.get("github.com")).token)).toBe("active-token");
 
       yield* settings.update({
-        github: { hosts: { "github.com": { account: "work", enabled: true } } },
+        sourceControlHosts: {
+          github: { hosts: { "github.com": { account: "work", enabled: true } } },
+        },
       });
       expect(Redacted.value((yield* credentials.get("github.com")).token)).toBe("token-for-work");
 
-      yield* settings.update({ github: { hosts: { "github.com": { enabled: false } } } });
+      yield* settings.update({
+        sourceControlHosts: { github: { hosts: { "github.com": { enabled: false } } } },
+      });
       expect((yield* Effect.flip(credentials.get("github.com")))._tag).toBe(
         "GitHubHostDisabledError",
       );
 
-      yield* settings.update({ github: { hosts: {} } });
+      yield* settings.update({ sourceControlHosts: { github: { hosts: {} } } });
       expect(Redacted.value((yield* credentials.get("github.com")).token)).toBe("active-token");
-      // The unpinned token stayed cached; only the newly pinned account cost a gh call.
       expect(calls).toHaveLength(2);
     }).pipe(Effect.provide(layer));
   });

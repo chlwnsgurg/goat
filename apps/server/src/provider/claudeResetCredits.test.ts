@@ -1,6 +1,6 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { it as effectIt } from "@effect/vitest";
-import * as HostProcess from "@t3tools/shared/HostProcess";
+import * as HostProcess from "@goat/shared/HostProcess";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -193,12 +193,10 @@ effectIt.layer(NodeServices.layer)("consumeClaudeResetCredit", (it) => {
       ]) {
         const result = yield* consume(client);
         expect(result).toMatchObject({ _tag: "Failure" });
-        // Claude answered, so a retry must be a new claim.
         if (result._tag === "Failure") {
           expect(ClaudeResetCredits.isSettledClaudeResetCreditFailure(result.failure)).toBe(true);
         }
       }
-      // No answer, or Claude could not confirm the claim: a retry is the same claim.
       for (const client of [respond(500, {}), respond(200, { result: "unavailable" })]) {
         const unanswered = yield* consume(client);
         expect(unanswered).toMatchObject({ _tag: "Failure" });

@@ -12,7 +12,7 @@ it("preserves in-app thread links through the shared Markdown sanitizer", () => 
     .use(CHAT_MARKDOWN_REHYPE_PLUGINS);
   const tree = processor.runSync(
     processor.parse(
-      '[Open thread](t3-thread://v1/environment/thread)\n\n<a href="javascript:alert(1)">Unsafe</a>',
+      '[Open thread](t3-thread://v1/environment/thread)\n\n<a href="javascript:alert(1)">Unsafe</a>', // goat-rename: legacy
     ),
   );
   expect(tree.children[0]).toMatchObject({
@@ -20,10 +20,54 @@ it("preserves in-app thread links through the shared Markdown sanitizer", () => 
     children: [
       {
         tagName: "a",
-        properties: { href: "t3-thread://v1/environment/thread" },
+        properties: { href: "t3-thread://v1/environment/thread" }, // goat-rename: legacy
         children: [{ type: "text", value: "Open thread" }],
       },
     ],
   });
   expect(JSON.stringify(tree)).not.toContain("javascript:");
+});
+
+// goat-rename: legacy-begin
+it.each(["t3-thread", "goat-thread", "t3-context", "goat-context", "t3-citation", "goat-citation"])(
+  "preserves %s links through the Markdown sanitizer",
+  (scheme) => {
+    const processor = unified()
+      .use(remarkParse)
+      .use(CHAT_MARKDOWN_REMARK_PLUGINS)
+      .use(remarkRehype, { allowDangerousHtml: true })
+      .use(CHAT_MARKDOWN_REHYPE_PLUGINS);
+    const href = `${scheme}://v1/thread`;
+    const tree = processor.runSync(processor.parse(`[reference](${href})`));
+    expect(tree.children[0]).toMatchObject({ children: [{ properties: { href } }] });
+  },
+);
+// goat-rename: legacy-end
+
+it("keeps backslashes that CommonMark would read as escapes in prose Windows paths", () => {
+  const processor = unified()
+    .use(remarkParse)
+    .use(CHAT_MARKDOWN_REMARK_PLUGINS)
+    .use(remarkRehype, { allowDangerousHtml: true })
+    .use(CHAT_MARKDOWN_REHYPE_PLUGINS);
+  type Node = { type: string; value?: string; tagName?: string; children?: Node[] };
+  const text = (node: Node): string =>
+    node.type === "text"
+      ? (node.value ?? "")
+      : node.tagName === "code"
+        ? `<code>${(node.children ?? []).map(text).join("")}</code>`
+        : (node.children ?? []).map(text).join("");
+  const render = (markdown: string) => text(processor.runSync(processor.parse(markdown)) as Node);
+
+  expect(
+    render(String.raw`Saved to C:\Users\me\.t3\_build and (C:\.scratch) and C:/work\.config.`),
+  ).toBe(String.raw`Saved to C:\Users\me\.t3\_build and (C:\.scratch) and C:/work\.config.`);
+  // Paths render as written, so one an agent already escaped keeps its doubled backslashes.
+  expect(render(String.raw`Escaped C:\\Users\\me`)).toBe(String.raw`Escaped C:\\Users\\me`);
+  expect(render(String.raw`See C:\x and \*this\* and Note:\*that\*.`)).toBe(
+    String.raw`See C:\x and *this* and Note:*that*.`,
+  );
+  expect(render(String.raw`${"`"}C:\me\.t3${"`"} and C:\me\.t3`)).toBe(
+    String.raw`<code>C:\me\.t3</code> and C:\me\.t3`,
+  );
 });

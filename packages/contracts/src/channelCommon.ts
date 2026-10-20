@@ -1,3 +1,4 @@
+import { MemoryReportReference } from "./memory.ts";
 import * as Schema from "effect/Schema";
 
 import { AuthEnvironmentScopes } from "./auth.ts";
@@ -31,7 +32,7 @@ export type ChannelQuestionId = typeof ChannelQuestionId.Type;
 export const ChannelTaskEventId = makeChannelId("ChannelTaskEventId");
 export type ChannelTaskEventId = typeof ChannelTaskEventId.Type;
 
-export const ChannelKind = Schema.Literals(["goat", "slack", "mcp"]);
+export const ChannelKind = Schema.Literals(["goat", "slack", "mcp", "imessage"]);
 export type ChannelKind = typeof ChannelKind.Type;
 
 /**
@@ -56,6 +57,11 @@ export const ChannelReplyAddress = Schema.Union([
     connectionId: TrimmedNonEmptyString,
     requestNamespace: TrimmedNonEmptyString,
     conversationKey: TrimmedNonEmptyString,
+  }),
+  Schema.Struct({
+    kind: Schema.Literal("imessage"),
+    connectionId: TrimmedNonEmptyString,
+    chatGuid: TrimmedNonEmptyString,
   }),
 ]);
 export type ChannelReplyAddress = typeof ChannelReplyAddress.Type;
@@ -100,6 +106,7 @@ export type ChannelMessageKind = typeof ChannelMessageKind.Type;
  * reading the input as context, not when a person viewed it.
  */
 export const ChannelMessageMeta = Schema.Struct({
+  memory: Schema.optionalKey(MemoryReportReference),
   conversationId: ChannelConversationId,
   originKind: ChannelKind,
   kind: ChannelMessageKind,
@@ -108,6 +115,8 @@ export const ChannelMessageMeta = Schema.Struct({
   taskId: Schema.optional(ChannelTaskId),
   inReplyToInputId: Schema.optional(ChannelInputId),
   readAt: Schema.optional(IsoDateTime),
+  /** Answers a question offers. The GOAT bot shows them as buttons that send the answer. */
+  options: Schema.optional(Schema.Array(TrimmedNonEmptyString)),
 });
 export type ChannelMessageMeta = typeof ChannelMessageMeta.Type;
 

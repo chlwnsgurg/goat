@@ -1,6 +1,6 @@
 import { assert, describe, it } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import * as HostProcess from "@t3tools/shared/HostProcess";
+import * as HostProcess from "@goat/shared/HostProcess";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
 import * as Effect from "effect/Effect";
@@ -9,6 +9,7 @@ import * as Option from "effect/Option";
 import { vi } from "vite-plus/test";
 
 import type * as Electron from "electron";
+import type { DesktopEnvironmentBootstrap } from "@goat/contracts";
 
 const { focusedWebContents, ownerWindow } = vi.hoisted(() => ({
   focusedWebContents: vi.fn(),
@@ -22,6 +23,7 @@ vi.mock("electron", () => ({
 import * as DesktopBackendConfiguration from "../../backend/DesktopBackendConfiguration.ts";
 import * as DesktopBackendManager from "../../backend/DesktopBackendManager.ts";
 import * as DesktopBackendPool from "../../backend/DesktopBackendPool.ts";
+import * as DesktopHeadlessServer from "../../backend/DesktopHeadlessServer.ts";
 import * as ElectronDialog from "../../electron/ElectronDialog.ts";
 import * as ElectronWindow from "../../electron/ElectronWindow.ts";
 import * as DesktopAppSettings from "../../settings/DesktopAppSettings.ts";
@@ -82,10 +84,46 @@ const backendConfigurationLayer = Layer.succeed(
   } satisfies DesktopBackendConfiguration.DesktopBackendConfiguration["Service"],
 );
 
-const bootstrapsLayer = (instances: ReadonlyArray<DesktopBackendManager.DesktopBackendInstance>) =>
-  Layer.merge(DesktopBackendPool.layerTest([...instances]), backendConfigurationLayer);
+const bootstrapsLayer = (
+  instances: ReadonlyArray<DesktopBackendManager.DesktopBackendInstance>,
+  headless: Option.Option<DesktopEnvironmentBootstrap> = Option.none(),
+) =>
+  Layer.mergeAll(
+    DesktopBackendPool.layerTest([...instances]),
+    backendConfigurationLayer,
+    Layer.succeed(DesktopHeadlessServer.DesktopHeadlessServer, {
+      bootstrap: Effect.succeed(headless),
+      refresh: Effect.void,
+    }),
+  );
 
 describe("getLocalEnvironmentBootstraps", () => {
+  it.effect("publishes the attached headless server after the desktop's own backends", () => {
+    const headless: DesktopEnvironmentBootstrap = {
+      id: DesktopHeadlessServer.HEADLESS_LOCAL_ENVIRONMENT_ID,
+      label: "Headless server",
+      runningDistro: null,
+      httpBaseUrl: "http://127.0.0.1:3773/",
+      wsBaseUrl: "ws://127.0.0.1:3773/",
+      accessToken: "headless-token",
+      accessTokenExpiresAt: "2099-01-01T00:00:00.000Z",
+    };
+    return Effect.gen(function* () {
+      const result = yield* getLocalEnvironmentBootstraps.handler();
+      assert.deepEqual(result, [
+        {
+          id: "wsl:default",
+          label: "WSL (Ubuntu)",
+          runningDistro: "Ubuntu",
+          httpBaseUrl: "http://127.0.0.1:3774/",
+          wsBaseUrl: "ws://127.0.0.1:3774/",
+          bootstrapToken: "bootstrap-token",
+        },
+        headless,
+      ]);
+    }).pipe(Effect.provide(bootstrapsLayer([defaultWslInstance], Option.some(headless))));
+  });
+
   it.effect("publishes the concrete running distro without replacing the stable instance id", () =>
     Effect.gen(function* () {
       const result = yield* getLocalEnvironmentBootstraps.handler();
@@ -320,7 +358,7 @@ it.effect.skipIf(HostProcess.Platform.defaultValue() === "win32")(
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
-      const home = yield* fs.makeTempDirectoryScoped({ prefix: "t3-remote-editors-" });
+      const home = yield* fs.makeTempDirectoryScoped({ prefix: "goat-remote-editors-" });
       for (const app of ["Cursor", "Visual Studio Code", "WebStorm"]) {
         const executable = path.join(
           home,

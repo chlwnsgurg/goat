@@ -12,8 +12,6 @@ import * as ServerConfig from "../config.ts";
 import { pruneExpiredReplayMarkers, REPLAY_MARKER_MAX_AGE } from "./replayMarkers.ts";
 import * as ServerSecretStore from "./ServerSecretStore.ts";
 
-// Every secret name the server stores today. The last three stand for names
-// built from an id at runtime.
 const REAL_SECRET_NAMES = [
   "server-signing-key",
   "asset-access-signing-key",
@@ -83,7 +81,7 @@ it.layer(NodeServices.layer)("replayMarkers", (it) => {
       Effect.provide(
         ServerSecretStore.layer.pipe(
           Layer.provideMerge(
-            ServerConfig.layerTest(process.cwd(), { prefix: "t3-replay-markers-test-" }),
+            ServerConfig.layerTest(process.cwd(), { prefix: "goat-replay-markers-test-" }),
           ),
         ),
       ),

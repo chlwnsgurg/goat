@@ -1,6 +1,6 @@
 import { View } from "react-native";
 
-import { AppText, AppTextInput, type AppTextInputProps } from "../../components/AppText";
+import { AppText, AppTextInput, type AppTextInputProps } from "../../components/ui/AppText";
 import { cn } from "../../lib/cn";
 
 type ConnectionFormFieldProps = Omit<AppTextInputProps, "accessibilityLabel" | "className"> & {
@@ -8,14 +8,13 @@ type ConnectionFormFieldProps = Omit<AppTextInputProps, "accessibilityLabel" | "
   readonly className?: string;
 };
 
-/** Labeled connection input with a native wrapper retained inside form sheets. */
 export function ConnectionFormField({ label, className, ...inputProps }: ConnectionFormFieldProps) {
   return (
     <View collapsable={false} className={cn("gap-1.5", className)}>
       <AppText
         accessibilityElementsHidden
         importantForAccessibility="no-hide-descendants"
-        className="text-2xs font-t3-bold tracking-[0.8px] uppercase text-foreground-muted"
+        className="text-2xs font-goat-bold tracking-[0.8px] uppercase text-foreground-muted"
       >
         {label}
       </AppText>

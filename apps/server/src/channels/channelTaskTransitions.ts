@@ -1,4 +1,4 @@
-import type { ChannelTask, ChannelTaskEvent, ChannelTaskStatus } from "@t3tools/contracts";
+import type { ChannelTask, ChannelTaskEvent, ChannelTaskStatus } from "@goat/contracts";
 
 /**
  * The task state machine. Every ledger write that moves a task goes through
@@ -12,18 +12,29 @@ export type ChannelTaskTransition =
 
 const reject = (reason: string): ChannelTaskTransition => ({ ok: false, reason });
 
+/** A finished task keeps the pull requests it produced; nothing is waiting on anyone anymore. */
+const settledObservation = (task: ChannelTask): Partial<Pick<ChannelTask, "observed">> =>
+  task.observed === undefined || task.observed.pullRequests.length === 0
+    ? {}
+    : { observed: { pullRequests: task.observed.pullRequests, needsYou: [] } };
+
 const allowedFrom: Record<ChannelTaskEvent["type"], ReadonlyArray<ChannelTaskStatus>> = {
   "task.created": [],
   "task.dispatch.claimed": ["received"],
+  "task.brief.frozen": ["dispatching"],
   "task.worker.bound": ["dispatching", "running", "waiting_input"],
   "task.progress": ["running"],
-  "task.question.opened": ["received", "dispatching", "running"],
+  // A question can open while another waits: a follow-up the worker refused asks its own.
+  "task.question.opened": ["received", "dispatching", "running", "waiting_input"],
   "task.question.answered": ["waiting_input"],
+  "task.followup.received": ["running"],
   "task.completion.proposed": ["running"],
   "task.completed": ["running"],
   "task.failed": ["received", "dispatching", "running", "waiting_input"],
   "task.cancelled": ["received", "dispatching", "running", "waiting_input"],
   "task.retry.requested": ["completed", "failed", "cancelled"],
+  "task.worker.observed": ["running", "waiting_input"],
+  "task.moved": ["dispatching", "running", "waiting_input"],
 };
 
 const eventGeneration = (event: ChannelTaskEvent): number | undefined => {
@@ -32,7 +43,10 @@ const eventGeneration = (event: ChannelTaskEvent): number | undefined => {
     case "task.progress":
     case "task.completed":
     case "task.failed":
+    case "task.worker.observed":
       return event.payload.generation;
+    case "task.brief.frozen":
+      return event.payload.brief.generation;
     case "task.worker.bound":
       return event.payload.worker.generation;
     case "task.completion.proposed":
@@ -54,9 +68,13 @@ export function applyChannelTaskEvent(
   if (!allowedFrom[event.type].includes(task.status)) {
     return reject(`${event.type} is not allowed while the task is ${task.status}.`);
   }
-  if (event.type === "task.retry.requested") {
+  if (event.type === "task.retry.requested" || event.type === "task.moved") {
     if (event.payload.generation !== task.generation + 1) {
-      return reject("A retry must start the next generation.");
+      return reject(
+        event.type === "task.moved"
+          ? "A move must start the next generation."
+          : "A retry must start the next generation.",
+      );
     }
   } else {
     const generation = eventGeneration(event);
@@ -79,6 +97,9 @@ export function applyChannelTaskEvent(
           projectId: event.payload.target.projectId,
         },
       };
+    case "task.brief.frozen":
+      if (task.briefVersion !== undefined) return reject("This generation already has a brief.");
+      return { ok: true, task: { ...base, briefVersion: event.payload.brief.version } };
     case "task.worker.bound":
       // A newer run on a waiting worker does not answer its open questions.
       return {
@@ -119,6 +140,9 @@ export function applyChannelTaskEvent(
             : "running";
       return { ok: true, task: { ...base, status, openQuestions } };
     }
+    // The worker takes the follow-up; the task keeps running until the run that took it settles.
+    case "task.followup.received":
+      return { ok: true, task: base };
     case "task.completion.proposed": {
       if (task.worker?.runId !== event.payload.proposal.runId) {
         return reject("The proposal names a run the task is not bound to.");
@@ -126,23 +150,26 @@ export function applyChannelTaskEvent(
       return { ok: true, task: { ...base, proposedCompletion: event.payload.proposal } };
     }
     case "task.completed": {
-      const { proposedCompletion: _proposed, ...rest } = base;
+      const { proposedCompletion: _proposed, observed: _observed, ...rest } = base;
       return {
         ok: true,
         task: {
           ...rest,
+          ...settledObservation(task),
           status: "completed",
           resultSummary: event.payload.summary,
+          ...(event.payload.report === undefined ? {} : { completionReport: event.payload.report }),
           completedAt: event.occurredAt,
         },
       };
     }
     case "task.failed": {
-      const { proposedCompletion: _proposed, ...rest } = base;
+      const { proposedCompletion: _proposed, observed: _observed, ...rest } = base;
       return {
         ok: true,
         task: {
           ...rest,
+          ...settledObservation(task),
           status: "failed",
           resultSummary: event.payload.summary ?? event.payload.reason,
           completedAt: event.occurredAt,
@@ -150,11 +177,12 @@ export function applyChannelTaskEvent(
       };
     }
     case "task.cancelled": {
-      const { proposedCompletion: _proposed, ...rest } = base;
+      const { proposedCompletion: _proposed, observed: _observed, ...rest } = base;
       return {
         ok: true,
         task: {
           ...rest,
+          ...settledObservation(task),
           status: "cancelled",
           ...(event.payload.reason === undefined ? {} : { resultSummary: event.payload.reason }),
           completedAt: event.occurredAt,
@@ -164,9 +192,12 @@ export function applyChannelTaskEvent(
     case "task.retry.requested": {
       const {
         proposedCompletion: _proposed,
+        briefVersion: _briefVersion,
         worker: _worker,
         completedAt: _completedAt,
         resultSummary: _summary,
+        completionReport: _report,
+        observed: _observed,
         ...rest
       } = base;
       return {
@@ -176,6 +207,37 @@ export function applyChannelTaskEvent(
           status: "received",
           generation: event.payload.generation,
           openQuestions: [],
+        },
+      };
+    }
+    case "task.worker.observed":
+      return { ok: true, task: { ...base, observed: event.payload.observed } };
+    case "task.moved": {
+      // The new machine resolves its own project and starts a new worker from the copied work,
+      // under a brief of its own, like a retry.
+      const {
+        proposedCompletion: _proposed,
+        worker: _worker,
+        target: _target,
+        projectId: _projectId,
+        observed: _observed,
+        briefVersion: _briefVersion,
+        ...rest
+      } = base;
+      return {
+        ok: true,
+        task: {
+          ...rest,
+          status: "received",
+          generation: event.payload.generation,
+          host: event.payload.host,
+          openQuestions: [],
+          movedFrom: {
+            host: event.payload.fromHost,
+            generation: task.generation,
+            at: event.occurredAt,
+            replicaCapturedAt: event.payload.replicaCapturedAt,
+          },
         },
       };
     }

@@ -11,7 +11,7 @@ import {
   type ChannelTaskChip,
   ChannelTaskEvent,
   type ChannelTaskEventId,
-} from "@t3tools/contracts";
+} from "@goat/contracts";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
@@ -47,7 +47,15 @@ export const makeTaskEvent = (
     occurredAt,
     actor: options.actor ?? "system",
     type: spec.type,
-    payload: spec.payload,
+    payload:
+      spec.type === "task.completed" ||
+      spec.type === "task.failed" ||
+      spec.type === "task.cancelled"
+        ? {
+            ...spec.payload,
+            ...(task.briefVersion === undefined ? {} : { briefVersion: task.briefVersion }),
+          }
+        : spec.payload,
   });
 
 const chipFor = (task: ChannelTask): ChannelTaskChip => ({
@@ -69,8 +77,14 @@ const chipFor = (task: ChannelTask): ChannelTaskChip => ({
           ...(task.worker.host === undefined ? {} : { host: task.worker.host }),
         },
       }),
+  ...(task.target?.placementReason === undefined
+    ? {}
+    : { placementReason: task.target.placementReason }),
+  ...(task.movedFrom === undefined ? {} : { movedFrom: task.movedFrom }),
   ...(task.resultSummary === undefined ? {} : { summary: task.resultSummary }),
   openQuestionCount: task.openQuestions.length,
+  ...(task.completionReport === undefined ? {} : { completionReport: task.completionReport }),
+  ...(task.observed === undefined ? {} : { observed: task.observed }),
 });
 
 export const botAddress = (bot: ChannelBotRef): ChannelReplyAddress => ({

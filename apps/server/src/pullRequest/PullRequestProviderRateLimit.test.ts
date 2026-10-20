@@ -1,21 +1,23 @@
+import { SourceControlProviderKind } from "@goat/contracts";
 import { assert, it } from "@effect/vitest";
 
-import * as AzureDevOpsCli from "@t3tools/source-control-azure-devops/server/AzureDevOpsCli";
-import * as BitbucketApi from "@t3tools/source-control-bitbucket/server/BitbucketApi";
-import * as GitHubApi from "@t3tools/source-control-github/server/GitHubApi";
-import * as SourceControlRateLimit from "@t3tools/source-control-core/server/SourceControlRateLimit";
-import * as GitLabCli from "@t3tools/source-control-gitlab/server/GitLabCli";
-import { azureDevOpsProviderFailure } from "@t3tools/source-control-azure-devops/server/AzureDevOpsPullRequestProvider";
-import { bitbucketProviderFailure } from "@t3tools/source-control-bitbucket/server/BitbucketPullRequestProvider";
-import { gitHubProviderFailure } from "@t3tools/source-control-github/server/GitHubPullRequestProvider";
-import { gitLabProviderFailure } from "@t3tools/source-control-gitlab/server/GitLabPullRequestProvider";
+import * as AzureDevOpsCli from "@goat/source-control-azure-devops/server/AzureDevOpsCli";
+import * as BitbucketApi from "@goat/source-control-bitbucket/server/BitbucketApi";
+import * as GitHubRest from "@goat/source-control-github/server/GitHubRest";
+import * as GitHubRequestPolicy from "@goat/source-control-github/server/GitHubRequestPolicy";
+import * as SourceControlRateLimit from "@goat/source-control-core/server/SourceControlRateLimit";
+import * as GitLabCli from "@goat/source-control-gitlab/server/GitLabCli";
+import { azureDevOpsProviderFailure } from "@goat/source-control-azure-devops/server/AzureDevOpsPullRequestProvider";
+import { bitbucketProviderFailure } from "@goat/source-control-bitbucket/server/BitbucketPullRequestProvider";
+import { gitHubProviderFailure } from "@goat/source-control-github/server/GitHubPullRequestProvider";
+import { gitLabProviderFailure } from "@goat/source-control-gitlab/server/GitLabPullRequestProvider";
 
 const cause = new Error("redacted provider failure");
 
 it("classifies rate limits from every pull-request provider", () => {
   assert.deepStrictEqual(
     gitHubProviderFailure(
-      new GitHubApi.GitHubApiRateLimitError({ host: "github.com", operation: "execute" }),
+      new GitHubRequestPolicy.GitHubApiRateLimitError({ host: "github.com", operation: "execute" }),
     ),
     { reason: "rate-limited" },
   );
@@ -59,7 +61,7 @@ it("keeps GitHub's exact retry time", () => {
   assert.deepStrictEqual(
     gitHubProviderFailure(
       new SourceControlRateLimit.SourceControlRateLimitPausedError({
-        provider: "github",
+        provider: SourceControlProviderKind.make("github"),
         host: "github.com",
         retryAt: 1_786_802_400_000,
       }),

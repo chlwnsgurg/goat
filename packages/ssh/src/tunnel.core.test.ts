@@ -1,9 +1,10 @@
-import { SSH_RUNTIME_PROTOCOL_VERSION } from "@t3tools/shared/sshRuntimeProtocol";
-import { ORCHESTRATION_PROTOCOL_VERSION } from "@t3tools/contracts";
+import * as NodeNet from "node:net";
+import { SSH_RUNTIME_PROTOCOL_VERSION } from "@goat/shared/sshRuntimeProtocol";
+import { ORCHESTRATION_PROTOCOL_VERSION } from "@goat/contracts";
 import { assert, describe, it, beforeEach, afterEach, vi } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import * as NetService from "@t3tools/shared/Net";
-import * as HostProcess from "@t3tools/shared/HostProcess";
+import * as NetService from "@goat/shared/Net";
+import * as HostProcess from "@goat/shared/HostProcess";
 import * as Deferred from "effect/Deferred";
 import * as Crypto from "effect/Crypto";
 import * as Hex from "effect/encoding/Hex";
@@ -20,7 +21,7 @@ import { TestClock } from "effect/testing";
 import { HttpClient, HttpClientResponse } from "effect/http";
 import { ChildProcess, ChildProcessSpawner } from "effect/process";
 import * as SshAuth from "./auth.ts";
-import { remoteStateKey } from "./command.ts";
+import { REMOTE_RUNTIME_STATE_KEY } from "./command.ts";
 import { SshCommandError, SshLaunchError } from "./errors.ts";
 import * as SshTunnel from "./tunnel.ts";
 import baseline from "./fixtures/remote-runner-baseline.json" with { type: "json" };
@@ -48,14 +49,42 @@ import {
   nativeScripts,
   nativeScriptsBatch,
   installArchivePsDouble,
+  isRemoteLaunch,
 } from "./tunnel.fixture.ts";
 import { nextVersion, shell, fixture } from "./tunnel.runnerSwitch.fixture.ts";
 
 // Archive acquisition stays local to these transport doubles.
 beforeEach(() => vi.stubGlobal("fetch", async () => new Response(null, { status: 404 })));
 afterEach(() => vi.unstubAllGlobals());
+const versionEntries = (...versions: string[]) =>
+  platform === "linux" ? [".maintenance.lock", ...versions] : versions;
 
 describe("ssh tunnel scripts", () => {
+  it.live("generates valid shell syntax with GOAT runtime variables and legacy peer metadata", () =>
+    Effect.gen(function* () {
+      const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+      const generated = yield* nativeScriptsBatch([{ input: ARCHIVE }, { input: NODE_SCRIPT }]);
+      for (const scripts of generated) {
+        assert.include(scripts.runner, "GOAT_NODE_SCRIPT_PATH=");
+        assert.include(scripts.runner, "T3_NODE_SCRIPT_PATH=");
+        assert.notMatch(scripts.runner, /\$[{]?T3_/);
+        for (const script of Object.values(scripts)) {
+          if (script === null) continue;
+          const child = yield* spawner.spawn(
+            ChildProcess.make(remoteShell, ["-n"], {
+              stdin: { stream: Stream.make(encoder.encode(script)), endOnDone: true },
+            }),
+          );
+          const result = yield* Effect.all({
+            code: child.exitCode,
+            stderr: child.stderr.pipe(Stream.decodeText(), Stream.mkString),
+          });
+          assert.equal(result.code, 0, result.stderr);
+        }
+      }
+      assert.include(generated[0]!.runner, `T3_ARCHIVE_VERSION='${ARCHIVE.archiveVersion}'`);
+    }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+  );
   it.effect(
     "preserves runner bytes and keeps cache directories out of launch and pairing scripts",
     () =>
@@ -87,13 +116,14 @@ describe("ssh tunnel scripts", () => {
           for (let variant = 0; variant < 4; variant++) {
             const actual = results[index++]!;
             assert.equal(actual.runner, baseline[key].runner);
+            assert.equal(actual.launch, baseline[key].launch);
             assert.equal(actual.launch, first.launch);
             assert.equal(actual.pairing, first.pairing);
           }
           if (key === "node") continue;
           const ordinary = baseline[key].runner;
           const start = ordinary.indexOf(
-            '  t3_fetch "$T3_RELEASE_BASE_URL/v$T3_ARCHIVE_VERSION/SHA256SUMS"',
+            '  goat_fetch "$GOAT_RELEASE_BASE_URL/v$GOAT_ARCHIVE_VERSION/SHA256SUMS"',
           );
           const end = ordinary.indexOf("  if command -v sha256sum >/dev/null 2>&1; then");
           const upload = first.upload!;
@@ -102,26 +132,26 @@ describe("ssh tunnel scripts", () => {
             upload.slice(upload.indexOf("  if command -v sha256sum >/dev/null 2>&1; then")),
             ordinary.slice(end),
           );
-          assert.include(upload, `T3_EXPECTED='${"a".repeat(64)}'`);
+          assert.include(upload, `GOAT_EXPECTED='${"a".repeat(64)}'`);
           assert.equal(first.runner, ordinary);
         }
         assert.throws(
-          () => SshTunnel.buildRemoteT3UploadInstallerScript(inputs.node, "a".repeat(64)),
+          () => SshTunnel.buildRemoteGoatUploadInstallerScript(inputs.node, "a".repeat(64)),
           SshLaunchError,
         );
         assert.throws(
-          () => SshTunnel.buildRemoteT3UploadInstallerScript({}, "a".repeat(64)),
+          () => SshTunnel.buildRemoteGoatUploadInstallerScript({}, "a".repeat(64)),
           SshLaunchError,
         );
         assert.throws(
-          () => SshTunnel.buildRemoteT3UploadInstallerScript(ARCHIVE, "no"),
+          () => SshTunnel.buildRemoteGoatUploadInstallerScript(ARCHIVE, "no"),
           SshLaunchError,
         );
       }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
   );
   it.effect("preserves literal shell PIDs through every nested script builder", () =>
     Effect.gen(function* () {
-      const lockOwner = `printf '%s\\n' "$$" > "$T3_LOCK_CANDIDATE/pid"`;
+      const lockOwner = `printf '%s\\n' "$$" > "$GOAT_LOCK_CANDIDATE/pid"`;
       for (const input of [
         ARCHIVE,
         { ...ARCHIVE, releaseBaseUrl: "https://example.invalid/mirror/" },
@@ -132,7 +162,7 @@ describe("ssh tunnel scripts", () => {
           assert.include(generated[field], lockOwner, field);
           assert.notInclude(
             generated[field],
-            `printf '%s\\n' "$" > "$T3_LOCK_CANDIDATE/pid"`,
+            `printf '%s\\n' "$" > "$GOAT_LOCK_CANDIDATE/pid"`,
             field,
           );
         }
@@ -150,27 +180,36 @@ describe("ssh tunnel scripts", () => {
     Effect.gen(function* () {
       const generated = yield* nativeScripts({ nodeScriptPath: "/fixture/dollar $$ $& entry.mjs" });
       for (const field of ["runner", "launch", "pairing", "mcp"] as const) {
-        assert.include(generated[field], "T3_NODE_SCRIPT_PATH='/fixture/dollar $$ $& entry.mjs'");
+        assert.include(generated[field], "GOAT_NODE_SCRIPT_PATH='/fixture/dollar $$ $& entry.mjs'");
       }
     }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
   );
 
-  it("installs and runs the release archive without Node, npm, or npx", () => {
-    const script = SshTunnel.buildRemoteT3RunnerScript(ARCHIVE);
+  it("embeds the runner in the launch script byte for byte", () => {
+    const runner = SshTunnel.buildRemoteGoatRunnerScript(ARCHIVE);
+    assert.include(runner, 'printf \'%s\\n\' "$$" > "$GOAT_LOCK_CANDIDATE/pid"');
+    assert.include(SshTunnel.buildRemoteLaunchScript(ARCHIVE), runner);
+  });
 
-    assert.include(script, "T3_ARCHIVE_VERSION='1.2.3-preview.20260911.4'");
-    assert.include(script, "T3_NODE_SCRIPT_PATH=''");
+  it("installs and runs the release archive without Node, npm, or npx", () => {
+    const script = SshTunnel.buildRemoteGoatRunnerScript(ARCHIVE);
+
+    assert.include(script, "GOAT_ARCHIVE_VERSION='1.2.3-preview.20260911.4'");
+    assert.include(script, "GOAT_NODE_SCRIPT_PATH=''");
     assert.include(
       script,
-      "T3_RELEASE_BASE_URL='https://github.com/goat-si/goat-releases/releases/download'",
+      "GOAT_RELEASE_BASE_URL='https://github.com/goat-si/goat-releases/releases/download'",
     );
     assert.include(
       script,
-      'T3_RUNTIME_DIR="$HOME/.goat/runtime/goat/versions/$T3_ARCHIVE_VERSION"',
+      'GOAT_RUNTIME_DIR="$HOME/.goat/runtime/goat/versions/$GOAT_ARCHIVE_VERSION"',
     );
-    assert.include(script, 'T3_ARCHIVE="goat-$T3_ARCHIVE_VERSION-$T3_PLATFORM-$T3_ARCH.tar.gz"');
+    assert.include(
+      script,
+      'GOAT_ARCHIVE="goat-$GOAT_ARCHIVE_VERSION-$GOAT_PLATFORM-$GOAT_ARCH.tar.gz"',
+    );
     assert.include(script, "SHA256SUMS");
-    assert.include(script, 'exec "$T3_RUNTIME_DIR/goat" "$@"');
+    assert.include(script, 'exec "$GOAT_RUNTIME_DIR/goat" "$@"');
     assert.notInclude(script, "npx");
     assert.notInclude(script, "npm exec");
     assert.notInclude(script, "t3@latest");
@@ -179,44 +218,44 @@ describe("ssh tunnel scripts", () => {
     // the completion marker after acquiring it.
     assert.include(
       script,
-      'T3_LOCK="$HOME/.goat/runtime/goat/versions/.$T3_ARCHIVE_VERSION.install.lock"',
+      'GOAT_LOCK="$HOME/.goat/runtime/goat/versions/.$GOAT_ARCHIVE_VERSION.install.lock"',
     );
     // Publish the pid before the atomic move, and pin stale cleanup to a cwd.
-    assert.include(script, 'mv "$T3_LOCK_CANDIDATE" "$T3_LOCK"');
-    assert.include(script, 'cd "$T3_LOCK" 2>/dev/null || exit 0');
-    assert.include(script, 'if kill -0 "$T3_LOCK_OWNER" 2>/dev/null; then exit 2; fi');
-    assert.include(script, 'elif [ "$T3_LOCK_UNOWNED" -lt 4 ]; then');
-    assert.include(script, 'if [ "$T3_LOCK_WAITED" -ge 360 ]; then');
-    assert.include(script, '"$T3_STAGING/SHA256SUMS" 30');
-    assert.include(script, '"$T3_STAGING/$T3_ARCHIVE" 240');
+    assert.include(script, 'mv "$GOAT_LOCK_CANDIDATE" "$GOAT_LOCK"');
+    assert.include(script, 'cd "$GOAT_LOCK" 2>/dev/null || exit 0');
+    assert.include(script, 'if kill -0 "$GOAT_LOCK_OWNER" 2>/dev/null; then exit 2; fi');
+    assert.include(script, 'elif [ "$GOAT_LOCK_UNOWNED" -lt 4 ]; then');
+    assert.include(script, 'if [ "$GOAT_LOCK_WAITED" -ge 360 ]; then');
+    assert.include(script, '"$GOAT_STAGING/SHA256SUMS" 30');
+    assert.include(script, '"$GOAT_STAGING/$GOAT_ARCHIVE" 240');
     assert.notInclude(script, "-mmin");
-    assert.equal(script.split("if ! t3_runtime_ready; then").length - 1, 2);
+    assert.equal(script.split("if ! goat_runtime_ready; then").length - 1, 2);
     assert.isBelow(
-      script.indexOf('"$T3_STAGING/goat" --version'),
-      script.indexOf('> "$T3_STAGING/.install-complete"'),
+      script.indexOf('"$GOAT_STAGING/goat" --version'),
+      script.indexOf('> "$GOAT_STAGING/.install-complete"'),
     );
     // Node discovery is defined for the dev path but only ever invoked inside
     // the node-script branch, which the archive path skips entirely.
     assert.equal(script.split("ensure_remote_node_path || true").length - 1, 1);
     assert.isBelow(
       script.indexOf("ensure_remote_node_path || true"),
-      script.indexOf('exec node "$T3_NODE_SCRIPT_PATH" "$@"'),
+      script.indexOf('exec node "$GOAT_NODE_SCRIPT_PATH" "$@"'),
     );
     assert.isBelow(
-      script.indexOf('exec node "$T3_NODE_SCRIPT_PATH" "$@"'),
-      script.indexOf("T3_ARCHIVE_VERSION="),
+      script.indexOf('exec node "$GOAT_NODE_SCRIPT_PATH" "$@"'),
+      script.indexOf("GOAT_ARCHIVE_VERSION="),
     );
 
     const launch = SshTunnel.buildRemoteLaunchScript({
       ...ARCHIVE,
       releaseBaseUrl: "https://mirror.example/goat/",
     });
-    assert.include(launch, "T3_ARCHIVE_MODE=1");
-    assert.include(launch, "T3_RELEASE_BASE_URL='https://mirror.example/goat'");
+    assert.include(launch, "GOAT_ARCHIVE_MODE=1");
+    assert.include(launch, "GOAT_RELEASE_BASE_URL='https://mirror.example/goat'");
     assert.include(launch, '"$RUNNER_FILE" __ssh-helper pick-port "$PORT_FILE"');
     assert.include(launch, '"$RUNNER_FILE" __ssh-helper wait-ready "$REMOTE_PORT"');
     assert.include(launch, "__ssh-helper protocol --runtime-file");
-    assert.include(SshTunnel.buildRemoteLaunchScript(NODE_SCRIPT), "T3_ARCHIVE_MODE=0");
+    assert.include(SshTunnel.buildRemoteLaunchScript(NODE_SCRIPT), "GOAT_ARCHIVE_MODE=0");
   });
 
   it("rejects archive versions that are not a single exact version segment", () => {
@@ -229,22 +268,22 @@ describe("ssh tunnel scripts", () => {
       "v1.2.3",
     ]) {
       assert.throws(
-        () => SshTunnel.buildRemoteT3RunnerScript({ archiveVersion }),
+        () => SshTunnel.buildRemoteGoatRunnerScript({ archiveVersion }),
         SshTunnel.SshInvalidArchiveVersionError,
         undefined,
         archiveVersion,
       );
     }
     assert.include(
-      SshTunnel.buildRemoteT3RunnerScript(ARCHIVE),
-      "T3_ARCHIVE_VERSION='1.2.3-preview.20260911.4'",
+      SshTunnel.buildRemoteGoatRunnerScript(ARCHIVE),
+      "GOAT_ARCHIVE_VERSION='1.2.3-preview.20260911.4'",
     );
   });
 
   it("refuses to build a runner with neither an archive version nor a node script", () => {
     for (const input of [undefined, {}, { archiveVersion: "  " }, { nodeScriptPath: null }]) {
       assert.throws(
-        () => SshTunnel.buildRemoteT3RunnerScript(input),
+        () => SshTunnel.buildRemoteGoatRunnerScript(input),
         SshTunnel.SshMissingRunnerError,
       );
     }
@@ -252,26 +291,26 @@ describe("ssh tunnel scripts", () => {
   });
 
   it("does not hard-code a remote node engine range", () => {
-    const script = SshTunnel.buildRemoteT3RunnerScript(NODE_SCRIPT);
+    const script = SshTunnel.buildRemoteGoatRunnerScript(NODE_SCRIPT);
 
-    assert.include(script, "T3_NODE_ENGINE_RANGE=''");
+    assert.include(script, "GOAT_NODE_ENGINE_RANGE=''");
     assert.notInclude(script, TEST_NODE_ENGINE_RANGE);
   });
 
   it("builds the remote t3 runner with a node script override", () => {
-    const script = SshTunnel.buildRemoteT3RunnerScript({
+    const script = SshTunnel.buildRemoteGoatRunnerScript({
       ...NODE_SCRIPT,
       nodeEngineRange: TEST_NODE_ENGINE_RANGE,
     });
 
     assert.include(
       script,
-      "T3_NODE_SCRIPT_PATH='/Users/julius/Development/Work/codething-mvp/apps/server/dist/bin.mjs'",
+      "GOAT_NODE_SCRIPT_PATH='/Users/julius/Development/Work/codething-mvp/apps/server/dist/bin.mjs'",
     );
-    assert.include(script, 'exec node "$T3_NODE_SCRIPT_PATH" "$@"');
-    assert.include(script, "T3_ARCHIVE_VERSION=''");
+    assert.include(script, 'exec node "$GOAT_NODE_SCRIPT_PATH" "$@"');
+    assert.include(script, "GOAT_ARCHIVE_VERSION=''");
     assert.include(script, 'prepend_path_if_dir "$HOME/.local/bin"');
-    assert.include(script, `T3_NODE_ENGINE_RANGE='${TEST_NODE_ENGINE_RANGE}'`);
+    assert.include(script, `GOAT_NODE_ENGINE_RANGE='${TEST_NODE_ENGINE_RANGE}'`);
     assert.include(script, "remote_node_satisfies_engine()");
     assert.include(script, "function satisfiesSemverRange");
     assert.include(script, "satisfiesSemverRange(rawVersion, range)");
@@ -285,7 +324,7 @@ describe("ssh tunnel scripts", () => {
     assert.include(script, 'prepend_path_if_dir "$HOME/.nodenv/shims"');
     assert.include(script, 'NVM_DIR="$HOME/.nvm"');
     assert.include(script, "nvm use --silent default");
-    assert.include(script, 'for T3_NODE_BIN in "$NVM_DIR"/versions/node/*/bin');
+    assert.include(script, 'for GOAT_NODE_BIN in "$NVM_DIR"/versions/node/*/bin');
     assert.notInclude(script, "ensure $NVM_DIR/nvm.sh is available");
     assert.notInclude(script, "npx");
   });
@@ -302,18 +341,19 @@ describe("ssh tunnel scripts", () => {
     assert.include(launch, "RUNNER_CHANGED=1");
     assert.include(launch, "ensure_remote_node_path()");
     assert.include(launch, "ensure_remote_node_path || true");
-    assert.include(devLaunch, `T3_NODE_ENGINE_RANGE='${TEST_NODE_ENGINE_RANGE}'`);
+    assert.include(devLaunch, `GOAT_NODE_ENGINE_RANGE='${TEST_NODE_ENGINE_RANGE}'`);
     assert.include(devLaunch, "does not satisfy required range ");
-    assert.include(launch, 'kill "$REMOTE_PID" 2>/dev/null || true');
+    // A failed cold start still cleans up the child this script launched.
+    assert.include(launch, 'server_kill "$REMOTE_PID" || true');
     assert.include(launch, "wait_ready");
     assert.include(launch, '"$RUNNER_FILE" serve --host 127.0.0.1');
     assert.include(launch, '--base-dir "$DEFAULT_SERVER_HOME"');
     assert.notInclude(launch, "server-home");
-    assert.include(launch, "Remote T3 server did not become ready");
+    assert.include(launch, "Remote GOAT server did not become ready");
     assert.include(launch, 'wait_ready "60000"');
     assert.include(launch, 'if [ -s "$LOG_FILE" ]; then');
     assert.include(launch, "It wrote nothing to %s");
-    assert.include(launch, "T3_ARCHIVE_VERSION='1.2.3-preview.20260911.4'");
+    assert.include(launch, "GOAT_ARCHIVE_VERSION='1.2.3-preview.20260911.4'");
     assert.include(
       SshTunnel.buildRemotePairingScript(stateKey, ARCHIVE),
       '"$RUNNER_FILE" auth pairing create --base-dir "$PAIRING_BASE_DIR" --json',
@@ -325,16 +365,13 @@ describe("ssh tunnel scripts", () => {
     assert.notInclude(SshTunnel.buildRemotePairingScript(stateKey, ARCHIVE), "server-home");
     assert.include(
       SshTunnel.buildRemotePairingScript(stateKey, ARCHIVE),
-      "T3_ARCHIVE_VERSION='1.2.3-preview.20260911.4'",
+      "GOAT_ARCHIVE_VERSION='1.2.3-preview.20260911.4'",
     );
     assert.include(
       SshTunnel.buildRemoteStopScript(stateKey),
       'if [ "$REMOTE_MANAGED" = managed ] && [ -n "$REMOTE_PID" ]; then',
     );
-    assert.include(
-      SshTunnel.buildRemoteStopScript(stateKey),
-      'kill "$REMOTE_PID" 2>/dev/null || true',
-    );
+    assert.include(SshTunnel.buildRemoteStopScript(stateKey), 'server_kill "$REMOTE_PID" || true');
     assert.include(
       SshTunnel.buildRemoteStopScript(stateKey),
       'rm -f "$PID_FILE" "$PORT_FILE" "$MANAGED_FILE"',
@@ -344,7 +381,9 @@ describe("ssh tunnel scripts", () => {
       'DEFAULT_RUNTIME_FILE="$DEFAULT_SERVER_HOME/userdata/server-runtime.json"',
     );
     assert.include(launch, "check_live_protocol()");
-    assert.include(launch, 'kill "$UPGRADE_PID" 2>/dev/null || true');
+    assert.notInclude(launch, 'kill "$UPGRADE_PID"');
+    assert.include(launch, '__ssh-helper drain --port "$UPGRADE_PORT"');
+    assert.include(launch, 'nohup "$RUNNER_FILE" __ssh-helper supervise');
     assert.include(launch, 'REMOTE_PORT="$LIVE_PORT"');
     assert.include(launch, 'rm -f "$PID_FILE"');
     assert.include(launch, "printf 'external\\n' >\"$MANAGED_FILE\"");
@@ -602,7 +641,7 @@ describe("ssh tunnel scripts", () => {
                 kills++;
               });
             }
-            if (args.includes("--")) {
+            if (isRemoteLaunch(args)) {
               launches++;
               if (launches === 2 && mode === "failed reconnect")
                 return {
@@ -682,7 +721,7 @@ describe("ssh tunnel scripts", () => {
               kills++;
             });
           }
-          if (args.includes("--")) {
+          if (isRemoteLaunch(args)) {
             stale = false;
             return makeSuccessfulProcess(
               '{"status":"ready","selectedVersion":"0.1.0","remotePort":3773,"serverKind":"managed"}',
@@ -749,7 +788,7 @@ describe("ssh tunnel scripts", () => {
               tunnelKillCount += 1;
             });
           }
-          if (args.includes("sh") && args.includes("--")) {
+          if (args.includes("sh") && isRemoteLaunch(args)) {
             return makeSuccessfulProcess(
               '{"status":"ready","selectedVersion":"1.2.3-preview.20260911.4","remotePort":3773}\n',
             );
@@ -798,6 +837,7 @@ describe("ssh tunnel scripts", () => {
         assert.include(firstTunnelArgs, "ControlMaster=no");
         assert.include(firstTunnelArgs, "ControlPath=none");
         assert.include(firstTunnelArgs, "ControlPersist=no");
+        assert.deepEqual(firstTunnelArgs?.slice(-2), ["--", "julius@devbox"]);
 
         const disconnected = yield* Effect.result(manager.disconnectEnvironment(target));
         if (mode === "failed stop") {
@@ -876,7 +916,7 @@ describe("ssh tunnel scripts", () => {
               }
               return tunnel;
             }
-            if (args.includes("--")) {
+            if (isRemoteLaunch(args)) {
               if (isTarget) {
                 launches += 1;
                 remoteRunning = true;
@@ -949,7 +989,8 @@ describe("ssh tunnel scripts", () => {
   );
 });
 
-describe("runtime preparation", () => {
+// Fake runtime fixtures use extensionless #!/bin/sh scripts and POSIX executable bits.
+describe.skipIf(HostProcess.Platform.defaultValue() === "win32")("runtime preparation", () => {
   it.live.each([
     { entry: "launch", mode: "ready" },
     { entry: "mcp", mode: "ready" },
@@ -982,8 +1023,8 @@ describe("runtime preparation", () => {
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const realSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
-      const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-retained-preparation-" });
-      const stateKey = yield* remoteStateKey(uploadTarget);
+      const root = yield* fs.makeTempDirectoryScoped({ prefix: "goat-retained-preparation-" });
+      const stateKey = REMOTE_RUNTIME_STATE_KEY;
       const state = `${root}/.goat/ssh-launch/${stateKey}`;
       const retainedVersion = mode === "invalid" ? "01.2.3" : "1.2.2-preview.20260910.1";
       const retainedScript =
@@ -1062,12 +1103,19 @@ else exit 2; fi
               ? yield* input.stream.pipe(Stream.runCollect)
               : [];
           const data = new Uint8Array(chunks.flatMap((chunk) => Array.from(chunk)));
+          if (command.args.includes("goat-runtime-cleanup")) {
+            calls.push("cleanup");
+            return makeSuccessfulProcess("");
+          }
           if (command.args.includes("-c")) {
             calls.push("upload");
             assert.include(command.args.join(" "), ARCHIVE.archiveVersion);
             return makeSuccessfulProcess("");
           }
-          if (new TextDecoder().decode(data).includes("ready=false")) {
+          if (
+            !isRemoteLaunch(command.args) &&
+            new TextDecoder().decode(data).includes("ready=false")
+          ) {
             calls.push("probe");
             // Execute the real probe against the isolated remote HOME.
             return yield* realSpawner.spawn(
@@ -1116,11 +1164,16 @@ else exit 2; fi
         ),
       );
       assert.isTrue(Result.isSuccess(result));
-      assert.deepEqual(calls, ["probe", entry]);
+      // Cleanup is a best-effort trailing call after a launch that installed a runtime.
+      assert.deepEqual(
+        calls.filter((call) => call !== "cleanup"),
+        ["probe", entry],
+      );
+      assert.isTrue(calls.indexOf("cleanup") === -1 || calls.at(-1) === "cleanup");
       assert.equal(
         spans
           .find((span) => span.name === "ssh.prepareRemoteRuntime")
-          ?.attributes.get("t3.runtime.source"),
+          ?.attributes.get("goat.runtime.source"),
         mode === "ready" ? "retained-runner" : "download",
       );
       assert.equal(yield* fs.exists(archiveDirectory), false);
@@ -1137,9 +1190,9 @@ else exit 2; fi
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const realSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
-      const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-managed-preparation-" });
+      const root = yield* fs.makeTempDirectoryScoped({ prefix: "goat-managed-preparation-" });
       const runtime = `${root}/.goat/runtime/goat/versions/${ARCHIVE.archiveVersion}`;
-      const state = `${root}/.goat/ssh-launch/711bc738002d72fd`;
+      const state = `${root}/.goat/ssh-launch/${REMOTE_RUNTIME_STATE_KEY}`;
       yield* fs.makeDirectory(runtime, { recursive: true });
       yield* fs.makeDirectory(state, { recursive: true });
       const cli = `${runtime}/goat`;
@@ -1170,7 +1223,7 @@ else if (args[0] === "__ssh-helper") {
 else {
   fs.appendFileSync("${root}/starts", "start\\n");
   const fields = {serverVersion:"${ARCHIVE.archiveVersion}",sshRuntimeProtocolVersion:${SSH_RUNTIME_PROTOCOL_VERSION},orchestrationProtocolVersion:${ORCHESTRATION_PROTOCOL_VERSION}};
-  const server = http.createServer((request,response) => response.end(request.url === "/.well-known/t3/environment" ? JSON.stringify({environmentId:"fixture",label:"Fixture",platform:{os:"linux",arch:"x64"},capabilities:{},...fields}) : "ok"));
+  const server = http.createServer((request,response) => response.end(["/.well-known/goat/environment", "/.well-known/t3/environment"].includes(request.url) ? JSON.stringify({environmentId:"fixture",label:"Fixture",platform:{os:"linux",arch:"x64"},capabilities:{},...fields}) : "ok"));
   process.on("SIGTERM", () => { fs.appendFileSync("${root}/stops", "stop\\n"); server.close(); });
   server.listen(0, "127.0.0.1", () => {
     const record = {version:1,startedAt:"2026-10-11T00:00:00.000Z",...fields,pid:process.pid,port:server.address().port,origin:"http://127.0.0.1:"+server.address().port};
@@ -1215,7 +1268,7 @@ else {
         const args = command.args;
         if (args.includes("-c")) uploads++;
         const remoteArgs = args.slice(args.indexOf("sh") + 1).filter((arg) => arg !== "-l");
-        const stdin = args.includes("--")
+        const stdin = isRemoteLaunch(args)
           ? Stream.make(encoder.encode(scripts.launch))
           : args.includes("-l")
             ? command.options.stdin
@@ -1282,8 +1335,15 @@ else {
           assert.equal(command._tag, "StandardCommand");
           if (command._tag !== "StandardCommand") return makeSuccessfulProcess("");
           const args = command.args;
-          const kind = args.includes("-c") ? "upload" : args.includes("--") ? "launch" : "probe";
+          const kind = args.includes("goat-runtime-cleanup")
+            ? "cleanup"
+            : args.includes("-c")
+              ? "upload"
+              : isRemoteLaunch(args)
+                ? "launch"
+                : "probe";
           calls.push(kind);
+          if (kind === "cleanup") return makeSuccessfulProcess("");
           auth.push({
             secret: command.options.env?.T3_SSH_AUTH_SECRET,
             batch: args.find((arg) => arg.startsWith("BatchMode=")),
@@ -1319,7 +1379,7 @@ else {
             const installer = yield* realSpawner.spawn(
               ChildProcess.make(
                 remoteShell,
-                ["-c", SshTunnel.buildRemoteT3RunnerScript(runner), "--", "--version"],
+                ["-c", SshTunnel.buildRemoteGoatRunnerScript(runner), "--", "--version"],
                 { env: { HOME: root } },
               ),
             );
@@ -1348,7 +1408,11 @@ else {
       );
       assert.deepEqual(
         calls,
-        ready || missing ? ["probe", "launch"] : ["probe", "upload", "launch"],
+        ready
+          ? ["probe", "launch"]
+          : missing
+            ? ["probe", "launch", "cleanup"]
+            : ["probe", "upload", "launch", "cleanup"],
       );
       assert.equal(reads, ready || missing ? 0 : 1);
       for (const options of auth)
@@ -1360,13 +1424,13 @@ else {
       const span = spans.find((span) => span.name === "ssh.prepareRemoteRuntime");
       assert.equal(span?.attributes.get("ssh.target"), "devbox");
       assert.equal(
-        span?.attributes.get("t3.runtime.source"),
+        span?.attributes.get("goat.runtime.source"),
         ready ? "ready" : missing ? "download" : "upload",
       );
       if (!ready && !missing) {
-        assert.equal(span?.attributes.get("t3.runtime.upload.installComplete"), true);
-        assert.equal(span?.attributes.get("t3.runtime.upload.sha256"), fixture.sha256);
-        assert.equal(span?.attributes.get("t3.runtime.upload.bytes"), bytes.byteLength);
+        assert.equal(span?.attributes.get("goat.runtime.upload.installComplete"), true);
+        assert.equal(span?.attributes.get("goat.runtime.upload.sha256"), fixture.sha256);
+        assert.equal(span?.attributes.get("goat.runtime.upload.bytes"), bytes.byteLength);
       }
       if (!ready)
         assert.equal(
@@ -1403,7 +1467,10 @@ else {
       if (Result.isFailure(result)) {
         assert.instanceOf(result.failure, SshLaunchError);
         assert.include(result.failure.message, ARCHIVE.archiveVersion);
-        assert.include(result.failure.message, "local SSH runtime archive directory");
+        assert.include(
+          result.failure.message,
+          `Remove goat-${ARCHIVE.archiveVersion}-${platform}-${arch}.tar.gz from ${directory}, then reconnect.`,
+        );
       }
       assert.equal(calls, 1);
     }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
@@ -1432,13 +1499,15 @@ else {
             calls.some((call) => call.kind === "pairing")
           )
             return makeSuccessfulProcess('{"stopped":true}');
-          const kind = args.includes("-c")
-            ? "upload"
-            : args.includes("--")
-              ? "launch"
-              : args.includes("-l")
-                ? "probe"
-                : "pairing";
+          const kind = args.includes("goat-runtime-cleanup")
+            ? "cleanup"
+            : args.includes("-c")
+              ? "upload"
+              : isRemoteLaunch(args)
+                ? "launch"
+                : args.includes("-l")
+                  ? "probe"
+                  : "pairing";
           if (command._tag === "StandardCommand")
             calls.push({
               kind,
@@ -1491,7 +1560,7 @@ else {
       assert.equal(uploads, 2);
       assert.deepEqual(
         calls.map((call) => call.kind),
-        ["probe", "upload", "probe", "upload", "launch", "pairing"],
+        ["probe", "upload", "probe", "upload", "launch", "cleanup", "pairing"],
       );
       for (const call of calls.slice(0, 2))
         assert.deepEqual(
@@ -1675,7 +1744,7 @@ describe("archive runner script", () => {
   it.effect.skipIf(windowsHost)("fails on an uploaded archive checksum mismatch", () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
-      const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-upload-bad-" });
+      const root = yield* fs.makeTempDirectoryScoped({ prefix: "goat-upload-bad-" });
       yield* makeMirror(root);
       const platform = hostPlatform === "darwin" ? "darwin" : "linux";
       const arch = hostArch === "arm64" ? "arm64" : "x64";
@@ -1695,7 +1764,10 @@ describe("archive runner script", () => {
       assert.isFalse(
         yield* fs.exists(`${root}/.goat/runtime/goat/versions/${archiveVersion}/.install-complete`),
       );
-      assert.deepEqual(yield* fs.readDirectory(`${root}/.goat/runtime/goat/versions`), []);
+      assert.deepEqual(
+        yield* fs.readDirectory(`${root}/.goat/runtime/goat/versions`),
+        versionEntries(),
+      );
       assert.notInclude(result.stderr, "curl");
     }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
   );
@@ -1703,7 +1775,7 @@ describe("archive runner script", () => {
   it.effect.skipIf(windowsHost)("installs once when two uploads race", () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
-      const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-upload-race-" });
+      const root = yield* fs.makeTempDirectoryScoped({ prefix: "goat-upload-race-" });
       yield* makeMirror(root);
       const platform = hostPlatform === "darwin" ? "darwin" : "linux";
       const arch = hostArch === "arm64" ? "arm64" : "x64";
@@ -1723,7 +1795,7 @@ describe("archive runner script", () => {
         assert.include(result.stdout, `goat v${archiveVersion}`);
       }
       const versions = `${root}/.goat/runtime/goat/versions`;
-      assert.deepEqual(yield* fs.readDirectory(versions), [archiveVersion]);
+      assert.deepEqual(yield* fs.readDirectory(versions), versionEntries(archiveVersion));
       assert.equal(
         (yield* fs.readFileString(`${versions}/${archiveVersion}/.install-complete`)).trim(),
         archiveVersion,
@@ -1736,12 +1808,12 @@ describe("archive runner script", () => {
     () =>
       Effect.gen(function* () {
         const fs = yield* FileSystem.FileSystem;
-        const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-archive-runner-" });
+        const root = yield* fs.makeTempDirectoryScoped({ prefix: "goat-archive-runner-" });
         const releaseBaseUrl = yield* makeMirror(root);
         const runner = `${root}/run-t3.sh`;
         yield* fs.writeFileString(
           runner,
-          SshTunnel.buildRemoteT3RunnerScript({ archiveVersion, releaseBaseUrl }),
+          SshTunnel.buildRemoteGoatRunnerScript({ archiveVersion, releaseBaseUrl }),
         );
         const home = `${root}/home`;
         yield* fs.makeDirectory(home, { recursive: true });
@@ -1755,7 +1827,7 @@ describe("archive runner script", () => {
           assert.include(result.stdout, `goat v${archiveVersion}`);
         }
         const versionsDir = `${home}/.goat/runtime/goat/versions`;
-        assert.deepEqual(yield* fs.readDirectory(versionsDir), [archiveVersion]);
+        assert.deepEqual(yield* fs.readDirectory(versionsDir), versionEntries(archiveVersion));
         assert.equal(
           (yield* fs.readFileString(`${versionsDir}/${archiveVersion}/.install-complete`)).trim(),
           archiveVersion,
@@ -1819,8 +1891,8 @@ describe("archive runner script", () => {
             '#!/bin/sh\necho x >> "$(dirname "$0")/sleep-calls"\n',
             { mode: 0o700 },
           );
-          const script = SshTunnel.buildRemoteT3RunnerScript({ archiveVersion, releaseBaseUrl });
-          assert.include(script, 'if [ "$T3_LOCK_WAITED" -ge 360 ]; then');
+          const script = SshTunnel.buildRemoteGoatRunnerScript({ archiveVersion, releaseBaseUrl });
+          assert.include(script, 'if [ "$GOAT_LOCK_WAITED" -ge 360 ]; then');
           yield* fs.writeFileString(runner, script.replace("-ge 360 ]", "-ge 3 ]"));
           const result = yield* runRunner(home, runner, bin);
           assert.equal(result.exitCode, 1);
@@ -1852,7 +1924,7 @@ describe("archive runner script", () => {
           yield* fs.makeDirectory(bin);
           yield* fs.writeFileString(
             runner,
-            SshTunnel.buildRemoteT3RunnerScript({ archiveVersion, releaseBaseUrl }),
+            SshTunnel.buildRemoteGoatRunnerScript({ archiveVersion, releaseBaseUrl }),
           );
           const mktempPath = yield* runShell(home, ["-c", "command -v mktemp"]);
           assert.equal(mktempPath.exitCode, 0, mktempPath.stderr);
@@ -1889,9 +1961,10 @@ exec /bin/mv "$@"
           assert.equal(result.stderr, "");
           assert.equal(result.stdout, `goat v${archiveVersion}\n`);
           assert.equal((yield* fs.readFileString(`${root}/attempts`)).trim().split("\n").length, 2);
-          assert.deepEqual(yield* fs.readDirectory(`${home}/.goat/runtime/goat/versions`), [
-            archiveVersion,
-          ]);
+          assert.deepEqual(
+            yield* fs.readDirectory(`${home}/.goat/runtime/goat/versions`),
+            versionEntries(archiveVersion),
+          );
         }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
     );
 
@@ -1915,7 +1988,7 @@ exec /bin/mv "$@"
           else yield* fs.writeFileString(`${lock}/pid.tmp`, "interrupted publication\n");
           yield* fs.writeFileString(
             runner,
-            SshTunnel.buildRemoteT3RunnerScript({ archiveVersion, releaseBaseUrl }),
+            SshTunnel.buildRemoteGoatRunnerScript({ archiveVersion, releaseBaseUrl }),
           );
           // FIFOs put B after its stale read, A inside the download with its live
           // lock, then B after cleanup. No scheduler speed or elapsed time is an oracle.
@@ -2010,7 +2083,7 @@ wait "$b"
               `goat v${archiveVersion}\n`,
             );
           }
-          assert.deepEqual(yield* fs.readDirectory(versions), [archiveVersion]);
+          assert.deepEqual(yield* fs.readDirectory(versions), versionEntries(archiveVersion));
         }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
     );
   });
@@ -2072,7 +2145,7 @@ console.log("goat v" + (count === 0 ? version : "9.9.9"));`,
             }
             if (
               mode === "upload-failure" &&
-              command.args.some((arg) => arg.includes("T3_SSH_UPLOADED_ARCHIVE"))
+              command.args.some((arg) => arg.includes("GOAT_SSH_UPLOADED_ARCHIVE"))
             )
               return {
                 ...makeSuccessfulProcess(""),
@@ -2317,7 +2390,7 @@ describe("bundled runtime acquisition", () => {
         const bundleArchiveBefore = (yield* fs.exists(`${bundle}/${asset}`))
           ? yield* fs.readFile(`${bundle}/${asset}`)
           : null;
-        const stateKey = yield* remoteStateKey(uploadTarget);
+        const stateKey = REMOTE_RUNTIME_STATE_KEY;
         const retainedVersion = "1.2.2-preview.20260910.1";
         const installedVersion = mode === "retained" ? retainedVersion : ARCHIVE.archiveVersion;
         const runtime = `${home}/.goat/runtime/goat/versions/${installedVersion}`;
@@ -2332,7 +2405,7 @@ describe("bundled runtime acquisition", () => {
             yield* fs.makeDirectory(state, { recursive: true });
             yield* fs.writeFileString(
               `${state}/run-t3.sh`,
-              SshTunnel.buildRemoteT3RunnerScript({ archiveVersion: retainedVersion }),
+              SshTunnel.buildRemoteGoatRunnerScript({ archiveVersion: retainedVersion }),
             );
             yield* fs.chmod(`${state}/run-t3.sh`, 0o700);
           }
@@ -2552,8 +2625,17 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")(
           runner,
           mode === "runner code"
             ? "T3_NODE_SCRIPT_PATH='$(touch \"$HOME/.test/evaluated\")'\n"
-            : SshTunnel.buildRemoteT3RunnerScript({ nodeScriptPath: entry }),
+            : SshTunnel.buildRemoteGoatRunnerScript({ nodeScriptPath: entry }),
         );
+        if (mode !== "runner code") {
+          // Stop asks the runner for activity and signals only an idle server.
+          yield* fs.chmod(runner, 0o700);
+          yield* fs.writeFileString(
+            `${bin}/node`,
+            '#!/bin/sh\ncase "$*" in *"__ssh-helper activity"*) echo idle; exit 0 ;; esac\nexit 2\n',
+          );
+          yield* fs.chmod(`${bin}/node`, 0o700);
+        }
         const nodeIdentity = [
           "node",
           "absolute node",
@@ -2659,7 +2741,7 @@ cat "$HOME/.test/command"
       }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
     );
 
-    it.live.each(["stale PID", "missing identity", "identity changes before termination"] as const)(
+    it.live.each(["stale PID", "missing identity", "identity changes before drain"] as const)(
       "refuses an owned upgrade with %s despite matching protocol metadata",
       (mode) =>
         Effect.gen(function* () {
@@ -2680,7 +2762,7 @@ cat "$HOME/.test/command"
           yield* fs.writeFileString(`${state}/managed`, "managed\n");
           yield* fs.writeFileString(
             `${state}/run-t3.sh`,
-            SshTunnel.buildRemoteT3RunnerScript({ archiveVersion: "1.2.2" }),
+            SshTunnel.buildRemoteGoatRunnerScript({ archiveVersion: "1.2.2" }),
           );
           if (mode !== "missing identity")
             yield* fs.writeFileString(
@@ -2704,6 +2786,8 @@ cat "$HOME/.test/command"
             `${runtime}/goat`,
             `#!/bin/sh
 if [ "$1" = --version ]; then printf '%s\\n' 'goat v${ARCHIVE.archiveVersion}'; exit 0; fi
+if [ "$1 $2" = '__ssh-helper compat' ]; then printf 'update-required 1 fixture-instance\\n'; exit 0; fi
+if [ "$1 $2" = '__ssh-helper drain' ]; then touch "$HOME/.test/drained"; exit 2; fi
 if [ "$1 $2" = '__ssh-helper compare-version' ]; then printf 'older\\n'; exit 0; fi
 if [ "$1 $2" = '__ssh-helper protocol' ]; then
   case " $* " in
@@ -2729,7 +2813,7 @@ if [ "$1 $2 $3 $4" != '-o command= -p ${pid}' ]; then
   exit 0
 fi
 printf 'inspected\\n' >> "$HOME/.test/inspected"
-if [ '${mode}' = 'identity changes before termination' ] && [ "$(wc -l < "$HOME/.test/inspected" | tr -d ' ')" = 1 ]; then
+if [ '${mode}' = 'identity changes before drain' ] && [ "$(wc -l < "$HOME/.test/inspected" | tr -d ' ')" = 1 ]; then
   cat "$HOME/.goat/ssh-launch/${key}/identity"
 else
   printf '%s\\n' '/bin/tail -f /unrelated/log'
@@ -2773,9 +2857,10 @@ fi
           if (mode !== "missing identity")
             assert.isAtLeast(
               (yield* fs.readFileString(`${home}/.test/inspected`)).trim().split("\n").length,
-              mode === "identity changes before termination" ? 2 : 1,
+              mode === "identity changes before drain" ? 2 : 1,
             );
           assert.isFalse(yield* fs.exists(`${home}/.test/signals`));
+          assert.isFalse(yield* fs.exists(`${home}/.test/drained`));
           assert.equal(yield* fs.readFileString(`${state}/run-t3.sh`), originalRunner);
           assert.equal(yield* fs.readFileString(record), metadata);
           assert.equal(yield* fs.readFileString(`${state}/pid`), pid + "\n");
@@ -2785,3 +2870,110 @@ fi
     );
   },
 );
+
+// On macOS, Node can bind 127.0.0.1:<port> while another process (such as the
+// desktop app with network access on) listens on *:<port>. Linux refuses that
+// bind unless both sockets set SO_REUSEPORT, so on Linux the preload adds it to
+// the picker's probe and the holder sets it too. macOS needs neither.
+const MACOS_BIND_PRELOAD = `const net = require("node:net");
+const listen = net.Server.prototype.listen;
+net.Server.prototype.listen = function (port, host, callback) {
+  if (typeof port !== "number" || typeof host !== "string") return listen.apply(this, arguments);
+  return listen.call(this, { port, host, reusePort: true }, callback);
+};
+`;
+
+describe("remote port picker", () => {
+  const hostPlatform = HostProcess.Platform.defaultValue();
+  const linuxHost = hostPlatform === "linux";
+  const windowsHost = hostPlatform === "win32";
+
+  const holdWildcardPort = Effect.acquireRelease(
+    Effect.callback<NodeNet.Server>((resume) => {
+      const server = NodeNet.createServer((socket) => socket.destroy());
+      server.once("error", (error) => resume(Effect.die(error)));
+      server.listen({ port: 0, host: "0.0.0.0", reusePort: linuxHost }, () =>
+        resume(Effect.succeed(server)),
+      );
+    }),
+    (server) =>
+      Effect.callback<void>((resume) => {
+        server.close(() => resume(Effect.void));
+      }),
+  );
+
+  it.effect.skipIf(windowsHost)("skips a port another server answers on loopback", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+      const root = yield* fs.makeTempDirectoryScoped({ prefix: "goat-pick-port-" });
+      yield* fs.writeFileString(`${root}/preload.cjs`, MACOS_BIND_PRELOAD);
+      yield* fs.writeFileString(`${root}/pick-port.cjs`, SshTunnel.REMOTE_PICK_PORT_SCRIPT);
+      const holder = yield* holdWildcardPort;
+      const heldPort = (holder.address() as NodeNet.AddressInfo).port;
+
+      const child = yield* spawner.spawn(
+        ChildProcess.make(process.execPath, [
+          ...(linuxHost ? ["--require", `${root}/preload.cjs`] : []),
+          `${root}/pick-port.cjs`,
+          "",
+          String(heldPort),
+          "20",
+        ]),
+      );
+      const [stdout, exitCode] = yield* Effect.all(
+        [
+          child.stdout.pipe(
+            Stream.decodeText(),
+            Stream.runFold(
+              () => "",
+              (acc, chunk) => acc + chunk,
+            ),
+          ),
+          child.exitCode.pipe(Effect.map(Number)),
+        ],
+        { concurrency: "unbounded" },
+      );
+
+      assert.equal(exitCode, 0);
+      const picked = Number(stdout);
+      assert.isAbove(picked, heldPort);
+      assert.isBelow(picked, heldPort + 20);
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+  );
+});
+
+// The reconnect liveness check must reject an exited child even before its
+// parent reaps it; kill -0 alone would keep treating it as a managed server.
+describe.skipIf(HostProcess.Platform.defaultValue() === "win32")("remote process liveness", () => {
+  it.live("does not count a zombie as a running server", () =>
+    Effect.gen(function* () {
+      const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+      const parent = yield* spawner.spawn(
+        ChildProcess.make(remoteShell, ["-c", "sleep 600 & echo $!; exec sleep 600"]),
+      );
+      const output = yield* parent.stdout.pipe(
+        Stream.decodeText(),
+        Stream.splitLines,
+        Stream.take(1),
+        Stream.mkString,
+      );
+      const pid = Number(output.trim());
+      assert.isAbove(pid, 0);
+      yield* Effect.sync(() => process.kill(pid, "SIGKILL"));
+      const launch = SshTunnel.buildRemoteLaunchScript(ARCHIVE);
+      const liveness = launch.match(/  # An exited, unreaped server[\s\S]*?\n  }/);
+      assert.isNotNull(liveness);
+      const probe = yield* spawner.spawn(
+        ChildProcess.make(remoteShell, [
+          "-c",
+          `${liveness![0]}\nserver_alive "$1" && exit 9\nserver_alive "$2"`,
+          "probe",
+          String(pid),
+          String(process.pid),
+        ]),
+      );
+      assert.equal(Number(yield* probe.exitCode), 0);
+    }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+  );
+});

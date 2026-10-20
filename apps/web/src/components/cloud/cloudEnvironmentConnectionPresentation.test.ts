@@ -1,4 +1,4 @@
-import type { EnvironmentConnectionPresentation } from "@t3tools/client-runtime/connection";
+import type { EnvironmentConnectionPresentation } from "@goat/client-runtime/connection";
 import { describe, expect, it } from "vite-plus/test";
 
 import { presentSavedCloudEnvironmentConnection } from "./cloudEnvironmentConnectionPresentation";
@@ -35,6 +35,20 @@ describe("saved cloud environment connection presentation", () => {
       statusText:
         "Failed to connect. Reconnecting... Reason: Relay environment endpoint is unavailable.",
       tone: "connecting",
+    });
+  });
+
+  it("keeps a host that is away idle instead of connecting", () => {
+    expect(
+      presentSavedCloudEnvironmentConnection({
+        ...connection("reconnecting", "Cannot reach mbp over SSH (Operation timed out)."),
+        unreachable: true,
+      }),
+    ).toEqual({
+      buttonLabel: "Unreachable",
+      statusText:
+        "Host unreachable. Reconnecting... Reason: Cannot reach mbp over SSH (Operation timed out).",
+      tone: "idle",
     });
   });
 

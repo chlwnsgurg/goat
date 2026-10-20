@@ -1,4 +1,4 @@
-import type { ProviderApprovalDecision, ProviderApprovalOption } from "@t3tools/contracts";
+import type { ProviderApprovalDecision, ProviderApprovalOption } from "@goat/contracts";
 import * as Schema from "effect/Schema";
 import type * as EffectCodexSchema from "effect-codex-app-server/schema";
 
@@ -105,7 +105,6 @@ function isMcpElicitationPersistenceField(
   );
 }
 
-/** Returns the app and approval choices advertised by an MCP elicitation. */
 export function describeMcpElicitation(
   payload: EffectCodexSchema.McpServerElicitationRequestParams,
 ): { readonly appName: string; readonly options: ReadonlyArray<ProviderApprovalOption> } {
@@ -171,7 +170,6 @@ export function describeMcpElicitation(
   };
 }
 
-/** Converts a T3 approval decision into the MCP elicitation wire response. */
 export function toMcpElicitationResponse(
   payload: EffectCodexSchema.McpServerElicitationRequestParams,
   decision: ProviderApprovalDecision,

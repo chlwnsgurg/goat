@@ -1,4 +1,15 @@
-import type { OrchestrationV2ProjectedTurnItem } from "@t3tools/contracts";
+import {
+  NodeId,
+  RuntimeRequestId,
+  ProviderSessionId,
+  RunId,
+  MessageId,
+  TurnItemId,
+  type OrchestrationV2RuntimeRequest,
+  type OrchestrationV2TurnItem,
+  type OrchestrationV2ProjectedTurnItem,
+  type OrchestrationV2Run,
+} from "@goat/contracts";
 import { describe, expect, it } from "@effect/vitest";
 import * as DateTime from "effect/DateTime";
 
@@ -10,6 +21,7 @@ import {
   mergeOlderHistoryIntoProjection,
   shouldShowLoadEarlierControl,
 } from "./threadHistoryMerge.ts";
+import { derivePendingThreadRequests } from "./threadRequests.ts";
 import { applyOrchestrationV2ProjectionEvent } from "./orchestrationV2Projection.ts";
 
 const NOW = DateTime.makeUnsafe("2026-06-20T00:00:00.000Z");
@@ -42,6 +54,82 @@ function row(index: number): OrchestrationV2ProjectedTurnItem {
       updatedAt: NOW,
     },
   };
+}
+
+function pendingDecisionFixture() {
+  const base = {
+    threadId: v2ThreadId,
+    runId: null,
+    nodeId: null,
+    providerThreadId: null,
+    providerTurnId: null,
+    nativeItemRef: null,
+    parentItemId: null,
+    status: "waiting" as const,
+    title: null,
+    startedAt: NOW,
+    completedAt: null,
+    updatedAt: NOW,
+  };
+  const question = {
+    ...base,
+    id: TurnItemId.make("d10-question-item"),
+    ordinal: 1,
+    type: "user_input_request",
+    requestId: RuntimeRequestId.make("d10-question"),
+    responseMode: "message",
+    questions: [
+      {
+        id: "q",
+        header: "Choice",
+        question: "Choose a destination",
+        options: [{ label: "One", description: "First destination", value: "  native\t" }],
+        multiSelect: false,
+        allowCustomAnswer: true,
+        initialAnswer: "  draft\n",
+      },
+    ],
+  } satisfies OrchestrationV2TurnItem;
+  const approval = {
+    ...base,
+    id: TurnItemId.make("d10-approval-item"),
+    ordinal: 2,
+    type: "approval_request",
+    requestId: RuntimeRequestId.make("d10-approval"),
+    requestKind: "command",
+    prompt: "Run the requested command?",
+    appName: "D10 fixture",
+    options: [
+      { decision: "acceptForSession", label: "Allow this session", warning: "Fixture caution" },
+      { decision: "decline", label: "Decline" },
+    ],
+  } satisfies OrchestrationV2TurnItem;
+  const requestBase = {
+    nodeId: NodeId.make("d10-node"),
+    providerTurnId: null,
+    nativeRequestRef: null,
+    status: "pending" as const,
+    createdAt: NOW,
+    resolvedAt: null,
+  };
+  const requests: OrchestrationV2RuntimeRequest[] = [
+    {
+      ...requestBase,
+      id: question.requestId,
+      kind: "user_input",
+      responseCapability: { type: "message" },
+    },
+    {
+      ...requestBase,
+      id: approval.requestId,
+      kind: "command",
+      responseCapability: {
+        type: "live",
+        providerSessionId: ProviderSessionId.make("d10-session"),
+      },
+    },
+  ];
+  return { question, approval, requests };
 }
 
 describe("threadHistoryMerge", () => {
@@ -157,6 +245,111 @@ describe("threadHistoryMerge", () => {
     ]);
   });
 
+  it.each(["user_input_request", "approval_request"] as const)(
+    "reveals retained %s bodies once and preserves current values",
+    (type) => {
+      const { question, approval, requests } = pendingDecisionFixture();
+      const recent = { ...row(3), position: 0 };
+      const cold = {
+        ...v2Projection,
+        turnItems: [recent.item, question, approval],
+        visibleTurnItems: [recent],
+        runtimeRequests: requests,
+      };
+      const pending = derivePendingThreadRequests(cold);
+      expect(pending.userInputs).toHaveLength(1);
+      expect(pending.approvals).toHaveLength(1);
+      expect(pending.userInputs[0]?.questions).toEqual(question.questions);
+      expect(pending.approvals[0]?.options).toEqual(approval.options);
+      expect(pending.approvals[0]?.detail).toBe("Run the requested command?");
+      expect(pending.approvals[0]?.appName).toBe("D10 fixture");
+      const questionRow = { ...row(0), item: question, sourceItemId: question.id };
+      const approvalRow = { ...row(1), item: approval, sourceItemId: approval.id };
+      const page = [questionRow, questionRow, approvalRow];
+      const merged = mergeOlderHistoryIntoProjection(cold, page);
+      expect(merged.visibleTurnItems.map((entry) => entry.sourceItemId)).toEqual([
+        "d10-question-item",
+        "d10-approval-item",
+        "item-3",
+      ]);
+      expect(new Set(merged.turnItems.map((item) => item.id)).size).toBe(3);
+      expect(merged.turnItems.filter((item) => item.id === question.id)).toHaveLength(1);
+      expect(merged.turnItems.filter((item) => item.id === approval.id)).toHaveLength(1);
+      expect(mergeOlderHistoryIntoProjection(merged, page)).toBe(merged);
+
+      const current =
+        type === "user_input_request"
+          ? {
+              ...question,
+              questions: [{ ...question.questions[0]!, question: "Current question" }],
+            }
+          : {
+              ...approval,
+              options: [
+                { ...approval.options[0]!, warning: "Current warning" },
+                approval.options[1]!,
+              ],
+            };
+      const live = {
+        ...cold,
+        turnItems: cold.turnItems.map((item) => (item.id === current.id ? current : item)),
+      };
+      const staleMerged = mergeOlderHistoryIntoProjection(live, page);
+      expect(
+        staleMerged.visibleTurnItems.find((entry) => entry.sourceItemId === current.id)?.item,
+      ).toBe(current);
+      const presented = derivePendingThreadRequests(staleMerged);
+      if (current.type === "user_input_request") {
+        expect(presented.userInputs[0]?.questions).toEqual(current.questions);
+      } else {
+        expect(presented.approvals[0]?.options).toEqual(current.options);
+      }
+      expect(mergeOlderHistoryIntoProjection(staleMerged, page)).toBe(staleMerged);
+
+      const runId = RunId.make("d10-rolled-back");
+      const rolledBackRun = {
+        id: runId,
+        threadId: v2ThreadId,
+        ordinal: 1,
+        providerInstanceId: v2Projection.thread.providerInstanceId,
+        modelSelection: v2Projection.thread.modelSelection,
+        providerThreadId: null,
+        userMessageId: MessageId.make("d10-message"),
+        rootNodeId: NodeId.make("d10-node"),
+        activeAttemptId: null,
+        status: "rolled_back",
+        requestedAt: NOW,
+        startedAt: NOW,
+        completedAt: NOW,
+        checkpointId: null,
+        contextHandoffId: null,
+      } satisfies OrchestrationV2Run;
+      const hidden = {
+        ...live,
+        runs: [rolledBackRun],
+        turnItems: live.turnItems.map((item) =>
+          item.id === current.id ? { ...item, runId } : item,
+        ),
+      };
+      const hiddenMerged = mergeOlderHistoryIntoProjection(hidden, page);
+      expect(hiddenMerged.visibleTurnItems.some((entry) => entry.sourceItemId === current.id)).toBe(
+        false,
+      );
+      const resolved = {
+        ...cold,
+        runtimeRequests: requests.map((request) => ({
+          ...request,
+          status: "resolved" as const,
+          resolvedAt: NOW,
+        })),
+      };
+      expect(derivePendingThreadRequests(mergeOlderHistoryIntoProjection(resolved, page))).toEqual({
+        approvals: [],
+        userInputs: [],
+      });
+    },
+  );
+
   it("does not resurrect a local item hidden while an older page was in flight", () => {
     const stalePageRow = row(1);
     const currentItem = {
@@ -218,11 +411,9 @@ describe("threadHistoryMerge", () => {
       ...loading,
       loading: false,
     });
-    // Stale cursor must not mutate replacement progressive meta.
     expect(
       clearActiveHistoryLoading("cursor-a", { ...loading, historyCursor: "cursor-b" }),
     ).toEqual({ ...loading, historyCursor: "cursor-b" });
-    // Already idle: identity-preserving no-op shape.
     const idle = { ...loading, loading: false };
     expect(clearActiveHistoryLoading("cursor-a", idle)).toBe(idle);
   });
@@ -289,8 +480,6 @@ describe("threadHistoryMerge", () => {
   });
 
   it("keeps a history-page interrupt result visible when its request was retained at cold open", () => {
-    // Cold bounded window: only a recent filler. Request was retained in
-    // turnItems (not visible). Result arrives later via load-earlier merge.
     const runId = "run-interrupt-cold" as never;
     const nodeId = "node-interrupt-cold" as never;
     const recent = row(5);
@@ -373,7 +562,6 @@ describe("threadHistoryMerge", () => {
           completedAt: null,
         },
       ],
-      // Request retained from full projection; no result yet in the window.
       turnItems: [requestItem, recent.item],
       visibleTurnItems: [{ ...recent, position: 0 }],
     };
@@ -453,7 +641,6 @@ describe("threadHistoryMerge", () => {
       "item-5",
     ]);
 
-    // Without the cold-open retained request, the same update would hide the result.
     const withoutRequest = {
       ...merged,
       turnItems: merged.turnItems.filter((item) => item.type !== "run_interrupt_request"),

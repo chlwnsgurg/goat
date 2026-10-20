@@ -9,18 +9,22 @@ import {
   ProviderSessionId,
   ProviderThreadId,
   ThreadId,
-} from "@t3tools/contracts";
+} from "@goat/contracts";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
-import { symlinksSupported } from "@t3tools/shared/testing/symlinks";
+import { symlinksSupported } from "@goat/shared/testing/symlinks";
+import * as ServerConfig from "../config.ts";
+import * as ServerSettings from "../serverSettings.ts";
+import * as GitWorkflowService from "../git/GitWorkflowService.ts";
 import * as CheckpointRollbackService from "./CheckpointRollbackService.ts";
+import { isCheckpointRestoreIsolated } from "./CheckpointRestoreSafety.ts";
 import * as ThreadCommandExecutor from "./ThreadCommandExecutor.ts";
 import { CheckpointServiceV2 } from "./CheckpointService.ts";
 import { EventSinkV2 } from "./EventSink.ts";
-import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
+import * as IdAllocator from "@goat/provider-core/server/IdAllocator";
 import { ProjectionStoreV2 } from "./ProjectionStore.ts";
 import * as ProjectStore from "./ProjectStore.ts";
 import { ProviderSessionManagerV2 } from "./ProviderSessionManager.ts";
@@ -43,7 +47,7 @@ it.effect.each([
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
-    const parent = yield* fs.makeTempDirectoryScoped({ prefix: "t3-v2-restore-" });
+    const parent = yield* fs.makeTempDirectoryScoped({ prefix: "goat-v2-restore-" });
     const cwd = path.join(parent, "worktree");
     const nested = path.join(cwd, "nested");
     const sibling = path.join(parent, "worktree2");
@@ -103,8 +107,11 @@ it.effect.each([
       Layer.provide(
         Layer.mergeAll(
           NodeServices.layer,
+          Layer.mock(ServerConfig.ServerConfig)({ worktreesDir: "/synthetic-worktrees" } as never),
+          ServerSettings.layerTest(),
           ThreadCommandExecutor.layer,
           IdAllocator.layer,
+          Layer.mock(GitWorkflowService.GitWorkflowService)({}),
           Layer.mock(ProjectStore.ProjectStoreV2)({
             get: () => Effect.succeed(Option.some({ workspaceRoot: parent } as never)),
           }),
@@ -135,8 +142,6 @@ it.effect.each([
                 ].includes(owner)
                   ? ([
                       {
-                        // One session shared by every thread keeps the cwd of
-                        // the thread that opened it, here this thread's.
                         cwd: owner === "shared-provider" ? cwd : nested,
                         status:
                           owner === "provider" || owner === "shared-provider"
@@ -195,5 +200,29 @@ it.effect.each([
       assert.deepEqual(calls, restoreFiles ? ["provider", "files"] : ["provider"]);
       assert.equal(yield* fs.exists(otherFile), !restoreFiles);
     }
+  }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+);
+
+it.effect("lets rollback recreate a worktree storage cleanup removed", () =>
+  Effect.gen(function* () {
+    const fileSystem = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const parent = yield* fileSystem.makeTempDirectoryScoped({
+      prefix: "goat-v2-restore-removed-",
+    });
+    const worktreePath = path.join(parent, "worktree");
+    const isolated = yield* isCheckpointRestoreIsolated(
+      { id: ThreadId.make("restore-removed"), worktreePath },
+      { cwd: worktreePath },
+      {
+        fileSystem,
+        path,
+        projections: {
+          getShellSnapshot: () => Effect.succeed({ threads: [], archivedThreads: [] }),
+        } as never,
+        projects: {} as never,
+      },
+    );
+    assert.isTrue(isolated);
   }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
 );

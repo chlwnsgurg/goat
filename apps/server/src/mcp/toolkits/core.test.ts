@@ -10,15 +10,19 @@ import {
   ChatImageAttachment,
   CommandId,
   RuntimeRequestId,
-  NodeId,
   TurnItemId,
   type OrchestrationV2ServerCommand,
   EnvironmentId,
+  NodeId,
+  OrchestratorMcpThreadReadResult,
+  ProviderDriverKind,
   ProviderInstanceId,
   RunId,
   ThreadId,
+  type OrchestrationV2ProjectedTurnItem,
   type OrchestrationV2ThreadShell,
-} from "@t3tools/contracts";
+} from "@goat/contracts";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as DateTime from "effect/DateTime";
 import * as Ref from "effect/Ref";
@@ -39,6 +43,8 @@ import {
 import * as ServerSecretStore from "../../auth/ServerSecretStore.ts";
 import * as ServerConfig from "../../config.ts";
 import * as ProviderAdapterRegistry from "../../orchestration-v2/ProviderAdapterRegistry.ts";
+import * as ThreadLaunchService from "../../orchestration-v2/ThreadLaunchService.ts";
+import * as GitVcsDriver from "../../vcs/GitVcsDriver.ts";
 import * as ThreadManagement from "../../orchestration-v2/ThreadManagementService.ts";
 import * as ThreadSearch from "../../orchestration-v2/ThreadSearch.ts";
 import * as PreviewBrowser from "../../preview/PreviewBrowser.ts";
@@ -46,18 +52,28 @@ import * as ProjectService from "../../project/ProjectService.ts";
 import * as ProviderRegistry from "../../provider/ProviderRegistry.ts";
 import * as SecretRequests from "../../secrets/SecretRequests.ts";
 import * as ScheduledTaskService from "../../scheduledTasks/ScheduledTaskService.ts";
+import * as ServerSettings from "../../serverSettings.ts";
 import * as McpHttpServer from "../McpHttpServer.ts";
+import * as ThreadResultService from "../../threadResults/ThreadResultService.ts";
 import * as SshRemoteDispatch from "../../sshRemote/SshRemoteDispatch.ts";
+import * as SshHostSetup from "../../sshRemote/SshHostSetup.ts";
+import * as SshWorkspaceSync from "../../sshRemote/SshWorkspaceSync.ts";
 import * as LaunchWatchService from "../LaunchWatchService.ts";
 import { newLaunchWatch } from "../launchWatch.ts";
 import * as McpInvocationContext from "../McpInvocationContext.ts";
 import * as McpToolAccessTestkit from "../McpToolAccess.testkit.ts";
 import { DispatchModeLimit } from "../../orchestration-v2/DispatchModeLimit.ts";
 import { dispatchFailure } from "../threadAccess.ts";
+import * as AnalyticsService from "../../telemetry/AnalyticsService.ts";
 import { OrchestratorToolkit } from "./orchestrator/tools.ts";
 import { PreviewToolkit } from "./preview/tools.ts";
 import { PreviewControlsToolkit } from "./previewControls/tools.ts";
 import { EnvironmentToolkit } from "./environment/tools.ts";
+import { HostStatusToolkit } from "./hostStatus/tools.ts";
+import { FleetHealthToolkit } from "./fleet/healthTools.ts";
+import { FleetResourcesToolkit } from "./fleet/resources/tools.ts";
+import { FleetToolkit } from "./fleet/tools.ts";
+import { ProviderToolkit } from "./provider/tools.ts";
 import * as EnvironmentHandlers from "./environment/handlers.ts";
 import { ProjectToolkit } from "./project/tools.ts";
 import { RemoteReportToolkit } from "./remoteReport/tools.ts";
@@ -72,6 +88,11 @@ import { ConnectionToolkit } from "./connection/tools.ts";
 import { WorktreeToolkit } from "./worktree/tools.ts";
 import { DeviceToolkit } from "./device/tools.ts";
 
+const layerOrchestratorToolkit = McpHttpServer.layerOrchestratorToolkit.pipe(
+  Layer.provide(Layer.mock(ThreadLaunchService.ThreadLaunchService)({})),
+  Layer.provide(Layer.mock(GitVcsDriver.GitVcsDriver)({})),
+);
+
 // Effect returns a declared tool failure as `isError` with its encoded payload
 // as JSON text, never as `structuredContent`.
 const declaredFailure = (result: McpSchema.CallToolResult) => {
@@ -82,16 +103,22 @@ import { PullRequestsToolkit } from "./pullRequests/tools.ts";
 import { HtmlToolkit } from "./html/tools.ts";
 import { ChannelToolkit } from "./channel/tools.ts";
 import {
-  resolveT3McpToolDefinition,
-  resolveT3McpToolPresentation,
-  resolveT3McpToolSummaryAction,
-} from "@t3tools/shared/t3McpToolPresentation";
-import { htmlRenderFromToolItem } from "@t3tools/shared/toolOutput";
+  resolveGoatMcpToolDefinition,
+  resolveGoatMcpToolPresentation,
+  resolveGoatMcpToolSummaryAction,
+} from "@goat/shared/goatMcpToolPresentation";
+import { htmlRenderFromToolItem } from "@goat/shared/toolOutput";
 
 const decodeMcpAttachmentInput = Schema.decodeUnknownEffect(McpAttachmentInput);
+const decodeThreadReadResult = Schema.decodeUnknownEffect(OrchestratorMcpThreadReadResult);
 
-// Registration asks for every service the thread tools declare; these cases call none that use them.
-const layerThreadToolkit = McpHttpServer.layerThreadToolkit.pipe(
+// A service provided here shadows a test's own mock, so tests that stub the
+// provider registry start from this layer.
+const layerThreadToolkitWithoutProviders = McpHttpServer.layerThreadToolkit.pipe(
+  Layer.provide(Layer.mock(ThreadLaunchService.ThreadLaunchService)({})),
+  Layer.provide(Layer.mock(GitVcsDriver.GitVcsDriver)({})),
+  Layer.provide(ServerSettings.layerTest()),
+  Layer.provide(Layer.mock(ThreadResultService.ThreadResultService)({})),
   Layer.provide(Layer.mock(RemoteDispatchCoordinator.RemoteDispatchCoordinator)({})),
   Layer.provide(Layer.mock(LaunchWatchService.LaunchWatchService)({})),
   Layer.provide(Layer.mock(ThreadSearch.ThreadSearch)({})),
@@ -101,8 +128,10 @@ const layerThreadToolkit = McpHttpServer.layerThreadToolkit.pipe(
   ),
   Layer.provide(Layer.mock(ProjectService.ProjectService)({})),
   Layer.provide(Layer.mock(ProviderAdapterRegistry.ProviderAdapterRegistryV2)({})),
-  Layer.provide(Layer.mock(ProviderRegistry.ProviderRegistry)({})),
   Layer.provide(Layer.mock(SecretRequests.SecretRequests)({})),
+);
+const layerThreadToolkit = layerThreadToolkitWithoutProviders.pipe(
+  Layer.provide(Layer.mock(ProviderRegistry.ProviderRegistry)({})),
 );
 
 it("publishes unique tool names with reference-free object-root inputs", () => {
@@ -115,6 +144,11 @@ it("publishes unique tool names with reference-free object-root inputs", () => {
     AttachmentToolkit,
     ProjectToolkit,
     EnvironmentToolkit,
+    HostStatusToolkit,
+    FleetHealthToolkit,
+    FleetToolkit,
+    FleetResourcesToolkit,
+    ProviderToolkit,
     PreviewControlsToolkit,
     DeviceToolkit,
     PullRequestsToolkit,
@@ -129,18 +163,16 @@ it("publishes unique tool names with reference-free object-root inputs", () => {
       names.add(tool.name);
       const schema = Tool.getJsonSchema(tool);
       expect(schema).toMatchObject({ type: "object" });
-      // The published tool catalog must also work with providers without $ref support.
       expect(JSON.stringify(schema), tool.name).not.toContain('"$ref"');
-      // Every published tool must have labels for its lifecycle, branding, and a summary.
-      const definition = resolveT3McpToolDefinition(tool.name);
+      const definition = resolveGoatMcpToolDefinition(tool.name);
       expect(definition, tool.name).not.toBeNull();
       expect(
         definition?.labels.every((label) => label.trim().length > 0),
         tool.name,
       ).toBe(true);
       for (const name of [tool.name, `mcp__t3-code__${tool.name}`, `T3-code.${tool.name}`]) {
-        expect(resolveT3McpToolPresentation(name)?.logo, name).toBe("t3-code");
-        expect(resolveT3McpToolSummaryAction(name), name).not.toBeNull();
+        expect(resolveGoatMcpToolPresentation(name)?.logo, name).toBe("t3-code");
+        expect(resolveGoatMcpToolSummaryAction(name), name).not.toBeNull();
       }
     }
   }
@@ -148,11 +180,35 @@ it("publishes unique tool names with reference-free object-root inputs", () => {
   expect([...names].filter((name) => name.startsWith("goat_")).sort()).toEqual([
     "goat_attachment_discard",
     "goat_attachment_prepare_upload",
+    "goat_cloud_holders",
+    "goat_cloud_launch",
+    "goat_cloud_machine_create",
+    "goat_cloud_machine_list",
+    "goat_cloud_machine_resume",
+    "goat_cloud_machine_stop",
+    "goat_cloud_run_forget",
+    "goat_cloud_run_list",
+    "goat_cloud_run_register",
     "goat_connection_add_ssh",
     "goat_connection_list",
     "goat_connection_remove",
     "goat_environment_preferences_update",
     "goat_environment_read",
+    "goat_fallback_chain_get",
+    "goat_fallback_chain_set",
+    "goat_goal_apply",
+    "goat_goal_delete",
+    "goat_goal_get",
+    "goat_goal_list",
+    "goat_goal_pause",
+    "goat_goal_resume",
+    "goat_host_cordon",
+    "goat_host_drain",
+    "goat_host_link_create",
+    "goat_host_link_list",
+    "goat_host_link_remove",
+    "goat_host_status",
+    "goat_host_uncordon",
     "goat_origin_report",
     "goat_origin_reports_wait",
     "goat_pending_request_list",
@@ -166,15 +222,35 @@ it("publishes unique tool names with reference-free object-root inputs", () => {
     "goat_project_list",
     "goat_project_read",
     "goat_project_update",
+    "goat_provider_addable_list",
+    "goat_provider_diagnose",
+    "goat_provider_home_request",
+    "goat_provider_host_matrix",
+    "goat_provider_login_cancel",
+    "goat_provider_login_start",
+    "goat_provider_login_status",
+    "goat_provider_setup_open",
+    "goat_provider_sync",
+    "goat_provider_sync_cancel",
+    "goat_provider_sync_status",
     "goat_queue_cancel",
     "goat_queue_edit",
     "goat_queue_list",
     "goat_queue_promote_to_steer",
     "goat_queue_read",
     "goat_queue_reorder",
+    "goat_review_findings_export",
+    "goat_review_findings_record",
+    "goat_scheduler_status",
     "goat_ssh_browse",
+    "goat_ssh_host_add",
+    "goat_ssh_host_forget",
     "goat_ssh_host_list",
+    "goat_ssh_host_prepare",
+    "goat_ssh_host_status",
     "goat_ssh_reports",
+    "goat_ssh_runtime_update",
+    "goat_ssh_thread_handoff",
     "goat_ssh_thread_launch",
     "goat_thread_configuration",
     "goat_thread_configure",
@@ -185,27 +261,38 @@ it("publishes unique tool names with reference-free object-root inputs", () => {
     "goat_thread_merge_back",
     "goat_thread_organize",
     "goat_thread_read",
+    "goat_thread_report_result",
+    "goat_thread_reschedule",
     "goat_thread_search",
     "goat_thread_send",
     "goat_thread_send_attachments",
+    "goat_thread_status",
     "goat_thread_transfers",
     "goat_thread_unwatch",
     "goat_thread_update",
     "goat_thread_wait",
     "goat_thread_watch",
     "goat_thread_watch_list",
+    "goat_workflow_stop",
+    "goat_worktree_cleanup",
     "goat_worktree_handoff",
+    "goat_worktree_inventory",
     "goat_worktree_list",
+    "goat_worktree_remove",
     "goat_worktree_status",
   ]);
   expect([...names].filter((name) => name.startsWith("channel_")).sort()).toEqual([
+    "channel_bot_home",
+    "channel_bot_home_claim",
     "channel_ingest",
     "channel_input_get",
+    "channel_task_export",
     "channel_task_get",
     "channel_task_list",
+    "channel_task_move",
     "channel_task_report",
   ]);
-  expect(names.size).toBe(97);
+  expect(names.size).toBe(158);
   expect([...names].some((name) => name.startsWith("t3_"))).toBe(false);
   expect(names.has("goat_thread_launch")).toBe(true);
   expect(names.has("t3_thread_start")).toBe(false);
@@ -402,13 +489,11 @@ it.effect("returns an HTML render reference that Codex and Claude tool rows both
       McpHttpServer.layerHtmlToolkit.pipe(
         Layer.provideMerge(McpServer.McpServer.layer),
         Layer.provide(PreviewBrowser.layer),
-        Layer.provide(ServerConfig.layerTest(process.cwd(), { prefix: "t3-mcp-html-render-" })),
+        Layer.provide(ServerConfig.layerTest(process.cwd(), { prefix: "goat-mcp-html-render-" })),
         Layer.provide(NodeServices.layer),
-        // The preview browser is not installed in a fresh home, so nothing downloads.
         Layer.provide(FetchHttpClient.layer),
         Layer.provide(
           Layer.mock(ThreadManagement.ThreadManagementService)({
-            // A live run: publishing stores a page, so it needs the caller's active turn.
             getThreadShell: () =>
               Effect.succeed({
                 id: threadId,
@@ -460,7 +545,7 @@ it.effect("refuses an undeclared argument before the tool runs", () =>
       _tag: "OrchestratorMcpFailure",
       code: "invalid_request",
       message:
-        "goat_thread_search does not take hostId, so nothing ran. It takes query, limit, projectId.",
+        "goat_thread_search does not take hostId, so nothing ran. It takes query, limit, projectId, allProjects, host, hosts, allHosts, statuses, updatedAfter, updatedBefore, includeArchived, cursor.",
     });
     const definition = server.tools.find(({ tool }) => tool.name === "goat_thread_search");
     expect(definition?.tool.inputSchema.additionalProperties).toBe(false);
@@ -503,6 +588,131 @@ it.effect("keeps unexpected handler defects private through the production regis
     ),
   ),
 );
+
+it.effect("records the calling agent and the agent a tool acted on", () => {
+  // Recording runs detached from the tool response, so each expected event is awaited.
+  const recorded = [
+    Deferred.makeUnsafe<{ event: string; properties: object }>(),
+    Deferred.makeUnsafe<{ event: string; properties: object }>(),
+  ];
+  let recordedCount = 0;
+  const shell = (id: ThreadId, instanceId: string, model: string) =>
+    ({
+      id,
+      projectId: "mcp-core-project",
+      providerInstanceId: ProviderInstanceId.make(instanceId),
+      modelSelection: { instanceId: ProviderInstanceId.make(instanceId), model },
+      runtimeMode: "full-access",
+      interactionMode: "default",
+      archivedAt: null,
+      deletedAt: null,
+      activeRunId: "mcp-core-run",
+      createdBy: "agent",
+      creationSource: "mcp",
+      lineage: {
+        parentThreadId: id === threadId ? ThreadId.make("mcp-core-parent") : null,
+        relationshipToParent: id === threadId ? "subagent" : null,
+        rootThreadId: ThreadId.make("mcp-core-parent"),
+      },
+    }) as never;
+  return Effect.gen(function* () {
+    const server = yield* McpServer.McpServer;
+    yield* server
+      .callTool({ name: "goat_thread_fork", arguments: { sourcePoint: { type: "latest_stable" } } })
+      .pipe(
+        Effect.provideService(McpInvocationContext.McpInvocationContext, scope),
+        Effect.provideService(McpSchema.McpServerClient, client),
+      );
+    const { event, properties } = yield* Deferred.await(recorded[0]!);
+    expect(event).toBe("mcp.tool.invoked");
+    expect(properties).toMatchObject({
+      tool: "goat_thread_fork",
+      outcome: "ok",
+      callerProvider: "codex",
+      callerModel: "gpt-5.5",
+      callerOrigin: "agent",
+      callerDepth: 1,
+      targetProvider: "claudeAgent",
+      targetModel: "claude-opus-5-5",
+      targetRuntimeMode: "full-access",
+      targetInteractionMode: "default",
+      crossProvider: true,
+    });
+    expect(properties).toHaveProperty("durationMs");
+    expect(Object.values(properties).some((value) => String(value).includes("mcp-core"))).toBe(
+      false,
+    );
+
+    // Queue tools return only a sequence, so the receiving thread comes from the input.
+    yield* server
+      .callTool({
+        name: "goat_queue_edit",
+        arguments: { threadId: "mcp-core-other", queuedRunId: "mcp-core-queued", text: "secret" },
+      })
+      .pipe(
+        Effect.provideService(McpInvocationContext.McpInvocationContext, scope),
+        Effect.provideService(McpSchema.McpServerClient, client),
+      );
+    // The fork recorded a single event, so the next one is the queue edit.
+    expect((yield* Deferred.await(recorded[1]!)).properties).toMatchObject({
+      tool: "goat_queue_edit",
+      outcome: "ok",
+      callerProvider: "codex",
+      targetProvider: "claudeAgent",
+      crossProvider: true,
+    });
+  }).pipe(
+    Effect.provide(
+      layerThreadToolkitWithoutProviders.pipe(
+        Layer.provideMerge(McpServer.McpServer.layer),
+        Layer.provide(NodeCrypto.layer),
+        Layer.provide(
+          Layer.mock(ThreadManagement.ThreadManagementService)({
+            getThreadShell: (id) =>
+              Effect.succeed(
+                id === threadId
+                  ? shell(threadId, "codex", "gpt-5.5")
+                  : shell(id, "claudeAgent", "claude-opus-5-5"),
+              ),
+            getThreadRecords: () => Effect.succeed({ runs: [], messages: [] } as never),
+            getProjectThreadRecords: () =>
+              Effect.succeed({ thread: shell(threadId, "codex", "gpt-5.5") } as never),
+            dispatch: () => Effect.succeed({ sequence: 1 } as never),
+          }),
+        ),
+        Layer.provide(
+          Layer.mock(ProviderRegistry.ProviderRegistry)({
+            getProviders: Effect.succeed([
+              {
+                instanceId: ProviderInstanceId.make("codex"),
+                driver: "codex",
+                models: [{ slug: "gpt-5.5", isCustom: false }],
+              } as never,
+              {
+                instanceId: ProviderInstanceId.make("claudeAgent"),
+                driver: "claudeAgent",
+                models: [{ slug: "claude-opus-5-5", isCustom: false }],
+              } as never,
+            ]),
+          }),
+        ),
+        Layer.provide(
+          Layer.succeed(
+            AnalyticsService.AnalyticsService,
+            AnalyticsService.AnalyticsService.of({
+              record: (event, properties) =>
+                Deferred.succeed(recorded[recordedCount++]!, {
+                  event,
+                  properties: properties ?? {},
+                }).pipe(Effect.asVoid),
+              flush: Effect.void,
+            }),
+          ),
+        ),
+      ),
+    ),
+  );
+});
 
 it("keeps MCP preference output allowlisted and Unicode-bounded", () => {
   const settings = {
@@ -722,7 +932,8 @@ it.effect("refuses act-as-caller tools to a client caller", () =>
     expect(declaredFailure(result)).toMatchObject({ code: "thread_credential_required" });
   }).pipe(
     Effect.provide(
-      McpHttpServer.layerOrchestratorToolkit.pipe(
+      layerOrchestratorToolkit.pipe(
+        Layer.provide(Layer.mock(ThreadResultService.ThreadResultService)({})),
         Layer.provide(Layer.mock(RemoteDispatchCoordinator.RemoteDispatchCoordinator)({})),
         Layer.provide(Layer.mock(SshRemoteDispatch.SshRemoteDispatch)({})),
         Layer.provide(Layer.mock(RemoteDispatchCoordinator.RemoteDispatchCoordinator)({})),
@@ -733,6 +944,7 @@ it.effect("refuses act-as-caller tools to a client caller", () =>
         Layer.provideMerge(McpServer.McpServer.layer),
         Layer.provide(NodeCrypto.layer),
         Layer.provide(Layer.mock(ThreadManagement.ThreadManagementService)({})),
+        Layer.provide(ServerSettings.layerTest()),
         Layer.provide(Layer.mock(ProviderRegistry.ProviderRegistry)({})),
         Layer.provide(Layer.mock(ProviderAdapterRegistry.ProviderAdapterRegistryV2)({})),
         Layer.provide(Layer.mock(ScheduledTaskService.ScheduledTaskService)({})),
@@ -767,7 +979,8 @@ it.effect("a caller cannot rewrite a scheduled task that runs above its own mode
     expect(allowed.isError).toBe(false);
   }).pipe(
     Effect.provide(
-      McpHttpServer.layerOrchestratorToolkit.pipe(
+      layerOrchestratorToolkit.pipe(
+        Layer.provide(Layer.mock(ThreadResultService.ThreadResultService)({})),
         Layer.provide(Layer.mock(RemoteDispatchCoordinator.RemoteDispatchCoordinator)({})),
         Layer.provide(Layer.mock(SshRemoteDispatch.SshRemoteDispatch)({})),
         Layer.provide(Layer.mock(RemoteDispatchCoordinator.RemoteDispatchCoordinator)({})),
@@ -778,6 +991,7 @@ it.effect("a caller cannot rewrite a scheduled task that runs above its own mode
         Layer.provideMerge(McpServer.McpServer.layer),
         Layer.provide(NodeCrypto.layer),
         Layer.provide(Layer.mock(ThreadManagement.ThreadManagementService)({})),
+        Layer.provide(ServerSettings.layerTest()),
         Layer.provide(Layer.mock(ProviderRegistry.ProviderRegistry)({})),
         Layer.provide(Layer.mock(ProviderAdapterRegistry.ProviderAdapterRegistryV2)({})),
         Layer.provide(
@@ -828,19 +1042,142 @@ function scheduledTask(id: string, runtimeMode: "auto" | "full-access"): never {
   } as never;
 }
 
-it.effect("a caller cannot interrupt a thread that runs above its own modes", () =>
-  Effect.gen(function* () {
+it.effect.each(["goat_thread_interrupt", "goat_workflow_stop"])(
+  "a caller cannot use %s on a thread that runs above its own modes",
+  (toolName) =>
+    Effect.gen(function* () {
+      const server = yield* McpServer.McpServer;
+      const result = yield* server
+        .callTool({
+          name: toolName,
+          arguments: {
+            threadId: "full-access-thread",
+            ...(toolName === "goat_workflow_stop" ? { subagentId: "workflow-coordinator" } : {}),
+          },
+        })
+        .pipe(
+          Effect.provideService(McpInvocationContext.McpInvocationContext, clientScope("auto")),
+          Effect.provideService(McpSchema.McpServerClient, client),
+        );
+      expect(declaredFailure(result)).toMatchObject({ code: "runtime_mode_escalation_denied" });
+    }).pipe(
+      Effect.provide(
+        layerOrchestratorToolkit.pipe(
+          Layer.provideMerge(McpServer.McpServer.layer),
+          Layer.provide(NodeCrypto.layer),
+          Layer.provide(
+            Layer.mock(ThreadManagement.ThreadManagementService)({
+              getThreadShell: () =>
+                Effect.succeed({
+                  projectId: "project-a",
+                  deletedAt: null,
+                  runtimeMode: "full-access",
+                  interactionMode: "default",
+                } as never),
+              getProjectThreadRecords: () =>
+                Effect.succeed({
+                  thread: {
+                    id: ThreadId.make("full-access-thread"),
+                    projectId: "project-a",
+                    runtimeMode: "full-access",
+                    interactionMode: "default",
+                    deletedAt: null,
+                  },
+                  runs: [],
+                } as never),
+              stopWorkflow: () => Effect.die("workflow stop must not dispatch above the ceiling"),
+              interruptThread: () => Effect.die("interrupt must not dispatch above the ceiling"),
+            }),
+          ),
+          Layer.provide(ServerSettings.layerTest()),
+          Layer.provide(Layer.mock(ThreadResultService.ThreadResultService)({})),
+          Layer.provide(Layer.mock(RemoteDispatchCoordinator.RemoteDispatchCoordinator)({})),
+          Layer.provide(Layer.mock(SshRemoteDispatch.SshRemoteDispatch)({})),
+          Layer.provide(
+            Layer.mock(LaunchWatchService.LaunchWatchService)({ rearm: () => Effect.void }),
+          ),
+          Layer.provide(Layer.mock(ProviderRegistry.ProviderRegistry)({})),
+          Layer.provide(Layer.mock(ProviderAdapterRegistry.ProviderAdapterRegistryV2)({})),
+          Layer.provide(Layer.mock(ScheduledTaskService.ScheduledTaskService)({})),
+          Layer.provide(Layer.mock(ProjectService.ProjectService)({})),
+          Layer.provide(Layer.mock(SecretRequests.SecretRequests)({})),
+        ),
+      ),
+    ),
+);
+
+it.effect("discovers workflow stop targets and requires orchestration capability", () => {
+  const threadId = ThreadId.make("workflow-parent");
+  const shell = McpToolAccessTestkit.liveThreadShell(threadId);
+  const subagentId = NodeId.make("workflow-coordinator");
+  const itemId = TurnItemId.make("workflow-coordinator-activity");
+  const row: OrchestrationV2ProjectedTurnItem = {
+    position: 0,
+    visibility: "local",
+    sourceThreadId: threadId,
+    sourceItemId: itemId,
+    item: {
+      id: itemId,
+      threadId,
+      runId: shell.activeRunId,
+      nodeId: subagentId,
+      providerThreadId: null,
+      providerTurnId: null,
+      nativeItemRef: null,
+      parentItemId: null,
+      ordinal: 0,
+      status: "running",
+      title: "Workflow: checkout review",
+      startedAt: shell.createdAt,
+      completedAt: null,
+      updatedAt: shell.updatedAt,
+      type: "subagent",
+      subagentId,
+      origin: "provider_native",
+      driver: ProviderDriverKind.make("claudeAgent"),
+      providerInstanceId: ProviderInstanceId.make("claudeAgent"),
+      childThreadId: ThreadId.make("workflow-child"),
+      prompt: "Review checkout",
+      result: null,
+    },
+  };
+  const stopped: Array<{ readonly threadId: ThreadId; readonly subagentId: string }> = [];
+  return Effect.gen(function* () {
     const server = yield* McpServer.McpServer;
-    const result = yield* server
-      .callTool({ name: "goat_thread_interrupt", arguments: { threadId: "full-access-thread" } })
+    const scope = clientScope("full-access");
+    const read = yield* server
+      .callTool({ name: "goat_thread_read", arguments: { threadId, view: "activity" } })
       .pipe(
-        Effect.provideService(McpInvocationContext.McpInvocationContext, clientScope("auto")),
+        Effect.provideService(McpInvocationContext.McpInvocationContext, scope),
         Effect.provideService(McpSchema.McpServerClient, client),
       );
-    expect(declaredFailure(result)).toMatchObject({ code: "runtime_mode_escalation_denied" });
+    expect(read.isError).toBe(false);
+    const result = yield* decodeThreadReadResult(read.structuredContent);
+    expect(result.items[0]?.subagentId).toBe(subagentId);
+    const call = (invocation: McpInvocationContext.McpInvocationScope) =>
+      server
+        .callTool({
+          name: "goat_workflow_stop",
+          arguments: { threadId, subagentId: result.items[0]?.subagentId },
+        })
+        .pipe(
+          Effect.provideService(McpInvocationContext.McpInvocationContext, invocation),
+          Effect.provideService(McpSchema.McpServerClient, client),
+        );
+    const denied = yield* call({ ...scope, capabilities: new Set(["worktree"]) });
+    expect(declaredFailure(denied)).toMatchObject({ code: "capability_denied" });
+    expect(stopped).toEqual([]);
+    const allowed = yield* call(scope);
+    expect(allowed.isError).toBe(false);
+    expect(stopped).toEqual([{ threadId: "workflow-parent", subagentId: "workflow-coordinator" }]);
   }).pipe(
     Effect.provide(
-      McpHttpServer.layerOrchestratorToolkit.pipe(
+      layerOrchestratorToolkit.pipe(
+        Layer.provide(
+          Layer.mock(ThreadResultService.ThreadResultService)({
+            forRun: () => Effect.succeed(null),
+          }),
+        ),
         Layer.provide(Layer.mock(RemoteDispatchCoordinator.RemoteDispatchCoordinator)({})),
         Layer.provide(Layer.mock(SshRemoteDispatch.SshRemoteDispatch)({})),
         Layer.provide(Layer.mock(RemoteDispatchCoordinator.RemoteDispatchCoordinator)({})),
@@ -852,22 +1189,19 @@ it.effect("a caller cannot interrupt a thread that runs above its own modes", ()
         Layer.provide(NodeCrypto.layer),
         Layer.provide(
           Layer.mock(ThreadManagement.ThreadManagementService)({
-            getThreadShell: () =>
-              Effect.succeed({ projectId: "project-a", deletedAt: null } as never),
+            getThreadShell: (id) => Effect.succeed(McpToolAccessTestkit.liveThreadShell(id)),
             getProjectThreadRecords: () =>
-              Effect.succeed({
-                thread: {
-                  id: ThreadId.make("full-access-thread"),
-                  projectId: "project-a",
-                  runtimeMode: "full-access",
-                  interactionMode: "default",
-                  deletedAt: null,
-                },
-                runs: [],
-              } as never),
-            interruptThread: () => Effect.die("interrupt must not dispatch above the ceiling"),
+              Effect.succeed(McpToolAccessTestkit.idleThreadProjection(shell)),
+            getThreadRecords: () =>
+              Effect.succeed(McpToolAccessTestkit.idleThreadProjection(shell)),
+            getTimelinePage: () => Effect.succeed({ items: [row], totalItems: 1, hasMore: false }),
+            stopWorkflow: (input) =>
+              Effect.sync(() => {
+                stopped.push(input);
+              }),
           }),
         ),
+        Layer.provide(ServerSettings.layerTest()),
         Layer.provide(Layer.mock(ProviderRegistry.ProviderRegistry)({})),
         Layer.provide(Layer.mock(ProviderAdapterRegistry.ProviderAdapterRegistryV2)({})),
         Layer.provide(Layer.mock(ScheduledTaskService.ScheduledTaskService)({})),
@@ -875,8 +1209,8 @@ it.effect("a caller cannot interrupt a thread that runs above its own modes", ()
         Layer.provide(Layer.mock(SecretRequests.SecretRequests)({})),
       ),
     ),
-  ),
-);
+  );
+});
 
 it.effect("only the caller that prepared a pending upload can discard it", () =>
   Effect.gen(function* () {
@@ -907,8 +1241,6 @@ it.effect("only the caller that prepared a pending upload can discard it", () =>
     const refused = yield* call("goat_attachment_discard", { attachmentId }, otherThread);
     expect(declaredFailure(refused)).toMatchObject({ code: "invalid_request" });
 
-    // Another prepare a day later keeps it: the file outlives its URL's 24 hours
-    // by as long as the upload took, up to the URL's own lifetime.
     yield* TestClock.adjust(24 * 60 * 60 * 1000 + 5 * 60_000);
     yield* call(
       "goat_attachment_prepare_upload",
@@ -916,7 +1248,6 @@ it.effect("only the caller that prepared a pending upload can discard it", () =>
       scope,
     );
 
-    // A new provider session of the same thread still owns the upload.
     const discarded = yield* call(
       "goat_attachment_discard",
       { attachmentId },
@@ -929,7 +1260,7 @@ it.effect("only the caller that prepared a pending upload can discard it", () =>
         Layer.provideMerge(McpServer.McpServer.layer),
         Layer.provide(McpToolAccessTestkit.liveThreadsLayer),
         Layer.provide(ServerSecretStore.layer),
-        Layer.provide(ServerConfig.layerTest(process.cwd(), { prefix: "t3-mcp-attachment-" })),
+        Layer.provide(ServerConfig.layerTest(process.cwd(), { prefix: "goat-mcp-attachment-" })),
         Layer.provide(NodeServices.layer),
       ),
     ),
@@ -956,8 +1287,8 @@ it.effect(
         responseCapability: { type: "message" },
         createdAt: now,
         resolvedAt: null,
-      } as import("@t3tools/contracts").OrchestrationV2RuntimeRequest;
-      const item: import("@t3tools/contracts").OrchestrationV2TurnItem = {
+      } as import("@goat/contracts").OrchestrationV2RuntimeRequest;
+      const item: import("@goat/contracts").OrchestrationV2TurnItem = {
         id: TurnItemId.make("question-item"),
         type: "user_input_request",
         threadId: targetId,
@@ -1285,10 +1616,13 @@ it.effect.each([false, true])(
                 ...input,
                 host: input.host ?? null,
                 incarnation: "test",
+                notifyWebhook: input.notifyWebhook ?? false,
                 now: 0,
               });
             }),
         }),
+        Layer.mock(SshWorkspaceSync.SshWorkspaceSync)({}),
+        Layer.mock(SshHostSetup.SshHostSetup)({}),
         Layer.mock(SshRemoteDispatch.SshRemoteDispatch)({
           validateLaunchAttachments: (attachments) => Effect.succeed(attachments),
           launchThread: (input, check) =>
@@ -1321,6 +1655,8 @@ it.effect.each([false, true])(
                 projectId: null,
                 title: "Remote",
                 runId: null,
+                notifyWebhook: false,
+                webhookTarget: null,
               },
             ]
           : [],
@@ -1346,6 +1682,10 @@ it.effect("pending toolkit host routing preserves target authority", () =>
     const localTargets: Array<ThreadId> = [];
     const remoteId = ThreadId.make("remote-thread");
     const dependencies = McpHttpServer.layerThreadToolkit.pipe(
+      Layer.provide(Layer.mock(ThreadLaunchService.ThreadLaunchService)({})),
+      Layer.provide(Layer.mock(GitVcsDriver.GitVcsDriver)({})),
+      Layer.provide(ServerSettings.layerTest()),
+      Layer.provide(Layer.mock(ThreadResultService.ThreadResultService)({})),
       Layer.provide(Layer.mock(RemoteDispatchCoordinator.RemoteDispatchCoordinator)({})),
       Layer.provide(Layer.mock(LaunchWatchService.LaunchWatchService)({})),
       Layer.provideMerge(McpServer.McpServer.layer),

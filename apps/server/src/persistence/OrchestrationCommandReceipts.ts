@@ -1,12 +1,4 @@
-/**
- * OrchestrationCommandReceiptRepository - Repository interface for command receipts.
- *
- * Owns persistence operations for deduplication and status tracking of
- * orchestration command handling.
- *
- * @module OrchestrationCommandReceiptRepository
- */
-import { CommandId, IsoDateTime, NonNegativeInt, ProjectId, ThreadId } from "@t3tools/contracts";
+import { CommandId, IsoDateTime, NonNegativeInt, ProjectId, ThreadId } from "@goat/contracts";
 import * as SqlClient from "effect/sql/SqlClient";
 import * as SqlSchema from "effect/sql/SqlSchema";
 import * as Context from "effect/Context";
@@ -37,9 +29,6 @@ export const GetByCommandIdInput = Schema.Struct({
 });
 export type GetByCommandIdInput = typeof GetByCommandIdInput.Type;
 
-/**
- * OrchestrationCommandReceiptRepository - Service tag for command receipt persistence.
- */
 export class OrchestrationCommandReceiptRepository extends Context.Service<
   OrchestrationCommandReceiptRepository,
   {
@@ -47,18 +36,10 @@ export class OrchestrationCommandReceiptRepository extends Context.Service<
       receipt: OrchestrationCommandReceipt,
     ) => Effect.Effect<boolean, OrchestrationCommandReceiptRepositoryError>;
 
-    /**
-     * Insert or replace a command receipt row.
-     *
-     * Upserts by `commandId` for idempotent command-result tracking.
-     */
     readonly upsert: (
       receipt: OrchestrationCommandReceipt,
     ) => Effect.Effect<void, OrchestrationCommandReceiptRepositoryError>;
 
-    /**
-     * Read a command receipt by command id.
-     */
     readonly getByCommandId: (
       input: GetByCommandIdInput,
     ) => Effect.Effect<
@@ -66,7 +47,7 @@ export class OrchestrationCommandReceiptRepository extends Context.Service<
       OrchestrationCommandReceiptRepositoryError
     >;
   }
->()("t3/persistence/OrchestrationCommandReceipts/OrchestrationCommandReceiptRepository") {}
+>()("goat/persistence/OrchestrationCommandReceipts/OrchestrationCommandReceiptRepository") {}
 
 const makeOrchestrationCommandReceiptRepository = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;

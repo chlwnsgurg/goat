@@ -1,10 +1,9 @@
-import type { DeviceServiceState, EnvironmentId } from "@t3tools/contracts";
+import type { DeviceServiceState, EnvironmentId } from "@goat/contracts";
 import { useState } from "react";
 import { Button } from "~/components/ui/button";
 import { deviceEnvironment } from "~/state/device";
 import { useAtomCommand } from "~/state/use-atom-command";
 
-/** Shared by setup, Settings, and the Device panel so automatic updates stay visible. */
 export function DeviceHostUpdates({
   state,
   environmentId,

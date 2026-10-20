@@ -29,29 +29,29 @@ html[data-mobile-composer-route-transition="true"]::view-transition-new(root) {
   animation: none;
 }
 
-html[data-mobile-composer-route-transition="true"]::view-transition-group(t3-mobile-composer) {
+html[data-mobile-composer-route-transition="true"]::view-transition-group(goat-mobile-composer) {
   animation-duration: var(--mobile-composer-transition-duration);
   animation-timing-function: cubic-bezier(0.4, 0, 0.2, 1);
 }
 
-html[data-mobile-composer-route-transition="true"]::view-transition-image-pair(t3-mobile-composer) {
+html[data-mobile-composer-route-transition="true"]::view-transition-image-pair(goat-mobile-composer) {
   isolation: isolate;
 }
 
-html[data-mobile-composer-route-transition="true"]::view-transition-old(t3-mobile-composer) {
-  animation: t3-mobile-composer-old var(--mobile-composer-transition-duration) linear both;
+html[data-mobile-composer-route-transition="true"]::view-transition-old(goat-mobile-composer) {
+  animation: goat-mobile-composer-old var(--mobile-composer-transition-duration) linear both;
   mix-blend-mode: normal;
 }
 
-html[data-mobile-composer-route-transition="true"]::view-transition-new(t3-mobile-composer) {
-  animation: t3-mobile-composer-new var(--mobile-composer-transition-duration) linear both;
+html[data-mobile-composer-route-transition="true"]::view-transition-new(goat-mobile-composer) {
+  animation: goat-mobile-composer-new var(--mobile-composer-transition-duration) linear both;
   mix-blend-mode: normal;
 }
 
 /* The expanded and compact composers have different internal layouts. Use a
    brief crossfade while their shared wrapper moves so the layout change does
    not read as a single-frame cut. */
-@keyframes t3-mobile-composer-old {
+@keyframes goat-mobile-composer-old {
   0%,
   35% {
     opacity: 1;
@@ -62,7 +62,7 @@ html[data-mobile-composer-route-transition="true"]::view-transition-new(t3-mobil
   }
 }
 
-@keyframes t3-mobile-composer-new {
+@keyframes goat-mobile-composer-new {
   0%,
   35% {
     opacity: 0;
@@ -73,17 +73,17 @@ html[data-mobile-composer-route-transition="true"]::view-transition-new(t3-mobil
   }
 }
 
-html[data-mobile-composer-route-transition="true"]::view-transition-group(t3-mobile-draft-headline) {
+html[data-mobile-composer-route-transition="true"]::view-transition-group(goat-mobile-draft-headline) {
   animation-duration: var(--mobile-composer-transition-duration);
 }
 
-html[data-mobile-composer-route-transition="true"]::view-transition-old(t3-mobile-draft-headline) {
-  animation: t3-mobile-draft-headline-exit var(--mobile-composer-transition-duration)
+html[data-mobile-composer-route-transition="true"]::view-transition-old(goat-mobile-draft-headline) {
+  animation: goat-mobile-draft-headline-exit var(--mobile-composer-transition-duration)
     cubic-bezier(0.4, 0, 1, 1) both;
   mix-blend-mode: normal;
 }
 
-@keyframes t3-mobile-draft-headline-exit {
+@keyframes goat-mobile-draft-headline-exit {
   from {
     opacity: 1;
     transform: translateY(0);
@@ -95,6 +95,14 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(t3-mobil
 }
 
 :root {
+  --channel-dev: var(--color-blue-700);
+  --channel-nightly: var(--color-indigo-600);
+
+  @variant dark {
+    --channel-dev: var(--color-blue-400);
+    --channel-nightly: var(--color-indigo-300);
+  }
+
   --app-scrollbar-width: 6px;
   --appearance-contrast-base: 100%;
   --appearance-contrast-boost: 0%;
@@ -118,7 +126,8 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(t3-mobil
   --command-shell-inset: 0.5rem;
   --command-content-inset: 1rem;
   --floating-content-inset: 0.75rem;
-  /* App layer order: docked sheets, then the floating preview player (47–49, see
+  /* App layer order: the bottom terminal drawer (45, above the timeline minimap),
+     docked sheets, then the floating preview player (47–49, see
      previewMiniPlayerLayout.ts), then dialogs and popovers (50 and up). */
   --z-sheet: 46;
   --glass-blur: 12px;
@@ -157,6 +166,7 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(t3-mobil
 }
 
 .wco {
+  --native-titlebar-height: env(titlebar-area-height, 0px);
   --workspace-topbar-height: max(40px, env(titlebar-area-height, 52px));
   --workspace-controls-top: env(titlebar-area-y, 0px);
   --workspace-controls-left: calc(env(titlebar-area-x, 0px) + 0.75rem);
@@ -192,6 +202,10 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(t3-mobil
   --text-4xs--line-height: 1;
   --text-5xs: 0.4375rem;
   --text-5xs--line-height: 1;
+  /* Work-log rows (tool calls, their group summaries, thinking and reasoning): a
+     half step under text-sm so the activity stays quieter than the conversation. */
+  --text-work-log: 0.78125rem;
+  --text-work-log--line-height: 1.625;
   /* Composer footer labels. A container scales them with
      --composer-control-text-scale (the expanded footer uses 0.8). */
   --text-composer-control: calc(var(--text-base) * var(--composer-control-text-scale, 1));
@@ -205,6 +219,8 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(t3-mobil
      by the composer, its context strip and attached banners. */
   --shadow-composer: 0 12px 28px -18px rgb(0 0 0 / 40%);
   --shadow-composer-dark: 0 14px 32px -18px rgb(0 0 0 / 75%);
+  /* Overlap the lower toolbar backdrop by one pixel to cover the composer seam. */
+  --spacing-composer-seam: calc(var(--spacing) * 4 - 1px);
   /* Dark-mode shade where an attached surface meets the composer: 10px of
      shadow fading away from the seam. Inline, so the offsets resolve on the
      element. below: the context strip under the composer (1rem seam, faint
@@ -231,12 +247,27 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(t3-mobil
      compositor updates discrete frames instead of every vsync. */
   --animate-status-pulse: status-pulse 2s infinite;
   --animate-status-ping: status-ping 2s infinite;
+  /* GOAT Bot's replying dots: a short hop, then a long hold, stepped like the status pulses. */
+  --animate-typing-wave: typing-wave 1.4s 6;
   --color-warning-foreground: var(--warning-foreground);
   --color-warning: var(--warning);
   --color-warning-surface: var(--warning-surface);
-  /* GOAT Bot's user bubbles: a light tint of the theme's warning hue with dark text. */
-  --color-goat-bubble: color-mix(in srgb, var(--warning) 45%, white);
-  --color-goat-bubble-foreground: var(--color-zinc-950);
+  --color-heat-warm: var(--heat-warm);
+  --color-heat-hot: var(--heat-hot);
+  --color-heat-burning: var(--heat-burning);
+  --color-heat-ember: var(--heat-ember);
+  /* GOAT Bot's face follows the theme's text and canvas without an accent hue. */
+  --color-goat-avatar: color-mix(in oklab, var(--foreground) 6%, var(--background));
+  --color-goat-avatar-border: color-mix(in oklab, var(--foreground) 12%, var(--background));
+  --color-goat-avatar-foreground: color-mix(in oklab, var(--foreground) 82%, var(--background));
+  /* GOAT Bot's Messages colors stay local to its conversation. */
+  --color-goat-bubble-out-top: var(--goat-bubble-out-top);
+  --color-goat-bubble-out: var(--goat-bubble-out);
+  --color-goat-bubble-out-foreground: #fff;
+  --color-goat-bubble-in: var(--goat-bubble-in);
+  --color-goat-bubble-in-foreground: var(--goat-bubble-in-foreground);
+  --color-channel-dev: var(--channel-dev);
+  --color-channel-nightly: var(--channel-nightly);
   --color-error-foreground: var(--error-foreground);
   --color-tool-error-icon: var(--tool-error-icon);
   --color-error: var(--error);
@@ -246,6 +277,23 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(t3-mobil
   --color-update-surface: var(--update-surface);
   --color-success-foreground: var(--success-foreground);
   --color-success: var(--success);
+  /* Pull request lifecycle tones. Each state's hue is folded into the muted text around it, so
+     PR glyphs and counts read as quiet metadata and pick up every theme's text tint. */
+  --color-pr-open: color-mix(
+    in oklab,
+    var(--success-foreground) 55%,
+    var(--contrast-muted-foreground)
+  );
+  --color-pr-closed: color-mix(
+    in oklab,
+    var(--error-foreground) 55%,
+    var(--contrast-muted-foreground)
+  );
+  --color-pr-merged: color-mix(
+    in oklab,
+    var(--merged-foreground) 55%,
+    var(--contrast-muted-foreground)
+  );
   --color-diff-addition: var(--diff-addition);
   --color-diff-deletion: var(--diff-deletion);
   --color-diff-addition-foreground: var(--diff-addition-foreground);
@@ -282,6 +330,11 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(t3-mobil
   --color-message-action: var(--message-action);
   --color-message-action-foreground: var(--message-action-foreground);
   --color-message-action-hover: var(--message-action-hover);
+  /* The composer's send and stop buttons: the theme's action and destructive colors taken a step
+     deeper, so the two buttons a user reaches for most stay solid on every palette. Hover lifts
+     them back to the plain theme color. */
+  --color-composer-send: color-mix(in oklab, var(--message-action) 86%, black);
+  --color-composer-stop: color-mix(in oklab, var(--destructive) 86%, black);
   --color-sidebar: var(--sidebar);
   --color-sidebar-foreground: var(--contrast-sidebar-foreground);
   --color-sidebar-muted-foreground: var(--contrast-sidebar-muted-foreground);
@@ -290,6 +343,7 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(t3-mobil
   --color-sidebar-row-active: var(--sidebar-row-active);
   --color-sidebar-row-selected: var(--sidebar-row-selected);
   --color-sidebar-border: var(--contrast-sidebar-border);
+  --color-chrome-divider: var(--contrast-chrome-divider);
   --radius-sm: calc(var(--radius) - 4px);
   --radius-md: calc(var(--radius) - 2px);
   --radius-lg: var(--radius);
@@ -313,6 +367,20 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(t3-mobil
     }
     100% {
       opacity: 1;
+    }
+  }
+  @keyframes typing-wave {
+    0% {
+      translate: 0 0;
+      animation-timing-function: steps(3);
+    }
+    15% {
+      translate: 0 -3px;
+      animation-timing-function: steps(3);
+    }
+    30%,
+    100% {
+      translate: 0 0;
     }
   }
   @keyframes status-pulse {
@@ -390,7 +458,7 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(t3-mobil
 }
 
 /* Paint find results without changing rendered markdown or copied text. */
-::highlight(t3-thread-find) {
+::highlight(goat-thread-find) {
   color: var(--app-theme-search-match-foreground, oklch(0.216164 0.028283 77.423));
   background-color: var(--app-theme-search-match-background, oklch(0.915 0.11 85));
 
@@ -400,7 +468,7 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(t3-mobil
   }
 }
 
-::highlight(t3-thread-find-active) {
+::highlight(goat-thread-find-active) {
   color: var(--app-theme-search-match-active-foreground, oklch(0.216164 0.028283 77.423));
   background-color: var(
     --app-theme-search-match-active-background,
@@ -509,6 +577,16 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(t3-mobil
     var(--app-scrollbar-width) 100%;
 }
 
+@utility timeline-scroll-bottom-fade {
+  --virtualized-scroll-fade-mask: linear-gradient(
+    to bottom,
+    black 0,
+    black calc(100% - var(--timeline-composer-overlay-height) - 0.75rem),
+    transparent calc(100% - var(--timeline-composer-overlay-height)),
+    transparent 100%
+  );
+}
+
 /* Stage-channel art needs a mask and pseudo-element gradient, so keep the
    behavior composable without tying it to the global components layer. */
 @utility sidebar-stage-backdrop {
@@ -561,6 +639,175 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(t3-mobil
     animation: live-tool-shine 2.2s steps(30) infinite;
     animation-play-state: var(--visible-animation-state, paused);
   }
+}
+
+@utility goat-bubble {
+  position: relative;
+  max-width: min(75%, 34rem);
+  padding: 8px 13px;
+  border-radius: 20px;
+  font-size: 1rem;
+  line-height: 1.375rem;
+  /* break-word, unlike anywhere, keeps whole words in the min-content width, so short
+     messages never wrap mid-word. */
+  overflow-wrap: break-word;
+  white-space: pre-wrap;
+
+  @media (max-width: 640px) {
+    font-size: 1.0625rem;
+  }
+}
+
+@utility goat-name-capsule {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 3px 10px;
+  border-radius: 9999px;
+  font-size: 13px;
+  line-height: 18px;
+  font-weight: 600;
+  background: color-mix(in oklab, var(--background) 72%, transparent);
+  box-shadow: inset 0 0 0 0.5px color-mix(in oklab, var(--foreground) 14%, transparent);
+}
+
+@utility goat-message-row {
+  border-radius: 20px;
+}
+
+@utility goat-task-title {
+  font-size: 15px;
+  line-height: 20px;
+}
+
+@utility goat-task-summary {
+  font-size: 13px;
+  line-height: 18px;
+}
+
+@utility goat-composer-field {
+  min-height: 44px;
+  border-radius: 22px;
+  background: var(--goat-composer-fill);
+  box-shadow: inset 0 0 0 0.5px var(--goat-hairline);
+
+  &:focus-within {
+    box-shadow: inset 0 0 0 0.5px color-mix(in oklab, var(--color-goat-bubble-out) 40%, transparent);
+  }
+}
+
+.goat-timeline[data-at-top="true"] > .goat-top-fade,
+.goat-timeline[data-at-bottom="true"] > .goat-bottom-fade {
+  opacity: 0;
+}
+
+@keyframes goat-arrive {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@utility goat-arrive {
+  animation: goat-arrive 180ms cubic-bezier(0.2, 0.8, 0.2, 1) 1 both;
+
+  @media (prefers-reduced-motion: reduce), (forced-colors: active) {
+    animation: none;
+  }
+}
+
+@utility goat-bubble-out-fill {
+  background-color: var(--color-goat-bubble-out);
+  background-image: linear-gradient(
+    to bottom,
+    var(--color-goat-bubble-out-top),
+    var(--color-goat-bubble-out)
+  );
+
+  @media (forced-colors: active) {
+    background-image: none;
+  }
+}
+
+/* The canvas-colored mask cuts a curved Messages tail from the last bubble in a group. */
+@utility goat-bubble-tail-out {
+  &::before {
+    content: "";
+    position: absolute;
+    bottom: 0;
+    right: -7px;
+    height: 20px;
+    width: 20px;
+    background: var(--color-goat-bubble-out);
+    border-bottom-left-radius: 16px 14px;
+  }
+  &::after {
+    content: "";
+    position: absolute;
+    bottom: 0;
+    right: -26px;
+    height: 20px;
+    width: 26px;
+    background: var(--background);
+    border-bottom-left-radius: 10px;
+  }
+}
+
+@utility goat-bubble-tail-in {
+  &::before {
+    content: "";
+    position: absolute;
+    bottom: 0;
+    left: -7px;
+    height: 20px;
+    width: 20px;
+    background: var(--color-goat-bubble-in);
+    border-bottom-right-radius: 16px 14px;
+  }
+  &::after {
+    content: "";
+    position: absolute;
+    bottom: 0;
+    left: -26px;
+    height: 20px;
+    width: 26px;
+    background: var(--background);
+    border-bottom-right-radius: 10px;
+  }
+}
+
+@utility goat-typing-tail {
+  &::before {
+    content: "";
+    position: absolute;
+    left: -2px;
+    bottom: -2px;
+    width: 10px;
+    height: 10px;
+    border-radius: 9999px;
+    background: var(--color-goat-bubble-in);
+  }
+  &::after {
+    content: "";
+    position: absolute;
+    left: -8px;
+    bottom: -8px;
+    width: 5px;
+    height: 5px;
+    border-radius: 9999px;
+    background: var(--color-goat-bubble-in);
+  }
+}
+
+@utility goat-reply-line {
+  border-left: 2px solid
+    color-mix(in oklab, var(--color-goat-bubble-in-foreground) 18%, transparent);
+  border-top: 0;
+  border-top-left-radius: 10px;
 }
 
 @utility visible-animate-spin {
@@ -617,7 +864,7 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(t3-mobil
     transparent 100%
   );
   mask-repeat: no-repeat;
-  animation: live-activity-focus 2.2s linear infinite;
+  animation: live-activity-focus 2.2s steps(30) infinite;
   animation-play-state: var(--visible-animation-state, paused);
   will-change: var(--visible-animation-will-change, auto);
 
@@ -630,7 +877,7 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(t3-mobil
 
 @utility live-activity-focus-counter {
   width: 100%;
-  animation: live-activity-focus-counter 2.2s linear infinite;
+  animation: live-activity-focus-counter 2.2s steps(30) infinite;
   animation-play-state: var(--visible-animation-state, paused);
   will-change: var(--visible-animation-will-change, auto);
 
@@ -652,51 +899,16 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(t3-mobil
 }
 
 @layer base {
-  ::highlight(t3-assistant-citation) {
+  ::highlight(goat-assistant-citation) {
     background-color: color-mix(
       in oklab,
       var(--primary) calc(var(--assistant-citation-highlight-opacity) * 100%),
       transparent
     );
   }
-  ::highlight(t3-assistant-citation-comment) {
+  ::highlight(goat-assistant-citation-comment) {
     background-color: color-mix(in oklab, var(--primary) 45%, transparent);
   }
-  :root {
-    /* Keep the original T3 Code artwork palettes as the defaults. Built-in
-       themes override them with their own pigments in the components layer. */
-    --stage-art-top: oklch(0.782169 0.123386 240.226);
-    --stage-art-mid: oklch(0.616111 0.195824 259.735);
-    --stage-art-bottom: oklch(0.441553 0.232394 265.474);
-    --stage-art-highlight: oklch(0.951597 0.037289 215.482);
-    --stage-art-secondary: oklch(0.794668 0.12136 235.46);
-    --stage-art-tertiary: oklch(0.678991 0.170261 275.365);
-    --stage-art-line: oklch(0.959666 0.029238 218.179);
-    --stage-art-celeste-highlight: oklch(0.968763 0.045822 196.42);
-    --stage-art-celeste-secondary: oklch(0.827395 0.126071 211.26);
-    --stage-art-violet-highlight: oklch(0.895381 0.053248 286.447);
-    --stage-art-grid-line: oklch(0.966822 0.01757 239.99);
-    --stage-night-base-top: oklch(0.283792 0.117327 297.201);
-    --stage-night-base-mid: oklch(0.227147 0.086086 277.99);
-    --stage-night-base-bottom: oklch(0.200528 0.055699 261.216);
-    --stage-night-top: var(--stage-night-base-top);
-    --stage-night-mid: var(--stage-night-base-mid);
-    --stage-night-bottom: var(--stage-night-base-bottom);
-    --stage-night-highlight: oklch(0.707246 0.157418 252.091);
-    --stage-night-secondary: oklch(0.600473 0.182225 277.296);
-    --stage-night-tertiary: oklch(0.62583 0.210886 305.994);
-    --stage-night-line: oklch(0.938794 0.029114 273.103);
-    --stage-night-glow-highlight: oklch(0.553749 0.176543 271.958);
-    --stage-night-glow-secondary: oklch(0.345571 0.117466 273.568);
-    --stage-night-sparkle: oklch(0.880867 0.057747 269.011);
-
-    @variant dark {
-      --stage-art-top: oklch(0.581473 0.149124 256.9);
-      --stage-art-mid: oklch(0.456509 0.159377 261.945);
-      --stage-art-bottom: oklch(0.291327 0.136578 267.649);
-    }
-  }
-
   * {
     @apply border-border outline-ring/50;
   }
@@ -734,176 +946,6 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(t3-mobil
 
   [data-slot="animated-height"] [data-slot="collapsible-panel"][data-closed] {
     display: none;
-  }
-
-  /* Each maintainer palette gives the same line art its own material: rose
-     vellum, forest drafting paper, marine cyanotype, copper, and violet ink.
-     These colors stay deliberately deep at the top edge so the white stage
-     wordmark and controls retain contrast in both appearance modes. */
-  html[data-theme-id="t3-chat"] {
-    --stage-art-top: oklch(0.760675 0.141361 348.019);
-    --stage-art-mid: oklch(0.588093 0.188832 353.138);
-    --stage-art-bottom: oklch(0.383959 0.135096 348.656);
-    --stage-art-highlight: oklch(0.949689 0.034241 339.171);
-    --stage-art-secondary: oklch(0.763402 0.163836 352.525);
-    --stage-art-tertiary: oklch(0.70819 0.180285 311.949);
-    --stage-art-line: oklch(0.952158 0.034194 336.179);
-
-    @variant dark {
-      --stage-art-top: oklch(0.540689 0.143665 347.587);
-      --stage-art-mid: oklch(0.396586 0.126592 347.6);
-      --stage-art-bottom: oklch(0.249959 0.079694 340.523);
-      --stage-art-highlight: oklch(0.921297 0.051708 343.229);
-      --stage-art-secondary: oklch(0.667398 0.165674 352.549);
-      --stage-art-tertiary: oklch(0.609315 0.163722 306.315);
-      --stage-art-line: oklch(0.945349 0.036045 341.433);
-    }
-  }
-
-  html[data-theme-id="grove"] {
-    --stage-art-top: oklch(0.751465 0.112731 157.313);
-    --stage-art-mid: oklch(0.567105 0.11099 158.859);
-    --stage-art-bottom: oklch(0.367918 0.067635 160.558);
-    --stage-art-highlight: oklch(0.976387 0.034353 161.456);
-    --stage-art-secondary: oklch(0.80968 0.117071 158.817);
-    --stage-art-tertiary: oklch(0.784102 0.108047 88.516);
-    --stage-art-line: oklch(0.981098 0.027812 158.718);
-    --stage-night-top: oklch(0.45805 0.079616 160.092);
-    --stage-night-mid: oklch(0.368483 0.065631 162.719);
-    --stage-night-bottom: oklch(0.264797 0.044397 168.088);
-    --stage-night-highlight: oklch(0.912563 0.055173 158.974);
-    --stage-night-secondary: oklch(0.665652 0.109731 156.599);
-    --stage-night-tertiary: oklch(0.698651 0.103024 89.828);
-    --stage-night-line: oklch(0.945336 0.041923 157.222);
-
-    @variant dark {
-      --stage-art-top: oklch(0.58719 0.09869 157.426);
-      --stage-art-mid: oklch(0.454979 0.079031 159.756);
-      --stage-art-bottom: oklch(0.297856 0.050355 161.167);
-      --stage-art-highlight: oklch(0.952407 0.053872 158.44);
-      --stage-art-secondary: oklch(0.732591 0.120606 155.853);
-      --stage-art-tertiary: oklch(0.716282 0.116547 80.563);
-      --stage-art-line: oklch(0.961577 0.035285 157.03);
-      --stage-night-top: oklch(0.398632 0.065534 158.601);
-      --stage-night-mid: oklch(0.290561 0.049694 160.456);
-      --stage-night-bottom: oklch(0.210147 0.03173 169.818);
-      --stage-night-highlight: oklch(0.866303 0.057526 156.796);
-      --stage-night-secondary: oklch(0.586553 0.093722 157.365);
-      --stage-night-tertiary: oklch(0.6364 0.101769 82.985);
-      --stage-night-line: oklch(0.913292 0.035718 156.976);
-    }
-  }
-
-  html[data-theme-id="ocean"] {
-    --stage-art-top: oklch(0.792993 0.088072 220.421);
-    --stage-art-mid: oklch(0.590296 0.116841 243.184);
-    --stage-art-bottom: oklch(0.409123 0.093718 247.98);
-    --stage-art-highlight: oklch(0.971217 0.023008 213.615);
-    --stage-art-secondary: oklch(0.788391 0.090856 215.684);
-    --stage-art-tertiary: oklch(0.76441 0.099607 187.893);
-    --stage-art-line: oklch(0.976025 0.019647 212.543);
-
-    @variant dark {
-      --stage-art-top: oklch(0.59663 0.089167 233.427);
-      --stage-art-mid: oklch(0.461094 0.084904 243.478);
-      --stage-art-bottom: oklch(0.294818 0.05947 250.526);
-      --stage-art-highlight: oklch(0.952907 0.032224 221.27);
-      --stage-art-secondary: oklch(0.732079 0.09296 224.414);
-      --stage-art-tertiary: oklch(0.720885 0.095495 190.903);
-      --stage-art-line: oklch(0.961039 0.027355 219.756);
-    }
-  }
-
-  html[data-theme-id="ember"] {
-    --stage-art-top: oklch(0.782439 0.118806 52.569);
-    --stage-art-mid: oklch(0.62863 0.15922 39.401);
-    --stage-art-bottom: oklch(0.404251 0.117664 30.424);
-    --stage-art-highlight: oklch(0.962469 0.02774 70.95);
-    --stage-art-secondary: oklch(0.815735 0.11904 53.659);
-    --stage-art-tertiary: oklch(0.69361 0.159346 24.787);
-    --stage-art-line: oklch(0.970313 0.02052 67.583);
-    --stage-night-top: oklch(0.470236 0.102322 39.355);
-    --stage-night-mid: oklch(0.345367 0.080697 33.217);
-    --stage-night-bottom: oklch(0.227386 0.056077 27.437);
-    --stage-night-highlight: oklch(0.903891 0.059281 56.181);
-    --stage-night-secondary: oklch(0.641705 0.126508 44.376);
-    --stage-night-tertiary: oklch(0.538694 0.129931 25.865);
-    --stage-night-line: oklch(0.926348 0.046029 58.73);
-
-    @variant dark {
-      --stage-art-top: oklch(0.597533 0.120694 43.455);
-      --stage-art-mid: oklch(0.437763 0.101287 34.86);
-      --stage-art-bottom: oklch(0.264269 0.055858 26.548);
-      --stage-art-highlight: oklch(0.929214 0.042638 55.801);
-      --stage-art-secondary: oklch(0.705592 0.137369 43.176);
-      --stage-art-tertiary: oklch(0.629583 0.158322 24.088);
-      --stage-art-line: oklch(0.945058 0.033906 58.824);
-      --stage-night-top: oklch(0.392352 0.081287 36.444);
-      --stage-night-mid: oklch(0.271305 0.056352 31.135);
-      --stage-night-bottom: oklch(0.182126 0.028154 27.774);
-      --stage-night-highlight: oklch(0.851007 0.061294 53.805);
-      --stage-night-secondary: oklch(0.560789 0.10645 42.953);
-      --stage-night-tertiary: oklch(0.476228 0.106656 24.165);
-      --stage-night-line: oklch(0.884931 0.046607 56.556);
-    }
-  }
-
-  html[data-theme-id="iris"] {
-    --stage-art-top: oklch(0.738305 0.113454 298.926);
-    --stage-art-mid: oklch(0.551826 0.159189 294.531);
-    --stage-art-bottom: oklch(0.37147 0.133317 289.999);
-    --stage-art-highlight: oklch(0.949472 0.029204 303.081);
-    --stage-art-secondary: oklch(0.745085 0.125892 298.647);
-    --stage-art-tertiary: oklch(0.73066 0.167815 340.964);
-    --stage-art-line: oklch(0.960278 0.024064 306.969);
-
-    @variant dark {
-      --stage-art-top: oklch(0.57297 0.145973 295.185);
-      --stage-art-mid: oklch(0.419499 0.13752 292.131);
-      --stage-art-bottom: oklch(0.274235 0.095798 286.608);
-      --stage-art-highlight: oklch(0.916698 0.047206 300.224);
-      --stage-art-secondary: oklch(0.670994 0.13095 296.689);
-      --stage-art-tertiary: oklch(0.679357 0.165376 340.439);
-      --stage-art-line: oklch(0.940582 0.032921 299.076);
-    }
-  }
-
-  :is(html[data-theme-id="t3-chat"], html[data-theme-id="ocean"], html[data-theme-id="iris"]) {
-    --stage-night-top: color-mix(in oklch, var(--stage-art-top) 38%, var(--stage-night-base-top));
-    --stage-night-mid: color-mix(in oklch, var(--stage-art-mid) 38%, var(--stage-night-base-mid));
-    --stage-night-bottom: color-mix(
-      in oklch,
-      var(--stage-art-bottom) 38%,
-      var(--stage-night-base-bottom)
-    );
-    --stage-night-highlight: var(--stage-art-highlight);
-    --stage-night-secondary: color-mix(
-      in oklch,
-      var(--stage-art-secondary) 55%,
-      var(--stage-night-mid)
-    );
-    --stage-night-tertiary: color-mix(
-      in oklch,
-      var(--stage-art-tertiary) 60%,
-      var(--stage-night-top)
-    );
-    --stage-night-line: color-mix(in oklch, var(--stage-art-line) 82%, oklch(1 0 0));
-  }
-
-  :is(
-    html[data-theme-id="t3-chat"],
-    html[data-theme-id="grove"],
-    html[data-theme-id="ocean"],
-    html[data-theme-id="ember"],
-    html[data-theme-id="iris"]
-  ) {
-    --stage-art-celeste-highlight: var(--stage-art-highlight);
-    --stage-art-celeste-secondary: var(--stage-art-secondary);
-    --stage-art-violet-highlight: var(--stage-art-highlight);
-    --stage-art-grid-line: var(--stage-art-line);
-    --stage-night-glow-highlight: var(--stage-night-highlight);
-    --stage-night-glow-secondary: var(--stage-night-secondary);
-    --stage-night-sparkle: var(--stage-night-line);
   }
 
   @keyframes settings-search-target-pulse {
@@ -1091,6 +1133,32 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(t3-mobil
   background-size: var(--surface-grain-size);
 }
 
+/* The content area's outline beside the destination rail. Its top edge is the titlebar hairline
+   and its left edge meets the rail; one rounded corner joins them, so the titlebar strip and the
+   rail read as a single window frame. The corner cover paints the frame colour outside the curve
+   (from the stroke's outer edge outward), so a square page background or header border beneath
+   never shows past it. Decorative only: the parent positions it and keeps pointer events off. */
+@utility workspace-content-frame {
+  border-top-width: 1px;
+  border-left-width: 1px;
+  border-color: var(--contrast-sidebar-border);
+  border-top-left-radius: var(--radius-xl);
+
+  &::before {
+    content: "";
+    position: absolute;
+    top: -1px;
+    left: -1px;
+    width: var(--radius-xl);
+    height: var(--radius-xl);
+    background: radial-gradient(
+      circle at 100% 100%,
+      transparent var(--radius-xl),
+      var(--background) calc(var(--radius-xl) + 1px)
+    );
+  }
+}
+
 /* Suppress all transitions during theme changes */
 .no-transitions,
 .no-transitions *,
@@ -1102,8 +1170,14 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(t3-mobil
 
 :root {
   color-scheme: light;
+  --goat-bubble-out-top: #1f74e0;
+  --goat-bubble-out: #1466d0;
+  --goat-bubble-in: #e9e9eb;
+  --goat-bubble-in-foreground: #000;
+  --goat-composer-fill: #f2f2f7;
+  --goat-hairline: rgb(0 0 0 / 8%);
   --radius: 0.625rem;
-  --background: var(--color-zinc-25);
+  --background: var(--color-white);
   --app-chrome-background: var(--background);
   --toolbar-background: var(--app-chrome-background);
   --toolbar-foreground: var(--foreground);
@@ -1117,7 +1191,7 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(t3-mobil
   --card-foreground: var(--color-zinc-800);
   --popover: var(--color-white);
   --popover-foreground: var(--color-zinc-800);
-  --primary: oklch(0.488 0.217 264);
+  --primary: oklch(0.55 0.21 259);
   --primary-foreground: var(--color-white);
   --secondary: var(--color-zinc-50);
   --secondary-foreground: var(--color-zinc-800);
@@ -1146,23 +1220,32 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(t3-mobil
   --info-foreground: var(--color-blue-700);
   --success: var(--color-emerald-500);
   --success-foreground: var(--color-emerald-700);
+  --merged-foreground: var(--color-violet-700);
   --warning: var(--color-amber-500);
   --warning-foreground: var(--color-amber-700);
   --warning-surface: color-mix(in srgb, var(--warning) 8%, transparent);
+  /* Fleet machine heat (FleetGraph): warm, hot, and burning, plus the ember
+     highlight its flames fade into. */
+  --heat-warm: var(--color-amber-500);
+  --heat-hot: var(--color-orange-500);
+  --heat-burning: var(--color-red-500);
+  --heat-ember: var(--color-amber-400);
   --update: var(--primary);
   --update-foreground: var(--primary);
   --update-surface: color-mix(in srgb, var(--update) 12%, transparent);
   /* Keep every sidebar primitive on the same light surface hierarchy, including
-     portaled mobile sheets and settings navigation outside the app sidebar. */
-  --sidebar: var(--color-zinc-50);
+     portaled mobile sheets and settings navigation outside the app sidebar.
+     The gray panel against the white canvas carries the layout, so the default
+     light look draws no chrome hairlines (--chrome-divider). */
+  --sidebar: oklch(96.2% 0 0);
   --sidebar-foreground: var(--foreground);
   --sidebar-muted-foreground: var(--muted-foreground);
-  --sidebar-control-surface: var(--color-zinc-100);
-  --sidebar-row-hover: var(--color-zinc-25);
-  --sidebar-row-active: var(--color-white);
-  --sidebar-row-selected: var(--color-white);
+  --sidebar-control-surface: color-mix(in srgb, var(--color-black) 4%, var(--sidebar));
+  --sidebar-row-hover: color-mix(in srgb, var(--color-black) 4%, var(--sidebar));
+  --sidebar-row-active: color-mix(in srgb, var(--color-black) 7%, var(--sidebar));
+  --sidebar-row-selected: color-mix(in srgb, var(--color-black) 7%, var(--sidebar));
   --sidebar-border: var(--border);
-  --sidebar-stage-fade: var(--sidebar);
+  --chrome-divider: transparent;
   --code-background: color-mix(in srgb, var(--card) 90%, var(--background));
   --code-foreground: var(--foreground);
   --terminal-background: var(--background);
@@ -1172,32 +1255,45 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(t3-mobil
 
   @variant dark {
     color-scheme: dark;
-    /* Keep controls and floating surfaces close to the neutral-black canvas.
-       Borders and hover states provide separation without milky gray fills. */
-    --background: var(--color-neutral-950);
-    --surface-raised: color-mix(in srgb, var(--background) 97%, var(--color-white));
+    --goat-bubble-out-top: #3574d4;
+    --goat-bubble-out: #2b66c6;
+    --goat-bubble-in: #3a3a3c;
+    --goat-bubble-in-foreground: #fff;
+    --goat-composer-fill: #262628;
+    --goat-hairline: rgb(255 255 255 / 10%);
+    /* A near-black (not black) canvas with surfaces a visible step lighter.
+       Muted text is sized for its common 60-80% alpha uses
+       (text-muted-foreground/70) to stay readable; the floors are asserted in
+       darkModeContrast.browser.test.ts. */
+    --background: var(--color-neutral-900);
+    --surface-raised: color-mix(in srgb, var(--background) 95%, var(--color-white));
     --foreground: var(--color-neutral-100);
-    --card: color-mix(in srgb, var(--background) 97%, var(--color-white));
+    --card: color-mix(in srgb, var(--background) 95%, var(--color-white));
     --card-foreground: var(--color-neutral-100);
-    --popover: color-mix(in srgb, var(--background) 97%, var(--color-white));
+    --popover: color-mix(in srgb, var(--background) 95%, var(--color-white));
     --popover-foreground: var(--color-neutral-100);
-    --primary: oklch(0.571 0.21 264);
-    --secondary: --alpha(var(--color-white) / 3%);
+    --primary: oklch(0.57 0.2 259);
+    --secondary: --alpha(var(--color-white) / 5%);
     --secondary-foreground: var(--color-neutral-100);
-    --muted: --alpha(var(--color-white) / 3%);
-    --muted-foreground: color-mix(in srgb, var(--color-neutral-500) 90%, var(--color-white));
-    --accent: --alpha(var(--color-white) / 4%);
+    --muted: --alpha(var(--color-white) / 5%);
+    --muted-foreground: var(--color-neutral-400);
+    --accent: --alpha(var(--color-white) / 6%);
     --accent-foreground: var(--color-neutral-100);
     --error: color-mix(in srgb, var(--color-red-500) 90%, var(--color-white));
     --error-foreground: var(--color-red-400);
     --tool-error-icon: #fca5a5;
     --error-surface: color-mix(in srgb, var(--error) 16%, transparent);
-    --border: --alpha(var(--color-white) / 6%);
-    --input: --alpha(var(--color-white) / 8%);
+    --border: --alpha(var(--color-white) / 10%);
+    --input: --alpha(var(--color-white) / 14%);
     --info-foreground: var(--color-blue-400);
     --success-foreground: var(--color-emerald-400);
+    --merged-foreground: var(--color-violet-400);
     --warning-foreground: var(--color-amber-400);
     --warning-surface: color-mix(in srgb, var(--warning) 16%, transparent);
+    --heat-warm: var(--color-amber-400);
+    --heat-hot: var(--color-orange-400);
+    --heat-burning: var(--color-red-500);
+    --heat-ember: var(--color-amber-200);
     --update-foreground: var(--color-blue-400);
     --update-surface: color-mix(in srgb, var(--update) 18%, transparent);
     --sidebar: var(--card);
@@ -1205,17 +1301,20 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(t3-mobil
     --sidebar-row-hover: var(--accent);
     --sidebar-row-active: var(--accent);
     --sidebar-row-selected: var(--muted);
-    --sidebar-stage-fade: var(--card);
+    --chrome-divider: var(--sidebar-border);
+    /* Code and diffs sit in a well below the canvas: the pierre-dark syntax
+       theme's punctuation and comments need the darker ground to stay legible. */
+    --code-background: color-mix(in srgb, var(--background) 65%, var(--color-black));
     --terminal-cursor: rgb(180 203 255);
     --terminal-selection-background: rgb(180 203 255 / 25%);
   }
 }
 
 /* Keep both sidebar implementations (default and legacy) on the same quiet
-   zinc hierarchy: zinc-50 navigation, zinc-25 hover, and white selected/raised
-   surfaces. */
+   hierarchy as :root: a gray panel on the white canvas, rows darkening on hover
+   and selection, and no chrome hairline in light mode. */
 [data-app-sidebar] {
-  --background: var(--color-zinc-25);
+  --background: var(--color-white);
   --foreground: var(--color-zinc-800);
   --card: var(--color-white);
   --card-foreground: var(--color-zinc-800);
@@ -1225,26 +1324,28 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(t3-mobil
   --muted-foreground: var(--color-zinc-500);
   --border: var(--color-zinc-200);
   --input: var(--color-zinc-300);
-  --sidebar: var(--color-zinc-50);
+  --sidebar: oklch(96.2% 0 0);
   --sidebar-foreground: var(--color-zinc-800);
   --sidebar-muted-foreground: var(--color-zinc-500);
-  --sidebar-control-surface: var(--color-zinc-100);
-  --sidebar-row-hover: var(--color-zinc-25);
-  --sidebar-row-active: var(--color-white);
-  --sidebar-row-selected: var(--color-white);
+  --sidebar-control-surface: color-mix(in srgb, var(--color-black) 4%, var(--sidebar));
+  --sidebar-row-hover: color-mix(in srgb, var(--color-black) 4%, var(--sidebar));
+  --sidebar-row-active: color-mix(in srgb, var(--color-black) 7%, var(--sidebar));
+  --sidebar-row-selected: color-mix(in srgb, var(--color-black) 7%, var(--sidebar));
   --sidebar-border: var(--color-zinc-200);
-  --sidebar-stage-fade: var(--sidebar);
+  --chrome-divider: transparent;
+  /* The panel's outer edge against the main canvas. */
+  border-color: var(--color-chrome-divider);
 
   @variant dark {
-    --background: #000;
+    --background: #0f0f0f;
     --foreground: #f1f3f7;
-    --card: #000;
+    --card: #0f0f0f;
     --card-foreground: var(--foreground);
-    --accent: #191a1d;
+    --accent: #232427;
     --accent-foreground: #f7f9ff;
-    --muted: #0a0a0a;
+    --muted: #1a1a1a;
     --muted-foreground: #a3a3a3;
-    --border: rgb(255 255 255 / 8%);
+    --border: rgb(255 255 255 / 12%);
     --input: rgb(255 255 255 / 18%);
     --sidebar: var(--card);
     --sidebar-foreground: var(--foreground);
@@ -1254,7 +1355,7 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(t3-mobil
     --sidebar-row-active: color-mix(in srgb, var(--contrast-foreground) 11%, transparent);
     --sidebar-row-selected: color-mix(in srgb, var(--contrast-foreground) 7%, transparent);
     --sidebar-border: var(--border);
-    --sidebar-stage-fade: var(--card);
+    --chrome-divider: var(--sidebar-border);
   }
 }
 
@@ -1267,6 +1368,7 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(t3-mobil
    dark variant without reintroducing raw `.dark` selectors. */
 html[data-theme-id]:not([data-theme-id=""]) {
   --background: var(--app-theme-canvas);
+  --chrome-divider: var(--app-theme-sidebar-border);
   --app-chrome-background: var(--app-theme-chrome);
   --toolbar-background: var(--app-theme-toolbar);
   --toolbar-foreground: var(--app-theme-toolbar-foreground);
@@ -1323,7 +1425,6 @@ html[data-theme-id]:not([data-theme-id=""]) {
   --sidebar-row-active: var(--app-theme-sidebar-row-active);
   --sidebar-row-selected: var(--app-theme-sidebar-row-selected);
   --sidebar-border: var(--app-theme-sidebar-border);
-  --sidebar-stage-fade: var(--app-theme-sidebar);
   --code-background: var(--app-theme-code-background);
   --code-foreground: var(--app-theme-code-foreground);
   --terminal-background: var(--app-theme-terminal-background);
@@ -1485,7 +1586,7 @@ html[data-theme-id] :is(.chat-markdown, .composer-tiptap) .chat-markdown-codeblo
 /* T3 Chat renders inline code and compact chat artifacts with its translucent
    secondary surface flattened over the light chat canvas. The raw muted and
    secondary tokens are substantially darker than those visible pixels. */
-html[data-theme-id="t3-chat"] {
+html[data-theme-id="goat-chat"] {
   @variant light {
     & .chat-markdown :not(pre) > code,
     & [data-changed-files-state],
@@ -1506,6 +1607,7 @@ html[data-theme-id="t3-chat"] {
 
 html[data-theme-id] [data-app-sidebar] {
   --background: var(--app-theme-canvas);
+  --chrome-divider: var(--app-theme-sidebar-border);
   --foreground: var(--app-theme-text);
   --card: var(--app-theme-surface);
   --card-foreground: var(--app-theme-text);
@@ -1523,7 +1625,6 @@ html[data-theme-id] [data-app-sidebar] {
   --sidebar-row-active: var(--app-theme-sidebar-row-active);
   --sidebar-row-selected: var(--app-theme-sidebar-row-selected);
   --sidebar-border: var(--app-theme-sidebar-border);
-  --sidebar-stage-fade: var(--app-theme-sidebar);
   border-color: color-mix(in srgb, var(--contrast-sidebar-foreground) 10%, transparent);
 
   @variant dark {
@@ -1533,7 +1634,7 @@ html[data-theme-id] [data-app-sidebar] {
 
 /* T3 Chat's panel divider is deliberately pink, and its resize affordance
    keeps that color while hovered. Do not neutralize this branded edge. */
-html[data-theme-id="t3-chat"] [data-app-sidebar] {
+html[data-theme-id="goat-chat"] [data-app-sidebar] {
   @variant dark {
     border-color: var(--contrast-sidebar-border);
   }
@@ -1652,6 +1753,11 @@ html[data-theme-id="t3-chat"] [data-app-sidebar] {
     color-mix(in srgb, var(--sidebar-border) var(--appearance-contrast-base), transparent),
     var(--sidebar-foreground) var(--appearance-contrast-border-boost)
   );
+  --contrast-chrome-divider: color-mix(
+    in srgb,
+    color-mix(in srgb, var(--chrome-divider) var(--appearance-contrast-base), transparent),
+    var(--sidebar-foreground) var(--appearance-contrast-border-boost)
+  );
 }
 
 body {
@@ -1704,7 +1810,7 @@ body {
 /* The live T3 Chat texture is a 128px grayscale tile with a constant 7/255
    alpha. Keep our procedural texture cheap while matching that scale and
    strength for the branded preset. */
-html[data-theme-id="t3-chat"] {
+html[data-theme-id="goat-chat"] {
   --surface-grain: url("data:image/svg+xml,%3Csvg viewBox='0 0 128 128' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.02745'/%3E%3C/svg%3E");
   --surface-grain-size: 128px 128px;
 }
@@ -1726,6 +1832,7 @@ code {
    Inline code stays relative to its sentence so it never towers over prose;
    diffs and file previews take the size through --diffs-font-size. */
 .chat-markdown .chat-markdown-shiki .shiki,
+.chat-markdown .chat-markdown-codeblock pre,
 :is(.chat-markdown, .composer-tiptap) pre code {
   font-size: var(--font-size-code, inherit);
 }
@@ -1766,9 +1873,15 @@ code {
 /* Scrollbar styling */
 ::-webkit-scrollbar {
   width: var(--app-scrollbar-width);
+  /* Without a height, horizontal scrollbars fall back to the platform's thick default. */
+  height: var(--app-scrollbar-width);
 }
 
 ::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-corner {
   background: transparent;
 }
 
@@ -1779,6 +1892,19 @@ code {
 
 ::-webkit-scrollbar-thumb:hover {
   background: var(--app-scrollbar-thumb-hover);
+}
+
+/* For small scroll regions nested inside a card or panel: the thumb stays hidden until the pointer
+   or keyboard focus is inside, so a bounded list does not wear a permanent gray rail. This uses the
+   standard properties because Chromium does not repaint ::-webkit-scrollbar-thumb when only the
+   parent's :hover changes; setting them also opts the element out of the global webkit rules. */
+@utility scrollbar-on-hover {
+  scrollbar-width: thin;
+  scrollbar-color: transparent transparent;
+
+  &:is(:hover, :focus-within) {
+    scrollbar-color: var(--app-scrollbar-thumb) transparent;
+  }
 }
 
 /* Chat markdown rendering */
@@ -1936,6 +2062,17 @@ code {
    spacing needs to match. */
 .composer-tiptap hr {
   margin: 0.65rem 0;
+}
+
+/* Block spacing separates blocks, not the draft from the composer edge. A
+   leading list or quote would otherwise push the first line down, and the
+   one-line resting composer clips it. */
+.composer-tiptap > :first-child {
+  margin-top: 0;
+}
+
+.composer-tiptap > :last-child {
+  margin-bottom: 0;
 }
 
 /* A heading at the top of a draft should not push the first line down. */
@@ -2381,5 +2518,267 @@ code {
         3rem + var(--chat-lane-inset-end, 0px) - var(--chat-timeline-gutter, 0px)
       );
     }
+  }
+}
+
+/* Fleet graph (FleetGraph.tsx). SMIL particles pause through pauseAnimations(); these
+   CSS loops pause with them while the tab is hidden. */
+@layer components {
+  .fleet-graph .fleet-flow {
+    animation: fleet-flow 1.1s linear infinite;
+  }
+  .fleet-graph .fleet-orbit {
+    animation: fleet-flow 9s linear infinite;
+  }
+  .fleet-graph .fleet-orbit-reverse {
+    animation-direction: reverse;
+    animation-duration: 14s;
+  }
+  .fleet-graph .fleet-spin,
+  .fleet-graph .fleet-breathe,
+  .fleet-graph .fleet-ring {
+    transform-box: fill-box;
+    transform-origin: center;
+  }
+  .fleet-graph .fleet-spin {
+    animation: fleet-spin 18s linear infinite;
+  }
+  .fleet-graph .fleet-breathe {
+    animation: fleet-breathe 3.2s ease-in-out infinite;
+  }
+  .fleet-graph .fleet-ring {
+    animation: fleet-ring 1.8s ease-out infinite;
+  }
+  /* Machine heat (HeatLayer): a still glow when hot; a flickering crown of
+     flames and two embers when burning. These HTML boxes animate only
+     transform and opacity, and each running animation is still a little main
+     thread work per frame, so only burning machines move. */
+  .fleet-graph .fleet-heat,
+  .fleet-graph .fleet-heat-spot {
+    position: absolute;
+    top: 0;
+    left: 0;
+  }
+  .fleet-graph .fleet-heat[data-tier="hot"] {
+    --fleet-heat-color: var(--heat-hot);
+  }
+  .fleet-graph .fleet-heat[data-tier="burning"] {
+    --fleet-heat-color: var(--heat-burning);
+  }
+  .fleet-graph .fleet-heat-glow {
+    position: absolute;
+    top: -34px;
+    left: -34px;
+    width: 68px;
+    height: 68px;
+    border-radius: 9999px;
+    background: radial-gradient(
+      closest-side,
+      color-mix(in srgb, var(--fleet-heat-color) 50%, transparent) 45%,
+      transparent
+    );
+  }
+  .fleet-graph .fleet-flames {
+    position: absolute;
+    transform-origin: 0 0;
+    animation: fleet-flame 1.3s ease-in-out infinite alternate;
+  }
+  .fleet-graph .fleet-flame {
+    position: absolute;
+    bottom: 0;
+    left: -7.5px;
+    width: 15px;
+    height: 24px;
+    overflow: visible;
+    transform-origin: 50% 100%;
+  }
+  .fleet-graph .fleet-ember {
+    position: absolute;
+    translate: -50% -50%;
+    border-radius: 9999px;
+    background: radial-gradient(var(--heat-ember) 30%, var(--heat-hot));
+    opacity: 0;
+    animation: fleet-ember 2.4s ease-out infinite;
+  }
+  .fleet-graph svg[data-paused] * {
+    animation-play-state: paused;
+  }
+  .fleet-graph[data-paused] .fleet-heat-layer * {
+    animation-play-state: paused;
+  }
+  .fleet-graph .fleet-node:focus-visible .fleet-node-ring {
+    stroke: var(--ring);
+    stroke-width: 3;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .fleet-graph * {
+      animation: none !important;
+    }
+  }
+}
+
+/* Fleet telemetry console (FleetConsole.tsx). The texture is static; the only motion is one
+   sweep per new host sample, paused offscreen and in hidden tabs by observeVisibleAnimation. */
+@layer components {
+  .fleet-console {
+    --fleet-console-accent: color-mix(in oklab, var(--primary) 55%, transparent);
+    box-shadow: inset 0 1px 0 color-mix(in oklab, var(--primary) 12%, transparent);
+  }
+  .fleet-console::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    background-image: repeating-linear-gradient(
+      to bottom,
+      color-mix(in oklab, var(--foreground) 3%, transparent) 0 1px,
+      transparent 1px 3px
+    );
+  }
+  .fleet-console-corners {
+    --fleet-console-corner: 10px;
+    --fleet-console-corner-weight: 1.5px;
+    position: absolute;
+    inset: 5px;
+    pointer-events: none;
+    background:
+      linear-gradient(var(--fleet-console-accent), var(--fleet-console-accent)) top left /
+        var(--fleet-console-corner) var(--fleet-console-corner-weight),
+      linear-gradient(var(--fleet-console-accent), var(--fleet-console-accent)) top left /
+        var(--fleet-console-corner-weight) var(--fleet-console-corner),
+      linear-gradient(var(--fleet-console-accent), var(--fleet-console-accent)) top right /
+        var(--fleet-console-corner) var(--fleet-console-corner-weight),
+      linear-gradient(var(--fleet-console-accent), var(--fleet-console-accent)) top right /
+        var(--fleet-console-corner-weight) var(--fleet-console-corner),
+      linear-gradient(var(--fleet-console-accent), var(--fleet-console-accent)) bottom left /
+        var(--fleet-console-corner) var(--fleet-console-corner-weight),
+      linear-gradient(var(--fleet-console-accent), var(--fleet-console-accent)) bottom left /
+        var(--fleet-console-corner-weight) var(--fleet-console-corner),
+      linear-gradient(var(--fleet-console-accent), var(--fleet-console-accent)) bottom right /
+        var(--fleet-console-corner) var(--fleet-console-corner-weight),
+      linear-gradient(var(--fleet-console-accent), var(--fleet-console-accent)) bottom right /
+        var(--fleet-console-corner-weight) var(--fleet-console-corner);
+    background-repeat: no-repeat;
+  }
+  .fleet-console-mark {
+    width: 6px;
+    height: 6px;
+    flex-shrink: 0;
+    transform: rotate(45deg);
+    background: var(--primary);
+    box-shadow: 0 0 6px color-mix(in oklab, var(--primary) 60%, transparent);
+  }
+  .fleet-console-spark {
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 1.25;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+    filter: drop-shadow(0 0 2px color-mix(in oklab, currentColor 40%, transparent));
+  }
+  .fleet-console-leader {
+    flex: 1;
+    align-self: center;
+    border-top: 1px dotted var(--contrast-border);
+  }
+  .fleet-console-baseline {
+    stroke: var(--contrast-border);
+    stroke-width: 1;
+    stroke-dasharray: 2 3;
+    vector-effect: non-scaling-stroke;
+  }
+  .fleet-console-sweep {
+    position: absolute;
+    inset: 2.5rem 0 0;
+    pointer-events: none;
+    animation: fleet-console-sweep 1.6s ease-out 1 both;
+    animation-play-state: var(--visible-animation-state, paused);
+  }
+  .fleet-console-sweep::before {
+    content: "";
+    position: absolute;
+    inset: 0 0 auto;
+    height: 1px;
+    background: linear-gradient(to right, transparent, var(--fleet-console-accent), transparent);
+    box-shadow: 0 0 8px color-mix(in oklab, var(--primary) 40%, transparent);
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .fleet-console-sweep {
+      display: none;
+    }
+  }
+}
+
+@keyframes fleet-console-sweep {
+  from {
+    transform: translateY(0);
+    opacity: 1;
+  }
+  to {
+    transform: translateY(100%);
+    opacity: 0;
+  }
+}
+
+@keyframes fleet-flow {
+  to {
+    stroke-dashoffset: -28;
+  }
+}
+@keyframes fleet-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+@keyframes fleet-breathe {
+  0%,
+  100% {
+    transform: scale(0.92);
+    opacity: 0.75;
+  }
+  50% {
+    transform: scale(1.08);
+    opacity: 1;
+  }
+}
+@keyframes fleet-ring {
+  from {
+    transform: scale(0.6);
+    opacity: 0.9;
+  }
+  to {
+    transform: scale(1.35);
+    opacity: 0;
+  }
+}
+@keyframes fleet-flame {
+  0% {
+    transform: scale(1, 1) skewX(0deg);
+    opacity: 0.92;
+  }
+  35% {
+    transform: scale(0.94, 1.08) skewX(-4deg);
+    opacity: 1;
+  }
+  70% {
+    transform: scale(1.04, 0.92) skewX(3deg);
+    opacity: 0.85;
+  }
+  100% {
+    transform: scale(0.97, 1.04) skewX(-1deg);
+    opacity: 0.95;
+  }
+}
+@keyframes fleet-ember {
+  0% {
+    transform: translate(0, 0);
+    opacity: 0;
+  }
+  20% {
+    opacity: 1;
+  }
+  100% {
+    transform: translate(0, -22px);
+    opacity: 0;
   }
 }

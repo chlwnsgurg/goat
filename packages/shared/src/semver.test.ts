@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vite-plus/test";
 
 import {
+  compareRuntimeBuilds,
   compareSemverVersions,
   normalizeSemverVersion,
   parseSemver,
@@ -31,8 +32,6 @@ describe("semver helpers", () => {
   });
 
   it("compares shorthand versions numerically instead of lexically", () => {
-    // Regression: "20" vs "9" previously fell back to string comparison, which
-    // ordered "20" before "9" ("2" < "9").
     expect(compareSemverVersions("20", "9")).toBeGreaterThan(0);
     expect(compareSemverVersions("18", "18.0.0")).toBe(0);
   });
@@ -63,6 +62,71 @@ describe("semver helpers", () => {
     expect(normalizeSemverVersion("20-preview-z+build.1")).toBe("20.0.0-preview-z+build.1");
     expect(parseSemver("1.2.3-preview-z+build.1")?.prerelease).toEqual(["preview-z"]);
     expect(parseSemver("1.2.3-preview.01")).toBeNull();
+  });
+
+  describe("compareRuntimeBuilds", () => {
+    const older = 1_791_862_399;
+    const newer = 1_791_866_417;
+    it.each([
+      // Dev builds order by commit, never by sha (#128): "e…" sorts above "8…".
+      [
+        { version: "0.1.0-dev.e17501807", commitTime: older },
+        { version: "0.1.0-dev.84b52e284", commitTime: newer },
+        -1,
+      ],
+      // A newer dev build ranks above an older nightly, whatever the train names say.
+      [
+        { version: "0.1.0-dev.84b52e284", commitTime: newer },
+        { version: "0.1.0-nightly.20261012.2", commitTime: older },
+        1,
+      ],
+      [
+        { version: "0.1.0-nightly.20261012.2", commitTime: older },
+        { version: "0.1.0-dev.84b52e284", commitTime: newer },
+        -1,
+      ],
+      // Numbered builds of one train keep SemVer order, stamped or not.
+      [{ version: "0.1.0-nightly.20261012.10" }, { version: "0.1.0-nightly.20261012.2" }, 1],
+      [
+        { version: "0.1.0-nightly.20261013.0", commitTime: older },
+        { version: "0.1.0-nightly.20261012.2", commitTime: newer },
+        1,
+      ],
+      // A different core is a release decision; a later hotfix commit never outranks it.
+      [{ version: "0.2.0", commitTime: older }, { version: "0.1.1", commitTime: newer }, 1],
+      [{ version: "0.1.0" }, { version: "0.1.0" }, 0],
+      [
+        { version: "0.1.0-dev.aaa", commitTime: newer },
+        { version: "0.1.0-nightly.20261012.2", commitTime: newer },
+        0,
+      ],
+      // A sha can be all digits; it still orders by commit, never as a number.
+      [
+        { version: "0.1.0-dev.987654321", commitTime: older },
+        { version: "0.1.0-dev.123456789", commitTime: newer },
+        -1,
+      ],
+    ] as const)("orders %j against %j", (left, right, order) => {
+      expect(Math.sign(compareRuntimeBuilds(left, right) ?? Number.NaN)).toBe(order);
+      expect(Math.sign(compareRuntimeBuilds(right, left) ?? Number.NaN)).toBe(
+        order === 0 ? 0 : -order,
+      );
+    });
+
+    it.each([
+      [{ version: "0.1.0-dev.e17501807" }, { version: "0.1.0-dev.84b52e284", commitTime: newer }],
+      [{ version: "0.1.0-dev.e17501807", commitTime: older }, { version: "0.1.0-dev.84b52e284" }],
+      [{ version: "0.1.0-nightly.20261012.2" }, { version: "0.1.0-dev.84b52e284" }],
+      [{ version: "0.1.0" }, { version: "0.1.0-dev.84b52e284" }],
+      [{ version: "0.1.0-dev.123456789" }, { version: "0.1.0-dev.987654321" }],
+      [
+        { version: "not-a-version", commitTime: older },
+        { version: "0.1.0", commitTime: newer },
+      ],
+    ] as const)("has no order for %j against %j without both commit times", (left, right) => {
+      expect(compareRuntimeBuilds(left, right)).toBeUndefined();
+      expect(compareRuntimeBuilds(right, left)).toBeUndefined();
+    });
   });
 
   it("falls back to lexical comparison for malformed numeric segments", () => {

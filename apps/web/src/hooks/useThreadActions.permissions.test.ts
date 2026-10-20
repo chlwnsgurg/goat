@@ -6,7 +6,7 @@ import {
   ProjectId,
   ThreadId,
   type ScopedThreadRef,
-} from "@t3tools/contracts";
+} from "@goat/contracts";
 import * as Cause from "effect/Cause";
 import { AsyncResult } from "effect/reactivity";
 import { beforeEach, describe, expect, it, vi } from "vite-plus/test";
@@ -341,8 +341,6 @@ describe("thread action permissions", () => {
     state.afterRequest = () => state.scopes.get(secondary)!.delete(AuthSourceControlWriteScope);
     const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
     try {
-      // The thread is already gone, so cleanup reports itself in a toast
-      // instead of failing the deletion.
       const result = await useThreadActions().deleteThread(target);
       expect(result._tag).toBe("Success");
       expect(state.requests.map((request) => request.action)).toEqual(["stopSession", "delete"]);

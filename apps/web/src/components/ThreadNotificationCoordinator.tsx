@@ -1,15 +1,17 @@
-import { presentThreadShell } from "@t3tools/client-runtime/state/models";
+import { type PendingSubagentRequest, presentThreadShell } from "@goat/client-runtime/state/models";
+import { pendingSubagentRequestsByThread } from "@goat/client-runtime/state/threads";
 import { useAtomValue } from "@effect/atom-react";
 import { useNavigate, useParams } from "@tanstack/react-router";
-import type { EnvironmentId, OrchestrationV2ThreadShell, ThreadId } from "@t3tools/contracts";
+import type { EnvironmentId, OrchestrationV2ThreadShell, ThreadId } from "@goat/contracts";
+import { isSideChatThread } from "@goat/contracts";
 import * as Option from "effect/Option";
 import {
   CircleAlertIcon,
   CircleCheckIcon,
   MessageCircleQuestionIcon,
   ShieldQuestionIcon,
-} from "lucide-react";
-import { useCallback, useEffect, useRef } from "react";
+} from "~/components/solar";
+import { useEffect, useRef } from "react";
 
 import { getClientSettings, useClientSettings } from "../hooks/useSettings";
 import { useEnvironmentIds } from "../state/environments";
@@ -19,6 +21,7 @@ import {
   hasNotificationSound,
   playNotificationSound,
   setNotificationBadge,
+  threadNotificationTag,
   unlockNotificationAudio,
 } from "../threadNotifications";
 import { resolveSidebarThreadStatus } from "./Sidebar.logic";
@@ -33,18 +36,18 @@ export function ThreadNotificationCoordinator() {
   const pending = useRef(
     new Map<string, { environmentId: EnvironmentId; notification: Notification }>(),
   );
-  const onNotification = useCallback((environmentId: EnvironmentId, notification: Notification) => {
+  const onNotification = (environmentId: EnvironmentId, notification: Notification) => {
     pending.current.get(notification.tag)?.notification.close();
     pending.current.set(notification.tag, { environmentId, notification });
     setNotificationBadge(pending.current.size);
-  }, []);
+  };
 
   useEffect(() => {
     const activeIds = new Set(environmentIds);
     const count = pending.current.size;
-    for (const [tag, { environmentId, notification }] of pending.current) {
-      if (activeIds.has(environmentId)) continue;
-      notification.close();
+    for (const [tag, entry] of pending.current) {
+      if (activeIds.has(entry.environmentId)) continue;
+      entry.notification.close();
       pending.current.delete(tag);
     }
     if (count !== pending.current.size) setNotificationBadge(pending.current.size);
@@ -90,6 +93,7 @@ export function ThreadNotificationCoordinator() {
 
 interface NotificationState {
   readonly raw: OrchestrationV2ThreadShell;
+  readonly subagentRequest: PendingSubagentRequest | null;
   readonly attention: string | null;
   readonly completion: number | null;
 }
@@ -102,8 +106,6 @@ function EnvironmentNotifications({
   onNotification: (environmentId: EnvironmentId, notification: Notification) => void;
 }) {
   const shell = useAtomValue(environmentShell.stateValueAtom(environmentId));
-  // The shell reducer keeps the thread list and unchanged thread objects
-  // stable, so this only rescans when a thread actually changed.
   const threads =
     shell.status === "live" && Option.isSome(shell.snapshot) ? shell.snapshot.value.threads : null;
   const mode = useClientSettings((settings) => settings.notificationMode);
@@ -122,15 +124,18 @@ function EnvironmentNotifications({
       return;
     }
     const next = new Map<ThreadId, NotificationState>();
+    const subagentRequests = pendingSubagentRequestsByThread(threads);
     for (const rawThread of threads) {
-      if (rawThread.lineage.relationshipToParent === "subagent") continue;
+      // Subagents report through their parent; a side chat answers in its open panel.
+      if (rawThread.lineage.relationshipToParent === "subagent" || isSideChatThread(rawThread))
+        continue;
       const prior = previous.current.get(rawThread.id);
-      // The same object cannot produce a new notification.
-      if (prior?.raw === rawThread) {
+      const subagentRequest = subagentRequests.get(rawThread.id) ?? null;
+      if (prior?.raw === rawThread && prior.subagentRequest === subagentRequest) {
         next.set(rawThread.id, prior);
         continue;
       }
-      const thread = presentThreadShell(environmentId, rawThread);
+      const thread = presentThreadShell(environmentId, rawThread, subagentRequest);
       let status = resolveSidebarThreadStatus(thread);
       if (status === "ready" && thread.latestRun?.status === "failed") status = "failed";
       const attention =
@@ -138,14 +143,13 @@ function EnvironmentNotifications({
           ? `${thread.latestRun?.runId ?? ""}:${status}`
           : null;
       const completedAt = Date.parse(thread.latestRun?.completedAt ?? "");
-      // Commands left running (a dev server) read as ready; subagents and monitors wait.
       const completion =
         status === "ready" &&
         thread.latestRun?.status === "completed" &&
         Number.isFinite(completedAt)
           ? completedAt
           : (prior?.completion ?? null);
-      next.set(thread.id, { raw: rawThread, attention, completion });
+      next.set(thread.id, { raw: rawThread, subagentRequest, attention, completion });
       if (!prior || thread.archivedAt !== null) continue;
       const kind =
         attention && attention !== prior.attention
@@ -215,7 +219,7 @@ function EnvironmentNotifications({
       try {
         const notification = new Notification(title, {
           body: thread.title,
-          tag: `${environmentId}:${thread.id}`,
+          tag: threadNotificationTag(environmentId, thread.id),
           silent: true,
         });
         onNotification(environmentId, notification);

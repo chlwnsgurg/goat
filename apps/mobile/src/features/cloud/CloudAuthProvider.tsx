@@ -1,12 +1,12 @@
 import { ClerkProvider, useAuth } from "@clerk/expo";
 import { tokenCache } from "@clerk/expo/token-cache";
-import { ManagedRelay, setManagedRelaySession } from "@t3tools/client-runtime/relay";
+import { ManagedRelay, setManagedRelaySession } from "@goat/client-runtime/relay";
 import {
   reportAtomCommandResult,
   settleAsyncResult,
   settlePromise,
   squashAtomCommandFailure,
-} from "@t3tools/client-runtime/state/runtime";
+} from "@goat/client-runtime/state/runtime";
 import * as Effect from "effect/Effect";
 import { type ReactNode, useEffect, useRef } from "react";
 
@@ -23,7 +23,11 @@ import {
   unregisterAgentAwarenessDeviceForCurrentUser,
 } from "../agent-awareness/remoteRegistration";
 import { clearConnectOnboardingRequest, requestConnectOnboarding } from "./connectOnboarding";
-import { resolveCloudPublicConfig, resolveRelayClerkTokenOptions } from "./publicConfig";
+import {
+  hasCloudPublicConfig,
+  resolveCloudPublicConfig,
+  resolveRelayClerkTokenOptions,
+} from "./publicConfig";
 import { removeCloudEnvironments } from "./cloud-drafts";
 
 function resetManagedRelayTokenCache() {
@@ -73,11 +77,7 @@ function CloudAuthBridge(props: { readonly children: ReactNode }) {
     const nextAccount = isSignedIn && userId ? userId : null;
     observedAccountRef.current = nextAccount;
 
-    // Every sign-in or account switch that completes during this session (a
-    // cold start observes undefined → account and must not re-prompt) requests
-    // the T3 Connect onboarding sheet — account transitions clear the
-    // connected environments, so each new session starts with no devices to
-    // reach. The request itself is issued after the cleanup transition inside
+    // The request itself is issued after the cleanup transition inside
     // activateSession, so the sheet never lists the previous account's
     // environments; sign-out drops any not-yet-presented request instead.
     const isAccountTransition =
@@ -170,8 +170,6 @@ function CloudAuthBridge(props: { readonly children: ReactNode }) {
       deactivateCloudRelayAccount();
       activateAfterTransition(queueAccountCleanup(previous));
     } else {
-      // A failed disk write can be retried. The persisted account check above
-      // still requires cleanup before activating a different account.
       activateAfterTransition((accountTransitionRef.current ?? Promise.resolve()).catch(() => {}));
     }
 
@@ -198,15 +196,17 @@ function CloudAuthBridge(props: { readonly children: ReactNode }) {
 export function CloudAuthProvider(props: { readonly children: ReactNode }) {
   const config = resolveCloudPublicConfig();
   const publishableKey = config.clerk.publishableKey;
-  const relayUrl = config.relay.url;
+  const enabled = hasCloudPublicConfig();
 
   useEffect(() => {
-    if (!publishableKey || !relayUrl) {
-      deactivateCloudRelayAccount();
+    if (!enabled) {
+      // Disabling Connect is not a sign-out; retain the saved registration.
+      releaseAgentAwarenessRelayTokenProvider();
+      setManagedRelaySession(appAtomRegistry, null);
     }
-  }, [publishableKey, relayUrl]);
+  }, [enabled]);
 
-  if (!publishableKey || !relayUrl) {
+  if (!enabled || !publishableKey) {
     return props.children;
   }
 

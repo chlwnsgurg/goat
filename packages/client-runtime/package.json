@@ -1,11 +1,55 @@
 {
-  "name": "@t3tools/client-runtime",
+  "name": "@goat/client-runtime",
   "private": true,
   "type": "module",
   "exports": {
+    "./memory-browsing": {
+      "types": "./src/memoryBrowsing.ts",
+      "default": "./src/memoryBrowsing.ts"
+    },
+    "./memory-import-recovery": {
+      "types": "./src/memoryImportRecovery.ts",
+      "default": "./src/memoryImportRecovery.ts"
+    },
+    "./memory-import-workflow": {
+      "types": "./src/memoryImportWorkflow.ts",
+      "default": "./src/memoryImportWorkflow.ts"
+    },
+    "./memory-presentation": {
+      "types": "./src/memoryPresentation.ts",
+      "default": "./src/memoryPresentation.ts"
+    },
+    "./state/memory": {
+      "types": "./src/state/memory.ts",
+      "default": "./src/state/memory.ts"
+    },
+    "./state/cloud-task": {
+      "types": "./src/state/cloudTask.ts",
+      "default": "./src/state/cloudTask.ts"
+    },
+    "./storage-migration": {
+      "types": "./src/storageMigration.ts",
+      "default": "./src/storageMigration.ts"
+    },
+    "./goat-project-file": {
+      "types": "./src/goatProjectFile.ts",
+      "default": "./src/goatProjectFile.ts"
+    },
+    "./goatBot/home": {
+      "types": "./src/goatBot/home.ts",
+      "default": "./src/goatBot/home.ts"
+    },
+    "./goatBot": {
+      "types": "./src/goatBot/index.ts",
+      "default": "./src/goatBot/index.ts"
+    },
     "./composerThreadItems": {
       "types": "./src/composerThreadItems.ts",
       "default": "./src/composerThreadItems.ts"
+    },
+    "./image-attachment-size": {
+      "types": "./src/imageAttachmentSize.ts",
+      "default": "./src/imageAttachmentSize.ts"
     },
     "./handoff": {
       "types": "./src/handoff.ts",
@@ -38,6 +82,10 @@
     "./user-message": {
       "types": "./src/userMessage.ts",
       "default": "./src/userMessage.ts"
+    },
+    "./prompt-links": {
+      "types": "./src/promptLinks.ts",
+      "default": "./src/promptLinks.ts"
     },
     "./secret-request": {
       "types": "./src/secretRequest.ts",
@@ -107,9 +155,9 @@
       "types": "./src/voice-input/index.ts",
       "default": "./src/voice-input/index.ts"
     },
-    "./t3ToolSummary": {
-      "types": "./src/t3ToolSummary.ts",
-      "default": "./src/t3ToolSummary.ts"
+    "./goatToolSummary": {
+      "types": "./src/goatToolSummary.ts",
+      "default": "./src/goatToolSummary.ts"
     },
     "./relay": {
       "types": "./src/relay/index.ts",
@@ -155,6 +203,10 @@
       "types": "./src/state/git.ts",
       "default": "./src/state/git.ts"
     },
+    "./state/command-output": {
+      "types": "./src/state/commandOutput.ts",
+      "default": "./src/state/commandOutput.ts"
+    },
     "./state/item-support": {
       "types": "./src/state/itemSupport.ts",
       "default": "./src/state/itemSupport.ts"
@@ -199,6 +251,10 @@
       "types": "./src/state/providerInstanceDisplay.ts",
       "default": "./src/state/providerInstanceDisplay.ts"
     },
+    "./state/remote-launches": {
+      "types": "./src/state/remoteLaunches.ts",
+      "default": "./src/state/remoteLaunches.ts"
+    },
     "./state/pull-requests": {
       "types": "./src/state/pullRequests.ts",
       "default": "./src/state/pullRequests.ts"
@@ -226,6 +282,14 @@
     "./state/usage-progress": {
       "types": "./src/state/usageProgress.ts",
       "default": "./src/state/usageProgress.ts"
+    },
+    "./state/sshHost": {
+      "types": "./src/state/sshHost.ts",
+      "default": "./src/state/sshHost.ts"
+    },
+    "./state/sshRuntime": {
+      "types": "./src/state/sshRuntime.ts",
+      "default": "./src/state/sshRuntime.ts"
     },
     "./state/server": {
       "types": "./src/state/server.ts",
@@ -274,6 +338,30 @@
     "./state/thread-sort": {
       "types": "./src/state/threadSort.ts",
       "default": "./src/state/threadSort.ts"
+    },
+    "./state/decision-inbox": {
+      "types": "./src/state/decisionInbox.ts",
+      "default": "./src/state/decisionInbox.ts"
+    },
+    "./state/fleet": {
+      "types": "./src/state/fleet.ts",
+      "default": "./src/state/fleet.ts"
+    },
+    "./state/fleet-cloud-agents": {
+      "types": "./src/state/fleetCloudAgents.ts",
+      "default": "./src/state/fleetCloudAgents.ts"
+    },
+    "./state/fleet-heat": {
+      "types": "./src/state/fleetHeat.ts",
+      "default": "./src/state/fleetHeat.ts"
+    },
+    "./state/host-metrics": {
+      "types": "./src/state/host-metrics.ts",
+      "default": "./src/state/host-metrics.ts"
+    },
+    "./state/user-input-draft": {
+      "types": "./src/state/userInputDraft.ts",
+      "default": "./src/state/userInputDraft.ts"
     },
     "./state/thread-inbox": {
       "types": "./src/state/threadInbox.ts",
@@ -331,9 +419,17 @@
       "types": "./src/work-log/itemDetail.ts",
       "default": "./src/work-log/itemDetail.ts"
     },
+    "./work-log/file-change-diff": {
+      "types": "./src/work-log/fileChangeDiff.ts",
+      "default": "./src/work-log/fileChangeDiff.ts"
+    },
     "./work-log/presentation": {
       "types": "./src/work-log/presentation.ts",
       "default": "./src/work-log/presentation.ts"
+    },
+    "./work-log/line-counts": {
+      "types": "./src/work-log/lineCounts.ts",
+      "default": "./src/work-log/lineCounts.ts"
     },
     "./work-log/tool-presentation": {
       "types": "./src/work-log/toolPresentation.ts",
@@ -346,6 +442,10 @@
     "./work-log/scroll-anchor": {
       "types": "./src/work-log/scrollAnchor.ts",
       "default": "./src/work-log/scrollAnchor.ts"
+    },
+    "./pull-request-link-input": {
+      "types": "./src/pullRequestLinkInput.ts",
+      "default": "./src/pullRequestLinkInput.ts"
     },
     "./thread-pull-request-compatibility": {
       "types": "./src/threadPullRequestCompatibility.ts",
@@ -387,6 +487,10 @@
       "types": "./src/device/duoControl.ts",
       "default": "./src/device/duoControl.ts"
     },
+    "./diff-count": {
+      "types": "./src/diffCount.ts",
+      "default": "./src/diffCount.ts"
+    },
     "./mcp-apps": {
       "types": "./src/mcpApps/host.ts",
       "default": "./src/mcpApps/host.ts"
@@ -394,15 +498,63 @@
     "./state/mcp-apps": {
       "types": "./src/state/mcpApps.ts",
       "default": "./src/state/mcpApps.ts"
+    },
+    "./source-control-clients": {
+      "types": "./src/sourceControlClients.ts",
+      "default": "./src/sourceControlClients.ts"
+    },
+    "./review-guide-tour": {
+      "types": "./src/reviewGuideTour.ts",
+      "default": "./src/reviewGuideTour.ts"
+    },
+    "./state/query-persistence": {
+      "types": "./src/state/queryPersistence.ts",
+      "default": "./src/state/queryPersistence.ts"
+    },
+    "./pull-request-markdown": {
+      "types": "./src/pullRequestMarkdown.ts",
+      "default": "./src/pullRequestMarkdown.ts"
+    },
+    "./memory-device-flow": {
+      "types": "./src/memoryDeviceFlow.ts",
+      "default": "./src/memoryDeviceFlow.ts"
+    },
+    "./pull-request-query": {
+      "types": "./src/pullRequestQuery.ts",
+      "default": "./src/pullRequestQuery.ts"
+    },
+    "./authorization/service": {
+      "types": "./src/authorization/service.ts",
+      "default": "./src/authorization/service.ts"
+    },
+    "./connection/driver": {
+      "types": "./src/connection/driver.ts",
+      "default": "./src/connection/driver.ts"
+    },
+    "./connection/resolver": {
+      "types": "./src/connection/resolver.ts",
+      "default": "./src/connection/resolver.ts"
+    },
+    "./rpc/session": {
+      "types": "./src/rpc/session.ts",
+      "default": "./src/rpc/session.ts"
     }
   },
   "scripts": {
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc-rs --noEmit",
     "test": "vp test run"
   },
   "dependencies": {
-    "@t3tools/contracts": "workspace:*",
-    "@t3tools/shared": "workspace:*",
+    "@goat/contracts": "workspace:*",
+    "@goat/shared": "workspace:*",
+    "@goat/source-control-azure-devops": "workspace:*",
+    "@goat/source-control-bitbucket": "workspace:*",
+    "@goat/source-control-core": "workspace:*",
+    "@goat/source-control-forgejo": "workspace:*",
+    "@goat/source-control-gitcafe": "workspace:*",
+    "@goat/source-control-github": "workspace:*",
+    "@goat/source-control-gitlab": "workspace:*",
+    "@pierre/diffs": "catalog:",
     "effect": "catalog:",
     "three": "0.180.0"
   },

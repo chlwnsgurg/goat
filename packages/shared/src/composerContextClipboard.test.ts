@@ -98,9 +98,6 @@ describe("composerContextClipboard", () => {
     });
 
     const html = encodeComposerContextClipboardHtml("output", raw);
-    // The attribute runs to nearly nine characters per code unit. A bound derived from the
-    // fragment limit has to allow that, or a fragment that encoded cleanly is rejected on the
-    // way back in. This ratio is what the decoder's own bound is sized against.
     expect(html.length).toBeGreaterThan(raw.length * 8);
     expect(decodeComposerContextClipboardHtml(html)).toEqual(JSON.parse(raw));
   });
@@ -128,6 +125,6 @@ describe("composerContextClipboard", () => {
       ),
     ).toBeNull();
     expect(decodeComposerContextFragment("x".repeat(2_000_001))).toBeNull();
-    expect(COMPOSER_CONTEXT_CLIPBOARD_MIME).toMatch(/^web application\//);
+    expect(COMPOSER_CONTEXT_CLIPBOARD_MIME).toBe("web application/x-goat-context-fragment+json");
   });
 });

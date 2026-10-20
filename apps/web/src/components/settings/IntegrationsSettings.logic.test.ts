@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vite-plus/test";
-import type { EnvironmentId } from "@t3tools/contracts";
+import type { EnvironmentId } from "@goat/contracts";
 
 import {
   browserProfileRemovalAvailable,
@@ -119,8 +119,6 @@ describe("importFailureReason", () => {
     expect(importFailureReason(failure("browserRunning"))).toBe("browserRunning");
     expect(importFailureReason(failure("readFailed"))).toBe("readFailed");
     expect(importFailureReason(failure("keychainUnavailable"))).toBe("keychainUnavailable");
-    // A settings write that fails after the cookies landed is its own case,
-    // not a read failure over a database that was in fact read.
     expect(importFailureReason(failure("profileNotSaved"))).toBe("profileNotSaved");
     expect(importFailureReason(failure("profileLimitReached"))).toBe("profileLimitReached");
   });

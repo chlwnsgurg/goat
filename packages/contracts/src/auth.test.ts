@@ -2,6 +2,8 @@ import { describe, expect, it } from "vite-plus/test";
 import * as Schema from "effect/Schema";
 
 import {
+  AuthMcpApprovalDecision,
+  AuthMcpApprovalDetails,
   AuthEnvironmentScopes,
   AuthEnvironmentScope,
   authScopeRequiredResponse,
@@ -39,7 +41,7 @@ describe("authorization grants", () => {
 
   const decodeOldScopes = Schema.decodeUnknownSync(oldScopes);
 
-  it.each(AuthEnvironmentScope.literals)(
+  it.each(AuthEnvironmentScope.literals.filter((scope) => !scope.startsWith("memory:")))(
     "keeps %s permission errors decodable by old clients",
     (scope) => {
       const response = authScopeRequiredResponse(scope);
@@ -153,4 +155,115 @@ describe("legacy permission notice", () => {
       expect(sessionHasLegacyPermissions({ authenticated: true, permissions })).toBe(false);
     }
   });
+});
+
+describe("memory permissions", () => {
+  it("recognizes memory scopes without legacy parent expansion", () => {
+    for (const scope of ["memory:read", "memory:write", "memory:sync"] as const) {
+      expect(Schema.decodeSync(AuthEnvironmentScope)(scope)).toBe(scope);
+      expect(
+        sessionGrantsScope(
+          { authenticated: true, scopes: ["orchestration:operate", "orchestration:read"] },
+          scope,
+        ),
+      ).toBe(false);
+    }
+  });
+  it("denies memory to unauthenticated and explicit empty grants", () => {
+    expect(
+      sessionGrantsScope({ authenticated: false, permissions: ["memory:read"] }, "memory:read"),
+    ).toBe(false);
+    expect(
+      sessionGrantsScope(
+        { authenticated: true, scopes: ["memory:read"], permissions: [] },
+        "memory:read",
+      ),
+    ).toBe(false);
+  });
+  it("keeps memory out of legacy scope response", () => {
+    expect(authScopeResponse(["memory:read", "memory:write", "memory:sync"])).toEqual({
+      scopes: [],
+      permissions: ["memory:read", "memory:write", "memory:sync"],
+    });
+  });
+  it("includes read and write but excludes sync in default client grants", () => {
+    expect(AuthStandardClientScopes).toContain("memory:read");
+    expect(AuthStandardClientScopes).toContain("memory:write");
+    expect(AuthStandardClientScopes).not.toContain("memory:sync");
+  });
+  it("does not upgrade stored old grants", () => {
+    const stored = Schema.decodeSync(AuthGrantScopes)(["orchestration:operate"]);
+    expect(stored).toEqual(["orchestration:operate"]);
+    expect(sessionGrantsScope({ authenticated: true, permissions: stored }, "memory:write")).toBe(
+      false,
+    );
+  });
+  it("requires explicit memory consent on both approval arms", () => {
+    for (const decision of [
+      { _tag: "pairing-code", access: "full-access", code: "synthetic" },
+      { _tag: "browser-session", access: "full-access", csrfToken: "synthetic" },
+    ]) {
+      const decode = Schema.decodeUnknownSync(AuthMcpApprovalDecision, {
+        onExcessProperty: "error",
+      });
+      expect(decode(decision)).not.toHaveProperty("memoryScopes");
+      expect(decode({ ...decision, memoryScopes: ["memory:read", "memory:write"] })).toHaveProperty(
+        "memoryScopes",
+        ["memory:read", "memory:write"],
+      );
+      expect(() => decode({ ...decision, memoryScopes: ["memory:sync"] })).toThrow();
+      expect(() => decode({ ...decision, memoryScopes: ["memory:read", "memory:read"] })).toThrow();
+    }
+  });
+});
+it("old approval omission grants no memory", () => {
+  const decision = Schema.decodeUnknownSync(AuthMcpApprovalDecision)({
+    _tag: "pairing-code",
+    access: "full-access",
+    code: "synthetic",
+  });
+  expect(decision).not.toHaveProperty("memoryScopes");
+  expect(
+    sessionGrantsScope({ authenticated: true, scopes: ["orchestration:operate"] }, "memory:write"),
+  ).toBe(false);
+});
+it("both approval arms round trip explicit read write selection", () => {
+  for (const proof of [
+    { _tag: "pairing-code", code: "synthetic" },
+    { _tag: "browser-session", csrfToken: "synthetic" },
+  ])
+    expect(
+      Schema.decodeUnknownSync(AuthMcpApprovalDecision)({
+        ...proof,
+        access: "full-access",
+        memoryScopes: ["memory:read", "memory:write"],
+      }),
+    ).toHaveProperty("memoryScopes", ["memory:read", "memory:write"]);
+});
+it("rejects sync duplicate and unknown memory grants", () => {
+  for (const memoryScopes of [["memory:sync"], ["memory:read", "memory:read"], ["memory:unknown"]])
+    expect(() =>
+      Schema.decodeUnknownSync(AuthMcpApprovalDecision)({
+        _tag: "browser-session",
+        access: "auto",
+        csrfToken: "synthetic",
+        memoryScopes,
+      }),
+    ).toThrow();
+});
+it("one click advertised scopes grant nothing by themselves", () => {
+  const details = Schema.decodeUnknownSync(AuthMcpApprovalDetails)({
+    clientName: "Synthetic",
+    redirectHost: "localhost",
+    environmentHost: "env",
+    oneClickMemoryScopes: ["memory:read"],
+  });
+  expect(details.oneClickMemoryScopes).toEqual(["memory:read"]);
+  expect(sessionGrantsScope({ authenticated: true, permissions: [] }, "memory:read")).toBe(false);
+  expect(
+    sessionGrantsScope(
+      { authenticated: true, permissions: ["orchestration:operate"] },
+      "memory:write",
+    ),
+  ).toBe(false);
 });

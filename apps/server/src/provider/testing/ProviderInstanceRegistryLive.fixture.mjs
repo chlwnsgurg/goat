@@ -1,6 +1,11 @@
 #!/usr/bin/env node
 import * as NodeFS from "node:fs";
 import * as NodeReadline from "node:readline";
+const requiredCwd = process.env.GOAT_CLAUDE_REQUIRED_CWD;
+if (requiredCwd && process.cwd() !== NodeFS.realpathSync(requiredCwd)) {
+  process.stderr.write(`claude: refusing to run outside ${requiredCwd}\n`);
+  process.exit(1);
+}
 if (process.argv.includes("--version")) {
   process.stdout.write("claude 2.1.219\n");
   process.exit(0);
@@ -10,8 +15,8 @@ lines.on("line", (line) => {
   const message = JSON.parse(line);
   if (message.type !== "control_request") return;
   if (message.request?.subtype === "get_usage") {
-    const marker = process.env.T3_CLAUDE_RESET_MARKER;
-    if (process.env.T3_CLAUDE_USAGE_FAILS_AFTER_CLAIM && marker && NodeFS.existsSync(marker)) {
+    const marker = process.env.GOAT_CLAUDE_RESET_MARKER;
+    if (process.env.GOAT_CLAUDE_USAGE_FAILS_AFTER_CLAIM && marker && NodeFS.existsSync(marker)) {
       process.stdout.write(
         JSON.stringify({
           type: "control_response",

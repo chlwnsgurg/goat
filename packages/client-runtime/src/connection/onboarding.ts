@@ -2,8 +2,8 @@ import type {
   ConnectionAddedBy,
   DesktopSshEnvironmentTarget,
   EnvironmentId,
-} from "@t3tools/contracts";
-import { resolveRemotePairingTarget } from "@t3tools/shared/remote";
+} from "@goat/contracts";
+import { resolveRemotePairingTarget } from "@goat/shared/remote";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -42,10 +42,6 @@ export interface PairingConnectionInput {
   readonly pairingUrl?: string;
   readonly host?: string;
   readonly pairingCode?: string;
-  /**
-   * Set when adding a route to a saved machine: the pairing must reach this
-   * environment, or nothing is saved.
-   */
   readonly expectedEnvironmentId?: EnvironmentId;
 }
 
@@ -54,7 +50,6 @@ export interface SshConnectionInput {
   readonly addedBy?: ConnectionAddedBy;
   readonly target: DesktopSshEnvironmentTarget;
   readonly label?: string;
-  /** Set when adding a route to a saved machine; see `PairingConnectionInput`. */
   readonly expectedEnvironmentId?: EnvironmentId;
 }
 
@@ -83,7 +78,7 @@ export class ConnectionOnboarding extends Context.Service<
       input: BearerConnectionUpdateInput,
     ) => Effect.Effect<void, ConnectionAttemptError | Persistence.ConnectionPersistenceError>;
   }
->()("@t3tools/client-runtime/connection/onboarding/ConnectionOnboarding") {}
+>()("@goat/client-runtime/connection/onboarding/ConnectionOnboarding") {}
 
 const resolvePairingTarget = Effect.fn("clientRuntime.connection.onboarding.resolvePairingTarget")(
   function* (input: PairingConnectionInput) {
@@ -98,11 +93,6 @@ const resolvePairingTarget = Effect.fn("clientRuntime.connection.onboarding.reso
   },
 );
 
-/**
- * One bearer route per address, so pairing over Tailscale adds a route next
- * to the LAN one instead of replacing it. Pairing the same address again
- * reuses the id and replaces that route.
- */
 function bearerConnectionId(environmentId: EnvironmentId, httpBaseUrl: string): string {
   return `bearer:${environmentId}:${new URL(httpBaseUrl).origin}`;
 }
@@ -165,7 +155,11 @@ const registerPairingConnection = Effect.fn(
 )(function* (input: PairingConnectionInput) {
   const registration = yield* preparePairingRegistration(input);
   const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
-  yield* registry.register(registration);
+  if (!(yield* registry.register(registration))) return registration.target.environmentId;
+  yield* registry.setCompatibility(registration.target.environmentId, null);
+  yield* registry
+    .setEnabled(registration.target.environmentId, true)
+    .pipe(Effect.catchTags({ EnvironmentNotRegisteredError: () => Effect.void }));
   return registration.target.environmentId;
 });
 
@@ -178,7 +172,6 @@ const updateBearerConnection = Effect.fn(
   const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
   const credentials = yield* ConnectionCredentialStore.ConnectionCredentialStore;
   const saved = (yield* SubscriptionRef.get(registry.entries)).get(input.environmentId);
-  // Editing changes the environment's first direct route; others stay as saved.
   const route =
     saved === undefined
       ? undefined
@@ -269,8 +262,6 @@ export const prepareSshRegistration = Effect.fn(
     input.expectedEnvironmentId,
     input.keyOnly === undefined ? undefined : { keyOnly: input.keyOnly },
   );
-  // One id per SSH target, so a second host or alias for the same machine
-  // adds a route instead of replacing the first.
   const connectionId = `ssh:${provisioned.environmentId}:${sshTargetKey(provisioned.bootstrap.target)}`;
   const label = input.label?.trim() || provisioned.label || provisioned.bootstrap.target.alias;
 
@@ -286,6 +277,12 @@ export const prepareSshRegistration = Effect.fn(
       label,
       target: provisioned.bootstrap.target,
       ...(input.addedBy === undefined ? {} : { addedBy: input.addedBy }),
+    }),
+    credential: new BearerConnectionCredential({
+      token: provisioned.bearerToken,
+      ...(provisioned.sshPairingGrant === undefined
+        ? {}
+        : { sshPairingGrant: provisioned.sshPairingGrant }),
     }),
   });
 });

@@ -1,14 +1,16 @@
-import { tokenizeCliArgs } from "@t3tools/shared/cliArgs";
+import { tokenizeCliArgs } from "@goat/shared/cliArgs";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 
-import type { McpProviderSessionConfig } from "@t3tools/provider-core/server/mcpSession";
+import type { McpProviderSessionConfig } from "@goat/provider-core/server/mcpSession";
+import { legacyEnvName, withLegacyEnvNames } from "@goat/contracts/legacyT3Names";
 import {
-  PI_T3_MCP_EXTENSION_FILENAME,
-  PI_T3_MCP_EXTENSION_SOURCE,
-  T3_MCP_BEARER_ENV,
-  T3_MCP_URL_ENV,
-  T3_PI_RUNTIME_MODE_ENV,
+  PI_GOAT_MCP_EXTENSION_FILENAME,
+  PI_GOAT_MCP_EXTENSION_SOURCE,
+  GOAT_MCP_BEARER_ENV,
+  GOAT_MCP_URL_ENV,
+  GOAT_PI_RUNTIME_MODE_ENV,
+  GOAT_PI_MCP_EXTENSION_PATH_ENV,
 } from "./mcpExtensionSource.ts";
 
 const RESERVED_PI_LAUNCH_ARGUMENTS = new Set([
@@ -99,11 +101,6 @@ function normalizePiBuiltInEqualsArguments(args: ReadonlyArray<string>): Readonl
   });
 }
 
-/**
- * Pi launch arguments may configure resources, models, tools, trust, and
- * storage. T3 owns RPC mode and session identity, so arguments that select a
- * different execution mode or native session are rejected before spawn.
- */
 export function resolvePiLaunchArgs(launchArgs: string): PiLaunchArgsResolution {
   // Pi parses equals-form tokens only as extension flags, even when their name
   // matches a built-in option. Split known built-ins while leaving arbitrary
@@ -160,9 +157,6 @@ export function resolvePiLaunchArgs(launchArgs: string): PiLaunchArgsResolution 
       message: `Pi launch arguments cannot include positional prompt '${arg}'.`,
     };
   }
-  // Pi 1.0 exits at startup on `--provider` without `--model`; older versions
-  // silently ran another provider's default model. Rejecting it here makes
-  // every spawn site report the reason instead of a bare exit code.
   if (hasProvider && !hasModel) {
     return { ok: false, message: "Pi launch argument '--provider' requires '--model'." };
   }
@@ -230,19 +224,19 @@ function withoutToolSelectionArgs(args: ReadonlyArray<string>): ReadonlyArray<st
   return filtered;
 }
 
-function piT3McpExtensionDestPath(cacheDir: string): string {
-  return `${cacheDir.replace(/\\/g, "/")}/${PI_T3_MCP_EXTENSION_FILENAME}`;
+function piGoatMcpExtensionDestPath(cacheDir: string): string {
+  return `${cacheDir.replace(/\\/g, "/")}/${PI_GOAT_MCP_EXTENSION_FILENAME}`;
 }
 
-export const materializePiT3McpExtension = Effect.fn("materializePiT3McpExtension")(function* (
+export const materializePiGoatMcpExtension = Effect.fn("materializePiGoatMcpExtension")(function* (
   cacheDir: string,
 ) {
   const fs = yield* FileSystem.FileSystem;
   yield* fs.makeDirectory(cacheDir, { recursive: true });
-  const dest = piT3McpExtensionDestPath(cacheDir);
+  const dest = piGoatMcpExtensionDestPath(cacheDir);
   const existing = yield* fs.readFileString(dest).pipe(Effect.orElseSucceed(() => ""));
-  if (existing !== PI_T3_MCP_EXTENSION_SOURCE) {
-    yield* fs.writeFileString(dest, PI_T3_MCP_EXTENSION_SOURCE);
+  if (existing !== PI_GOAT_MCP_EXTENSION_SOURCE) {
+    yield* fs.writeFileString(dest, PI_GOAT_MCP_EXTENSION_SOURCE);
   }
   return dest;
 });
@@ -259,10 +253,10 @@ export function buildPiRpcLaunch(input: {
 }): {
   readonly args: ReadonlyArray<string>;
   readonly env: NodeJS.ProcessEnv;
-  readonly hasT3Mcp: boolean;
+  readonly hasGoatMcp: boolean;
 } {
-  const hasT3Extension = input.disableExtensions !== true && input.extensionPath !== undefined;
-  const hasT3Mcp = hasT3Extension && input.mcpSession !== undefined;
+  const hasGoatExtension = input.disableExtensions !== true && input.extensionPath !== undefined;
+  const hasGoatMcp = hasGoatExtension && input.mcpSession !== undefined;
   const extensionSafeArgs =
     input.disableExtensions === true
       ? withoutExplicitExtensions(input.launchArgs)
@@ -280,7 +274,7 @@ export function buildPiRpcLaunch(input: {
     ...(input.disableTools === true ? ["--no-tools"] : []),
   ];
   if (
-    hasT3Extension &&
+    hasGoatExtension &&
     input.extensionPath !== undefined &&
     !hasExplicitExtension(args, input.extensionPath)
   ) {
@@ -289,28 +283,36 @@ export function buildPiRpcLaunch(input: {
   const environment = { ...input.environment };
   // These values belong to the current T3 session. Never let a Pi child reuse
   // credentials inherited from the server or a parent provider process.
-  delete environment[T3_MCP_URL_ENV];
-  delete environment[T3_MCP_BEARER_ENV];
+  for (const name of [GOAT_MCP_URL_ENV, GOAT_MCP_BEARER_ENV, GOAT_PI_MCP_EXTENSION_PATH_ENV]) {
+    delete environment[name];
+    delete environment[legacyEnvName(name) ?? name];
+  }
 
   return {
     args,
     env: {
       ...environment,
-      ...(hasT3Extension && input.runtimeMode !== undefined
-        ? {
-            [T3_PI_RUNTIME_MODE_ENV]:
-              input.runtimeMode === "auto" ? "approval-required" : input.runtimeMode,
-          }
-        : {}),
-      ...(hasT3Mcp && input.mcpSession !== undefined
-        ? {
-            [T3_MCP_URL_ENV]: input.mcpSession.endpoint,
-            [T3_MCP_BEARER_ENV]: bearerTokenFromAuthorizationHeader(
-              input.mcpSession.authorizationHeader,
-            ),
-          }
-        : {}),
+      // An extension materialized by an older build reads the legacy names.
+      ...withLegacyEnvNames({
+        ...(hasGoatExtension && input.extensionPath !== undefined
+          ? { [GOAT_PI_MCP_EXTENSION_PATH_ENV]: input.extensionPath }
+          : {}),
+        ...(hasGoatExtension && input.runtimeMode !== undefined
+          ? {
+              [GOAT_PI_RUNTIME_MODE_ENV]:
+                input.runtimeMode === "auto" ? "approval-required" : input.runtimeMode,
+            }
+          : {}),
+        ...(hasGoatMcp && input.mcpSession !== undefined
+          ? {
+              [GOAT_MCP_URL_ENV]: input.mcpSession.endpoint,
+              [GOAT_MCP_BEARER_ENV]: bearerTokenFromAuthorizationHeader(
+                input.mcpSession.authorizationHeader,
+              ),
+            }
+          : {}),
+      }),
     },
-    hasT3Mcp,
+    hasGoatMcp,
   };
 }

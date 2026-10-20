@@ -45,8 +45,6 @@ describe("VcsDriverRegistry", () => {
     }).pipe(Effect.provide(layer));
   });
 
-  // Answers detection like git: the nearest folder at or above the cwd, up to
-  // `rootDir`, that holds `.git` is the repository.
   const makeDiskBackedLayer = (rootDir: string, calls: string[]) =>
     Layer.effect(VcsDriverRegistry.VcsDriverRegistry, VcsDriverRegistry.make).pipe(
       Layer.provide(NodeServices.layer),
@@ -89,7 +87,7 @@ describe("VcsDriverRegistry", () => {
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
-      const repoDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-vcs-registry-" });
+      const repoDir = yield* fs.makeTempDirectoryScoped({ prefix: "goat-vcs-registry-" });
       yield* fs.makeDirectory(path.join(repoDir, ".git"));
       const calls: string[] = [];
 
@@ -113,7 +111,7 @@ describe("VcsDriverRegistry", () => {
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
-      const repoDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-vcs-registry-" });
+      const repoDir = yield* fs.makeTempDirectoryScoped({ prefix: "goat-vcs-registry-" });
       yield* fs.makeDirectory(path.join(repoDir, ".git"));
       const calls: string[] = [];
 
@@ -133,7 +131,7 @@ describe("VcsDriverRegistry", () => {
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
-      const parentDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-vcs-registry-" });
+      const parentDir = yield* fs.makeTempDirectoryScoped({ prefix: "goat-vcs-registry-" });
       const projectDir = path.join(parentDir, "project");
       yield* fs.makeDirectory(path.join(parentDir, ".git"));
       yield* fs.makeDirectory(projectDir);
@@ -157,7 +155,7 @@ describe("VcsDriverRegistry", () => {
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
-      const parentDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-vcs-registry-" });
+      const parentDir = yield* fs.makeTempDirectoryScoped({ prefix: "goat-vcs-registry-" });
       const middleDir = path.join(parentDir, "a");
       const cwd = path.join(middleDir, "b");
       yield* fs.makeDirectory(path.join(parentDir, ".git"));
@@ -179,7 +177,7 @@ describe("VcsDriverRegistry", () => {
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
-      const repoDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-vcs-registry-" });
+      const repoDir = yield* fs.makeTempDirectoryScoped({ prefix: "goat-vcs-registry-" });
       const calls: string[] = [];
 
       yield* Effect.gen(function* () {

@@ -13,13 +13,18 @@
  */
 import {
   type ChannelDispatchTarget,
+  type CommandId,
+  type ChannelRequester,
   type ChannelTask,
   type ChannelTaskId,
+  type MemoryTaskGrantCeiling,
   type ModelSelection,
   type OrchestrationV2ThreadLaunchWorkspaceStrategy,
   ProjectId,
-} from "@t3tools/contracts";
-import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
+} from "@goat/contracts";
+import { resolveProjectSettings } from "@goat/shared/projectSettings";
+import { prependStandingInstructions } from "@goat/shared/standingInstructions";
+import { resolveGoatBotModelSelection } from "@goat/shared/serverSettings";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
@@ -35,6 +40,8 @@ import {
 } from "../orchestration-v2/DispatchModeLimit.ts";
 import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
 import * as RepositoryIdentityResolver from "../project/RepositoryIdentityResolver.ts";
+import * as ServerConfig from "../config.ts";
+import { captureMemoryGrantCeiling } from "../memory/MemoryAccess.ts";
 import * as ThreadLaunch from "../orchestration-v2/ThreadLaunchService.ts";
 import * as ThreadManagement from "../orchestration-v2/ThreadManagementService.ts";
 import * as ProviderInstanceRegistry from "../provider/ProviderInstanceRegistry.ts";
@@ -43,8 +50,21 @@ import * as ServerSettings from "../serverSettings.ts";
 import { lowerRuntimeMode } from "./ChannelGateway.ts";
 import * as ChannelLedger from "./ChannelLedger.ts";
 import * as ChannelRemoteWorkers from "./ChannelRemoteWorkers.ts";
-import { answerForwardIdsFor, questionIdFor, workerLaunchIdsFor } from "./channelIds.ts";
+import { makeChannelProjectChoices } from "./channelProjectChoices.ts";
+import { type ChannelBotFiles, channelBotFilesFor } from "./channelBotNotes.ts";
+import {
+  answerForwardIdsFor,
+  questionIdFor,
+  stopIdsFor,
+  turnSteerIdsFor,
+  workerLaunchIdsFor,
+} from "./channelIds.ts";
+import { choosePlacement, type PlacementCandidate } from "./channelPlacement.ts";
+import { channelNotesRevision, freezeChannelBrief } from "./channelBriefs.ts";
 import { commitTransition } from "./channelTaskWrites.ts";
+import { channelWorkerRules, workerHeader } from "./channelWorkerBrief.ts";
+import { isThreadMissing } from "./channelWorkerObservation.ts";
+import { derivePendingBackgroundWork } from "@goat/shared/orchestrationV2PendingBackgroundWork";
 import * as SlackChannelSettings from "./SlackChannelSettings.ts";
 
 export class ChannelDispatcher extends Context.Service<
@@ -61,22 +81,81 @@ export class ChannelDispatcher extends Context.Service<
       owner: string,
     ) => Effect.Effect<void, ChannelLedger.ChannelLedgerError>;
   }
->()("t3/channels/ChannelDispatcher") {}
+>()("goat/channels/ChannelDispatcher") {}
 
 /** What the worker thread is told besides the instruction itself. */
-const workerInstruction = (task: ChannelTask) =>
+const workerInstruction = (task: ChannelTask, files: ChannelBotFiles) =>
   [
-    task.instruction,
-    "",
-    "---",
-    "This work came in through GOAT as task " +
-      task.taskId +
-      " (generation " +
-      task.generation +
-      ").",
-    'If you need a decision from the person who asked, call channel_task_report with this taskId and generation, status "waiting_input", a new eventId, and your question, then stop.',
-    "When you finish, end with a short summary of the result.",
+    ...workerHeader(task),
+    "Standing notes from the person are in " +
+      files.notes +
+      "; follow them. Reusable procedures (skills) are in " +
+      files.skills +
+      "; read the one the instruction names.",
+    task.notesChangeRequested === undefined
+      ? "Leave the notes file unchanged; this task did not ask to change a note."
+      : "The person asked to change or forget a note (" +
+        JSON.stringify(task.notesChangeRequested) +
+        "). Edit the notes file only to make that change.",
+    ...channelWorkerRules("local"),
   ].join("\n");
+
+const MEMORY_CEILING_RANK = { none: 0, read: 1, read_write: 2 } as const;
+
+/** How many pieces of one person's work run at once before more wait in the queue. */
+export const WORKERS_PER_REQUESTER = 4;
+
+export const sameRequester = (left: ChannelRequester, right: ChannelRequester) =>
+  left.ownerId === right.ownerId && left.principalId === right.principalId;
+
+const withoutKey = <V>(map: ReadonlyMap<string, V>, key: string) => {
+  const next = new Map(map);
+  next.delete(key);
+  return next;
+};
+
+/** Run states that have ended; anything else may still start or run. */
+const ENDED_RUN_STATUSES = new Set([
+  "completed",
+  "failed",
+  "cancelled",
+  "interrupted",
+  "rolled_back",
+]);
+
+/** How long a stop keeps looking for a worker whose launch was in flight when it was asked. */
+const STOP_LAUNCH_GRACE_MS = 120_000;
+
+/**
+ * The most a GOAT Bot turn may do on its own, whatever the requester may: read and search freely
+ * and edit files without asking, while commands the provider gates still ask. Work that changes
+ * a repository is a coding task, which runs at the requester's full ceiling.
+ */
+export const BOT_TURN_RUNTIME_CEILING = "auto-accept-edits" as const;
+
+/** What a GOAT Bot turn is told besides the person's request. */
+const turnInstruction = (task: ChannelTask, files: ChannelBotFiles) =>
+  [
+    ...workerHeader(task),
+    "You are GOAT Bot handling this message yourself. Your summary is your answer to the person: write it for them, in the language they wrote in, short and outcome first.",
+    "Look things up directly: read and search files, read GOAT Bot's notes (" +
+      files.notes +
+      "), use GOAT memory, and use the channel_task_* and goat_thread_* tools to check the work GOAT Bot started and its threads. Hand research, long investigations, or anything that needs several steps to subagents with delegate_task, wait for them, and summarize what they found; do not paste their output.",
+    "Do not change any repository. If the request turns out to need code changes, say what you found and that it needs a coding task, then report.",
+    task.notesChangeRequested === undefined
+      ? "Leave the notes file unchanged; this message did not ask to change a note."
+      : "The person asked to change or forget a note (" +
+        JSON.stringify(task.notesChangeRequested) +
+        "). Edit the notes file only to make that change.",
+    ...channelWorkerRules("local"),
+  ].join("\n");
+
+/** The narrower of two memory ceilings. */
+const lowerMemoryCeiling = (
+  left: MemoryTaskGrantCeiling,
+  right: MemoryTaskGrantCeiling,
+): MemoryTaskGrantCeiling =>
+  MEMORY_CEILING_RANK[left] <= MEMORY_CEILING_RANK[right] ? left : right;
 
 const toLaunchStrategy = (
   strategy: ChannelDispatchTarget["workspaceStrategy"],
@@ -96,7 +175,10 @@ const make = Effect.gen(function* () {
   const fileSystem = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const remoteWorkers = yield* ChannelRemoteWorkers.ChannelRemoteWorkers;
+  /** Remote dispatches handed off but not yet claimed, by task, with whose work they are. */
+  const remoteReservations = yield* Ref.make<ReadonlyMap<string, ChannelRequester>>(new Map());
   const slackSettings = yield* SlackChannelSettings.SlackChannelSettings;
+  const botFiles = channelBotFilesFor(path, (yield* ServerConfig.ServerConfig).stateDir);
 
   /**
    * The Slack connection's default project and model, for work that came in through it. A
@@ -118,11 +200,14 @@ const make = Effect.gen(function* () {
     stored: ChannelLedger.ChannelStoredTask,
     text: string,
     owner: string,
-    options: { readonly clearPendingAnswer?: boolean } = {},
+    options: {
+      readonly clearPendingAnswer?: boolean;
+      readonly choices?: ReadonlyArray<string>;
+    } = {},
   ) =>
     Effect.gen(function* () {
       const askedAt = DateTime.formatIso(yield* DateTime.now);
-      yield* commitTransition(
+      return yield* commitTransition(
         ledger,
         stored,
         {
@@ -132,6 +217,9 @@ const make = Effect.gen(function* () {
               questionId: questionIdFor(stored.task.taskId, stored.task.version + 1),
               text,
               askedAt,
+              ...(options.choices === undefined || options.choices.length < 2
+                ? {}
+                : { options: options.choices }),
               ...(stored.task.requester.externalActorId === undefined
                 ? {}
                 : { requesterExternalActorId: stored.task.requester.externalActorId }),
@@ -146,6 +234,8 @@ const make = Effect.gen(function* () {
       );
     });
 
+  const projectChoices = (yield* makeChannelProjectChoices).question;
+
   /** Whether this machine has the provider instance and, when it lists models, that model. */
   const modelOffered = (selection: ModelSelection) =>
     Effect.gen(function* () {
@@ -158,34 +248,143 @@ const make = Effect.gen(function* () {
       );
     });
 
+  /** Channel work already started on this machine, per provider account. */
+  const localTasksByInstance = ledger
+    .listTasksByStatus(["dispatching", "running", "waiting_input"])
+    .pipe(
+      Effect.map((stored) => {
+        const counts = new Map<string, number>();
+        for (const { task } of stored) {
+          const target = task.target;
+          if (target === undefined || target.remote !== undefined) continue;
+          const instanceId = target.modelSelection.instanceId;
+          counts.set(instanceId, (counts.get(instanceId) ?? 0) + 1);
+        }
+        return counts;
+      }),
+      Effect.orElseSucceed(() => new Map<string, number>()),
+    );
+
+  /**
+   * The provider account to run a model on here. Another signed-in account of the same provider
+   * that offers the model can take the work when it has more quota left or less channel work
+   * running; the configured account stays a candidate and wins ties. The reason is for the chip.
+   */
+  const placeLocally = (selection: ModelSelection) =>
+    Effect.gen(function* () {
+      const configured = yield* providers.getInstance(selection.instanceId);
+      if (configured === undefined) return { modelSelection: selection, reason: undefined };
+      const siblings = (yield* providers.listInstances).filter(
+        (instance) =>
+          instance.instanceId === selection.instanceId ||
+          (instance.enabled && instance.driverKind === configured.driverKind),
+      );
+      const load = yield* localTasksByInstance;
+      const candidates = yield* Effect.forEach(siblings, (instance) =>
+        Effect.gen(function* () {
+          const snapshot = yield* instance.snapshot.getSnapshot;
+          const isConfigured = instance.instanceId === selection.instanceId;
+          const ready =
+            snapshot.enabled &&
+            snapshot.installed &&
+            (snapshot.status === "ready" || snapshot.status === "warning") &&
+            snapshot.auth.status !== "unauthenticated" &&
+            (snapshot.availability ?? "available") === "available";
+          const offers =
+            snapshot.models.length === 0 ||
+            snapshot.models.some((candidate) => candidate.slug === selection.model);
+          if (!isConfigured && !(ready && offers)) return [];
+          const windows = snapshot.usageLimits?.windows ?? [];
+          const candidate: PlacementCandidate<ModelSelection> = {
+            value: isConfigured ? selection : { ...selection, instanceId: instance.instanceId },
+            host: null,
+            providerLabel:
+              instance.displayName ?? snapshot.displayName ?? String(instance.instanceId),
+            preferred: isConfigured,
+            windows: windows.length === 0 ? null : windows,
+            activeTasks: load.get(instance.instanceId) ?? 0,
+          };
+          return [candidate];
+        }),
+      );
+      // listInstances leaves out instances that failed to start; the configured one still runs.
+      const pool = candidates.flat();
+      const now = DateTime.toEpochMillis(yield* DateTime.now);
+      const placed = choosePlacement(
+        pool.length === 0
+          ? [
+              {
+                value: selection,
+                host: null,
+                providerLabel: String(selection.instanceId),
+                preferred: true,
+                windows: null,
+                activeTasks: 0,
+              },
+            ]
+          : pool,
+        now,
+      );
+      return { modelSelection: placed?.chosen.value ?? selection, reason: placed?.reason };
+    });
+
+  /**
+   * The memory a task's worker may use: what the requester was granted, the same rule MCP and
+   * scheduled launches use. A Slack requester is judged by the identity link as it stands now,
+   * so a link narrowed or removed since the message arrived counts. A task that already chose a
+   * target never gets more than that target recorded, so choosing again cannot widen it.
+   */
+  const requesterMemoryCeiling = (task: ChannelTask) =>
+    Effect.gen(function* () {
+      const recorded = task.target === undefined ? undefined : task.target.memoryGrantCeiling;
+      const cap = (ceiling: MemoryTaskGrantCeiling): MemoryTaskGrantCeiling =>
+        task.target === undefined ? ceiling : lowerMemoryCeiling(ceiling, recorded ?? "none");
+      let scopes = task.requester.grantedScopes;
+      if (task.originAddress.kind === "slack" || task.originAddress.kind === "imessage") {
+        const actor = task.requester.externalActorId;
+        if (actor === undefined) return "none" satisfies MemoryTaskGrantCeiling;
+        const linked = yield* ledger.findIdentity({
+          connectionId: task.originAddress.connectionId,
+          externalActorId: actor,
+        });
+        if (linked === undefined) return "none" satisfies MemoryTaskGrantCeiling;
+        scopes = scopes.filter((scope) => linked.grantedScopes.includes(scope));
+      }
+      // A read-only destination still narrows this when the thread starts.
+      return cap(captureMemoryGrantCeiling(scopes, false));
+    });
+
   /** The launch settings for a task, or the question to ask when they cannot be chosen. */
   const resolveTarget = (stored: ChannelLedger.ChannelStoredTask) =>
     Effect.gen(function* () {
       const task = stored.task;
       const bot = yield* ledger.getBot(stored.ownerId);
       const shells = yield* projects.listShells().pipe(Effect.orElseSucceed(() => []));
+      if (task.kind === "turn") return yield* turnTarget(task, bot?.bot.projectId, shells);
       const real = shells.filter((shell) => shell.id !== bot?.bot.projectId);
       const allowed = real.length > 0 ? real : shells;
-      const names = allowed.map((shell) => shell.title).join(", ");
+      const hostWorkspace = shells.some((shell) => shell.id === bot?.bot.projectId);
       const defaults = yield* originDefaults(task);
       // A project named with the work wins over the channel's default project.
       const projectId = task.projectId ?? defaults?.projectId;
-      let chosen = allowed.find((shell) => shell.id === projectId);
+      // Named work may also go to the bot's own workspace, for work about the machine itself.
+      let chosen = shells.find((shell) => shell.id === projectId);
       if (projectId !== undefined && chosen === undefined) {
+        const choices = yield* projectChoices(allowed, hostWorkspace);
         return {
-          type: "question" as const,
-          text: "I can't start work in that project. Which one should I use? " + names,
+          ...choices,
+          text: "I can't start work in that project. " + choices.text,
         };
       }
       if (chosen === undefined && allowed.length === 1) chosen = allowed[0];
       if (chosen === undefined) {
-        return {
-          type: "question" as const,
-          text:
-            allowed.length === 0
-              ? "There is no project to work in yet. Add one in GOAT, then answer with its name."
-              : "Which project should I use? " + names,
-        };
+        if (allowed.length === 0) {
+          return {
+            type: "question" as const,
+            text: "There is no project to work in yet. Add one in GOAT, then answer with its name.",
+          };
+        }
+        return yield* projectChoices(allowed, hostWorkspace);
       }
       const settings = resolveProjectSettings(
         yield* serverSettings.getSettings.pipe(Effect.orDie),
@@ -223,10 +422,12 @@ const make = Effect.gen(function* () {
       const isGit = yield* fileSystem
         .exists(path.join(chosen.workspaceRoot, ".git"))
         .pipe(Effect.orElseSucceed(() => false));
+      const memoryGrantCeiling = yield* requesterMemoryCeiling(task);
+      const placed = yield* placeLocally(modelSelection);
       const target: ChannelDispatchTarget = {
         environmentId: yield* environment.getEnvironmentId,
         projectId: chosen.id,
-        modelSelection,
+        modelSelection: placed.modelSelection,
         runtimeMode: lowerRuntimeMode(
           task.requester.runtimeModeCeiling,
           settings.defaultRuntimeMode,
@@ -234,15 +435,92 @@ const make = Effect.gen(function* () {
         interactionMode: "default",
         // Each task in a repository gets its own worktree so two tasks never share a checkout.
         workspaceStrategy: isGit ? { type: "worktree", baseRef: "HEAD" } : { type: "root" },
+        ...(placed.reason === undefined ? {} : { placementReason: placed.reason }),
+        ...(memoryGrantCeiling === "none" ? {} : { memoryGrantCeiling }),
       };
       return { type: "target" as const, target };
     });
 
-  const launch = (stored: ChannelLedger.ChannelStoredTask, owner: string) =>
+  /**
+   * A GOAT Bot turn runs in the bot's own workspace on this machine, on GOAT Bot's model: the
+   * one chosen in settings, else the new-thread default, else the text generation model. A
+   * chosen model this machine no longer offers falls back with a warning rather than asking,
+   * because the person asked a question, not for a model.
+   */
+  const turnTarget = (
+    task: ChannelTask,
+    botProjectId: string | undefined,
+    shells: ReadonlyArray<{ readonly id: ProjectId }>,
+  ) =>
     Effect.gen(function* () {
+      const home = shells.find((shell) => shell.id === botProjectId);
+      if (home === undefined) {
+        return {
+          type: "question" as const,
+          text: "I can't find my own workspace on this machine. Open GOAT Bot in GOAT once, then ask again.",
+        };
+      }
+      const all = yield* serverSettings.getSettings.pipe(Effect.orDie);
+      const settings = resolveProjectSettings(all, home.id).settings;
+      // The environment's settings, not the bot workspace's: the settings page shows and saves
+      // the bot's model from the same resolution, so what it says is what runs.
+      const fallback = resolveGoatBotModelSelection({ ...all, goatBotModelSelection: null });
+      const chosen = all.goatBotModelSelection;
+      const preferred = chosen !== null && (yield* modelOffered(chosen)) ? chosen : undefined;
+      if (chosen !== null && preferred === undefined) {
+        yield* Effect.logWarning("GOAT Bot model is not available here; using the default", {
+          instanceId: chosen.instanceId,
+          model: chosen.model,
+        });
+      }
+      const memoryGrantCeiling = yield* requesterMemoryCeiling(task);
+      const target: ChannelDispatchTarget = {
+        environmentId: yield* environment.getEnvironmentId,
+        projectId: home.id,
+        modelSelection: preferred ?? fallback,
+        runtimeMode: lowerRuntimeMode(
+          lowerRuntimeMode(task.requester.runtimeModeCeiling, settings.defaultRuntimeMode),
+          BOT_TURN_RUNTIME_CEILING,
+        ),
+        interactionMode: "default",
+        workspaceStrategy: { type: "root" },
+        ...(memoryGrantCeiling === "none" ? {} : { memoryGrantCeiling }),
+      };
+      return { type: "target" as const, target };
+    });
+
+  const launch = (initial: ChannelLedger.ChannelStoredTask, owner: string) =>
+    Effect.gen(function* () {
+      if (initial.task.target === undefined) return;
+      // The project's standing instructions go in front, as goat_thread_launch puts them, so a
+      // channel worker follows the rules every thread in that project follows.
+      const standing = resolveProjectSettings(
+        yield* serverSettings.getSettings.pipe(Effect.orDie),
+        initial.task.target.projectId,
+      ).settings.standingInstructions;
+      const { stored, brief } = yield* freezeChannelBrief(
+        ledger,
+        initial,
+        owner,
+        prependStandingInstructions(
+          standing,
+          initial.task.kind === "turn"
+            ? turnInstruction(initial.task, botFiles)
+            : workerInstruction(initial.task, botFiles),
+        ).text,
+        {
+          notesPath: botFiles.notes,
+          notesRevision:
+            initial.task.briefVersion === undefined
+              ? yield* channelNotesRevision(botFiles.notes).pipe(
+                  Effect.provideService(FileSystem.FileSystem, fileSystem),
+                )
+              : null,
+          skillsPath: botFiles.skills,
+        },
+      );
       const task = stored.task;
-      const target = task.target;
-      if (target === undefined) return;
+      const target = task.target!;
       const ids = workerLaunchIdsFor(task.taskId, task.generation);
       const launched = yield* launches
         .launch({
@@ -257,8 +535,11 @@ const make = Effect.gen(function* () {
           workspaceStrategy: toLaunchStrategy(target.workspaceStrategy),
           initialMessage: {
             messageId: ids.messageId,
-            text: workerInstruction(task),
+            text: brief.deliveredText,
             attachments: [],
+            ...(target.memoryGrantCeiling === undefined
+              ? {}
+              : { memoryGrantCeiling: target.memoryGrantCeiling }),
           },
           createdBy: "system",
           creationSource: "server",
@@ -335,6 +616,7 @@ const make = Effect.gen(function* () {
       const bot = yield* ledger.getBot(stored.ownerId);
       return {
         ...(defaultProjectGone ? { requireNamedProject: true } : {}),
+        memoryGrantCeiling: yield* requesterMemoryCeiling(task),
         localProjects: shells
           .filter((shell) => shell.id !== bot?.bot.projectId)
           .map((shell) => ({ id: shell.id, title: shell.title })),
@@ -385,11 +667,37 @@ const make = Effect.gen(function* () {
         return yield* launch(stored, owner);
       }
       if (stored.task.status !== "received") return;
+      // At most this many pieces of a person's work hold a worker at once; the rest wait as
+      // received and the runtime, going oldest first, dispatches them as earlier work ends. A
+      // remote dispatch claims the task only after it resolves the machine, so the ones handed
+      // off but not yet claimed count too.
+      const requester = stored.task.requester;
+      let inFlight = 0;
+      for (const [reservedId, who] of yield* Ref.get(remoteReservations)) {
+        if (reservedId === taskId || !sameRequester(who, requester)) continue;
+        const current = yield* ledger.getTask(reservedId as ChannelTaskId);
+        if (current?.task.status === "received") inFlight += 1;
+        else yield* Ref.update(remoteReservations, (map) => withoutKey(map, reservedId));
+      }
+      const busy =
+        (yield* ledger.countBusyTasks({
+          ownerId: requester.ownerId,
+          principalId: requester.principalId,
+        })) + inFlight;
+      if (busy >= WORKERS_PER_REQUESTER) return;
       if (stored.task.host !== undefined) {
+        yield* Ref.update(remoteReservations, (map) => new Map(map).set(taskId, requester));
         return yield* remoteWorkers.dispatch(taskId, owner, yield* remoteHints(stored));
       }
       const resolved = yield* resolveTarget(stored);
-      if (resolved.type === "question") return yield* askRequester(stored, resolved.text, owner);
+      if (resolved.type === "question") {
+        return yield* askRequester(
+          stored,
+          resolved.text,
+          owner,
+          "choices" in resolved ? { choices: resolved.choices } : {},
+        );
+      }
       const claimedAt = DateTime.formatIso(yield* DateTime.now);
       const claimed = yield* commitTransition(
         ledger,
@@ -409,9 +717,288 @@ const make = Effect.gen(function* () {
       if (reread !== undefined) yield* launch(reread, owner);
     });
 
+  /**
+   * Sends a recorded follow-up to its task's worker: into the running run when it can take
+   * steering, else as the thread's next run. The ids come from the input, so a resend after a
+   * restart lands on the same message. The task then binds to the run that took it and the
+   * completion fence set with the follow-up is lifted in the same write, so the task settles on
+   * that run and never on the one before it.
+   */
+  const forwardFollowUp = (
+    pending: ChannelLedger.ChannelPendingEvent,
+    event: Extract<ChannelLedger.ChannelPendingEvent["event"], { type: "task.followup.received" }>,
+    owner: string,
+  ) =>
+    Effect.gen(function* () {
+      const stored = yield* ledger.getTask(event.taskId);
+      const worker = stored?.task.worker;
+      const target = stored?.task.target;
+      // Work that was stopped, finished, or restarted as a new generation never gets an old
+      // follow-up: sending it would start a run nothing reports on.
+      if (
+        stored === undefined ||
+        worker === undefined ||
+        target === undefined ||
+        (stored.task.status !== "running" && stored.task.status !== "waiting_input") ||
+        stored.task.generation !== event.payload.generation
+      ) {
+        yield* ledger.completeForward({ owner, sequence: pending.sequence });
+        return;
+      }
+      // In order per task: a later follow-up never overtakes an earlier one still waiting.
+      if (
+        yield* ledger.hasEarlierPendingForward({ taskId: event.taskId, sequence: pending.sequence })
+      ) {
+        return;
+      }
+      // A person stopped the worker's run in GOAT after this follow-up was recorded. Sending it
+      // would start the worker again; instead the follow-up is dropped and the fence lifted, so
+      // reconciliation records the stop as it does for any stopped run.
+      const records = yield* threads
+        .getThreadRecords(worker.threadId, ["runs"])
+        .pipe(Effect.option);
+      const newest = Option.match(records, {
+        onNone: () => undefined,
+        onSome: (value) =>
+          value.runs.toSorted((left, right) => left.ordinal - right.ordinal).at(-1),
+      });
+      if (newest?.status === "cancelled") {
+        const latest = (yield* ledger.getTask(event.taskId)) ?? stored;
+        if (latest.pendingAnswerMessageId !== undefined) {
+          const lifted = yield* commitTransition(
+            ledger,
+            latest,
+            { type: "task.worker.bound", payload: { worker: { ...worker, runId: newest.id } } },
+            { owner, pendingAnswerMessageId: null },
+          );
+          if (lifted === undefined) return;
+        }
+        yield* ledger.completeForward({ owner, sequence: pending.sequence });
+        return;
+      }
+      const refused = yield* Ref.make<DispatchModeRefusal | undefined>(undefined);
+      const send = (attempt: "first" | "queued") => {
+        const ids = turnSteerIdsFor(event.payload.inputId, attempt);
+        return threads
+          .sendToThread({
+            projectId: ProjectId.make(target.projectId),
+            commandId: ids.commandId,
+            threadId: worker.threadId,
+            messageId: ids.messageId,
+            text: "Follow-up from " + event.payload.from + ": " + event.payload.text,
+            attachments: [],
+            // First into the running run when it can take steering; the second attempt only
+            // queues, which the thread accepts whatever its run is doing.
+            mode: attempt === "first" ? "auto" : "queue",
+            createdBy: "user",
+            creationSource: "server",
+          })
+          .pipe(
+            Effect.provideService(DispatchModeLimit, {
+              runtimeMode: stored.task.requester.runtimeModeCeiling,
+              interactionMode: "default",
+              refused,
+            }),
+            Effect.result,
+          );
+      };
+      const rejected = (failure: { readonly _tag: string }) =>
+        failure._tag === "OrchestratorCommandRejectedError" ||
+        failure._tag === "OrchestratorCommandPreviouslyRejectedError";
+      let sent = yield* send("first");
+      // A rejected command id is refused for good, so a definite rejection gets one more attempt
+      // under its own ids rather than retrying the same ones forever.
+      if (
+        sent._tag === "Failure" &&
+        rejected(sent.failure) &&
+        (yield* Ref.get(refused)) === undefined
+      ) {
+        sent = yield* send("queued");
+      }
+      if (sent._tag === "Failure") {
+        const refusal = yield* Ref.get(refused);
+        if (refusal !== undefined || rejected(sent.failure)) {
+          // Read again: an earlier follow-up's question may have moved the task since.
+          const asked = yield* askRequester(
+            (yield* ledger.getTask(event.taskId)) ?? stored,
+            refusal !== undefined
+              ? "The thread doing this now runs in " +
+                  refusal.runtimeMode +
+                  " mode, above what this work may use, so I didn't pass on your follow-up (\"" +
+                  event.payload.text +
+                  "\"). Lower the thread's mode in GOAT, or say it again there."
+              : "The thread doing this didn't take your follow-up (\"" +
+                  event.payload.text +
+                  '"). Say it again, or open the thread in GOAT.',
+            owner,
+            { clearPendingAnswer: true },
+          );
+          // Done only once the person has been told; otherwise the next pass tells them.
+          if (asked === undefined) return;
+          yield* ledger.completeForward({ owner, sequence: pending.sequence });
+          return;
+        }
+        // Not known to be refused; the next pass sends it again under the same ids.
+        yield* Effect.logWarning("channel follow-up forward failed", {
+          taskId: stored.task.taskId,
+          cause: sent.failure,
+        });
+        return;
+      }
+      const latest = yield* ledger.getTask(event.taskId);
+      if (
+        latest === undefined ||
+        latest.task.worker === undefined ||
+        (latest.task.status !== "running" && latest.task.status !== "waiting_input")
+      ) {
+        // Settling waits for pending forwards, so this means the task was stopped meanwhile.
+        yield* ledger.completeForward({ owner, sequence: pending.sequence });
+        return;
+      }
+      // Bind the task to the run that took the follow-up. Only the follow-up that set the fence
+      // lifts it; an earlier one leaves a later one's fence in place.
+      const own = [
+        turnSteerIdsFor(event.payload.inputId, "first").messageId,
+        turnSteerIdsFor(event.payload.inputId, "queued").messageId,
+      ] as ReadonlyArray<string>;
+      const ownsFence =
+        latest.pendingAnswerMessageId !== undefined && own.includes(latest.pendingAnswerMessageId);
+      if (ownsFence || latest.task.worker.runId !== sent.success.run.id) {
+        const bound = yield* commitTransition(
+          ledger,
+          latest,
+          {
+            type: "task.worker.bound",
+            payload: { worker: { ...latest.task.worker, runId: sent.success.run.id } },
+          },
+          { owner, ...(ownsFence ? { pendingAnswerMessageId: null } : {}) },
+        );
+        // A concurrent write moved the task; the next pass sends again under the same ids,
+        // which lands on the same run, and binds then.
+        if (bound === undefined) return;
+      }
+      yield* ledger.completeForward({ owner, sequence: pending.sequence });
+    });
+
+  /**
+   * Stops the worker of a task a person stopped from chat: a full thread stop, which also holds
+   * anything queued behind the run, then every subagent the worker started. The ids come from the
+   * stop event, so replaying the forward after a crash stops once. A worker on another machine is
+   * stopped there. A launch that was in flight when the stop was asked lands on the thread id the
+   * task's generation derives, so that thread is stopped too once it exists. Each step that fails
+   * stays pending and is retried.
+   */
+  const stopWorker = (pending: ChannelLedger.ChannelPendingEvent, owner: string) =>
+    Effect.gen(function* () {
+      const stored = yield* ledger.getTask(pending.event.taskId);
+      const done = ledger.completeForward({ owner, sequence: pending.sequence });
+      if (stored === undefined) return yield* done;
+      const task = stored.task;
+      if (task.worker?.host !== undefined || task.target?.remote !== undefined) {
+        return yield* remoteWorkers.stop(pending, owner);
+      }
+      // Never claimed for a launch: the ledger write was the whole stop.
+      if (task.target === undefined) return yield* done;
+      const threadId =
+        task.worker?.threadId ?? workerLaunchIdsFor(task.taskId, task.generation).threadId;
+      const ids = stopIdsFor(pending.event.eventId);
+      const read = yield* threads
+        .getThreadRecords(threadId, ["runs", "providerThreads", "turnItems"], {
+          turnItemStatuses: ["pending", "running", "waiting"],
+        })
+        .pipe(Effect.result);
+      if (read._tag === "Failure") {
+        // A read that failed says nothing; only a thread that does not exist may be a launch
+        // that never landed, and only once the grace for one in flight has passed.
+        if (!isThreadMissing(read.failure)) return;
+        const age =
+          DateTime.toEpochMillis(yield* DateTime.now) - Date.parse(pending.event.occurredAt);
+        if (age > STOP_LAUNCH_GRACE_MS) yield* done;
+        return;
+      }
+      const records = { value: read.success };
+      // Anything not yet ended is alive: queued, preparing, starting, running, waiting, or a
+      // finished run whose provider still works in the background or in the cloud.
+      const runs = records.value.runs;
+      const latestRun = runs.findLast((run) => run.status !== "queued");
+      const background =
+        latestRun !== undefined &&
+        derivePendingBackgroundWork({
+          latestRun,
+          providerThreads: records.value.providerThreads,
+          turnItems: records.value.turnItems,
+          activeProviderThreadId: records.value.thread.activeProviderThreadId,
+          runs,
+        }).length > 0;
+      // A cloud task still running or being submitted keeps working whatever the runs say, as
+      // the orchestrator's own stop treats it.
+      const cloud = records.value.providerThreads.some(
+        (thread) =>
+          thread.cloudTask?.status === "running" || thread.cloudTask?.status === "submitting",
+      );
+      const live =
+        runs.findLast((run) => !ENDED_RUN_STATUSES.has(run.status)) ??
+        (background || cloud ? latestRun : undefined);
+      const stopThread = (commandId: CommandId) =>
+        threads
+          .dispatch({ type: "thread.stop", commandId, threadId, reason: "Stopped from GOAT Bot." })
+          .pipe(Effect.result);
+      const refusedFor = (failure: unknown) => {
+        const tag = (failure as { readonly _tag?: string })._tag;
+        return (
+          tag === "OrchestratorCommandRejectedError" ||
+          tag === "OrchestratorCommandPreviouslyRejectedError"
+        );
+      };
+      // A refused command id is refused for good, so each refusal while something still runs
+      // moves the stop to a new attempt id; the next pass tries that one.
+      const attempt = yield* ledger.stopAttempt(pending.event.eventId);
+      const stopped = yield* stopThread(
+        attempt === 0
+          ? ids.interrupt
+          : stopIdsFor(pending.event.eventId, "attempt-" + attempt).interrupt,
+      );
+      if (stopped._tag === "Failure" && refusedFor(stopped.failure) && live !== undefined) {
+        yield* ledger.advanceStopAttempt({
+          eventId: pending.event.eventId,
+          from: attempt,
+          now: DateTime.formatIso(yield* DateTime.now),
+        });
+      }
+      if (stopped._tag === "Failure") {
+        // A refused stop is done only if nothing is left running there.
+        if (!refusedFor(stopped.failure) || live !== undefined) {
+          yield* Effect.logWarning("channel worker stop failed; retrying", {
+            taskId: task.taskId,
+            cause: stopped.failure,
+          });
+          return;
+        }
+      }
+      const subagents = yield* threads
+        .stopDelegatedTasks({
+          threadId,
+          commandId: ids.subagents,
+          reason: "Stopped from GOAT Bot.",
+        })
+        .pipe(Effect.result);
+      if (subagents._tag === "Failure") {
+        yield* Effect.logWarning("channel subagent stop failed; retrying", {
+          taskId: task.taskId,
+          cause: subagents.failure,
+        });
+        return;
+      }
+      yield* done;
+    });
+
   const forward: ChannelDispatcher["Service"]["forward"] = (pending, owner) =>
     Effect.gen(function* () {
       const event = pending.event;
+      if (event.type === "task.followup.received") {
+        return yield* forwardFollowUp(pending, event, owner);
+      }
+      if (event.type === "task.cancelled") return yield* stopWorker(pending, owner);
       const stored = yield* ledger.getTask(event.taskId);
       const worker = stored?.task.worker;
       if (worker?.host !== undefined) return yield* remoteWorkers.forward(pending, owner);

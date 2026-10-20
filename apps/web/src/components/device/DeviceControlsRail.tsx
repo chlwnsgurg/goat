@@ -1,22 +1,22 @@
-import type { DevicePlatform } from "@t3tools/contracts";
+import type { DevicePlatform } from "@goat/contracts";
 import {
-  Camera,
-  ChevronLeft,
-  Home,
-  Keyboard,
-  Box,
-  Maximize,
-  MoreHorizontal,
-  PictureInPicture2,
-  Power,
-  RotateCcw,
-  SlidersHorizontal,
-  Smartphone,
-  Square,
-  Type,
-  X,
-} from "lucide-react";
-import { Moon, Sun } from "lucide";
+  CameraIcon as Camera,
+  ChevronLeftIcon as ChevronLeft,
+  HomeIcon as Home,
+  KeyboardIcon as Keyboard,
+  BoxIcon as Box,
+  MaximizeIcon as Maximize,
+  EllipsisIcon as MoreHorizontal,
+  PictureInPictureIcon as PictureInPicture2,
+  PowerIcon as Power,
+  RotateCcwIcon as RotateCcw,
+  SlidersHorizontalIcon as SlidersHorizontal,
+  SmartphoneIcon as Smartphone,
+  SquareIcon as Square,
+  TextIcon as Type,
+  XIcon as X,
+} from "~/components/solar";
+import { Moon, Sun } from "~/components/solar/nodes";
 import type { ReactNode } from "react";
 import { Button } from "~/components/ui/button";
 import { MorphIcon } from "~/components/MorphIcon";
@@ -34,7 +34,6 @@ import { Tooltip, TooltipPopup, TooltipTrigger } from "~/components/ui/tooltip";
 import type { DeviceStreamHandle, DeviceViewControls } from "./DeviceStreamView";
 import type { DeviceControls } from "./useDeviceControls";
 
-/** Stable floating controls for both presentations, regardless of panel width. */
 export function DeviceControlsRail(props: {
   platform: DevicePlatform;
   handle: DeviceStreamHandle | null;

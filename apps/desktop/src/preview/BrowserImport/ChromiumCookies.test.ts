@@ -2,7 +2,7 @@
 // OSCrypt primitives the module under test decrypts.
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { describe, expect, it } from "@effect/vitest";
-import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
+import * as NodeSqliteClient from "@goat/shared/nodeSqliteClient";
 import * as NodeCrypto from "node:crypto";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -102,7 +102,7 @@ describe("readChromiumCookieDatabase", () => {
       Effect.gen(function* () {
         const fileSystem = yield* FileSystem.FileSystem;
         const directory = yield* fileSystem.makeTempDirectoryScoped({
-          prefix: "t3code-missing-key-",
+          prefix: "goat-missing-key-",
         });
         const filename = `${directory}/Cookies`;
         const key = Buffer.from("0123456789abcdef");
@@ -140,7 +140,6 @@ describe("readChromiumCookieDatabase", () => {
         expect(partial.cookies.map((cookie) => cookie.value)).toEqual(["kept"]);
         expect(partial.undecryptable).toBe(1);
 
-        // A partitioned-only jar does not need its key: it is skipped separately.
         yield* Effect.gen(function* () {
           const sql = yield* SqlClient.SqlClient;
           yield* sql`delete from cookies where name = 'readable'`;
@@ -156,7 +155,7 @@ describe("readChromiumCookieDatabase", () => {
     Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;
       const directory = yield* fileSystem.makeTempDirectoryScoped({
-        prefix: "t3code-chromium-cookies-",
+        prefix: "goat-chromium-cookies-",
       });
       const filename = `${directory}/Cookies`;
       const key = Buffer.from("0123456789abcdef");
@@ -208,7 +207,7 @@ describe("readChromiumCookieDatabase", () => {
     Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;
       const directory = yield* fileSystem.makeTempDirectoryScoped({
-        prefix: "t3code-chromium-cookies-",
+        prefix: "goat-chromium-cookies-",
       });
       const filename = `${directory}/Cookies`;
       const key = Buffer.from("0123456789abcdef");
@@ -249,7 +248,7 @@ describe("readChromiumCookieDatabase", () => {
     Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;
       const directory = yield* fileSystem.makeTempDirectoryScoped({
-        prefix: "t3code-chromium-cookies-",
+        prefix: "goat-chromium-cookies-",
       });
       const filename = `${directory}/Cookies`;
       const cbcV10 = Buffer.from("0123456789abcdef");
@@ -295,7 +294,7 @@ describe("readChromiumCookieDatabase", () => {
     Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;
       const directory = yield* fileSystem.makeTempDirectoryScoped({
-        prefix: "t3code-chromium-cookies-",
+        prefix: "goat-chromium-cookies-",
       });
       const filename = `${directory}/Cookies`;
       const cbcV10 = Buffer.from("0123456789abcdef");
@@ -322,8 +321,6 @@ describe("readChromiumCookieDatabase", () => {
           ('ev11.example', 'empty-v11', '', ${encryptChromium("v11", "empty v11 value", cbcEmpty)}, '/', 0, 1, 0, 0)`;
       }).pipe(Effect.provide(NodeSqliteClient.layer({ filename })));
 
-      // The records' own keys fail, and the empty key recovers both — the
-      // retry Chromium itself performs.
       const recovered = yield* readChromiumCookieDatabase(
         filename,
         { cbcV10, cbcV11, cbcEmpty },
@@ -335,8 +332,6 @@ describe("readChromiumCookieDatabase", () => {
       ]);
       expect(recovered.undecryptable).toBe(0);
 
-      // Matching Chromium: a record whose own key is missing entirely is not
-      // retried with the empty key.
       const noV11 = yield* readChromiumCookieDatabase(filename, { cbcV10, cbcEmpty }, "linux");
       expect(noV11.cookies.map(({ name }) => name)).toEqual(["empty-v10"]);
       expect(noV11.undecryptableHosts).toEqual(["ev11.example"]);
@@ -347,7 +342,7 @@ describe("readChromiumCookieDatabase", () => {
     Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;
       const directory = yield* fileSystem.makeTempDirectoryScoped({
-        prefix: "t3code-chromium-cookies-",
+        prefix: "goat-chromium-cookies-",
       });
       const filename = `${directory}/Cookies`;
       const key = Buffer.from("0123456789abcdef");
@@ -379,7 +374,7 @@ describe("readChromiumCookieDatabase", () => {
     Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;
       const directory = yield* fileSystem.makeTempDirectoryScoped({
-        prefix: "t3code-chromium-cookies-",
+        prefix: "goat-chromium-cookies-",
       });
       const filename = `${directory}/Cookies`;
 
@@ -403,7 +398,7 @@ describe("readChromiumCookieDatabase", () => {
     Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;
       const directory = yield* fileSystem.makeTempDirectoryScoped({
-        prefix: "t3code-chromium-cookies-",
+        prefix: "goat-chromium-cookies-",
       });
       const filename = `${directory}/Cookies`;
       const key = Buffer.from("0123456789abcdef");
@@ -441,7 +436,7 @@ describe("readChromiumCookieDatabase", () => {
     Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;
       const directory = yield* fileSystem.makeTempDirectoryScoped({
-        prefix: "t3code-chromium-cookies-",
+        prefix: "goat-chromium-cookies-",
       });
       const legacyFilename = `${directory}/LegacyCookies`;
       const chipsFilename = `${directory}/ChipsCookies`;

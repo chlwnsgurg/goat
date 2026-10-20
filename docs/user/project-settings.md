@@ -27,6 +27,14 @@ again.
 Providers and diagnostics are per machine: they show one environment at a time, the primary
 one until you pick another. Every other setting fans out to the selection.
 
+With a project selected, a provider's switch in **Settings → Providers** turns it on or off for
+that project only, in either direction: a provider off on the machine can be used in one project,
+and one on everywhere can be kept out of another. That project's model pickers follow the switch,
+and no new turn there can start on a provider it turned off, including queued messages and
+follow-ups from delegated tasks. A turn already running when the switch flips finishes. A delegated
+task's result still lands in its parent thread, which sees it on its next turn. Reset returns the project to the
+machine's setting. Every other provider setting stays per machine.
+
 On mobile, open **Settings** and use the filter in its header to choose connected environments
 and a project. The filter stays available in server-setting pages. With **All projects** selected,
 the **Server settings** categories and auto-settle controls in **Thread behavior** edit the
@@ -52,6 +60,19 @@ to override its environment defaults. Worktree directories keep their original n
 If generation fails, or a custom name is invalid or already taken, the temporary
 branch name remains.
 
+## Standing instructions for launched threads
+
+In **Settings → General → Standing instructions**, write the rules every thread an
+agent launches should follow, such as which model to use for subagents or how to
+commit and open pull requests. GOAT puts them in front of the first message of each
+thread an agent, GOAT Bot, or Slack starts here, including threads started from
+another machine over SSH, which get this machine's instructions. Select a project to
+replace them for that project; an empty project value turns them off there.
+
+The launched thread shows them as a collapsed **Standing instructions** block above
+the task, with a short version code that changes whenever the text does. Threads you
+start yourself are unaffected, and an agent can ask for a launch without them.
+
 ## Scheduled tasks on mobile
 
 Open **Settings → Scheduled tasks** to create recurring tasks or manage existing
@@ -69,9 +90,11 @@ Leaving an edited form asks before discarding unsaved changes.
 
 In **Settings → Scheduled tasks**, choose **On webhook**
 as a task's schedule to run it whenever another service calls its URL, such as
-GitHub on a new pull request or a CI job that failed. A public URL needs a
-[T3 Connect](remote-access.md) managed tunnel; after you save the task, copy
-its URL from the editor. Without one, the editor shows only the URL's path.
+GitHub on a new pull request or a CI job that failed. The editor shows the
+full URL on the address you use to reach the environment, such as a LAN or
+Tailscale address, and only the path when that address is unknown. GOAT-provided
+public URLs arrive with GOAT Connect; until then, a sender outside your network
+needs a public HTTPS address you set up yourself.
 **Rotate** replaces the URL and the old one stops working.
 
 The prompt decides what the agent sees. Placeholders pull values out of the
@@ -79,6 +102,17 @@ request: `{{body.path}}` for a JSON or form field, `{{headers.name}}`,
 `{{query.name}}`, `{{body}}` for the raw body, and `{{request}}` for everything.
 For example, `Review this PR: {{body.pull_request.html_url}}` sends only the
 pull request link. A placeholder with no value is left empty.
+
+Each value reaches the agent wrapped in `<webhook-data-…>` tags and marked as
+untrusted request data. This helps the agent tell it apart from your
+instructions, but it doesn't guarantee the agent ignores what the text says.
+Inside a value, every `$`, other currency sign and `@`, and a `/` that starts
+a lone word, gets an invisible character after it, so mentions like `$skill`,
+`@file` and `/command` don't act. Text copied from a value, such as an email
+address or a command, carries that character too. Without a signature, anyone
+with the URL can start a run with any content. A signature only proves which
+service sent the request: a GitHub payload still carries text written by any
+GitHub user.
 
 For GitHub, turn on **Require signature**, keep the header
 `x-hub-signature-256`, hex encoding and the `sha256=` prefix, and enter the
@@ -92,12 +126,8 @@ requests and the prompt each one produced.
 
 If the environment is offline, the sender gets an error and nothing runs;
 redeliver from the sender, such as GitHub's **Recent Deliveries**, once it is
-back. To have T3 Connect keep requests instead, turn on **Hold webhooks while
-offline** in **Settings → Connections**. T3 Connect then stores requests to a
-T3 Connect URL for up to 24 hours and delivers them when the environment
-returns. Leave it off if you don't want request bodies stored outside your
-machine. To skip requests that waited too long, set **Skip requests older
-than** on the task.
+back. Holding requests while the environment is offline is unavailable until
+GOAT Connect arrives.
 
 ## Defaults and inheritance
 
@@ -122,12 +152,29 @@ itself, or **Skip** to leave them for a setup script. It resolves in the same or
 workspace default: a `"worktreeSubmodules"` value in the `t3.json` of the branch being checked out
 applies when the project and environment are both on **Inherit**.
 
+## Check an agent's work when its run completes
+
+An agent's reported tests are only what it says it ran. To have GOAT run a check itself, turn on
+**Run as a check when an agent's run completes** for one of the project's actions, such as
+`vp test run`. Each time a run completes, the action runs in the thread's worktree, and its exit
+code, duration and last lines of output are stored with that run's result next to the agent's
+reported tests, where orchestrating agents read them with `goat_thread_read`. A check that runs
+longer than 10 minutes is stopped and recorded as timed out. A failing check does not change the
+run's outcome.
+
+Threads in the project's main checkout record the check as skipped, because other threads may be
+editing there. Turn on **Also check threads in the shared checkout** to run it there as well.
+
 ## Worktree location
 
 New worktrees go in the `worktrees` folder of the GOAT home directory. To put them somewhere else,
 such as another drive, set **Settings → Storage → Worktree location** to an absolute path like
 `D:\worktrees` or `~/worktrees`. The setting is per machine. Existing worktrees stay where they
 are, and cleanup covers both the default folder and the custom one.
+
+If the custom folder can't be used when a thread starts, for example because its drive is
+unmounted, the worktree goes in the default folder instead. The thread's setup steps say so, and
+**Settings → Storage** shows a warning under **Worktree location** until the folder is back.
 
 ## Storage cleanup
 
@@ -140,9 +187,10 @@ Inherit follows each machine's rules; Off keeps that project's worktrees until y
 manually. Custom applies separate worktree rules to the selected project or checkout. Browser
 captures and log retention remain machine-wide.
 
-Worktrees can be removed after a chosen number of inactive days, after merging, or when they
-have no commits beyond the default branch. Only GOAT-managed worktrees are eligible. Active
-sessions and shared worktrees prevent removal. **Keep worktrees with local changes** defaults
+Worktrees can be removed after a chosen number of inactive days, after a thread settles, after
+merging, or when they have no commits beyond the default branch. Set settled retention to 0 days
+to remove a worktree at the next cleanup after settlement. Only GOAT-managed worktrees are eligible.
+Active sessions and shared worktrees prevent removal. **Keep worktrees with local changes** defaults
 to **Uncommitted changes**, which protects tracked edits and untracked files but deletes ignored
 files such as `.env` and build output. **Any local files** also protects ignored files other than
 `node_modules`. **Edited tracked files** protects only tracked edits and allows untracked and
@@ -158,6 +206,7 @@ Existing prompts for deleting a worktree manually remain available when this pol
 
 Choose **Delete now** to run the enabled rules immediately. The latest results show which
 worktrees were removed or kept and why, plus any failures.
+Results also list folders in the worktree folder that no thread uses, with their sizes; cleanup never removes them, so remove them manually if you want.
 
 Browser captures and rotated logs have separate retention periods. Expired capture links stop
 working. Current logs, message attachments, and browser profiles are kept.

@@ -1,34 +1,24 @@
-/**
- * ClaudeDriver — `ProviderDriver` for the Claude Agent SDK runtime.
- *
- * Mirrors `CodexDriver`: a plain value whose `create()` returns one
- * `ProviderInstance` bundling `snapshot` / `adapter` / `textGeneration`
- * closures captured over the per-instance `ClaudeSettings`.
- *
- * Unlike Codex, the Claude snapshot probe may invoke a secondary probe
- * (`probeClaudeCapabilities`) to read Anthropic account + slash-command
- * metadata. That probe is per-instance and keyed by binary + resolved HOME so
- * two concurrent Claude instances don't cross-contaminate account metadata.
- *
- * @module provider/Drivers/ClaudeDriver
- */
-import { ClaudeSettings, ProviderDriverKind } from "@t3tools/contracts";
+import * as AdapterInfrastructure from "../ProviderOrchestrationAdapterInfrastructure.ts";
+import * as Option from "effect/Option";
+import { ClaudeSettings, ProviderDriverKind } from "@goat/contracts";
 import * as Cache from "effect/Cache";
 import * as Duration from "effect/Duration";
 import * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
+import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
 import { HttpClient } from "effect/http";
 import { ChildProcessSpawner } from "effect/process";
 
 import { makeClaudeTextGeneration } from "../../textGeneration/ClaudeTextGeneration.ts";
-import * as ProviderLatestVersions from "@t3tools/provider-core/server/ProviderLatestVersions";
-import * as ProviderHost from "@t3tools/provider-core/server/ProviderHost";
+import * as ProviderLatestVersions from "@goat/provider-core/server/ProviderLatestVersions";
+import * as ProviderHost from "@goat/provider-core/server/ProviderHost";
 import * as ServerConfig from "../../config.ts";
-import { expandHomePath } from "@t3tools/provider-core/server/pathExpansion";
-import * as ProviderEventLoggers from "@t3tools/provider-core/server/ProviderEventLoggers";
+import { expandHomePath } from "@goat/provider-core/server/pathExpansion";
+import * as ProviderEventLoggers from "@goat/provider-core/server/ProviderEventLoggers";
 import {
   createClaudeAdapterV2,
   type ClaudeAdapterV2DriverEnv,
@@ -43,39 +33,48 @@ import {
   makePendingClaudeProvider,
   probeClaudeCapabilities,
   probeClaudeWorkspaceSnapshot,
+  type ClaudeCapabilitiesProbe,
 } from "../ClaudeProvider.ts";
-import { makeManagedServerProvider } from "@t3tools/provider-core/server/managedProvider";
-import * as ModelCatalog from "@t3tools/provider-core/server/ModelCatalog";
+import { makeManagedServerProvider } from "@goat/provider-core/server/managedProvider";
+import * as ModelCatalog from "@goat/provider-core/server/ModelCatalog";
 import { resolveClaudeModelCatalog } from "../ClaudeModelCatalog.ts";
 import {
   defaultProviderContinuationIdentity,
   type ProviderDriver,
   type ProviderInstance,
-} from "@t3tools/provider-core/server/driver";
-import { withInstanceIdentity } from "@t3tools/provider-core/server/instanceIdentity";
-import { mergeProviderInstanceEnvironment } from "@t3tools/provider-core/server/instanceEnvironment";
+} from "@goat/provider-core/server/driver";
+import { withInstanceIdentity } from "@goat/provider-core/server/instanceIdentity";
+import { mergeProviderInstanceEnvironment } from "@goat/provider-core/server/instanceEnvironment";
 import {
   enrichProviderSnapshotWithVersionAdvisory,
   makeCachedProviderMaintenanceResolution,
   makePackageManagedProviderMaintenanceResolver,
   normalizeCommandPath,
   resolveProviderMaintenanceCapabilitiesEffect,
-} from "@t3tools/provider-core/server/maintenanceResolver";
+} from "@goat/provider-core/server/maintenanceResolver";
 import {
   haveProviderSnapshotSettingsChanged,
   makeProviderSnapshotSettingsSource,
   type ProviderSnapshotSettings,
-} from "@t3tools/provider-core/server/snapshotSettings";
+} from "@goat/provider-core/server/snapshotSettings";
 import {
   makeClaudeCapabilitiesCacheKey,
   makeClaudeContinuationGroupKey,
   resolveClaudeHomePath,
 } from "./ClaudeHome.ts";
-import * as HostProcess from "@t3tools/shared/HostProcess";
+import * as HostProcess from "@goat/shared/HostProcess";
+import * as PtyAdapter from "@goat/shared/PtyAdapter";
+import { makeClaudeAuth } from "./ClaudeAuth.ts";
 const decodeClaudeSettings = Schema.decodeSync(ClaudeSettings);
 
 const DRIVER_KIND = ProviderDriverKind.make("claudeAgent");
 const CAPABILITIES_PROBE_TTL = Duration.minutes(5);
+
+const withoutUsage = (capabilities: ClaudeCapabilitiesProbe): ClaudeCapabilitiesProbe => {
+  const result = { ...capabilities };
+  delete result.usage;
+  return result;
+};
 
 function isClaudeNativeCommandPath(commandPath: string): boolean {
   const normalized = normalizeCommandPath(commandPath);
@@ -120,10 +119,14 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv, Path.
   usage: claudeUsageReader,
   create: ({ instanceId, displayName, accentColor, environment, enabled, config }) =>
     Effect.gen(function* () {
+      const host = yield* ProviderHost.ProviderHost;
       const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
       const fileSystem = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
-      const { cwd } = yield* ServerConfig.ServerConfig;
+      const pty = yield* Effect.serviceOption(PtyAdapter.PtyAdapter);
+      // The server cwd is $HOME in packaged desktop builds, and `claude`
+      // wrappers that scope themselves to their cwd refuse to run there.
+      const { stateDir } = yield* ServerConfig.ServerConfig;
       const httpClient = yield* HttpClient.HttpClient;
       const latestVersions = yield* ProviderLatestVersions.ProviderLatestVersions;
       const resetCreditCoordinator = yield* ResetCreditCoordinator.ResetCreditCoordinator;
@@ -170,6 +173,9 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv, Path.
       });
 
       const scopedLimitNames = yield* makeClaudeScopedLimitNames;
+      const memoryAdmission = yield* Effect.serviceOption(
+        AdapterInfrastructure.ProviderMemoryAdmission,
+      );
       const orchestrationAdapter = yield* createClaudeAdapterV2(
         {
           instanceId,
@@ -179,7 +185,15 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv, Path.
           enabled,
           config,
         },
-        { scopedLimitNames, onUsageLimits: (update) => snapshot.applyUsageLimits(update) },
+        {
+          scopedLimitNames,
+          onUsageLimits: (update) => snapshot.applyUsageLimits(update),
+          ...(Option.isNone(memoryAdmission)
+            ? {}
+            : {
+                mcpCredentialRotations: memoryAdmission.value.rotations,
+              }),
+        },
       ).pipe(
         Effect.mapError(
           (cause) =>
@@ -195,42 +209,77 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv, Path.
         effectiveConfig,
         processEnv,
         modelCatalog,
+        {
+          providerInstanceId: instanceId,
+          ...(host.environmentId === undefined ? {} : { environmentId: host.environmentId }),
+        },
       );
 
       // Per-instance capabilities cache: keyed on binary + resolved HOME so
       // account-specific probes never share auth metadata across instances.
-      const capabilitiesProbeCache = yield* Cache.make({
-        capacity: 1,
-        timeToLive: CAPABILITIES_PROBE_TTL,
-        lookup: () =>
-          Effect.all([
-            probeClaudeCapabilities(effectiveConfig, processEnv, cwd),
-            ClaudeResetCredits.readClaudeOrganizationId(accountConfigPath),
-          ]).pipe(
-            Effect.map(([capabilities, workspaceId]) =>
-              capabilities && workspaceId ? { ...capabilities, workspaceId } : capabilities,
+      // A transient miss may reuse the last account once, but its usage windows keep their age.
+      const lastGoodCapabilities = yield* Ref.make<ClaudeCapabilitiesProbe | undefined>(undefined);
+      const capabilitiesProbeCache = yield* Cache.makeWith(
+        () =>
+          probeClaudeCapabilities(effectiveConfig, processEnv, stateDir).pipe(
+            Effect.flatMap((capabilities) =>
+              ClaudeResetCredits.readClaudeOrganizationId(accountConfigPath).pipe(
+                Effect.map((workspaceId) => ({
+                  _tag: "fresh" as const,
+                  capabilities:
+                    workspaceId === undefined ? capabilities : { ...capabilities, workspaceId },
+                })),
+              ),
+            ),
+            Effect.tap(({ capabilities }) => Ref.set(lastGoodCapabilities, capabilities)),
+            Effect.catch((error) =>
+              Ref.getAndSet(lastGoodCapabilities, undefined).pipe(
+                Effect.flatMap((capabilities) =>
+                  capabilities === undefined
+                    ? Effect.fail(error)
+                    : ClaudeResetCredits.readClaudeOrganizationId(accountConfigPath).pipe(
+                        Effect.flatMap((workspaceId) =>
+                          workspaceId === capabilities.workspaceId
+                            ? Effect.succeed({
+                                _tag: "fallback" as const,
+                                capabilities: withoutUsage(capabilities),
+                              })
+                            : Effect.fail(error),
+                        ),
+                      ),
+                ),
+              ),
             ),
             Effect.provideService(FileSystem.FileSystem, fileSystem),
             Effect.provideService(Path.Path, path),
           ),
-      });
+        {
+          capacity: 1,
+          timeToLive: (exit) =>
+            // Only a fresh probe earns the TTL; a failure or its fallback retries on the next check.
+            Exit.isSuccess(exit) && exit.value._tag === "fresh"
+              ? CAPABILITIES_PROBE_TTL
+              : Duration.zero,
+        },
+      );
       const capabilitiesCacheKey = yield* makeClaudeCapabilitiesCacheKey(
         effectiveConfig,
-        cwd,
+        stateDir,
         processEnv,
       );
+      const resolveCapabilities = Cache.get(capabilitiesProbeCache, capabilitiesCacheKey).pipe(
+        Effect.map((result) => result.capabilities),
+      );
 
-      // Start the TTL-gated refresh without delaying provider readiness. The
-      // next check observes a remote manifest after the background fetch lands.
       const checkProvider = catalogService.refreshInBackground.pipe(
         Effect.andThen(
           modelCatalog.pipe(
             Effect.flatMap((catalog) =>
               checkClaudeProviderStatus(
                 effectiveConfig,
-                () => Cache.get(capabilitiesProbeCache, capabilitiesCacheKey),
+                () => resolveCapabilities,
                 processEnv,
-                cwd,
+                stateDir,
                 catalog,
                 scopedLimitNames,
                 (version) =>
@@ -241,7 +290,12 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv, Path.
                   ),
               ),
             ),
-            Effect.map(stampIdentity),
+            Effect.map((provider) =>
+              stampIdentity({
+                ...provider,
+                setup: { canAuthenticate: Option.isSome(pty), canInstall: false },
+              }),
+            ),
           ),
         ),
         Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
@@ -258,7 +312,12 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv, Path.
         initialSnapshot: (settings) =>
           modelCatalog.pipe(
             Effect.flatMap((catalog) => makePendingClaudeProvider(settings.provider, catalog)),
-            Effect.map(stampIdentity),
+            Effect.map((provider) =>
+              stampIdentity({
+                ...provider,
+                setup: { canAuthenticate: Option.isSome(pty), canInstall: false },
+              }),
+            ),
           ),
         checkProvider,
         enrichSnapshot: ({ settings, snapshot, publishSnapshot }) =>
@@ -283,6 +342,21 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv, Path.
             }),
         ),
       );
+
+      const auth = Option.isSome(pty)
+        ? yield* makeClaudeAuth({
+            instanceId,
+            config: effectiveConfig,
+            environment: processEnv,
+            cwd: stateDir,
+            pty: pty.value,
+            onChanged: Effect.gen(function* () {
+              yield* Ref.set(lastGoodCapabilities, undefined);
+              yield* Cache.invalidateAll(capabilitiesProbeCache);
+              yield* snapshot.refresh;
+            }),
+          })
+        : undefined;
 
       // Same rules as Codex: serialised on the config directory that holds the
       // login, one request id kept until Claude answers (a cooldown or rate
@@ -321,8 +395,6 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv, Path.
                 cause,
               }),
           ),
-          // Re-probe after any answer, but only a reset claims the limits
-          // changed, so only a reset reports an unconfirmed refresh.
           Effect.tap((outcome) =>
             Effect.gen(function* () {
               const before = (yield* snapshot.getSnapshot).usageLimits?.checkedAt;
@@ -357,6 +429,7 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv, Path.
         accentColor,
         enabled,
         snapshot,
+        ...(auth ? { auth } : {}),
         invalidateCaches: Cache.invalidateAll(capabilitiesProbeCache),
         snapshotForCwd: (cwd: string) =>
           snapshot.getSnapshot.pipe(

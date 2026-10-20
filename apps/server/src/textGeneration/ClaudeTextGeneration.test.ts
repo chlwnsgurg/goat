@@ -1,14 +1,17 @@
+import { MemoryGenerationRunnerError } from "@goat/provider-core/server/memoryGenerationRunner";
+import * as M from "@goat/contracts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { it } from "@effect/vitest";
-import { ClaudeSettings, ProviderInstanceId } from "@t3tools/contracts";
-import * as HostProcess from "@t3tools/shared/HostProcess";
-import { createModelSelection } from "@t3tools/shared/model";
+import { ClaudeSettings, ProviderInstanceId } from "@goat/contracts";
+import * as HostProcess from "@goat/shared/HostProcess";
+import { createModelSelection } from "@goat/shared/model";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 import { expect } from "vite-plus/test";
+import * as PlatformError from "effect/PlatformError";
 
 import * as ServerConfig from "../config.ts";
 import {
@@ -19,13 +22,14 @@ import {
   SYNTHETIC_CLAUDE_THINKING_MODEL,
 } from "../provider/ClaudeModelCatalog.testFixtures.ts";
 import * as TextGeneration from "./TextGeneration.ts";
-import { sanitizeThreadTitle } from "@t3tools/provider-core/server/textGenerationUtils";
+import { sanitizeThreadTitle } from "@goat/provider-core/server/textGenerationUtils";
 import { makeClaudeTextGeneration } from "./ClaudeTextGeneration.ts";
-import { writeFakeCli } from "@t3tools/provider-testing/fakeCli";
+import { ClaudeMemoryRegistryQuery, verifyClaudeMemoryHooks } from "./ClaudeMemoryIsolation.ts";
+import { writeFakeCli } from "@goat/provider-testing/fakeCli";
 const decodeClaudeSettings = Schema.decodeSync(ClaudeSettings);
 
 const layerClaudeTextGenerationTest = ServerConfig.ServerConfig.layerTest(process.cwd(), {
-  prefix: "t3code-claude-text-generation-test-",
+  prefix: "goat-claude-text-generation-test-",
 }).pipe(Layer.provideMerge(NodeServices.layer));
 
 // The stub behaviour lives in Node so the same implementation runs on Windows,
@@ -51,9 +55,26 @@ function makeFakeClaudeBinary(dir: string) {
   });
 }
 
+const registryOutput = (key: string, settings: string, type = "REG_SZ") =>
+  `\n${key.replace("HKLM", "HKEY_LOCAL_MACHINE").replace("HKCU", "HKEY_CURRENT_USER")}\n    Settings    ${type}    ${settings}\n`;
+const emptyRegistryQuery = (key: string) => Effect.succeed(registryOutput(key, "{}"));
+
 function withFakeClaudeEnv<A, E, R>(
   input: {
+    memoryRunnerContext?: import("@goat/provider-core/server/memoryGenerationRunner").MemoryGenerationRunnerContext;
     output: string;
+    managedSettings?: string;
+    managedDropin?: string;
+    managedUnreadable?: boolean;
+    subscription?: boolean;
+    oauthToken?: boolean;
+    wsl?: boolean;
+    platform?: NodeJS.Platform;
+    registryQuery?: (key: string) => Effect.Effect<string, MemoryGenerationRunnerError>;
+    expectNoSpawn?: boolean;
+    expectSpawn?: boolean;
+    directApi?: boolean;
+    defaultEndpoint?: boolean;
     exitCode?: number;
     stderr?: string;
     argsMustContain?: string;
@@ -67,64 +88,64 @@ function withFakeClaudeEnv<A, E, R>(
 ) {
   return Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
-    const tempDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3code-claude-text-" });
+    const tempDir = yield* fs.makeTempDirectoryScoped({ prefix: "goat-claude-text-" });
     const binDir = yield* makeFakeClaudeBinary(tempDir);
     const pathDelimiter = (yield* HostProcess.isWindows) ? ";" : ":";
     const previousPath = process.env.PATH;
-    const previousOutput = process.env.T3_FAKE_CLAUDE_OUTPUT;
-    const previousExitCode = process.env.T3_FAKE_CLAUDE_EXIT_CODE;
-    const previousStderr = process.env.T3_FAKE_CLAUDE_STDERR;
-    const previousArgsMustContain = process.env.T3_FAKE_CLAUDE_ARGS_MUST_CONTAIN;
-    const previousArgsMustNotContain = process.env.T3_FAKE_CLAUDE_ARGS_MUST_NOT_CONTAIN;
-    const previousStdinMustContain = process.env.T3_FAKE_CLAUDE_STDIN_MUST_CONTAIN;
-    const previousConfigDirMustBe = process.env.T3_FAKE_CLAUDE_CONFIG_DIR_MUST_BE;
-    const previousCwdMustNotBe = process.env.T3_FAKE_CLAUDE_CWD_MUST_NOT_BE;
+    const previousOutput = process.env.GOAT_FAKE_CLAUDE_OUTPUT;
+    const previousExitCode = process.env.GOAT_FAKE_CLAUDE_EXIT_CODE;
+    const previousStderr = process.env.GOAT_FAKE_CLAUDE_STDERR;
+    const previousArgsMustContain = process.env.GOAT_FAKE_CLAUDE_ARGS_MUST_CONTAIN;
+    const previousArgsMustNotContain = process.env.GOAT_FAKE_CLAUDE_ARGS_MUST_NOT_CONTAIN;
+    const previousStdinMustContain = process.env.GOAT_FAKE_CLAUDE_STDIN_MUST_CONTAIN;
+    const previousConfigDirMustBe = process.env.GOAT_FAKE_CLAUDE_CONFIG_DIR_MUST_BE;
+    const previousCwdMustNotBe = process.env.GOAT_FAKE_CLAUDE_CWD_MUST_NOT_BE;
 
     yield* Effect.acquireRelease(
       Effect.sync(() => {
         process.env.PATH = `${binDir}${pathDelimiter}${previousPath ?? ""}`;
-        process.env.T3_FAKE_CLAUDE_OUTPUT = input.output;
+        process.env.GOAT_FAKE_CLAUDE_OUTPUT = input.output;
 
         if (input.exitCode !== undefined) {
-          process.env.T3_FAKE_CLAUDE_EXIT_CODE = String(input.exitCode);
+          process.env.GOAT_FAKE_CLAUDE_EXIT_CODE = String(input.exitCode);
         } else {
-          delete process.env.T3_FAKE_CLAUDE_EXIT_CODE;
+          delete process.env.GOAT_FAKE_CLAUDE_EXIT_CODE;
         }
 
         if (input.stderr !== undefined) {
-          process.env.T3_FAKE_CLAUDE_STDERR = input.stderr;
+          process.env.GOAT_FAKE_CLAUDE_STDERR = input.stderr;
         } else {
-          delete process.env.T3_FAKE_CLAUDE_STDERR;
+          delete process.env.GOAT_FAKE_CLAUDE_STDERR;
         }
 
         if (input.argsMustContain !== undefined) {
-          process.env.T3_FAKE_CLAUDE_ARGS_MUST_CONTAIN = input.argsMustContain;
+          process.env.GOAT_FAKE_CLAUDE_ARGS_MUST_CONTAIN = input.argsMustContain;
         } else {
-          delete process.env.T3_FAKE_CLAUDE_ARGS_MUST_CONTAIN;
+          delete process.env.GOAT_FAKE_CLAUDE_ARGS_MUST_CONTAIN;
         }
 
         if (input.argsMustNotContain !== undefined) {
-          process.env.T3_FAKE_CLAUDE_ARGS_MUST_NOT_CONTAIN = input.argsMustNotContain;
+          process.env.GOAT_FAKE_CLAUDE_ARGS_MUST_NOT_CONTAIN = input.argsMustNotContain;
         } else {
-          delete process.env.T3_FAKE_CLAUDE_ARGS_MUST_NOT_CONTAIN;
+          delete process.env.GOAT_FAKE_CLAUDE_ARGS_MUST_NOT_CONTAIN;
         }
 
         if (input.stdinMustContain !== undefined) {
-          process.env.T3_FAKE_CLAUDE_STDIN_MUST_CONTAIN = input.stdinMustContain;
+          process.env.GOAT_FAKE_CLAUDE_STDIN_MUST_CONTAIN = input.stdinMustContain;
         } else {
-          delete process.env.T3_FAKE_CLAUDE_STDIN_MUST_CONTAIN;
+          delete process.env.GOAT_FAKE_CLAUDE_STDIN_MUST_CONTAIN;
         }
 
         if (input.cwdMustNotBe !== undefined) {
-          process.env.T3_FAKE_CLAUDE_CWD_MUST_NOT_BE = input.cwdMustNotBe;
+          process.env.GOAT_FAKE_CLAUDE_CWD_MUST_NOT_BE = input.cwdMustNotBe;
         } else {
-          delete process.env.T3_FAKE_CLAUDE_CWD_MUST_NOT_BE;
+          delete process.env.GOAT_FAKE_CLAUDE_CWD_MUST_NOT_BE;
         }
 
         if (input.configDirMustBe !== undefined) {
-          process.env.T3_FAKE_CLAUDE_CONFIG_DIR_MUST_BE = input.configDirMustBe;
+          process.env.GOAT_FAKE_CLAUDE_CONFIG_DIR_MUST_BE = input.configDirMustBe;
         } else {
-          delete process.env.T3_FAKE_CLAUDE_CONFIG_DIR_MUST_BE;
+          delete process.env.GOAT_FAKE_CLAUDE_CONFIG_DIR_MUST_BE;
         }
       }),
       () =>
@@ -132,66 +153,780 @@ function withFakeClaudeEnv<A, E, R>(
           process.env.PATH = previousPath;
 
           if (previousOutput === undefined) {
-            delete process.env.T3_FAKE_CLAUDE_OUTPUT;
+            delete process.env.GOAT_FAKE_CLAUDE_OUTPUT;
           } else {
-            process.env.T3_FAKE_CLAUDE_OUTPUT = previousOutput;
+            process.env.GOAT_FAKE_CLAUDE_OUTPUT = previousOutput;
           }
 
           if (previousExitCode === undefined) {
-            delete process.env.T3_FAKE_CLAUDE_EXIT_CODE;
+            delete process.env.GOAT_FAKE_CLAUDE_EXIT_CODE;
           } else {
-            process.env.T3_FAKE_CLAUDE_EXIT_CODE = previousExitCode;
+            process.env.GOAT_FAKE_CLAUDE_EXIT_CODE = previousExitCode;
           }
 
           if (previousStderr === undefined) {
-            delete process.env.T3_FAKE_CLAUDE_STDERR;
+            delete process.env.GOAT_FAKE_CLAUDE_STDERR;
           } else {
-            process.env.T3_FAKE_CLAUDE_STDERR = previousStderr;
+            process.env.GOAT_FAKE_CLAUDE_STDERR = previousStderr;
           }
 
           if (previousArgsMustContain === undefined) {
-            delete process.env.T3_FAKE_CLAUDE_ARGS_MUST_CONTAIN;
+            delete process.env.GOAT_FAKE_CLAUDE_ARGS_MUST_CONTAIN;
           } else {
-            process.env.T3_FAKE_CLAUDE_ARGS_MUST_CONTAIN = previousArgsMustContain;
+            process.env.GOAT_FAKE_CLAUDE_ARGS_MUST_CONTAIN = previousArgsMustContain;
           }
 
           if (previousArgsMustNotContain === undefined) {
-            delete process.env.T3_FAKE_CLAUDE_ARGS_MUST_NOT_CONTAIN;
+            delete process.env.GOAT_FAKE_CLAUDE_ARGS_MUST_NOT_CONTAIN;
           } else {
-            process.env.T3_FAKE_CLAUDE_ARGS_MUST_NOT_CONTAIN = previousArgsMustNotContain;
+            process.env.GOAT_FAKE_CLAUDE_ARGS_MUST_NOT_CONTAIN = previousArgsMustNotContain;
           }
 
           if (previousStdinMustContain === undefined) {
-            delete process.env.T3_FAKE_CLAUDE_STDIN_MUST_CONTAIN;
+            delete process.env.GOAT_FAKE_CLAUDE_STDIN_MUST_CONTAIN;
           } else {
-            process.env.T3_FAKE_CLAUDE_STDIN_MUST_CONTAIN = previousStdinMustContain;
+            process.env.GOAT_FAKE_CLAUDE_STDIN_MUST_CONTAIN = previousStdinMustContain;
           }
 
           if (previousCwdMustNotBe === undefined) {
-            delete process.env.T3_FAKE_CLAUDE_CWD_MUST_NOT_BE;
+            delete process.env.GOAT_FAKE_CLAUDE_CWD_MUST_NOT_BE;
           } else {
-            process.env.T3_FAKE_CLAUDE_CWD_MUST_NOT_BE = previousCwdMustNotBe;
+            process.env.GOAT_FAKE_CLAUDE_CWD_MUST_NOT_BE = previousCwdMustNotBe;
           }
 
           if (previousConfigDirMustBe === undefined) {
-            delete process.env.T3_FAKE_CLAUDE_CONFIG_DIR_MUST_BE;
+            delete process.env.GOAT_FAKE_CLAUDE_CONFIG_DIR_MUST_BE;
           } else {
-            process.env.T3_FAKE_CLAUDE_CONFIG_DIR_MUST_BE = previousConfigDirMustBe;
+            process.env.GOAT_FAKE_CLAUDE_CONFIG_DIR_MUST_BE = previousConfigDirMustBe;
           }
         }),
     );
 
-    const config = decodeClaudeSettings(input.claudeConfig ?? {});
+    const config = decodeClaudeSettings({
+      ...(input.memoryRunnerContext ? { homePath: tempDir } : {}),
+      ...input.claudeConfig,
+    });
     const textGeneration = yield* makeClaudeTextGeneration(
       config,
-      undefined,
+      input.memoryRunnerContext === undefined
+        ? undefined
+        : {
+            ...process.env,
+            ANTHROPIC_API_KEY: input.subscription ? "" : "synthetic-api-key",
+            ANTHROPIC_AUTH_TOKEN: "",
+            ANTHROPIC_BASE_URL: input.defaultEndpoint
+              ? undefined
+              : input.directApi
+                ? "https://api.anthropic.com"
+                : "https://synthetic-provider.invalid",
+            GOAT_FAKE_CLAUDE_SPAWN_MARKER: `${tempDir}/spawned`,
+            CLAUDE_CODE_OAUTH_TOKEN: input.oauthToken ? "synthetic-oauth-token" : "",
+            CLAUDE_CODE_USE_BEDROCK: "",
+            CLAUDE_CODE_USE_VERTEX: "",
+            CLAUDE_CODE_USE_FOUNDRY: "",
+            WSL_DISTRO_NAME: input.wsl ? "synthetic-wsl" : "",
+          },
       Effect.succeed(SYNTHETIC_CLAUDE_MODEL_CATALOG),
+      input.memoryRunnerContext,
+    ).pipe(
+      Effect.provideService(FileSystem.FileSystem, {
+        ...fs,
+        exists: (file) =>
+          file.endsWith("managed-settings.json")
+            ? Effect.succeed(
+                input.managedSettings !== undefined || input.managedUnreadable === true,
+              )
+            : file.endsWith("managed-settings.d") || file.endsWith("10-hooks.json")
+              ? Effect.succeed(input.managedDropin !== undefined)
+              : file.startsWith("/Library/") ||
+                  file.startsWith("/etc/claude-code") ||
+                  file.startsWith("/mnt/c/Program Files/ClaudeCode")
+                ? Effect.succeed(false)
+                : fs.exists(file),
+        readDirectory: (file) =>
+          file.endsWith("managed-settings.d")
+            ? Effect.succeed(["10-hooks.json"])
+            : fs.readDirectory(file),
+        readFileString: (file, encoding) =>
+          file.endsWith("managed-settings.json")
+            ? input.managedUnreadable
+              ? Effect.fail(
+                  new PlatformError.SystemError({
+                    _tag: "PermissionDenied",
+                    module: "FileSystem",
+                    method: "readFileString",
+                    pathOrDescriptor: file,
+                  }),
+                )
+              : Effect.succeed(input.managedSettings ?? "{}")
+            : file.endsWith("10-hooks.json")
+              ? Effect.succeed(input.managedDropin ?? "{}")
+              : fs.readFileString(file, encoding),
+      }),
+      Effect.provideService(HostProcess.Platform, input.platform ?? "linux"),
     );
-    return yield* effectFn(textGeneration);
-  }).pipe(Effect.scoped);
+    const result = yield* effectFn(textGeneration);
+    if (input.expectNoSpawn) expect(yield* fs.exists(`${tempDir}/spawned`)).toBe(false);
+    if (input.expectSpawn) expect(yield* fs.exists(`${tempDir}/spawned`)).toBe(true);
+    return result;
+  }).pipe(
+    Effect.provideService(ClaudeMemoryRegistryQuery, input.registryQuery ?? emptyRegistryQuery),
+    Effect.scoped,
+  );
 }
 
+const memorySelection = M.MemoryModelSelection.make({
+  instanceId: M.ProviderInstanceId.make("claudeAgent"),
+  model: SYNTHETIC_CLAUDE_STANDARD_MODEL,
+  options: [],
+});
+const memoryContext = {
+  providerInstanceId: memorySelection.instanceId,
+  environmentId: M.EnvironmentId.make("memory-owner"),
+};
+const memoryId = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
+const memoryRevision = M.MemoryRevision.make({
+  memorySpaceId: M.MemorySpaceId.make(memoryId(1)),
+  memoryId: M.MemoryId.make(memoryId(2)),
+  revisionId: M.MemoryRevisionId.make(memoryId(3)),
+  payloadRef: M.MemoryRevisionId.make(memoryId(3)),
+  operationId: M.MemoryOperationId.make(memoryId(4)),
+  parents: [],
+  scope: { kind: "user" },
+  assertionKind: "inference",
+  provenance: { environmentId: memoryContext.environmentId },
+  createdAtUtc: "2026-10-14T00:00:00.000Z",
+});
+const memoryPayload = M.MemoryPayload.make({
+  text: "Synthetic input",
+  evidence: [],
+  derivedFromMemoryRevisions: [],
+});
+const memorySummary = M.GenerateMemorySummaryInput.make({
+  cwd: process.cwd(),
+  sourceThread: {
+    environmentId: memoryContext.environmentId,
+    threadId: M.ThreadId.make("synthetic-thread"),
+  },
+  sourceWatermark: {
+    fromEventId: M.EventId.make("e1"),
+    toEventId: M.EventId.make("e2"),
+    throughSequence: 2,
+  },
+  messages: [{ messageId: M.MessageId.make("m1"), text: "Synthetic input", completed: true }],
+  modelSelection: memorySelection,
+});
+const memoryConflict = M.ResolveMemoryConflictInput.make({
+  cwd: memorySummary.cwd,
+  memorySpaceId: memoryRevision.memorySpaceId,
+  memoryId: memoryRevision.memoryId,
+  conflictId: M.MemoryConflictId.make(memoryId(8)),
+  heads: [
+    { revision: memoryRevision, payload: memoryPayload },
+    {
+      revision: {
+        ...memoryRevision,
+        revisionId: M.MemoryRevisionId.make(memoryId(5)),
+        payloadRef: M.MemoryRevisionId.make(memoryId(5)),
+      },
+      payload: memoryPayload,
+    },
+  ],
+  modelSelection: memorySelection,
+});
+const memoryOutput = { text: "Synthetic result", assertionKind: "inference", evidence: [] };
+const memoryOperations = ["resolveMemoryConflict", "generateMemorySummary"] as const;
+
 it.layer(layerClaudeTextGenerationTest)("ClaudeTextGeneration", (it) => {
+  it.effect.each(memoryOperations)(
+    "records the resolved Claude alias and option suffix for %s",
+    (operation) =>
+      withFakeClaudeEnv(
+        {
+          output: JSON.stringify({
+            structured_output:
+              operation === "resolveMemoryConflict"
+                ? { ...memoryOutput, judgment: "Synthetic" }
+                : memoryOutput,
+          }),
+          memoryRunnerContext: memoryContext,
+          argsMustContain: `--model ${SYNTHETIC_CLAUDE_CAPABLE_MODEL}[expanded] --effort high`,
+        },
+        (generation) =>
+          Effect.gen(function* () {
+            const selection = M.MemoryModelSelection.make({
+              ...memorySelection,
+              model: SYNTHETIC_CLAUDE_COLLIDING_ALIAS,
+              options: [
+                { id: "contextWindow", value: "expanded" },
+                { id: "effort", value: "high" },
+              ],
+            });
+            const generated =
+              operation === "resolveMemoryConflict"
+                ? yield* generation.resolveMemoryConflict!({
+                    ...memoryConflict,
+                    modelSelection: selection,
+                  })
+                : yield* generation.generateMemorySummary!({
+                    ...memorySummary,
+                    modelSelection: selection,
+                  });
+            expect(generated.execution.effectiveModel).toBe(
+              `${SYNTHETIC_CLAUDE_CAPABLE_MODEL}[expanded]`,
+            );
+            expect(generated.execution.requestedModelSelection).toEqual(selection);
+          }),
+      ),
+  );
+
+  it.effect.each(
+    memoryOperations.flatMap((operation) =>
+      [
+        {
+          scenario: "managed SessionStart hook",
+          managedSettings: JSON.stringify({
+            hooks: { SessionStart: [{ hooks: [{ type: "command", command: "synthetic" }] }] },
+          }),
+        },
+        {
+          scenario: "managed UserPromptSubmit drop-in",
+          managedDropin: JSON.stringify({ hooks: { UserPromptSubmit: [] } }),
+        },
+        { scenario: "unreadable policy", managedUnreadable: true },
+        { scenario: "invalid policy", managedSettings: "{invalid" },
+      ].map((scenario) => ({ operation, ...scenario })),
+    ),
+  )(
+    "$operation refuses $scenario before accepting apparent success",
+    ({ operation, ...scenario }) =>
+      withFakeClaudeEnv(
+        {
+          ...scenario,
+          directApi: true,
+          expectNoSpawn: true,
+          memoryRunnerContext: memoryContext,
+          output: JSON.stringify({
+            structured_output:
+              operation === "resolveMemoryConflict"
+                ? { ...memoryOutput, judgment: "Synthetic" }
+                : memoryOutput,
+          }),
+        },
+        (generation) =>
+          Effect.gen(function* () {
+            const failure = yield* Effect.flip(
+              operation === "resolveMemoryConflict"
+                ? generation.resolveMemoryConflict!(memoryConflict)
+                : generation.generateMemorySummary!(memorySummary),
+            );
+            expect(failure.cause).toMatchObject({ code: "unavailable" });
+          }),
+      ),
+  );
+
+  it.effect.each(
+    memoryOperations.flatMap((operation) =>
+      [
+        { scenario: "default Anthropic API", directApi: true },
+        { scenario: "API key without endpoint override", defaultEndpoint: true },
+        { scenario: "subscription login", subscription: true, directApi: true },
+        {
+          scenario: "subscription OAuth token",
+          subscription: true,
+          oauthToken: true,
+          directApi: true,
+        },
+        { scenario: "WSL without Windows policy", wsl: true, directApi: true },
+        {
+          scenario: "hook-free managed file and drop-in",
+          managedSettings: "{}",
+          managedDropin: "{}",
+          directApi: true,
+        },
+      ].map((scenario) => ({ operation, ...scenario })),
+    ),
+  )("$operation allows $scenario after local inspection", ({ operation, ...scenario }) =>
+    withFakeClaudeEnv(
+      {
+        ...scenario,
+        expectSpawn: true,
+        memoryRunnerContext: memoryContext,
+        output: JSON.stringify({
+          structured_output:
+            operation === "resolveMemoryConflict"
+              ? { ...memoryOutput, judgment: "Synthetic" }
+              : memoryOutput,
+        }),
+      },
+      (generation) =>
+        Effect.gen(function* () {
+          const generated =
+            operation === "resolveMemoryConflict"
+              ? yield* generation.resolveMemoryConflict!(memoryConflict)
+              : yield* generation.generateMemorySummary!(memorySummary);
+          expect(generated.result.text).toBe(memoryOutput.text);
+        }),
+    ),
+  );
+
+  it.effect.each([
+    { platform: "win32", system: "C:\\Program Files\\ClaudeCode" },
+    { platform: "darwin", system: "/Library/Application Support/ClaudeCode" },
+    { platform: "linux", system: "/etc/claude-code" },
+  ] as const)("allows absent local policy on $platform", ({ platform, system }) =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const inspected: string[] = [];
+      yield* verifyClaudeMemoryHooks("generateMemorySummary", {}).pipe(
+        Effect.provideService(ClaudeMemoryRegistryQuery, emptyRegistryQuery),
+        Effect.provideService(HostProcess.Platform, platform),
+        Effect.provideService(FileSystem.FileSystem, {
+          ...fs,
+          exists: (file) => {
+            inspected.push(file);
+            return Effect.succeed(false);
+          },
+        }),
+      );
+      expect(inspected).toContain(path.join(system, "managed-settings.json"));
+      expect(inspected).toContain(path.join(system, "managed-settings.d"));
+    }),
+  );
+
+  it.effect.each([
+    {
+      platform: "darwin",
+      policy: "/Library/Managed Preferences/com.anthropic.claudecode.plist",
+      environment: {},
+    },
+    {
+      platform: "linux",
+      policy: "/mnt/c/Program Files/ClaudeCode/managed-settings.json",
+      environment: { WSL_DISTRO_NAME: "synthetic-wsl" },
+    },
+  ] as const)(
+    "refuses a present uninspectable $platform policy",
+    ({ platform, policy, environment }) =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const failure = yield* Effect.flip(
+          verifyClaudeMemoryHooks("generateMemorySummary", environment).pipe(
+            Effect.provideService(ClaudeMemoryRegistryQuery, emptyRegistryQuery),
+            Effect.provideService(HostProcess.Platform, platform),
+            Effect.provideService(FileSystem.FileSystem, {
+              ...fs,
+              exists: (file) => Effect.succeed(file === policy),
+            }),
+          ),
+        );
+        expect(failure.cause).toMatchObject({ code: "unavailable" });
+      }),
+  );
+
+  it.effect.each(
+    memoryOperations.flatMap((operation) =>
+      ["win32", "wsl"].flatMap((host) =>
+        [
+          "HKLM hook",
+          "HKCU hook",
+          "query failure",
+          "interop unavailable",
+          "invalid JSON",
+          "invalid type",
+          "invalid framing",
+        ].map((scenario) => ({ operation, host, scenario })),
+      ),
+    ),
+  )("$operation refuses $host registry $scenario before spawn", ({ operation, host, scenario }) =>
+    withFakeClaudeEnv(
+      {
+        platform: host === "win32" ? "win32" : "linux",
+        wsl: host === "wsl",
+        memoryRunnerContext: memoryContext,
+        expectNoSpawn: true,
+        output: JSON.stringify({
+          structured_output:
+            operation === "resolveMemoryConflict"
+              ? { ...memoryOutput, judgment: "Synthetic" }
+              : memoryOutput,
+        }),
+        registryQuery: (key) => {
+          if (scenario === "query failure" || scenario === "interop unavailable")
+            return Effect.fail(new MemoryGenerationRunnerError({ code: "unavailable" }));
+          if (scenario === "invalid framing") return Effect.succeed("unexpected response");
+          if (scenario === "invalid JSON") return Effect.succeed(registryOutput(key, "{invalid"));
+          if (scenario === "invalid type")
+            return Effect.succeed(registryOutput(key, "{}", "REG_BINARY"));
+          const hooks = key.startsWith(scenario.startsWith("HKLM") ? "HKLM" : "HKCU");
+          return Effect.succeed(
+            registryOutput(key, JSON.stringify(hooks ? { hooks: { SessionStart: [] } } : {})),
+          );
+        },
+      },
+      (generation) =>
+        Effect.gen(function* () {
+          const failure = yield* Effect.flip(
+            operation === "resolveMemoryConflict"
+              ? generation.resolveMemoryConflict!(memoryConflict)
+              : generation.generateMemorySummary!(memorySummary),
+          );
+          expect(failure.cause).toMatchObject({ code: "unavailable" });
+        }),
+    ),
+  );
+
+  it.effect.each(
+    memoryOperations.flatMap((operation) => ["win32", "wsl"].map((host) => ({ operation, host }))),
+  )("$operation spawns with hook-free $host registry policy", ({ operation, host }) =>
+    withFakeClaudeEnv(
+      {
+        platform: host === "win32" ? "win32" : "linux",
+        wsl: host === "wsl",
+        memoryRunnerContext: memoryContext,
+        expectSpawn: true,
+        output: JSON.stringify({
+          structured_output:
+            operation === "resolveMemoryConflict"
+              ? { ...memoryOutput, judgment: "Synthetic" }
+              : memoryOutput,
+        }),
+      },
+      (generation) =>
+        Effect.gen(function* () {
+          const result =
+            operation === "resolveMemoryConflict"
+              ? yield* generation.resolveMemoryConflict!(memoryConflict)
+              : yield* generation.generateMemorySummary!(memorySummary);
+          expect(result.result.text).toBe(memoryOutput.text);
+        }),
+    ),
+  );
+
+  it.effect.each([
+    { platform: "win32", environment: {} },
+    { platform: "linux", environment: { WSL_DISTRO_NAME: "synthetic-wsl" } },
+  ] as const)("checks registry policy precedence on $platform", ({ platform, environment }) =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      for (const settings of [
+        "{}",
+        '{"wslInheritsWindowsSettings":true}',
+        '{"model":"synthetic"}',
+      ]) {
+        const inspected: string[] = [];
+        yield* verifyClaudeMemoryHooks("generateMemorySummary", environment).pipe(
+          Effect.provideService(HostProcess.Platform, platform),
+          Effect.provideService(FileSystem.FileSystem, {
+            ...fs,
+            exists: () => Effect.succeed(false),
+          }),
+          Effect.provideService(ClaudeMemoryRegistryQuery, (key, env) => {
+            expect(env).toBe(environment);
+            inspected.push(key);
+            return Effect.succeed(
+              registryOutput(key, key.startsWith("HKLM") ? settings : "{}", "REG_EXPAND_SZ"),
+            );
+          }),
+        );
+        expect(inspected).toEqual([
+          "HKLM\\SOFTWARE\\Policies\\ClaudeCode",
+          ...(settings.includes('"model"') ? [] : ["HKCU\\SOFTWARE\\Policies\\ClaudeCode"]),
+        ]);
+      }
+    }),
+  );
+
+  it.effect.each(memoryOperations)("runs %s with tools hooks and MCP disabled", (operation) =>
+    withFakeClaudeEnv(
+      {
+        output: JSON.stringify({
+          structured_output:
+            operation === "resolveMemoryConflict"
+              ? { ...memoryOutput, judgment: "Synthetic judgment" }
+              : memoryOutput,
+        }),
+        memoryRunnerContext: memoryContext,
+        cwdMustNotBe: memorySummary.cwd,
+        argsMustContain:
+          "--tools  --disable-slash-commands --strict-mcp-config --permission-mode dontAsk",
+        stdinMustContain: "<untrusted_memory_data>",
+      },
+      (generation) =>
+        Effect.gen(function* () {
+          const generated =
+            operation === "resolveMemoryConflict"
+              ? yield* generation.resolveMemoryConflict!(memoryConflict)
+              : yield* generation.generateMemorySummary!(memorySummary);
+          expect(generated.result.text).toBe(memoryOutput.text);
+          expect(generated.execution).toEqual({
+            requestedModelSelection: memorySelection,
+            effectiveModel: `${SYNTHETIC_CLAUDE_STANDARD_MODEL}[expanded]`,
+            effectiveProvider: "claudeAgent",
+            providerInstanceId: memoryContext.providerInstanceId,
+            environmentId: memoryContext.environmentId,
+          });
+        }),
+    ),
+  );
+  it.effect.each(memoryOperations)("preserves frozen Claude options for %s", (operation) =>
+    withFakeClaudeEnv(
+      {
+        output: JSON.stringify({
+          structured_output:
+            operation === "resolveMemoryConflict"
+              ? { ...memoryOutput, judgment: "Synthetic judgment" }
+              : memoryOutput,
+        }),
+        memoryRunnerContext: memoryContext,
+        argsMustContain: '--settings {"disableAllHooks":true,"alwaysThinkingEnabled":false}',
+      },
+      (generation) =>
+        Effect.gen(function* () {
+          const selection = M.MemoryModelSelection.make({
+            ...memorySelection,
+            model: SYNTHETIC_CLAUDE_THINKING_MODEL,
+            options: [
+              { id: "thinking", value: false },
+              { id: "effort", value: "high" },
+            ],
+          });
+          const generated =
+            operation === "resolveMemoryConflict"
+              ? yield* generation.resolveMemoryConflict!({
+                  ...memoryConflict,
+                  modelSelection: selection,
+                })
+              : yield* generation.generateMemorySummary!({
+                  ...memorySummary,
+                  modelSelection: selection,
+                });
+          expect(generated.execution.requestedModelSelection).toEqual(selection);
+          expect(generated.execution.effectiveModel).toBe(SYNTHETIC_CLAUDE_THINKING_MODEL);
+        }),
+    ),
+  );
+  it.effect.each(
+    memoryOperations.flatMap((operation) =>
+      [
+        "envelope denial",
+        "result denial",
+        "assistant tool",
+        "user tool result",
+        "permission event",
+        "envelope tool",
+      ].map((scenario) => ({ operation, scenario })),
+    ),
+  )("$operation discards $scenario even with valid final JSON", ({ operation, scenario }) => {
+    const structured_output = {
+      ...memoryOutput,
+      ...(operation === "resolveMemoryConflict" ? { judgment: "Synthetic" } : {}),
+    };
+    const denial = {
+      tool_name: "Bash",
+      tool_use_id: "synthetic-tool",
+      tool_input: { command: "synthetic" },
+    };
+    const final = { type: "result", structured_output };
+    const output =
+      scenario === "envelope denial"
+        ? { structured_output, permission_denials: [denial] }
+        : scenario === "result denial"
+          ? [{ ...final, permission_denials: [denial] }, final]
+          : scenario === "assistant tool"
+            ? [
+                {
+                  type: "assistant",
+                  message: {
+                    content: [{ type: "tool_use", id: "synthetic-tool", name: "Bash", input: {} }],
+                  },
+                },
+                final,
+              ]
+            : scenario === "user tool result"
+              ? [
+                  {
+                    type: "user",
+                    message: {
+                      content: [
+                        {
+                          type: "tool_result",
+                          tool_use_id: "synthetic-tool",
+                          is_error: true,
+                          content: "Permission denied",
+                        },
+                      ],
+                    },
+                  },
+                  final,
+                ]
+              : scenario === "permission event"
+                ? [{ type: "system", subtype: "permission_denied" }, final]
+                : { structured_output, content: [{ type: "tool_use", name: "Read" }] };
+    return withFakeClaudeEnv(
+      {
+        output: JSON.stringify(output),
+        memoryRunnerContext: memoryContext,
+        argsMustContain: "--verbose",
+      },
+      (generation) =>
+        Effect.gen(function* () {
+          const failure = yield* Effect.flip(
+            operation === "resolveMemoryConflict"
+              ? generation.resolveMemoryConflict!(memoryConflict)
+              : generation.generateMemorySummary!(memorySummary),
+          );
+          expect(failure.cause).toMatchObject({ code: "invalid_output" });
+          expect(failure.detail).toContain("attempted a tool or permission request");
+        }),
+    );
+  });
+  it.effect.each(memoryOperations)(
+    "%s accepts verbose output with empty diagnostics",
+    (operation) =>
+      withFakeClaudeEnv(
+        {
+          memoryRunnerContext: memoryContext,
+          argsMustContain: "--verbose",
+          output: JSON.stringify([
+            { type: "system", subtype: "init" },
+            { type: "assistant", message: { content: [{ type: "text", text: "Synthetic" }] } },
+            {
+              type: "result",
+              permission_denials: [],
+              structured_output: {
+                ...memoryOutput,
+                ...(operation === "resolveMemoryConflict" ? { judgment: "Synthetic" } : {}),
+              },
+            },
+          ]),
+        },
+        (generation) =>
+          Effect.gen(function* () {
+            const result =
+              operation === "resolveMemoryConflict"
+                ? yield* generation.resolveMemoryConflict!(memoryConflict)
+                : yield* generation.generateMemorySummary!(memorySummary);
+            expect(result.result.text).toBe(memoryOutput.text);
+          }),
+      ),
+  );
+
+  it.effect.each(
+    memoryOperations.flatMap((operation) =>
+      [
+        "round trip",
+        "mixed executable tool",
+        "mixed MCP tool",
+        "unmatched result",
+        "failed result",
+        "permission denial",
+      ].map((scenario) => ({ operation, scenario })),
+    ),
+  )("$operation handles StructuredOutput $scenario", ({ operation, scenario }) => {
+    const structured_output = {
+      ...memoryOutput,
+      ...(operation === "resolveMemoryConflict" ? { judgment: "Synthetic" } : {}),
+    };
+    return withFakeClaudeEnv(
+      {
+        memoryRunnerContext: memoryContext,
+        output: JSON.stringify([
+          {
+            type: "assistant",
+            message: {
+              content: [
+                {
+                  type: "tool_use",
+                  name: "StructuredOutput",
+                  id: "structured",
+                  input: structured_output,
+                },
+                ...(scenario.startsWith("mixed")
+                  ? [
+                      {
+                        type: "tool_use",
+                        name: scenario === "mixed MCP tool" ? "mcp__synthetic__run" : "Bash",
+                        id: "executable",
+                        input: {},
+                      },
+                    ]
+                  : []),
+              ],
+            },
+          },
+          {
+            type: "user",
+            message: {
+              content: [
+                {
+                  type: "tool_result",
+                  tool_use_id: scenario === "unmatched result" ? "other" : "structured",
+                  is_error: scenario === "failed result",
+                  content: "Structured output recorded",
+                },
+              ],
+            },
+          },
+          {
+            type: "result",
+            structured_output,
+            permission_denials:
+              scenario === "permission denial" ? [{ tool_name: "StructuredOutput" }] : [],
+          },
+        ]),
+      },
+      (generation) =>
+        Effect.gen(function* () {
+          const run =
+            operation === "resolveMemoryConflict"
+              ? generation.resolveMemoryConflict!(memoryConflict)
+              : generation.generateMemorySummary!(memorySummary);
+          if (scenario === "round trip") {
+            expect((yield* run).result.text).toBe(memoryOutput.text);
+          } else {
+            expect((yield* Effect.flip(run)).cause).toMatchObject({ code: "invalid_output" });
+          }
+        }),
+    );
+  });
+
+  it.effect.each(memoryOperations)("rejects forged authority JSON for %s", (operation) =>
+    withFakeClaudeEnv(
+      {
+        output: JSON.stringify({
+          structured_output: { ...memoryOutput, judgment: "Forged", environmentId: "forged" },
+        }),
+        memoryRunnerContext: memoryContext,
+      },
+      (generation) =>
+        Effect.gen(function* () {
+          const exit = yield* Effect.exit(
+            operation === "resolveMemoryConflict"
+              ? generation.resolveMemoryConflict!(memoryConflict)
+              : generation.generateMemorySummary!(memorySummary),
+          );
+          expect(exit._tag).toBe("Failure");
+        }),
+    ),
+  );
+  it.effect.each(memoryOperations)(
+    "rejects missing owner identity before Claude spawn for %s",
+    (operation) =>
+      withFakeClaudeEnv(
+        { output: "{}", memoryRunnerContext: { providerInstanceId: memorySelection.instanceId } },
+        (generation) =>
+          Effect.gen(function* () {
+            const exit = yield* Effect.exit(
+              operation === "resolveMemoryConflict"
+                ? generation.resolveMemoryConflict!(memoryConflict)
+                : generation.generateMemorySummary!(memorySummary),
+            );
+            expect(exit._tag).toBe("Failure");
+          }),
+      ),
+  );
   it.effect("forwards Claude thinking settings without passing unsupported effort", () =>
     withFakeClaudeEnv(
       {
@@ -237,7 +972,7 @@ it.layer(layerClaudeTextGenerationTest)("ClaudeTextGeneration", (it) => {
             body: "",
           },
         }),
-        argsMustContain: `--model ${SYNTHETIC_CLAUDE_COLLIDING_ALIAS} --settings`,
+        argsMustContain: `--model ${SYNTHETIC_CLAUDE_COLLIDING_ALIAS} --effort max --settings`,
         claudeConfig: { customModels: [SYNTHETIC_CLAUDE_COLLIDING_ALIAS] },
       },
       (textGeneration) =>
@@ -484,6 +1219,43 @@ it.layer(layerClaudeTextGenerationTest)("ClaudeTextGeneration", (it) => {
     ),
   );
 
+  const apiError = "API Error: 400 Model blocked by guardrail: 4 endpoints excluded";
+  const wrapperNotice = "Using the OpenRouter credential from the global credential file.";
+  it.effect.each([
+    [
+      "the stdout error over a stderr notice",
+      JSON.stringify({ is_error: true, api_error_status: 400, result: apiError }),
+      apiError,
+    ],
+    [
+      "the verbose stdout error over a stderr notice",
+      JSON.stringify([
+        { type: "system", subtype: "init" },
+        { type: "result", is_error: true, result: apiError },
+        { type: "result", is_error: true, result: " " },
+      ]),
+      apiError,
+    ],
+    ["stderr when stdout has no error", "not json", wrapperNotice],
+  ] as const)("reports %s when the Claude CLI fails", ([, output, expected]) =>
+    withFakeClaudeEnv({ output, stderr: wrapperNotice, exitCode: 1 }, (textGeneration) =>
+      Effect.gen(function* () {
+        const error = yield* Effect.flip(
+          textGeneration.generateThreadTitle({
+            cwd: process.cwd(),
+            message: "Name this thread",
+            modelSelection: {
+              instanceId: ProviderInstanceId.make("claudeAgent"),
+              model: SYNTHETIC_CLAUDE_STANDARD_MODEL,
+            },
+          }),
+        );
+
+        expect(error.detail).toBe(`Claude CLI command failed: ${expected}`);
+      }),
+    ),
+  );
+
   it.effect("falls back when Claude thread title normalization becomes whitespace-only", () =>
     withFakeClaudeEnv(
       {
@@ -526,6 +1298,12 @@ it.layer(layerClaudeTextGenerationTest)("channel reception", (it) => {
             questionId: "",
             answer: "",
             question: "Which project?",
+            options: [],
+            reads: [],
+            remember: "",
+            rememberQuote: "",
+            notesChangeRequested: "",
+            clarifyAbout: "other",
           },
         }),
         cwdMustNotBe: process.cwd(),

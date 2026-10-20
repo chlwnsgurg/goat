@@ -1,4 +1,4 @@
-import type { EnvironmentTheme } from "@t3tools/contracts";
+import type { EnvironmentTheme } from "@goat/contracts";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vite-plus/test";
 
 const NIGHTFALL_THEME = {
@@ -16,7 +16,7 @@ const LIGHT_THEME = {
 } as const satisfies EnvironmentTheme;
 
 async function setupThemeSync(mode: "dark" | "system" = "dark") {
-  const storage = new Map<string, string>([["t3code:theme", NIGHTFALL_THEME.id]]);
+  const storage = new Map<string, string>([["goat:theme", NIGHTFALL_THEME.id]]);
   const styles = new Map<string, string>();
   const classes = new Set<string>();
   const root = {
@@ -77,7 +77,6 @@ async function setupThemeSync(mode: "dark" | "system" = "dark") {
     published = themes;
     useEnvironmentThemeSync();
     flushEffects();
-    // A changed store snapshot also runs the consumer's passive theme effect.
     const theme = useTheme();
     flushEffects();
     return theme;
@@ -163,7 +162,6 @@ describe("published theme refresh", () => {
       palette.getThemeDefinition(NIGHTFALL_THEME.id)?.colors.canvas,
     );
     expect(root.classList.contains("dark")).toBe(true);
-    expect(palette.getThemePreviewSidebarArtwork()).toBeNull();
   });
 
   it("keeps a draft visible when default adoption changes the theme and appearance", async () => {
@@ -184,6 +182,5 @@ describe("published theme refresh", () => {
     current.refreshTheme();
     expect(root.dataset.themeId).toBe("ocean");
     expect(root.classList.contains("dark")).toBe(false);
-    expect(palette.getThemePreviewSidebarArtwork()).toBeNull();
   });
 });

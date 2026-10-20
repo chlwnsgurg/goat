@@ -1,3 +1,8 @@
+import {
+  CITATION_LINK_PROTOCOLS,
+  CONTEXT_LINK_PROTOCOLS,
+  THREAD_LINK_PROTOCOLS,
+} from "@goat/contracts/legacyT3Names";
 import type { Processor } from "unified";
 import { isWindowsAbsolutePath } from "./path.ts";
 import type { PluggableList } from "unified";
@@ -12,7 +17,6 @@ import {
   remarkCodexDirectives,
 } from "./codexMarkdownDirectives.ts";
 import { isWindowsDrivePathHref } from "./markdownLinks.ts";
-import { THREAD_LINK_PROTOCOL } from "./threadLinks.ts";
 
 type MarkdownImageHastNode = {
   type?: string;
@@ -28,14 +32,6 @@ function meaningfulHastChildren(node: MarkdownImageHastNode): MarkdownImageHastN
   );
 }
 
-/**
- * An image that is the only content of its block (optionally wrapped in a
- * link) is almost always a screenshot or figure, so it gets a reserved slot
- * while it loads. Images mixed with text or other images — badge rows, icons
- * in a sentence — stay inline at their natural size, since a placeholder taller
- * than the image would move the page more than the image itself does.
- */
-/** Containers whose sole child image reads as a figure rather than part of a sentence. */
 const STANDALONE_IMAGE_BLOCKS = new Set([
   "p",
   "div",
@@ -53,15 +49,12 @@ function soleImageDescendant(node: MarkdownImageHastNode): MarkdownImageHastNode
   const only = children[0];
   if (only?.type !== "element") return undefined;
   if (only.tagName === "img") return only;
-  // A link, emphasis, or similar inline wrapper around the image still counts
-  // as long as nothing else shares the block.
   return only.tagName === "a" || only.tagName === "strong" || only.tagName === "em"
     ? soleImageDescendant(only)
     : undefined;
 }
 
 function markStandaloneImages(node: MarkdownImageHastNode) {
-  // A raw `<img>` on its own line reaches the root without a paragraph.
   if (node.type === "root" || (node.tagName && STANDALONE_IMAGE_BLOCKS.has(node.tagName))) {
     const image = soleImageDescendant(node);
     if (image) image.properties = { ...image.properties, dataStandalone: true };
@@ -71,7 +64,6 @@ function markStandaloneImages(node: MarkdownImageHastNode) {
   });
 }
 
-/** Keep unmatched inline `<A>` placeholders from opening an HTML link over later blocks. */
 function rehypePreserveBareAnchorPlaceholders() {
   return (tree: MarkdownImageHastNode) => {
     const anchors: Array<MarkdownImageHastNode | null> = [];
@@ -119,7 +111,6 @@ function rehypePreserveBareAnchorPlaceholders() {
   };
 }
 
-/** Carries authored image source metadata through the sanitizer to the image renderer. */
 function rehypePreserveImageSourceMeta() {
   return (tree: MarkdownImageHastNode) => {
     const visit = (node: MarkdownImageHastNode) => {
@@ -161,17 +152,17 @@ const CHAT_MARKDOWN_SANITIZE_SCHEMA = {
     href: [
       ...(defaultSchema.protocols?.href ?? []),
       "file",
-      "t3-citation",
-      "t3-context",
-      THREAD_LINK_PROTOCOL,
+      ...CITATION_LINK_PROTOCOLS,
+      ...CONTEXT_LINK_PROTOCOLS,
+      ...THREAD_LINK_PROTOCOLS,
     ],
-    src: [...(defaultSchema.protocols?.src ?? []), "file", "t3-context"],
+    src: [...(defaultSchema.protocols?.src ?? []), "file", ...CONTEXT_LINK_PROTOCOLS],
   },
 } satisfies Parameters<typeof rehypeSanitize>[0];
 
 export const CHAT_MARKDOWN_REMARK_PLUGINS: PluggableList = [
   remarkGfm,
-  remarkKeepWindowsPathDestinations,
+  remarkKeepWindowsPaths,
   remarkGithubAlerts,
   remarkNormalizeListItemIndentation,
   remarkCodexDirectives,
@@ -181,7 +172,7 @@ export const CHAT_MARKDOWN_REMARK_PLUGINS: PluggableList = [
 
 export const CHAT_MARKDOWN_REMARK_PLUGINS_WITH_BREAKS: PluggableList = [
   remarkGfm,
-  remarkKeepWindowsPathDestinations,
+  remarkKeepWindowsPaths,
   remarkGithubAlerts,
   remarkNormalizeListItemIndentation,
   remarkCodexDirectives,
@@ -226,11 +217,6 @@ function remarkPreserveCodeMeta() {
   };
 }
 
-/**
- * Preserve Windows drive links as allowed `file:` URLs before sanitization.
- * The same traversal tags inline code while it can still be distinguished
- * from fenced code. Code inside links stays untagged to avoid nested anchors.
- */
 function remarkNormalizeLinksAndTagInlineCode() {
   return (tree: MarkdownAstNode) => {
     const visit = (node: MarkdownAstNode, insideLink: boolean) => {
@@ -273,17 +259,37 @@ function keepWindowsPathDestination(this: DestinationCompileContext, token: unkn
     node.url = isWindowsAbsolutePath(authored) && !authored.includes("&") ? authored : decoded;
 }
 
+// A drive path that has not reached whitespace yet: `C:`, `C:\Users\me`, `C:/work`.
+const UNFINISHED_DRIVE_PATH = /(?:^|\W)[A-Za-z]:(?:[\\/]\S*)?$/;
+
+interface EscapeCompileContext {
+  readonly stack: ReadonlyArray<{
+    readonly type: string;
+    children?: Array<{ type: string; value?: string }>;
+  }>;
+}
+
+function keepWindowsPathEscape(this: EscapeCompileContext) {
+  const text = this.stack.at(-1)?.children?.at(-1);
+  if (text?.type !== "text" || text.value === undefined) return;
+  const before = text.value.slice(0, -1);
+  if (UNFINISHED_DRIVE_PATH.test(before)) text.value = `${before}\\${text.value.slice(-1)}`;
+}
+
 /**
- * CommonMark reads the `\.` in `C:\me\.t3\shot.png` as an escape, even in a link
- * destination. Every backslash in a Windows path is a separator, so link, image, and
- * definition destinations that are Windows paths keep the text as written.
+ * CommonMark reads the `\.` in `C:\me\.t3\shot.png` as an escape. Every backslash in a
+ * Windows path is a separator, so link, image, and definition destinations that are
+ * Windows paths keep the text as written, and so do escapes inside drive paths in prose.
+ * Prose paths end at whitespace: past that, nothing tells a path from a sentence, and
+ * `C:\x and \*this\*` must still read `*this*`.
  */
-function remarkKeepWindowsPathDestinations(this: Processor) {
+export function remarkKeepWindowsPaths(this: Processor) {
   const data = this.data();
   (data.fromMarkdownExtensions ??= []).push({
     exit: {
       resourceDestinationString: keepWindowsPathDestination,
       definitionDestinationString: keepWindowsPathDestination,
+      characterEscape: keepWindowsPathEscape,
     },
   });
 }

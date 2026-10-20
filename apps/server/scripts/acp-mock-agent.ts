@@ -17,109 +17,111 @@ import type * as AcpCompat from "effect-acp/compat";
 
 import { beginAcpMockPrompt } from "./acpMockCancellationState.ts";
 
-const requestLogPath = process.env.T3_ACP_REQUEST_LOG_PATH;
-const exitLogPath = process.env.T3_ACP_EXIT_LOG_PATH;
-const antigravityProfile = process.env.T3_ACP_ANTIGRAVITY === "1";
-const emitToolCalls = process.env.T3_ACP_EMIT_TOOL_CALLS === "1";
+const requestLogPath = process.env.GOAT_ACP_REQUEST_LOG_PATH;
+const exitLogPath = process.env.GOAT_ACP_EXIT_LOG_PATH;
+const antigravityProfile = process.env.GOAT_ACP_ANTIGRAVITY === "1";
+const emitToolCalls = process.env.GOAT_ACP_EMIT_TOOL_CALLS === "1";
 const emitInterleavedAssistantToolCalls =
-  process.env.T3_ACP_EMIT_INTERLEAVED_ASSISTANT_TOOL_CALLS === "1";
-const emitV2Fidelity = process.env.T3_ACP_EMIT_V2_FIDELITY === "1";
-const vibeRetryOutcome = process.env.T3_ACP_VIBE_RETRY_OUTCOME;
-const emitGenericToolPlaceholders = process.env.T3_ACP_EMIT_GENERIC_TOOL_PLACEHOLDERS === "1";
-const emitPostSettleMonitorFlow = process.env.T3_ACP_EMIT_POST_SETTLE_MONITOR_FLOW === "1";
+  process.env.GOAT_ACP_EMIT_INTERLEAVED_ASSISTANT_TOOL_CALLS === "1";
+const emitV2Fidelity = process.env.GOAT_ACP_EMIT_V2_FIDELITY === "1";
+const vibeRetryOutcome = process.env.GOAT_ACP_VIBE_RETRY_OUTCOME;
+const emitGenericToolPlaceholders = process.env.GOAT_ACP_EMIT_GENERIC_TOOL_PLACEHOLDERS === "1";
+const emitPostSettleMonitorFlow = process.env.GOAT_ACP_EMIT_POST_SETTLE_MONITOR_FLOW === "1";
 const emitInTurnTaskOutputThenLateDuplicate =
-  process.env.T3_ACP_EMIT_IN_TURN_TASKOUTPUT_THEN_LATE_DUPLICATE === "1";
-const injectedReportTriggerPath = process.env.T3_ACP_INJECTED_REPORT_TRIGGER_PATH;
+  process.env.GOAT_ACP_EMIT_IN_TURN_TASKOUTPUT_THEN_LATE_DUPLICATE === "1";
+const injectedReportTriggerPath = process.env.GOAT_ACP_INJECTED_REPORT_TRIGGER_PATH;
 const emitBackgroundToolDuringAnswer =
-  process.env.T3_ACP_EMIT_BACKGROUND_TOOL_DURING_ANSWER === "1";
-const emitAskQuestion = process.env.T3_ACP_EMIT_ASK_QUESTION === "1";
-const emitElicitation = process.env.T3_ACP_EMIT_ELICITATION === "1";
+  process.env.GOAT_ACP_EMIT_BACKGROUND_TOOL_DURING_ANSWER === "1";
+const emitAskQuestion = process.env.GOAT_ACP_EMIT_ASK_QUESTION === "1";
+const emitElicitation = process.env.GOAT_ACP_EMIT_ELICITATION === "1";
 const emitMcpToolApprovalElicitation =
-  process.env.T3_ACP_EMIT_MCP_TOOL_APPROVAL_ELICITATION === "1";
-const emitUrlElicitation = process.env.T3_ACP_EMIT_URL_ELICITATION === "1";
-const emitXAiAskUserQuestion = process.env.T3_ACP_EMIT_XAI_ASK_USER_QUESTION === "1";
-const emitXAiExitPlanMode = process.env.T3_ACP_EMIT_XAI_EXIT_PLAN_MODE === "1";
-const emitXAiPlanMdWrite = process.env.T3_ACP_EMIT_XAI_PLAN_MD_WRITE === "1";
-const emitXAiPromptCompleteThenHang = process.env.T3_ACP_EMIT_XAI_PROMPT_COMPLETE_THEN_HANG === "1";
-const emitXAiRateLimitThenHang = process.env.T3_ACP_EMIT_XAI_RATE_LIMIT_THEN_HANG === "1";
+  process.env.GOAT_ACP_EMIT_MCP_TOOL_APPROVAL_ELICITATION === "1";
+const emitUrlElicitation = process.env.GOAT_ACP_EMIT_URL_ELICITATION === "1";
+const emitXAiAskUserQuestion = process.env.GOAT_ACP_EMIT_XAI_ASK_USER_QUESTION === "1";
+const emitXAiExitPlanMode = process.env.GOAT_ACP_EMIT_XAI_EXIT_PLAN_MODE === "1";
+const emitXAiPlanMdWrite = process.env.GOAT_ACP_EMIT_XAI_PLAN_MD_WRITE === "1";
+const emitXAiPromptCompleteThenHang =
+  process.env.GOAT_ACP_EMIT_XAI_PROMPT_COMPLETE_THEN_HANG === "1";
+const emitXAiRateLimitThenHang = process.env.GOAT_ACP_EMIT_XAI_RATE_LIMIT_THEN_HANG === "1";
 const emitXAiAskUserQuestionThenHang =
-  process.env.T3_ACP_EMIT_XAI_ASK_USER_QUESTION_THEN_HANG === "1";
-const emitContentThenHang = process.env.T3_ACP_EMIT_CONTENT_THEN_HANG === "1";
-const emitPlanThenHang = process.env.T3_ACP_EMIT_PLAN_THEN_HANG === "1";
-const emitActiveToolThenHang = process.env.T3_ACP_EMIT_ACTIVE_TOOL_THEN_HANG === "1";
-const emitGrokMonitorPostTurnPoll = process.env.T3_ACP_EMIT_GROK_MONITOR_POST_TURN_POLL === "1";
-const emitGrokBackgroundTaskStarted = process.env.T3_ACP_EMIT_GROK_BACKGROUND_TASK_STARTED === "1";
-const emitForeignSessionUpdates = process.env.T3_ACP_EMIT_FOREIGN_SESSION_UPDATES === "1";
-const waitForResumeRelease = process.env.T3_ACP_WAIT_FOR_RESUME_RELEASE === "1";
-const completeFirstPromptOnCancel = process.env.T3_ACP_COMPLETE_FIRST_PROMPT_ON_CANCEL === "1";
-const floodStderr = process.env.T3_ACP_FLOOD_STDERR === "1";
-const hangPromptForever = process.env.T3_ACP_HANG_PROMPT_FOREVER === "1";
-// Sends fs/write_text_file for this path, then fs/read_text_file, at the start of
-// each prompt whatever the client advertised, and appends each outcome as a JSON
-// line to T3_ACP_CLIENT_FS_PROBE_LOG_PATH.
-const clientFsProbePath = process.env.T3_ACP_CLIENT_FS_PROBE_PATH;
-const clientFsProbeLogPath = process.env.T3_ACP_CLIENT_FS_PROBE_LOG_PATH;
+  process.env.GOAT_ACP_EMIT_XAI_ASK_USER_QUESTION_THEN_HANG === "1";
+const emitContentThenHang = process.env.GOAT_ACP_EMIT_CONTENT_THEN_HANG === "1";
+const emitPlanThenHang = process.env.GOAT_ACP_EMIT_PLAN_THEN_HANG === "1";
+const emitActiveToolThenHang = process.env.GOAT_ACP_EMIT_ACTIVE_TOOL_THEN_HANG === "1";
+const emitGrokMonitorPostTurnPoll = process.env.GOAT_ACP_EMIT_GROK_MONITOR_POST_TURN_POLL === "1";
+const emitGrokBackgroundTaskStarted =
+  process.env.GOAT_ACP_EMIT_GROK_BACKGROUND_TASK_STARTED === "1";
+const emitForeignSessionUpdates = process.env.GOAT_ACP_EMIT_FOREIGN_SESSION_UPDATES === "1";
+const waitForResumeRelease = process.env.GOAT_ACP_WAIT_FOR_RESUME_RELEASE === "1";
+const completeFirstPromptOnCancel = process.env.GOAT_ACP_COMPLETE_FIRST_PROMPT_ON_CANCEL === "1";
+const floodStderr = process.env.GOAT_ACP_FLOOD_STDERR === "1";
+const hangPromptForever = process.env.GOAT_ACP_HANG_PROMPT_FOREVER === "1";
+const clientFsProbePath = process.env.GOAT_ACP_CLIENT_FS_PROBE_PATH;
+const clientFsProbeLogPath = process.env.GOAT_ACP_CLIENT_FS_PROBE_LOG_PATH;
 const encodeJson = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
-const hangAfterPermission = process.env.T3_ACP_HANG_AFTER_PERMISSION === "1";
-const hangFirstPromptForever = process.env.T3_ACP_HANG_FIRST_PROMPT_FOREVER === "1";
-const emitLateUpdateAfterCancel = process.env.T3_ACP_EMIT_LATE_UPDATE_AFTER_CANCEL === "1";
+const hangAfterPermission = process.env.GOAT_ACP_HANG_AFTER_PERMISSION === "1";
+const hangFirstPromptForever = process.env.GOAT_ACP_HANG_FIRST_PROMPT_FOREVER === "1";
+const emitLateUpdateAfterCancel = process.env.GOAT_ACP_EMIT_LATE_UPDATE_AFTER_CANCEL === "1";
 const emitTaskBackgroundedAfterCancel =
-  process.env.T3_ACP_EMIT_TASK_BACKGROUNDED_AFTER_CANCEL === "1";
-const residualCallbackResponseLogPath = process.env.T3_ACP_RESIDUAL_CALLBACK_RESPONSE_LOG_PATH;
-const residualCallbackTriggerPath = process.env.T3_ACP_RESIDUAL_CALLBACK_TRIGGER_PATH;
-const exitAfterResidualCallbacks = process.env.T3_ACP_EXIT_AFTER_RESIDUAL_CALLBACKS === "1";
-const emitRunningCommandThenHang = process.env.T3_ACP_EMIT_RUNNING_COMMAND_THEN_HANG === "1";
+  process.env.GOAT_ACP_EMIT_TASK_BACKGROUNDED_AFTER_CANCEL === "1";
+const residualCallbackResponseLogPath = process.env.GOAT_ACP_RESIDUAL_CALLBACK_RESPONSE_LOG_PATH;
+const residualCallbackTriggerPath = process.env.GOAT_ACP_RESIDUAL_CALLBACK_TRIGGER_PATH;
+const exitAfterResidualCallbacks = process.env.GOAT_ACP_EXIT_AFTER_RESIDUAL_CALLBACKS === "1";
+const emitRunningCommandThenHang = process.env.GOAT_ACP_EMIT_RUNNING_COMMAND_THEN_HANG === "1";
 const emitRunningCommandThenHangOnFirstPrompt =
-  process.env.T3_ACP_EMIT_RUNNING_COMMAND_THEN_HANG_FIRST_PROMPT === "1";
-const emitEmptySuccessfulBash = process.env.T3_ACP_EMIT_EMPTY_SUCCESSFUL_BASH === "1";
+  process.env.GOAT_ACP_EMIT_RUNNING_COMMAND_THEN_HANG_FIRST_PROMPT === "1";
+const emitEmptySuccessfulBash = process.env.GOAT_ACP_EMIT_EMPTY_SUCCESSFUL_BASH === "1";
 const emitEmptySuccessfulBashThenHang =
-  process.env.T3_ACP_EMIT_EMPTY_SUCCESSFUL_BASH_THEN_HANG === "1";
-const exitOnCancel = process.env.T3_ACP_EXIT_ON_CANCEL === "1";
-const runningCommandIgnoresTerm = process.env.T3_ACP_RUNNING_COMMAND_IGNORE_TERM === "1";
-const runningCommandPidPath = process.env.T3_ACP_RUNNING_COMMAND_PID_PATH;
-const runningCommandSeparateSession = process.env.T3_ACP_RUNNING_COMMAND_SEPARATE_SESSION === "1";
-const exitAfterRunningCommandLaunch = process.env.T3_ACP_EXIT_AFTER_RUNNING_COMMAND_LAUNCH === "1";
+  process.env.GOAT_ACP_EMIT_EMPTY_SUCCESSFUL_BASH_THEN_HANG === "1";
+const exitOnCancel = process.env.GOAT_ACP_EXIT_ON_CANCEL === "1";
+const runningCommandIgnoresTerm = process.env.GOAT_ACP_RUNNING_COMMAND_IGNORE_TERM === "1";
+const runningCommandPidPath = process.env.GOAT_ACP_RUNNING_COMMAND_PID_PATH;
+const runningCommandSeparateSession = process.env.GOAT_ACP_RUNNING_COMMAND_SEPARATE_SESSION === "1";
+const exitAfterRunningCommandLaunch =
+  process.env.GOAT_ACP_EXIT_AFTER_RUNNING_COMMAND_LAUNCH === "1";
 const omitXAiPromptCompleteStopReason =
-  process.env.T3_ACP_OMIT_XAI_PROMPT_COMPLETE_STOP_REASON === "1";
-const failLoadSession = process.env.T3_ACP_FAIL_LOAD_SESSION === "1";
+  process.env.GOAT_ACP_OMIT_XAI_PROMPT_COMPLETE_STOP_REASON === "1";
+const failLoadSession = process.env.GOAT_ACP_FAIL_LOAD_SESSION === "1";
 const failLoadSessionAfterConfigReplay =
-  process.env.T3_ACP_FAIL_LOAD_SESSION_AFTER_CONFIG_REPLAY === "1";
-const emitLoadReplay = process.env.T3_ACP_EMIT_LOAD_REPLAY === "1";
-const hangLoadSessionAfterReplay = process.env.T3_ACP_HANG_LOAD_SESSION_AFTER_REPLAY === "1";
-const delayLoadSessionAfterReplay = process.env.T3_ACP_DELAY_LOAD_SESSION_AFTER_REPLAY === "1";
-const loadSessionDelayMs = Number(process.env.T3_ACP_LOAD_SESSION_DELAY_MS ?? "5000");
+  process.env.GOAT_ACP_FAIL_LOAD_SESSION_AFTER_CONFIG_REPLAY === "1";
+const emitLoadReplay = process.env.GOAT_ACP_EMIT_LOAD_REPLAY === "1";
+const hangLoadSessionAfterReplay = process.env.GOAT_ACP_HANG_LOAD_SESSION_AFTER_REPLAY === "1";
+const delayLoadSessionAfterReplay = process.env.GOAT_ACP_DELAY_LOAD_SESSION_AFTER_REPLAY === "1";
+const loadSessionDelayMs = Number(process.env.GOAT_ACP_LOAD_SESSION_DELAY_MS ?? "5000");
 const emitStaleXAiPromptCompleteBeforeSecondHang =
-  process.env.T3_ACP_EMIT_STALE_XAI_PROMPT_COMPLETE_BEFORE_SECOND_HANG === "1";
+  process.env.GOAT_ACP_EMIT_STALE_XAI_PROMPT_COMPLETE_BEFORE_SECOND_HANG === "1";
 const emitOverlappingXAiPromptCompleteOutOfOrder =
-  process.env.T3_ACP_EMIT_OVERLAPPING_XAI_PROMPT_COMPLETE_OUT_OF_ORDER === "1";
-const failPrompt = process.env.T3_ACP_FAIL_PROMPT === "1";
-const failSetConfigOption = process.env.T3_ACP_FAIL_SET_CONFIG_OPTION === "1";
-const exitOnSetConfigOption = process.env.T3_ACP_EXIT_ON_SET_CONFIG_OPTION === "1";
-const omitModelConfigOption = process.env.T3_ACP_OMIT_MODEL_CONFIG_OPTION === "1";
-const promptResponseText = process.env.T3_ACP_PROMPT_RESPONSE_TEXT;
+  process.env.GOAT_ACP_EMIT_OVERLAPPING_XAI_PROMPT_COMPLETE_OUT_OF_ORDER === "1";
+const failPrompt = process.env.GOAT_ACP_FAIL_PROMPT === "1";
+const failSetConfigOption = process.env.GOAT_ACP_FAIL_SET_CONFIG_OPTION === "1";
+const failSetModeConfigOption = process.env.GOAT_ACP_FAIL_SET_MODE_CONFIG_OPTION === "1";
+const exitOnSetConfigOption = process.env.GOAT_ACP_EXIT_ON_SET_CONFIG_OPTION === "1";
+const omitModelConfigOption = process.env.GOAT_ACP_OMIT_MODEL_CONFIG_OPTION === "1";
+const emitEmptyDefaultAgentOption = process.env.GOAT_ACP_EMIT_EMPTY_DEFAULT_AGENT_OPTION === "1";
+const promptResponseText = process.env.GOAT_ACP_PROMPT_RESPONSE_TEXT;
 const initialGrokReasoningEffort =
-  process.env.T3_ACP_INITIAL_GROK_REASONING_EFFORT?.trim() || undefined;
-const promptDelayMs = Number(process.env.T3_ACP_PROMPT_DELAY_MS ?? "0");
-const supportsSessionLifecycle = process.env.T3_ACP_SESSION_LIFECYCLE === "1";
-const supportsAcpMcp = process.env.T3_ACP_MCP_ACP === "1";
-const supportsV2Management = process.env.T3_ACP_V2_MANAGEMENT === "1";
-const omitSessionListHandler = process.env.T3_ACP_OMIT_SESSION_LIST_HANDLER === "1";
-const advertisedAuthMethodId = process.env.T3_ACP_AUTH_METHOD_ID?.trim();
+  process.env.GOAT_ACP_INITIAL_GROK_REASONING_EFFORT?.trim() || undefined;
+const promptDelayMs = Number(process.env.GOAT_ACP_PROMPT_DELAY_MS ?? "0");
+const supportsSessionLifecycle = process.env.GOAT_ACP_SESSION_LIFECYCLE === "1";
+const supportsAcpMcp = process.env.GOAT_ACP_MCP_ACP === "1";
+const supportsV2Management = process.env.GOAT_ACP_V2_MANAGEMENT === "1";
+const omitSessionListHandler = process.env.GOAT_ACP_OMIT_SESSION_LIST_HANDLER === "1";
+const advertisedAuthMethodId = process.env.GOAT_ACP_AUTH_METHOD_ID?.trim();
 const initializeAuthMethodId =
   advertisedAuthMethodId ?? (supportsSessionLifecycle ? "test" : undefined);
-const requiresAuthentication = process.env.T3_ACP_REQUIRE_AUTH === "1";
+const requiresAuthentication = process.env.GOAT_ACP_REQUIRE_AUTH === "1";
 const commandAdvertisementDelayMs = Number(
-  process.env.T3_ACP_COMMAND_ADVERTISEMENT_DELAY_MS ?? "-1",
+  process.env.GOAT_ACP_COMMAND_ADVERTISEMENT_DELAY_MS ?? "-1",
 );
 const permissionOptionIds = {
-  allowOnce: process.env.T3_ACP_ALLOW_ONCE_OPTION_ID ?? "allow-once",
-  allowAlways: process.env.T3_ACP_ALLOW_ALWAYS_OPTION_ID ?? "allow-always",
-  rejectOnce: process.env.T3_ACP_REJECT_ONCE_OPTION_ID ?? "reject-once",
+  allowOnce: process.env.GOAT_ACP_ALLOW_ONCE_OPTION_ID ?? "allow-once",
+  allowAlways: process.env.GOAT_ACP_ALLOW_ALWAYS_OPTION_ID ?? "allow-always",
+  rejectOnce: process.env.GOAT_ACP_REJECT_ONCE_OPTION_ID ?? "reject-once",
 };
-const omitAllowAlways = process.env.T3_ACP_OMIT_ALLOW_ALWAYS === "1";
+const omitAllowAlways = process.env.GOAT_ACP_OMIT_ALLOW_ALWAYS === "1";
 const permissionRequestCount = Math.max(
   1,
-  Number(process.env.T3_ACP_PERMISSION_REQUEST_COUNT ?? "1") || 1,
+  Number(process.env.GOAT_ACP_PERMISSION_REQUEST_COUNT ?? "1") || 1,
 );
 const sessionId = "mock-session-1";
 
@@ -129,6 +131,7 @@ let parameterizedModelPicker = false;
 let currentReasoning = "medium";
 let currentContext = "272k";
 let currentFast = false;
+let currentAgent = "";
 let authenticated = !requiresAuthentication;
 let promptCount = 0;
 let overlappingFirstPromptId: string | undefined;
@@ -174,6 +177,13 @@ process.once("SIGINT", () => {
 
 process.once("exit", (code) => {
   logExit(`exit:${code}`);
+});
+
+// Tests own this agent through its stdio. Exit when stdin ends so a test worker
+// that dies before closing its scope cannot leave the agent running under PID 1.
+process.stdin.once("end", () => {
+  logExit("stdin-end");
+  process.exit(0);
 });
 
 function configOptions(): ReadonlyArray<AcpSchema.SessionConfigOption> {
@@ -314,6 +324,22 @@ function configOptions(): ReadonlyArray<AcpSchema.SessionConfigOption> {
   }
 
   return [
+    // Mirrors GitHub Copilot, whose default agent is the empty-valued choice.
+    ...(emitEmptyDefaultAgentOption
+      ? [
+          {
+            configId: "agent",
+            name: "Agent",
+            category: "_agent",
+            type: "select" as const,
+            currentValue: currentAgent,
+            options: [
+              { value: "", name: "Copilot" },
+              { value: "example", name: "example" },
+            ],
+          },
+        ]
+      : []),
     {
       configId: "mode",
       name: "Mode",
@@ -408,13 +434,14 @@ function modeState(): AcpCompat.SessionModeState {
 }
 
 // Mirrors the real Grok ACP: it advertises versioned model ids, never the CLI's own
-// "grok-build" product name. Native helper model switching has its own v1 fixture.
+// "grok-build" product name.
 const grokAcpModels: ReadonlyArray<AcpCompat.ModelInfo> = [
   {
-    modelId: "grok-4.6",
+    modelId: process.env.GOAT_ACP_GROK_MODEL ?? "grok-4.6",
     name: "Grok 4.6",
     _meta: {
-      totalContextTokens: 500_000,
+      totalContextTokens: Number(process.env.GOAT_ACP_GROK_CONTEXT_TOKENS ?? 500_000),
+      contextWindows: [256_000, 500_000],
       supportsReasoningEffort: true,
       reasoningEffort: initialGrokReasoningEffort ?? "high",
       reasoningEfforts: [
@@ -433,7 +460,7 @@ function modelState(): AcpCompat.SessionModelState {
   }
   const modelId = grokAcpModels.some((model) => model.modelId === currentModelId)
     ? currentModelId
-    : "grok-4.6";
+    : (process.env.GOAT_ACP_GROK_MODEL ?? "grok-4.6");
   return {
     currentModelId: modelId,
     availableModels: grokAcpModels,
@@ -775,7 +802,7 @@ const program = Effect.gen(function* () {
           process.exit(7);
         });
       }
-      if (failSetConfigOption) {
+      if (failSetConfigOption || (failSetModeConfigOption && request.configId === "mode")) {
         return yield* AcpError.AcpRequestError.invalidParams(
           "Mock invalid params for session/set_config_option",
           {
@@ -789,6 +816,9 @@ const program = Effect.gen(function* () {
       }
       if (request.configId === "model" && typeof request.value === "string") {
         currentModelId = request.value;
+      }
+      if (request.configId === "agent" && typeof request.value === "string") {
+        currentAgent = request.value;
       }
       if (request.configId === "reasoning" && typeof request.value === "string") {
         currentReasoning = request.value;
@@ -836,8 +866,6 @@ const program = Effect.gen(function* () {
         });
       }
       if (emitTaskBackgroundedAfterCancel) {
-        // Grok cancel-as-detach: the foreground command is re-run as a
-        // background task that later completes on its own.
         yield* Effect.sync(() => {
           writeJsonRpcNotification("_x.ai/task_backgrounded", {
             sessionId: cancelledSessionId,
@@ -874,7 +902,7 @@ const program = Effect.gen(function* () {
       beginAcpMockPrompt(cancelledSessions, requestedSessionId);
       promptCount += 1;
       if (
-        process.env.T3_ACP_CRASH_PROMPT === "1" &&
+        process.env.GOAT_ACP_CRASH_PROMPT === "1" &&
         request.prompt.some((part) => part.type === "text" && part.text === "crash now")
       ) {
         return yield* Effect.sync(() => process.exit(23));
@@ -922,7 +950,6 @@ const program = Effect.gen(function* () {
           requestedSessionId,
           requestedSessionId,
         ].entries()) {
-          // Progress from an earlier tool must not end the retry.
           if (index === 2 && vibeRetryOutcome === "recovered") {
             yield* Effect.sync(() =>
               writeJsonRpcNotification("session/update", {
@@ -1429,7 +1456,6 @@ const program = Effect.gen(function* () {
           yield* Effect.sleep("100 millis");
           return yield* Effect.sync(() => process.exit(0));
         }
-        // Stay open until session/cancel so interrupt tests can observe a running tool.
         while (!cancelledSessions.has(requestedSessionId)) {
           yield* Effect.sleep("25 millis");
         }
@@ -1684,8 +1710,6 @@ const program = Effect.gen(function* () {
       }
 
       if (emitBackgroundToolDuringAnswer) {
-        // A command backgrounded earlier reports progress and then finishes
-        // while the next answer is still streaming.
         const toolCallId = "background-1";
         const say = (text: string) =>
           agent.client.sessionUpdate({
@@ -1718,7 +1742,6 @@ const program = Effect.gen(function* () {
         yield* say("| x |\n");
         yield* progress("completed", "done");
         yield* say("| 2 | y |\n");
-        // Agents can repeat a terminal update after the call finished.
         yield* progress("completed", "done");
         yield* say("| 3 | z |");
         return yield* finishPrompt(requestedSessionId, "end_turn");
@@ -1849,16 +1872,16 @@ const program = Effect.gen(function* () {
         for (let index = 0; index < permissionRequestCount; index++) {
           const command =
             index > 0
-              ? (process.env.T3_ACP_SECOND_PERMISSION_COMMAND ?? "cat server/package.json")
+              ? (process.env.GOAT_ACP_SECOND_PERMISSION_COMMAND ?? "cat server/package.json")
               : "cat server/package.json";
           const permission = yield* agent.client.requestPermission({
             sessionId: requestedSessionId,
-            title: process.env.T3_ACP_PERMISSION_TITLE ?? `\`${command}\``,
+            title: process.env.GOAT_ACP_PERMISSION_TITLE ?? `\`${command}\``,
             subject: {
               type: "tool_call",
               toolCall: {
                 toolCallId: index === 0 ? toolCallId : `${toolCallId}-${index + 1}`,
-                title: process.env.T3_ACP_PERMISSION_TITLE ?? `\`${command}\``,
+                title: process.env.GOAT_ACP_PERMISSION_TITLE ?? `\`${command}\``,
                 kind: "execute",
                 status: "pending",
                 rawInput: {
@@ -1959,9 +1982,6 @@ const program = Effect.gen(function* () {
         return yield* finishPrompt(requestedSessionId, "end_turn");
       }
 
-      // In-turn monitor + TaskOutput hydrate, then a late post-finalize
-      // duplicate terminal TaskOutput for the same task. Exercises the
-      // already-handled short-circuit: must not pin hasPendingBackgroundWork.
       if (emitInTurnTaskOutputThenLateDuplicate) {
         const monitorToolCallId = "tool-call-monitor-1";
         yield* agent.client.sessionUpdate({
@@ -2011,9 +2031,6 @@ const program = Effect.gen(function* () {
             content: { type: "text", text: "Monitor listing ready in-turn." },
           },
         });
-        // After deferred finalize (~2s) clears activeTurn, re-emit a terminal
-        // TaskOutput for the same task so bufferPostSettleWake sees
-        // alreadyHandledToolUpdate with a non-empty wake path.
         yield* Effect.gen(function* () {
           yield* Effect.sleep("2500 millis");
           yield* Effect.sync(() => {
@@ -2057,10 +2074,6 @@ const program = Effect.gen(function* () {
           },
         });
 
-        // After the prompt settles, replay the CLI-injected monitor-event
-        // turn: end notice, TaskOutput hydration, then (once the trigger
-        // file exists) the report chunk. Detached fiber on the real clock;
-        // it outlives the prompt handler.
         yield* Effect.gen(function* () {
           yield* Effect.sleep("150 millis");
           yield* Effect.sync(() => {
@@ -2177,10 +2190,9 @@ const program = Effect.gen(function* () {
 
       if (emitXAiPlanMdWrite) {
         // Match Grok's real session layout so isGrokPlanMarkdownPath accepts it.
-        const planRoot = process.env.T3_ACP_PLAN_ROOT ?? "/tmp/mock-home/.grok";
+        const planRoot = process.env.GOAT_ACP_PLAN_ROOT ?? "/tmp/mock-home/.grok";
         const planPath = `${planRoot}/sessions/${requestedSessionId}/plan.md`;
         const planBody = "# Mock plan\n\n- Write the feature\n- Add a test\n- Ship it\n";
-        // enter_plan_mode first so the adapter arms planModeActive.
         yield* agent.client.sessionUpdate({
           sessionId: requestedSessionId,
           update: {
@@ -2327,8 +2339,8 @@ const program = Effect.gen(function* () {
   yield* agent.handleUnknownExtRequest((method, params) => {
     if (method === "_test/environment") {
       return Effect.succeed({
-        inherited: process.env.T3_ACP_RUNTIME_AMBIENT === "sentinel",
-        explicit: process.env.T3_ACP_RUNTIME_EXPLICIT === "kept",
+        inherited: process.env.GOAT_ACP_RUNTIME_AMBIENT === "sentinel",
+        explicit: process.env.GOAT_ACP_RUNTIME_EXPLICIT === "kept",
       });
     }
     if (method === "_test/release-resume") {

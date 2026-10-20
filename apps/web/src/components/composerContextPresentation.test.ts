@@ -1,4 +1,4 @@
-import { ThreadId } from "@t3tools/contracts";
+import { ThreadId } from "@goat/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
 import { buildMessageContext } from "~/lib/composerContextRecords";
@@ -18,7 +18,6 @@ describe("composerContextRecordsFromDraft", () => {
       regions: [],
       strokes: [],
       styleChanges: [],
-      // The draft stores annotations without their data URL.
       screenshot: {
         dataUrl: "",
         width: 10,

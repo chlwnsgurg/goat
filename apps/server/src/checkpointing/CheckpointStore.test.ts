@@ -3,8 +3,8 @@ import * as NodePath from "node:path";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { it } from "@effect/vitest";
-import { ThreadId, type VcsError } from "@t3tools/contracts";
-import * as HostProcess from "@t3tools/shared/HostProcess";
+import { ThreadId, type VcsError } from "@goat/contracts";
+import * as HostProcess from "@goat/shared/HostProcess";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
@@ -20,7 +20,7 @@ import * as VcsProcess from "../vcs/VcsProcess.ts";
 import * as ServerConfig from "../config.ts";
 
 const layerServerConfig = ServerConfig.ServerConfig.layerTest(process.cwd(), {
-  prefix: "t3-checkpoint-store-test-",
+  prefix: "goat-checkpoint-store-test-",
 });
 const layerVcsProcessTest = VcsProcess.layer.pipe(Layer.provide(NodeServices.layer));
 const layerVcsDriverTest = VcsDriverRegistry.layer.pipe(Layer.provide(layerVcsProcessTest));
@@ -510,7 +510,6 @@ it.layer(layerTest)("CheckpointStore.layer", (it) => {
         yield* checkpointStore.captureCheckpoint({ cwd: tmp, checkpointRef: refs.toCheckpointRef });
         expect(yield* checkpointStore.listAuthoredPaths(refs)).toBeNull();
 
-        // The turn merges upstream, fixes the conflict by taking upstream, and edits one more file.
         yield* git(tmp, ["merge", "upstream", "--no-edit"], { allowNonZeroExit: true });
         yield* writeTextFile(NodePath.join(tmp, "shared.txt"), "upstream\n");
         yield* git(tmp, ["commit", "-am", "merge upstream"]);
@@ -567,3 +566,21 @@ it.layer(layerTest)("CheckpointStore.layer", (it) => {
     );
   });
 });
+
+it.effect("writes GOAT checkpoint refs and restores an existing legacy ref", () =>
+  Effect.gen(function* () {
+    const cwd = yield* makeTmpDir();
+    yield* initRepoWithCommit(cwd);
+    const store = yield* CheckpointStore.CheckpointStore;
+    const ref = checkpointRefForThreadTurn(ThreadId.make("rename"), 1);
+    expect(ref).toMatch(/^refs\/goat\/checkpoints\//);
+    yield* store.captureCheckpoint({ cwd, checkpointRef: ref });
+    const legacy = ref.replace("refs/goat/", "refs/t3/") as typeof ref;
+    yield* git(cwd, ["update-ref", legacy, ref]);
+    yield* writeTextFile(NodePath.join(cwd, "README.md"), "changed\n");
+    expect(yield* store.hasCheckpointRef({ cwd, checkpointRef: legacy })).toBe(true);
+    yield* store.restoreCheckpoint({ cwd, checkpointRef: legacy });
+    const fs = yield* FileSystem.FileSystem;
+    expect(yield* fs.readFileString(NodePath.join(cwd, "README.md"))).toBe("# test\n");
+  }).pipe(Effect.provide(layerTest)),
+);

@@ -1,4 +1,4 @@
-import type { RelayManagedEndpoint, RelayManagedEndpointOrigin } from "@t3tools/contracts/relay";
+import type { RelayManagedEndpoint, RelayManagedEndpointOrigin } from "@goat/contracts/relay";
 import { and, eq, exists, inArray, isNull, sql } from "drizzle-orm";
 import { QueryBuilder } from "drizzle-orm/pg-core";
 import * as Context from "effect/Context";
@@ -24,7 +24,6 @@ export interface ManagedEndpointAllocation {
   readonly origin: RelayManagedEndpointOrigin | null;
   readonly updatedAt: string;
   readonly generation: number;
-  /** When cleanup deleted the recorded tunnel; null once a tunnel is recorded again. */
   readonly tunnelReleasedAt: string | null;
 }
 
@@ -113,7 +112,6 @@ interface MarkManagedEndpointReadyInput extends ManagedEndpointAllocationKey {
 interface ClaimManagedEndpointReleaseInput extends ManagedEndpointAllocationKey {
   readonly tunnelId: string;
   readonly generation: number;
-  /** Record that the tunnel is being deleted; set only by the claim that deletes it. */
   readonly markReleased?: boolean;
 }
 
@@ -137,7 +135,6 @@ export class ManagedEndpointAllocations extends Context.Service<
     readonly get: (
       input: ManagedEndpointAllocationKey,
     ) => Effect.Effect<ManagedEndpointAllocation | null, ManagedEndpointAllocationPersistenceError>;
-    /** The allocation that owns a tunnel name; tunnel names are unique. */
     readonly getByTunnelName: (
       tunnelName: string,
     ) => Effect.Effect<ManagedEndpointAllocation | null, ManagedEndpointAllocationPersistenceError>;

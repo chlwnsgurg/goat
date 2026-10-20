@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vite-plus/test";
 
-import type { ModelCapabilities } from "@t3tools/contracts";
+import type { ModelCapabilities } from "@goat/contracts";
 
 import { applyProviderOptionSelection, resolveProviderOptionDescriptors } from "./providerOptions";
 
@@ -42,7 +42,6 @@ describe("mobile provider options", () => {
       { id: "reasoningEffort", value: "medium" },
       { id: "serviceTier", value: "priority" },
     ]);
-    // Choices the model doesn't advertise are rejected, not stored.
     expect(
       applyProviderOptionSelection(descriptors, { id: "serviceTier", value: "turbo" }),
     ).toBeNull();

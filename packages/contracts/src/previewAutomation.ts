@@ -25,7 +25,6 @@ const OptionalTimeoutMs = Schema.optional(
     .annotate({ description: "Maximum wait in milliseconds. Defaults to 15000; maximum 60000." }),
 ).annotate({ description: "Maximum wait in milliseconds. Defaults to 15000; maximum 60000." });
 
-/** Operations understood by desktop hosts predating viewport resizing. */
 export const PREVIEW_AUTOMATION_V1_OPERATIONS = [
   "status",
   "open",
@@ -41,7 +40,6 @@ export const PREVIEW_AUTOMATION_V1_OPERATIONS = [
   "recordingStop",
 ] as const;
 
-/** Advertised by current desktop hosts for mixed-version routing. */
 const PREVIEW_AUTOMATION_OPERATIONS = [
   ...PREVIEW_AUTOMATION_V1_OPERATIONS,
   "resize",
@@ -56,6 +54,10 @@ export const PREVIEW_AUTOMATION_SERVER_OPERATIONS = [
   "hover",
   "select",
   "drag",
+  "back",
+  "forward",
+  "reload",
+  "logs",
 ] as const;
 export const PreviewAutomationOperation = Schema.Literals(PREVIEW_AUTOMATION_SERVER_OPERATIONS);
 export type PreviewAutomationOperation = typeof PreviewAutomationOperation.Type;
@@ -74,6 +76,17 @@ const PreviewAutomationTabTargetFields = {
 
 export const PreviewAutomationTabTargetInput = Schema.Struct(PreviewAutomationTabTargetFields);
 export type PreviewAutomationTabTargetInput = typeof PreviewAutomationTabTargetInput.Type;
+
+export const PreviewAutomationSnapshotInput = Schema.Struct({
+  ...PreviewAutomationTabTargetFields,
+  fullPage: Schema.optional(
+    Schema.Boolean.annotate({
+      description:
+        "Capture the document from its top-left instead of the viewport. Defaults to false. Full-page captures are clipped to 3840 × 16384 CSS pixels and scaled to at most 3840 × 16384 image pixels and 8 MiB; screenshot.clipped reports omitted document content.",
+    }),
+  ),
+});
+export type PreviewAutomationSnapshotInput = typeof PreviewAutomationSnapshotInput.Type;
 
 /** `human`: a person controls the tab now; `agent`: an agent session opened it; `unclaimed`: neither. */
 export const PreviewAutomationTabOwner = Schema.Literals(["agent", "human", "unclaimed"]);
@@ -108,15 +121,11 @@ export const PreviewAutomationStatus = Schema.Struct({
       }),
     ),
   ),
-  /** Optional for compatibility with desktop hosts predating viewport sizing. */
   viewportSetting: Schema.optional(PreviewViewportSetting),
-  /** Measured guest-page viewport in CSS pixels when a webview is ready. */
   viewport: Schema.optional(PreviewRenderedViewportSize),
-  /** Server hosts: a file picker the page opened, answered with preview_upload. */
   fileChooser: Schema.optional(
     Schema.NullOr(Schema.Struct({ multiple: Schema.Boolean, accept: Schema.String })),
   ),
-  /** Server hosts: files this tab downloaded, saved on the environment until the tab closes. */
   downloads: Schema.optional(
     Schema.Array(
       Schema.Struct({
@@ -146,9 +155,7 @@ export const PreviewAutomationStatus = Schema.Struct({
       }),
     ),
   ),
-  /** Server hosts: the browser profiles preview_open accepts, as the user's client reported them. */
   profiles: Schema.optional(Schema.Array(PreviewAutomationProfile)),
-  /** Server hosts: the profile preview_open uses when given none. */
   defaultProfileId: Schema.optional(BrowserProfileId),
 });
 export type PreviewAutomationStatus = typeof PreviewAutomationStatus.Type;
@@ -273,6 +280,24 @@ export const PreviewAutomationNavigateInput = Schema.Struct({
       "Navigates the active browser tab. Provide exactly one of url or target; for most public pages use url.",
   });
 export type PreviewAutomationNavigateInput = typeof PreviewAutomationNavigateInput.Type;
+
+export const PreviewAutomationHistoryInput = Schema.Struct({
+  ...PreviewAutomationTabTargetFields,
+  readiness: Schema.optional(Schema.Literals(["load", "domContentLoaded"])).annotate({
+    description:
+      "Readiness milestone after navigation commits: load (default) or domContentLoaded for an interactive document.",
+  }),
+  timeoutMs: OptionalTimeoutMs,
+});
+export type PreviewAutomationHistoryInput = typeof PreviewAutomationHistoryInput.Type;
+
+export const PreviewAutomationReloadInput = Schema.Struct({
+  ...PreviewAutomationHistoryInput.fields,
+  ignoreCache: Schema.optional(Schema.Boolean).annotate({
+    description: "Bypass Chromium's HTTP cache for this reload. Defaults to false.",
+  }),
+});
+export type PreviewAutomationReloadInput = typeof PreviewAutomationReloadInput.Type;
 
 export const PreviewAutomationResizeInput = Schema.Struct({
   ...PreviewAutomationTabTargetFields,
@@ -481,7 +506,7 @@ export const PreviewAutomationSelectResult = Schema.Struct({
 });
 export type PreviewAutomationSelectResult = typeof PreviewAutomationSelectResult.Type;
 
-/** A required locator field. Its JSON schema keeps only the description on its last check. */
+/** Its JSON schema keeps only the description on its last check. */
 const DescribedLocator = (description: string) =>
   Schema.String.check(Schema.isTrimmed())
     .check(Schema.isNonEmpty({ description }))
@@ -649,6 +674,16 @@ export const PreviewAutomationWaitForInput = Schema.Struct({
     description:
       "Playwright selector that must match an element, for example role=button[name='Send'].",
   }),
+  state: Schema.optional(Schema.Literals(["attached", "visible", "hidden", "detached"])).annotate({
+    description:
+      "Locator state to wait for. Requires locator or selector. Defaults to attached (presence, even when hidden). Hidden also matches a detached element.",
+  }),
+  loadState: Schema.optional(Schema.Literals(["load", "domContentLoaded", "networkIdle"])).annotate(
+    {
+      description:
+        "Optional load milestone for the current document. networkIdle explicitly waits for 500ms without network connections and may time out on busy pages. All conditions share timeoutMs; no load wait by default.",
+    },
+  ),
   text: Schema.optional(
     TrimmedNonEmptyString.annotate({
       description: "Case-sensitive substring that must appear in visible document text.",
@@ -668,11 +703,19 @@ export const PreviewAutomationWaitForInput = Schema.Struct({
       if (input.selector !== undefined && input.locator !== undefined) {
         return "Provide at most one of selector or locator.";
       }
+      if (
+        input.state !== undefined &&
+        input.selector === undefined &&
+        input.locator === undefined
+      ) {
+        return "Provide locator or selector when specifying state.";
+      }
       return (
         input.selector !== undefined ||
         input.locator !== undefined ||
         input.text !== undefined ||
         input.urlIncludes !== undefined ||
+        input.loadState !== undefined ||
         "Provide at least one wait condition."
       );
     }),
@@ -710,8 +753,90 @@ export const PreviewAutomationNetworkEntry = Schema.Struct({
   failed: Schema.Boolean,
   errorText: Schema.optional(Schema.String),
   timestamp: Schema.String,
+  requestId: Schema.optional(Schema.String),
+  phase: Schema.optional(Schema.Literals(["request", "response", "finished", "failed"])),
+  durationMs: Schema.optional(Schema.Number),
 });
 export type PreviewAutomationNetworkEntry = typeof PreviewAutomationNetworkEntry.Type;
+
+export const PreviewAutomationPageError = Schema.Struct({
+  message: Schema.String,
+  stack: Schema.optional(Schema.String),
+  timestamp: Schema.String,
+});
+export type PreviewAutomationPageError = typeof PreviewAutomationPageError.Type;
+
+const DiagnosticFilter = Schema.String.check(Schema.isMaxLength(256));
+export const PreviewAutomationLogsInput = Schema.Struct({
+  ...PreviewAutomationTabTargetFields,
+  limit: Schema.optional(Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 100 }))).annotate(
+    {
+      description:
+        "Maximum entries per stream, newest first. Defaults to 50; maximum 100. A shared byte budget may return fewer.",
+    },
+  ),
+  includeConsole: Schema.optional(Schema.Boolean).annotate({
+    description: "Include console entries. Defaults to true.",
+  }),
+  includeErrors: Schema.optional(Schema.Boolean).annotate({
+    description: "Include uncaught page errors and stacks. Defaults to true.",
+  }),
+  includeNetwork: Schema.optional(Schema.Boolean).annotate({
+    description: "Include network metadata. Defaults to true.",
+  }),
+  consoleLevels: Schema.optional(
+    Schema.Array(Schema.String.check(Schema.isMaxLength(32))).check(Schema.isMaxLength(20)),
+  ).annotate({
+    description:
+      "Exact Playwright console levels to include, such as log, info, warning, error or debug. Omit for all levels.",
+  }),
+  text: Schema.optional(DiagnosticFilter).annotate({
+    description:
+      "Case-insensitive substring of console text or page error message/stack, after URL redaction.",
+  }),
+  url: Schema.optional(DiagnosticFilter).annotate({
+    description:
+      "Case-insensitive substring of the redacted network URL; query values cannot be searched.",
+  }),
+  method: Schema.optional(Schema.String.check(Schema.isMaxLength(32))).annotate({
+    description: "Exact HTTP method, case-insensitive, such as GET or POST.",
+  }),
+  status: Schema.optional(
+    Schema.Int.check(Schema.isBetween({ minimum: 100, maximum: 599 })),
+  ).annotate({
+    description:
+      "Exact HTTP response status (100 through 599). Request/failure entries without a response do not match.",
+  }),
+  failed: Schema.optional(Schema.Boolean).annotate({
+    description:
+      "Filter transport failures; HTTP 4xx/5xx responses are not failed requests. Omit for both.",
+  }),
+}).annotate({
+  description:
+    "Read retained diagnostics, newest first. All streams default to included; limit defaults to 50 per stream (maximum 100), subject to a shared 24 KB entry budget. Filters are case-insensitive substrings except exact console levels, HTTP status, method and failed. URL filtering uses redacted URLs. text filters console text and error message/stack. Reads do not clear buffers.",
+});
+export type PreviewAutomationLogsInput = typeof PreviewAutomationLogsInput.Type;
+
+const DiagnosticCounts = {
+  droppedCount: Schema.Int.annotate({
+    description: "Entries evicted from this tab's bounded buffer, before filtering.",
+  }),
+  omittedCount: Schema.Int.annotate({
+    description: "Retained matching entries omitted by the limit or shared byte budget.",
+  }),
+};
+export const PreviewAutomationLogs = Schema.Struct({
+  console: Schema.Struct({
+    entries: Schema.Array(PreviewAutomationConsoleEntry),
+    ...DiagnosticCounts,
+  }),
+  errors: Schema.Struct({ entries: Schema.Array(PreviewAutomationPageError), ...DiagnosticCounts }),
+  network: Schema.Struct({
+    entries: Schema.Array(PreviewAutomationNetworkEntry),
+    ...DiagnosticCounts,
+  }),
+});
+export type PreviewAutomationLogs = typeof PreviewAutomationLogs.Type;
 
 export const PreviewAutomationActionEvent = Schema.Struct({
   id: Schema.String,
@@ -738,6 +863,9 @@ export const PreviewAutomationSnapshot = Schema.Struct({
     data: Schema.String,
     width: Schema.Int,
     height: Schema.Int,
+    fullPage: Schema.optional(Schema.Boolean),
+    clipped: Schema.optional(Schema.Boolean),
+    byteLength: Schema.optional(Schema.Int),
   }),
 });
 export type PreviewAutomationSnapshot = typeof PreviewAutomationSnapshot.Type;
@@ -775,8 +903,7 @@ export type PreviewAutomationHostIdentity = typeof PreviewAutomationHostIdentity
 export const PreviewAutomationHost = Schema.Struct({
   ...PreviewAutomationHostIdentity.fields,
   /**
-   * Missing means the pre-capability-negotiation V1 operation set. This lets
-   * a newer server safely coexist with an older desktop during rollout.
+   * Missing means the pre-capability-negotiation V1 operation set.
    */
   supportedOperations: Schema.optional(Schema.Array(PreviewAutomationOperation)),
 });
@@ -840,7 +967,6 @@ export const PreviewAutomationResponse = Schema.Struct({
 });
 export type PreviewAutomationResponse = typeof PreviewAutomationResponse.Type;
 
-// Thread fields are absent when the caller signed in from outside a T3 thread.
 const McpCapabilityErrorFields = {
   environmentId: EnvironmentId,
   threadId: Schema.optional(ThreadId),
@@ -848,7 +974,6 @@ const McpCapabilityErrorFields = {
   providerInstanceId: Schema.optional(ProviderInstanceId),
 };
 
-/** Agents read this message, so it names the next step and not only the failure. */
 export class PreviewAutomationUnavailableError extends Schema.TaggedError<PreviewAutomationUnavailableError>()(
   "PreviewAutomationUnavailableError",
   {
@@ -882,7 +1007,6 @@ const PreviewAutomationScopeErrorFields = {
   providerInstanceId: ProviderInstanceId,
 };
 
-/** The automation host id of an environment's own server browser. */
 export const SERVER_BROWSER_AUTOMATION_CLIENT_ID = "server-browser";
 
 const PreviewAutomationRequestErrorFields = {
@@ -1010,10 +1134,6 @@ export class PreviewAutomationExecutionError extends Schema.TaggedError<PreviewA
   {
     ...PreviewAutomationRequestErrorFields,
     ...PreviewAutomationRemoteDiagnosticFields,
-    /**
-     * What went wrong, as the server's own browser reported it, such as a
-     * page that refused the connection. Absent for other hosts.
-     */
     reason: Schema.optional(Schema.String),
   },
 ) {
@@ -1031,7 +1151,6 @@ export class PreviewAutomationInvalidSelectorError extends Schema.TaggedError<Pr
     ...PreviewAutomationRemoteDiagnosticFields,
     selectorKind: Schema.optional(Schema.Literals(["locator", "selector"])),
     selectorLength: Schema.optional(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
-    /** The selector was an `aria-ref` from an older snapshot. */
     staleRef: Schema.optional(Schema.Boolean),
   },
 ) {

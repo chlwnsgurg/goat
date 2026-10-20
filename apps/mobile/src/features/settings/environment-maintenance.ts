@@ -4,13 +4,13 @@ import {
   type AuthSessionState,
   type ExecutionEnvironmentCapabilities,
   type ServerProvider,
-} from "@t3tools/contracts";
+} from "@goat/contracts";
 import {
   cliReleaseChannelOf,
   cliReleaseIndexPageUrl,
   newestCliReleaseVersion,
-} from "@t3tools/shared/cliRelease";
-import { compareSemverVersions } from "@t3tools/shared/semver";
+} from "@goat/shared/cliRelease";
+import { compareSemverVersions } from "@goat/shared/semver";
 import * as Schema from "effect/Schema";
 
 export function canMaintainEnvironment(session: AuthSessionState | null, connected: boolean) {
@@ -53,7 +53,6 @@ const Releases = Schema.Array(
 );
 const decodeReleases = Schema.decodeUnknownSync(Releases);
 
-/** Preserve the host's release channel and never offer a downgrade. */
 export async function findEnvironmentUpdate(currentVersion: string, signal: AbortSignal) {
   const channel = cliReleaseChannelOf(currentVersion);
   for (let page = 1; ; page++) {

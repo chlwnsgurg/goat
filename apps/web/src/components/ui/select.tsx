@@ -3,7 +3,7 @@ import { mergeProps } from "@base-ui/react/merge-props";
 import { Select as SelectPrimitive } from "@base-ui/react/select";
 import { useRender } from "@base-ui/react/use-render";
 import { cva, type VariantProps } from "class-variance-authority";
-import { ChevronDownIcon, ChevronUpIcon } from "lucide-react";
+import { ChevronDownIcon, ChevronUpIcon } from "~/components/solar";
 import type * as React from "react";
 
 import { cn } from "~/lib/utils";
@@ -59,10 +59,6 @@ function SelectTrigger({
   );
 }
 
-/**
- * The select-field look for a picker that is not a Select, such as a Menu or
- * Combobox trigger. Render it as that trigger: `<MenuTrigger render={<SelectButton />}>`.
- */
 function SelectButton({
   className,
   size = "default",

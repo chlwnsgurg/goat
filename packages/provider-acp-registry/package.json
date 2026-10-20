@@ -1,5 +1,5 @@
 {
-  "name": "@t3tools/provider-acp-registry",
+  "name": "@goat/provider-acp-registry",
   "private": true,
   "type": "module",
   "exports": {
@@ -26,24 +26,28 @@
     "./server/AcpRegistryRuntimeCoordinator": {
       "types": "./src/server/AcpRegistryRuntimeCoordinator.ts",
       "import": "./src/server/AcpRegistryRuntimeCoordinator.ts"
+    },
+    "./server/devinAcp": {
+      "types": "./src/server/devinAcp.ts",
+      "import": "./src/server/devinAcp.ts"
     }
   },
   "scripts": {
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc-rs --noEmit",
     "test": "vp test run --config ../../vite.config.ts --dir ."
   },
   "dependencies": {
+    "@goat/contracts": "workspace:*",
+    "@goat/provider-acp": "workspace:*",
+    "@goat/provider-core": "workspace:*",
+    "@goat/shared": "workspace:*",
     "@noble/hashes": "catalog:",
-    "@t3tools/contracts": "workspace:*",
-    "@t3tools/provider-acp": "workspace:*",
-    "@t3tools/provider-core": "workspace:*",
-    "@t3tools/shared": "workspace:*",
     "effect": "catalog:"
   },
   "devDependencies": {
     "@effect/platform-node": "catalog:",
     "@effect/vitest": "catalog:",
-    "@t3tools/provider-testing": "workspace:*",
+    "@goat/provider-testing": "workspace:*",
     "@types/node": "catalog:",
     "effect-acp": "workspace:*",
     "vite-plus": "catalog:"

@@ -1,21 +1,23 @@
-import { scopeThreadRef, scopedThreadKey } from "@t3tools/client-runtime/environment";
-import { backgroundWorkHoldsCompletion } from "@t3tools/shared/orchestrationV2PendingBackgroundWork";
-import { threadPullRequestSearchTerms } from "@t3tools/shared/threadPullRequests";
+import { scopeThreadRef, scopedThreadKey } from "@goat/client-runtime/environment";
+import { backgroundWorkHoldsCompletion } from "@goat/shared/orchestrationV2PendingBackgroundWork";
+import { threadPullRequestSearchTerms } from "@goat/shared/threadPullRequests";
 import * as React from "react";
 import {
   isAtomCommandInterrupted,
   type AtomCommandResult,
-} from "@t3tools/client-runtime/state/runtime";
+} from "@goat/client-runtime/state/runtime";
 import { defaultAnimateLayoutChanges, type AnimateLayoutChanges } from "@dnd-kit/sortable";
-import { threadSearchMatchKey } from "@t3tools/client-runtime/state/thread-search";
-import type { ContextMenuItem, EnvironmentId, ThreadId } from "@t3tools/contracts";
-import type { SidebarProjectSortOrder, SidebarThreadSortOrder } from "@t3tools/contracts/settings";
+import { threadSearchMatchKey } from "@goat/client-runtime/state/thread-search";
+import type { ContextMenuItem, EnvironmentId, ThreadId } from "@goat/contracts";
+import { isSideChatThread } from "@goat/contracts";
+import type { SidebarProjectSortOrder, SidebarThreadSortOrder } from "@goat/contracts/settings";
 import type { AsyncResult } from "effect/reactivity";
-import { planPinnedReorder } from "@t3tools/client-runtime/state/thread-sort";
+import { planPinnedReorder } from "@goat/client-runtime/state/thread-sort";
 import {
   effectiveSnoozed,
+  threadWokeAt,
   type ThreadSnoozeShell,
-} from "@t3tools/client-runtime/state/thread-settled";
+} from "@goat/client-runtime/state/thread-settled";
 import {
   getThreadSortTimestamp,
   sortThreads,
@@ -23,7 +25,7 @@ import {
   type ThreadSortInput,
 } from "../lib/threadSort";
 import type { SidebarThreadSummary, Thread } from "../types";
-import { cn } from "../lib/utils";
+import { cn, normalizeSearchText } from "../lib/utils";
 import { isLatestRunSettled } from "../session-logic";
 import { resolveServerBackedAppStageLabel } from "../branding.logic";
 
@@ -52,12 +54,37 @@ const SIDEBAR_HOST_HUE_CLASSES = [
   "text-rose-500",
 ] as const;
 
-export function sidebarHostHueClassName(environmentId: string): string {
+function sidebarHostHueSlot(environmentId: string): number {
   let hash = 0x811c9dc5;
   for (let index = 0; index < environmentId.length; index += 1) {
     hash = Math.imul(hash ^ environmentId.charCodeAt(index), 0x01000193);
   }
-  return SIDEBAR_HOST_HUE_CLASSES[(hash >>> 0) % SIDEBAR_HOST_HUE_CLASSES.length]!;
+  return (hash >>> 0) % SIDEBAR_HOST_HUE_CLASSES.length;
+}
+
+/** Hash-only hue, for an environment outside the known set. */
+export function sidebarHostHueClassName(environmentId: string): string {
+  return SIDEBAR_HOST_HUE_CLASSES[sidebarHostHueSlot(environmentId)]!;
+}
+
+/**
+ * Distinct globe hues for the known device environments. Each id keeps its hashed
+ * hue unless an id that sorts earlier already took it, then moves to the next free
+ * one, so colors only repeat past the palette size and never depend on list order.
+ */
+export function assignSidebarHostHues(
+  environmentIds: ReadonlyArray<string>,
+): ReadonlyMap<string, string> {
+  const taken = new Set<number>();
+  const hues = new Map<string, string>();
+  for (const environmentId of [...new Set(environmentIds)].toSorted()) {
+    if (taken.size === SIDEBAR_HOST_HUE_CLASSES.length) taken.clear();
+    let slot = sidebarHostHueSlot(environmentId);
+    while (taken.has(slot)) slot = (slot + 1) % SIDEBAR_HOST_HUE_CLASSES.length;
+    taken.add(slot);
+    hues.set(environmentId, SIDEBAR_HOST_HUE_CLASSES[slot]!);
+  }
+  return hues;
 }
 
 export function shouldNavigateAfterThreadPark(input: {
@@ -86,22 +113,16 @@ export function resolveSidebarRowAccessibility(input: {
   readonly isActive: boolean;
 }): { readonly label: string; readonly current: "page" | undefined } {
   return {
-    // The title is the row's identity and must lead when users scan tasks.
-    // Only static context belongs here; nested action labels remain separate controls.
     label: [input.title, input.statusLabel, input.projectDisplayName].filter(Boolean).join(", "),
     current: input.isActive ? "page" : undefined,
   };
 }
 
-// Visible sidebar rows are prewarmed into the thread-detail cache so opening a
-// nearby thread usually reuses an already-hot subscription. Each prewarmed
-// thread holds a live, fully hydrated detail subscription (all messages and
-// activities, growing as agents work) for as long as the row stays visible,
-// so this limit is a direct renderer-heap and server-load multiplier — keep
-// it small; cold opens still render instantly from the cached snapshot.
+// Each prewarmed thread holds a live, fully hydrated detail subscription (all
+// messages and activities, growing as agents work) for as long as the row stays
+// visible, so this limit is a direct renderer-heap and server-load multiplier —
+// keep it small; cold opens still render instantly from the cached snapshot.
 const SIDEBAR_THREAD_PREWARM_LIMIT = 3;
-// A small buffer keeps the next few rows warm without leasing every row that
-// content-visibility leaves mounted below the scroll viewport.
 const SIDEBAR_ROW_SUBSCRIPTION_OVERSCAN_PX = 160;
 
 export function useSidebarRowSubscriptionLease(isActive: boolean): {
@@ -110,17 +131,12 @@ export function useSidebarRowSubscriptionLease(isActive: boolean): {
 } {
   const [row, setRow] = React.useState<HTMLElement | null>(null);
   const [isNearViewport, setIsNearViewport] = React.useState(isActive);
+  // The active row stays leased after it deactivates until the observer reports.
+  if (isActive && !isNearViewport) setIsNearViewport(true);
+  const canObserve = typeof IntersectionObserver !== "undefined";
 
   React.useEffect(() => {
-    if (isActive) {
-      setIsNearViewport(true);
-      return;
-    }
-    if (row === null) return;
-    if (typeof IntersectionObserver === "undefined") {
-      setIsNearViewport(true);
-      return;
-    }
+    if (isActive || row === null || !canObserve) return;
 
     const scrollRoot = row.closest<HTMLElement>('[data-slot="scroll-area-viewport"]');
     const observer = new IntersectionObserver(
@@ -132,24 +148,24 @@ export function useSidebarRowSubscriptionLease(isActive: boolean): {
     );
     observer.observe(row);
     return () => observer.disconnect();
-  }, [isActive, row]);
+  }, [canObserve, isActive, row]);
 
   return {
-    leaseLiveStatus: isActive || isNearViewport,
+    leaseLiveStatus: isActive || isNearViewport || !canObserve,
     rowRef: setRow,
   };
 }
 
-// A row keeps the last live value it rendered so a released lease never
-// blanks its badge. The value is bound to `key`, so a different worktree or
-// linked pull request cannot reuse the previous one.
 export function useRetainedValue<T>(key: string | null, value: T | null): T | null {
-  const retained = React.useRef<{ readonly key: string; readonly value: T } | null>(null);
-  if (key !== null && value !== null) {
-    retained.current = { key, value };
+  const [retained, setRetained] = React.useState<{
+    readonly key: string;
+    readonly value: T;
+  } | null>(null);
+  if (key !== null && value !== null && (retained?.key !== key || retained.value !== value)) {
+    setRetained({ key, value });
   }
   if (value !== null) return value;
-  return key !== null && retained.current?.key === key ? retained.current.value : null;
+  return key !== null && retained?.key === key ? retained.value : null;
 }
 
 // Sidebar.motion handles ordinary section changes. Sortable transforms own
@@ -181,17 +197,12 @@ export function resolveSidebarThreadSection(input: {
   return "active";
 }
 
-/** Sortable ids: thread rows use their scoped key; structural items use a
-    colon-free prefix: scoped thread keys always contain a colon. */
 const SIDEBAR_MARKER_PREFIX = "sidebar-marker-";
 
 export type SidebarListMarker =
-  /** The top boundary is also a landing target when there are no pins. */
   | "pinned-header"
-  /** Stand-in rows so an empty section has somewhere for the gap to open. */
   | "active-placeholder"
   | "settled-placeholder"
-  /** The boundary between pinned and active rows. */
   | "pinned-divider"
   | "priority-header"
   | "snoozed-header"
@@ -283,15 +294,11 @@ export function resolveSidebarDropTarget(
 
 export type SidebarThreadDropPlan =
   | { readonly kind: "none" }
-  /** Within the pinned block: the existing key writes. */
   | {
       readonly kind: "reorder-pinned";
       readonly order: readonly string[];
       readonly assignments: ReadonlyArray<{ readonly id: string; readonly orderKey: string }>;
     }
-  /** From another section into the pinned block. Fresh pins take `orderKey`
-      on the pin command. `extraAssignments` land afterward, including the
-      moved row when it was already pinned beneath a snooze. */
   | {
       readonly kind: "pin";
       readonly order: readonly string[];
@@ -347,7 +354,6 @@ export function resolveSidebarDropVerb(
   return "wake";
 }
 
-/** Eligible rows between the pressed action and the pointer, in sidebar order. */
 export function resolveSidebarSweepKeys(
   orderedKeys: readonly string[],
   originKey: string,
@@ -360,10 +366,6 @@ export function resolveSidebarSweepKeys(
   return orderedKeys.slice(Math.min(origin, target), Math.max(origin, target) + 1).filter(canApply);
 }
 
-/** The thread row at a pointer height, clamped to the rows visible in the
-    sidebar's scroll viewport. A gap between rows resolves to the row above
-    it. Rows carry their key in data-thread-item, which departing motion
-    clones drop. */
 export function sidebarThreadKeyAtY(list: HTMLElement, y: number): string | null {
   const viewport = list.closest('[data-slot="scroll-area-viewport"]')?.getBoundingClientRect();
   const visibleY = viewport ? Math.min(Math.max(y, viewport.top), viewport.bottom - 1) : y;
@@ -378,12 +380,10 @@ export function sidebarThreadKeyAtY(list: HTMLElement, y: number): string | null
 export function planSidebarThreadDrop(input: {
   readonly activeKey: string;
   readonly activeSection: SidebarSection;
-  /** Snoozed threads can retain pinning and settlement beneath the shelf. */
   readonly activePinned?: boolean;
   readonly activeSettled?: boolean;
   readonly supportsSettlement?: boolean;
   readonly target: SidebarDropTarget;
-  /** All pinned keys in displayed order before the drop. */
   readonly pinnedOrder: readonly string[];
   readonly pinnedKeysById: ReadonlyMap<string, string | null | undefined>;
   readonly reorderableKeys?: ReadonlySet<string>;
@@ -408,10 +408,6 @@ export function planSidebarThreadDrop(input: {
   if (input.supportsSettlement === false && (target.section === "settled" || activeSettled)) {
     return { kind: "none" };
   }
-  // Rows whose server cannot store an order (an older server, or a machine
-  // that is offline) are never written. Keyless ones sort outside the keyed
-  // run, so they leave the plan; keyed ones stay as bounds. Before, one keyless row
-  // refused every drop that needed fresh keys for its neighbors.
   const arrange = (
     order: readonly string[],
     keysById: ReadonlyMap<string, string | null | undefined>,
@@ -451,7 +447,6 @@ export function planSidebarThreadDrop(input: {
       return activeSection === "settled" ? { kind: "none" } : { kind: "settle" };
     case "pinned": {
       const order = target.pinnedOrder;
-      // Dropped back where it started: nothing to write.
       if (
         activeSection === "pinned" &&
         order.length === pinnedOrder.length &&
@@ -478,8 +473,6 @@ export function planSidebarThreadDrop(input: {
   }
 }
 
-/** Project a drop's lifecycle fields before sorting its destination. Reusing
-    the server's re-entry rules keeps the preview in place when events arrive. */
 export function applySidebarThreadDrop<
   T extends Pick<
     SidebarThreadSummary,
@@ -546,7 +539,7 @@ export type ThreadTraversalDirection = "previous" | "next";
 
 /**
  * Shared-worktree checks must exclude only successful deletions, never the
- * whole batch. A null result skips an entry that the caller can no longer find.
+ * whole batch.
  */
 export async function deleteSelectedThreadEntries<
   TEntry extends { readonly threadKey: string },
@@ -811,19 +804,72 @@ export function withSidebarChildRequest<
   };
 }
 
+export type SidebarSettingsHydration = "pending" | "ready" | "failed" | "retrying";
+
+/**
+ * Which sidebar to mount. `null` holds the tree unmounted until settings resolve,
+ * so Projects does not mount and then swap. A synchronous last view paints immediately.
+ * Failed hydration with no saved view uses Projects.
+ */
+export function resolveSidebarViewIsProjects(input: {
+  readonly status: SidebarSettingsHydration;
+  readonly value: boolean;
+  readonly synchronousValue: boolean | null;
+}): boolean | null {
+  if (input.status === "ready") return input.value;
+  if (input.synchronousValue !== null) return input.synchronousValue;
+  if (input.status === "failed") return true;
+  return null;
+}
+
+// Subagent threads have no sidebar row, so an open subagent is represented by
+// its nearest non-subagent ancestor. A broken chain (missing parent, cycle,
+// other environment) resolves to the thread itself, which then matches no row.
+export function resolveSidebarRowThreadId(
+  threadId: ThreadId,
+  environmentId: EnvironmentId,
+  threads: readonly Pick<SidebarThreadSummary, "id" | "environmentId" | "lineage">[],
+): ThreadId {
+  const findThread = (id: ThreadId) =>
+    threads.find((thread) => thread.id === id && thread.environmentId === environmentId);
+  const visited = new Set<ThreadId>();
+  let thread = findThread(threadId);
+  while (thread !== undefined && isSidebarSubagentThread(thread)) {
+    if (thread.lineage.parentThreadId === null || visited.has(thread.id)) return threadId;
+    visited.add(thread.id);
+    thread = findThread(thread.lineage.parentThreadId);
+  }
+  return thread?.id ?? threadId;
+}
+
 export function filterSidebarV2VisibleThreads<
-  T extends Pick<SidebarThreadSummary, "archivedAt" | "lineage"> & {
+  T extends Pick<SidebarThreadSummary, "archivedAt" | "lineage" | "sideChatOf"> & {
     environmentId: string;
     projectId: string;
+    id?: SidebarThreadSummary["id"];
+    deletedAt?: SidebarThreadSummary["deletedAt"];
   },
->(threads: readonly T[], scopedProjectKeys: ReadonlySet<string> | null): T[] {
-  return threads.filter(
-    (thread) =>
-      thread.archivedAt === null &&
-      !isSidebarSubagentThread(thread) &&
-      (scopedProjectKeys === null ||
-        scopedProjectKeys.has(`${thread.environmentId}:${thread.projectId}`)),
-  );
+>(
+  threads: readonly T[],
+  scopedProjectKeys: ReadonlySet<string> | null,
+  /** Archived owners kept so a child's request or the open subagent still has a row. */
+  retainedArchivedKeys?: ReadonlySet<string>,
+): T[] {
+  return threads.filter((thread) => {
+    if (thread.deletedAt != null || isSidebarSubagentThread(thread) || isSideChatThread(thread))
+      return false;
+    if (thread.archivedAt !== null) {
+      if (retainedArchivedKeys === undefined || thread.id === undefined) return false;
+      const key = scopedThreadKey(
+        scopeThreadRef(thread.environmentId as SidebarThreadSummary["environmentId"], thread.id),
+      );
+      if (!retainedArchivedKeys.has(key)) return false;
+    }
+    return (
+      scopedProjectKeys === null ||
+      scopedProjectKeys.has(`${thread.environmentId}:${thread.projectId}`)
+    );
+  });
 }
 
 export function getSidebarForkParentThreadId(
@@ -855,11 +901,6 @@ export function buildBulkTitleRegenerationContextMenuItem(input: {
   };
 }
 
-/**
- * Bulk unpin follows the same "count only what the action will touch" rule
- * as title regeneration: on a mixed selection the label counts the pinned
- * rows alone, and the item disappears when nothing selected is pinned.
- */
 export function buildBulkUnpinContextMenuItem(input: {
   pinnedCount: number;
 }): ContextMenuItem<"unpin"> | null {
@@ -872,6 +913,7 @@ export interface ThreadStatusPill {
     | "Working"
     | "Connecting"
     | "Completed"
+    | "Failed"
     | "Pending Approval"
     | "Awaiting Input"
     | "Waiting"
@@ -884,6 +926,7 @@ export interface ThreadStatusPill {
 const THREAD_STATUS_PRIORITY: Record<ThreadStatusPill["label"], number> = {
   "Pending Approval": 5,
   "Awaiting Input": 4,
+  Failed: 3.5,
   Working: 3,
   Connecting: 3,
   Waiting: 2.5,
@@ -896,6 +939,7 @@ type ThreadStatusInput = Pick<
   | "hasActionableProposedPlan"
   | "hasPendingApprovals"
   | "hasPendingUserInput"
+  | "pendingSubagentRequest"
   | "interactionMode"
   | "latestRun"
   | "runtime"
@@ -986,9 +1030,9 @@ export function useThreadJumpHintVisibility(): {
     };
   }, []);
 
-  const updateThreadJumpHintsVisibility = React.useCallback((shouldShow: boolean) => {
+  const updateThreadJumpHintsVisibility = (shouldShow: boolean) => {
     controllerRef.current?.sync(shouldShow);
-  }, []);
+  };
 
   return {
     showThreadJumpHints,
@@ -996,13 +1040,6 @@ export function useThreadJumpHintVisibility(): {
   };
 }
 
-/**
- * Effective visited watermark for a thread. Servers with visited tracking
- * project `lastVisitedAt` on the shell and are authoritative — that value is
- * shared across every device connected to the environment. Pre-tracking
- * servers omit the field, and the browser's locally persisted watermark keeps
- * working as before.
- */
 export function resolveThreadLastVisitedAt(
   serverLastVisitedAt: string | null | undefined,
   localLastVisitedAt: string | undefined,
@@ -1025,24 +1062,26 @@ export function hasUnseenCompletion(thread: ThreadStatusInput): boolean {
   return completedAt > lastVisitedAt;
 }
 
-/** Only writable unread threads are targets of Priority's bulk visit action. */
+/** Writable unread completions and woke-only rows are targets of Priority's bulk visit. */
 export function selectSidebarMarkReadTargets<
   T extends ThreadStatusInput & Pick<SidebarThreadSummary, "environmentId" | "id">,
 >(input: {
   readonly threads: readonly T[];
   readonly localLastVisitedAtByKey: Readonly<Record<string, string | undefined>>;
+  readonly wokeAtByKey?: ReadonlyMap<string, string | null>;
   readonly canOperate: (thread: T) => boolean;
 }): T[] {
   return input.threads.filter((thread) => {
     if (!input.canOperate(thread)) return false;
     const key = scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id));
-    return hasUnseenCompletion({
-      ...thread,
-      lastVisitedAt: resolveThreadLastVisitedAt(
-        thread.lastVisitedAt,
-        input.localLastVisitedAtByKey[key],
-      ),
-    });
+    const lastVisitedAt = resolveThreadLastVisitedAt(
+      thread.lastVisitedAt,
+      input.localLastVisitedAtByKey[key],
+    );
+    return (
+      hasUnseenCompletion({ ...thread, lastVisitedAt }) ||
+      isSidebarThreadWoke(input.wokeAtByKey?.get(key) ?? null, lastVisitedAt)
+    );
   });
 }
 
@@ -1089,9 +1128,114 @@ export function holdSidebarPriorityRank(input: {
   readonly key: string;
   readonly settledOverride: SidebarThreadSummary["settledOverride"];
   readonly holds: SidebarPriorityHolds;
+  /** Mark all as read drops the row once it no longer qualifies, instead of holding it. */
+  readonly released?: boolean;
 }): 0 | 1 | 2 | null {
+  if (input.released) return input.rank;
   if (input.rank !== null || !input.holds.has(input.key)) return input.rank;
   return input.holds.get(input.key) === input.settledOverride ? 2 : null;
+}
+
+/**
+ * Settling acknowledges a wake. The acknowledgement sticks until the shell stops
+ * reporting one, so a later hold cannot put the Woke pill back. Un-settling restores it.
+ */
+export function resolveSidebarWokeAtForRow(input: {
+  readonly key: string;
+  readonly rawWokeAt: string | null;
+  readonly settledOverride: SidebarThreadSummary["settledOverride"];
+  readonly heldSettledOverride: SidebarThreadSummary["settledOverride"] | undefined;
+  readonly acknowledged: Set<string>;
+}): string | null {
+  const settling =
+    input.heldSettledOverride !== undefined &&
+    input.heldSettledOverride !== input.settledOverride &&
+    input.settledOverride === "settled";
+  if (settling) input.acknowledged.add(input.key);
+  if (input.settledOverride !== "settled" || input.rawWokeAt === null) {
+    input.acknowledged.delete(input.key);
+  }
+  return input.acknowledged.has(input.key) ? null : input.rawWokeAt;
+}
+
+type SidebarPriorityMember = ThreadStatusInput &
+  ThreadSnoozeShell &
+  Pick<SidebarThreadSummary, "settledOverride" | "pinnedAt" | "deletedAt">;
+
+/** Priority membership shared by the section and the activity bell. Holds are not included. */
+export function isSidebarPriorityMember(input: {
+  readonly thread: SidebarPriorityMember;
+  readonly now: string;
+  readonly localLastVisitedAt: string | undefined;
+  readonly hasChildAttention: boolean;
+  readonly supportsSnooze: boolean;
+  readonly supportsSettlement: boolean;
+}): boolean {
+  if (input.thread.deletedAt != null) return false;
+  const rank = resolveSidebarPriorityRank({
+    thread: input.thread,
+    localLastVisitedAt: input.localLastVisitedAt,
+    wokeAt: threadWokeAt(input.thread, { now: input.now }),
+    hasChildAttention: input.hasChildAttention,
+  });
+  return (
+    resolveSidebarThreadSection({
+      snoozed: input.supportsSnooze && effectiveSnoozed(input.thread, { now: input.now }),
+      settled: input.supportsSettlement && input.thread.settledOverride === "settled",
+      pinned: input.thread.pinnedAt != null,
+      priority: rank !== null,
+    }) === "priority"
+  );
+}
+
+export function countVisibleSidebarPriorityThreads<
+  T extends SidebarPriorityMember & Pick<SidebarThreadSummary, "environmentId" | "id">,
+>(input: {
+  readonly threads: readonly T[];
+  readonly now: string;
+  readonly localLastVisitedAtByKey: Readonly<Record<string, string | undefined>>;
+  readonly attentionByOwnerKey: ReadonlyMap<string, SidebarChildAttention>;
+  readonly supportsSnooze: (environmentId: SidebarThreadSummary["environmentId"]) => boolean;
+  readonly supportsSettlement: (environmentId: SidebarThreadSummary["environmentId"]) => boolean;
+}): number {
+  let count = 0;
+  for (const thread of input.threads) {
+    const key = scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id));
+    if (
+      isSidebarPriorityMember({
+        thread,
+        now: input.now,
+        localLastVisitedAt: input.localLastVisitedAtByKey[key],
+        hasChildAttention: input.attentionByOwnerKey.has(key),
+        supportsSnooze: input.supportsSnooze(thread.environmentId),
+        supportsSettlement: input.supportsSettlement(thread.environmentId),
+      })
+    ) {
+      count += 1;
+    }
+  }
+  return count;
+}
+
+let publishedSidebarPriorityCount: number | null = null;
+const sidebarPriorityCountListeners = new Set<() => void>();
+
+/** Activity publishes the Priority row count so the bell shows the same number. */
+export function publishSidebarPriorityCount(count: number | null): void {
+  if (publishedSidebarPriorityCount === count) return;
+  publishedSidebarPriorityCount = count;
+  for (const listener of sidebarPriorityCountListeners) listener();
+}
+
+export function subscribeSidebarPriorityCount(listener: () => void): () => void {
+  sidebarPriorityCountListeners.add(listener);
+  return () => {
+    sidebarPriorityCountListeners.delete(listener);
+  };
+}
+
+export function getPublishedSidebarPriorityCount(): number | null {
+  return publishedSidebarPriorityCount;
 }
 
 /**
@@ -1125,6 +1269,20 @@ export function resolveSidebarThreadPresentation(input: {
   };
 }
 
+/**
+ * A failed latest run the person hasn't looked at since it ended. Unlike a
+ * completion, a thread nobody has opened yet (an automation's, say) counts:
+ * its failure still needs someone.
+ */
+function hasUnseenFailure(thread: ThreadStatusInput): boolean {
+  if (thread.latestRun?.status !== "failed") return false;
+  if (!thread.lastVisitedAt) return true;
+  const completedAt = Date.parse(thread.latestRun.completedAt ?? "");
+  const lastVisitedAt = Date.parse(thread.lastVisitedAt);
+  if (Number.isNaN(completedAt) || Number.isNaN(lastVisitedAt)) return true;
+  return completedAt > lastVisitedAt;
+}
+
 export function shouldClearThreadSelectionOnMouseDown(target: HTMLElement | null): boolean {
   if (target === null) return true;
   return !target.closest(THREAD_SELECTION_SAFE_SELECTOR);
@@ -1144,7 +1302,6 @@ function nodeClosest(node: object | null, selector: string): unknown {
   return node.closest(selector);
 }
 
-/** Clicks on a nested link keep the link's meaning. The row must not treat them as multi-select. */
 export function isSidebarNestedLinkClick(target: EventTarget | null): boolean {
   if (target == null || typeof target !== "object") return false;
   if (nodeClosest(target, "a[href]") !== null) return true;
@@ -1157,10 +1314,6 @@ export function isSidebarNestedLinkClick(target: EventTarget | null): boolean {
   return nodeClosest(parent, "a[href]") !== null;
 }
 
-// Shift+click on the new thread button creates directly in the current
-// project, skipping the command palette's project picker. With a single
-// project there is nothing to pick, so a plain click already creates
-// immediately and the modifier changes nothing.
 export function shouldCreateNewThreadInCurrentProject(
   shiftKey: boolean,
   projectGroupCount: number,
@@ -1284,17 +1437,6 @@ export function resolveThreadRowClassName(input: {
   );
 }
 
-// ── Sidebar v2 status model ─────────────────────────────────────────
-// Six visual states, three colors: color is reserved for "act now"
-// (approval), "in motion" (working), and "broken" (failed). Ready is the
-// unlabeled resting state — the agent stopped and is waiting on the user,
-// whether it finished, asked a question, or proposed a plan. Waiting
-// (runtime status "idle") is the agent stopped with background work that will
-// wake it (subagents, monitors): not the user's turn yet, so it renders grey
-// like working, not as a false Done. Commands it left running, such as a dev
-// server, do not hold the thread; it reads as ready.
-// Unread completion is tracked separately: it describes whether a ready
-// thread needs attention, not what the thread is currently doing.
 export type SidebarThreadStatus =
   | "approval"
   | "input"
@@ -1321,14 +1463,14 @@ export function shouldRecedeSidebarThread(input: {
 
 type SidebarThreadStatusInput = Pick<
   SidebarThreadSummary,
-  "hasPendingApprovals" | "hasPendingUserInput" | "runtime"
+  "hasPendingApprovals" | "hasPendingUserInput" | "pendingSubagentRequest" | "runtime"
 >;
 
 export function resolveSidebarThreadStatus(thread: SidebarThreadStatusInput): SidebarThreadStatus {
-  if (thread.hasPendingApprovals) {
+  if (thread.hasPendingApprovals || thread.pendingSubagentRequest === "approval") {
     return "approval";
   }
-  if (thread.hasPendingUserInput) {
+  if (thread.hasPendingUserInput || thread.pendingSubagentRequest === "user_input") {
     return "input";
   }
   if (
@@ -1396,20 +1538,14 @@ export function firstValidTimestampMs(
   return 0;
 }
 
-export { sortActiveThreadsByOrderKey as sortThreadsForSidebar } from "@t3tools/client-runtime/state/thread-sort";
+export { sortActiveThreadsByOrderKey as sortThreadsForSidebar } from "@goat/client-runtime/state/thread-sort";
 // Pinned-reorder key math and the keyed sort live in client-runtime
 // (state/thread-sort) so web and mobile compute identical pinned orders.
-export { pinOrderKeyBetween } from "@t3tools/client-runtime/state/thread-sort";
-export { sortPinnedThreadsByOrderKey as sortPinnedThreadsForSidebar } from "@t3tools/client-runtime/state/thread-sort";
+export { pinOrderKeyBetween } from "@goat/client-runtime/state/thread-sort";
+export { sortPinnedThreadsByOrderKey as sortPinnedThreadsForSidebar } from "@goat/client-runtime/state/thread-sort";
 
 const EMPTY_CONTENT_MATCH_KEYS: ReadonlySet<string> = new Set<string>();
 
-/**
- * Search the already-ordered sidebar thread collection by title or linked PR,
- * plus any thread whose messages the server matched (`contentMatchKeys`, keyed
- * by `threadSearchMatchKey`). Keeping the input order means lifecycle ordering
- * (active, snoozed, settled) remains stable while the user narrows the list.
- */
 export function searchSidebarThreads<
   T extends {
     readonly environmentId: EnvironmentId;
@@ -1441,6 +1577,16 @@ export function searchSidebarThreads<
     }
   }
   return [...titleMatches, ...contentMatches];
+}
+
+export function pullRequestMatchesSearchQuery(
+  pullRequest: Parameters<typeof threadPullRequestSearchTerms>[0],
+  query: string,
+): boolean {
+  const normalizedQuery = normalizeSearchText(query);
+  if (normalizedQuery.length === 0) return false;
+  const haystack = normalizeSearchText(threadPullRequestSearchTerms(pullRequest).join(" "));
+  return normalizedQuery.split(" ").every((token) => haystack.includes(token));
 }
 
 export function filterSidebarProjectScopeItems<TItem extends { readonly value: string }>(input: {
@@ -1482,7 +1628,7 @@ export function resolveThreadStatusPill(input: {
 }): ThreadStatusPill | null {
   const { thread } = input;
 
-  if (thread.hasPendingApprovals) {
+  if (thread.hasPendingApprovals || thread.pendingSubagentRequest === "approval") {
     return {
       label: "Pending Approval",
       colorClass: "text-amber-600 dark:text-amber-300/90",
@@ -1491,7 +1637,7 @@ export function resolveThreadStatusPill(input: {
     };
   }
 
-  if (thread.hasPendingUserInput) {
+  if (thread.hasPendingUserInput || thread.pendingSubagentRequest === "user_input") {
     return {
       label: "Awaiting Input",
       colorClass: "text-indigo-600 dark:text-indigo-300/90",
@@ -1527,6 +1673,15 @@ export function resolveThreadStatusPill(input: {
       label: "Waiting",
       colorClass: "text-sidebar-muted-foreground",
       dotClass: "bg-sidebar-muted-foreground",
+      pulse: false,
+    };
+  }
+
+  if (hasUnseenFailure(thread)) {
+    return {
+      label: "Failed",
+      colorClass: "text-red-600 dark:text-red-300/90",
+      dotClass: "bg-red-500 dark:bg-red-300/90",
       pulse: false,
     };
   }
@@ -1720,11 +1875,6 @@ export function sortSidebarV2ProjectGroups<
   );
 }
 
-/**
- * Sorts the cross-environment project collection used by landing surfaces.
- * Project ids are only unique within an environment, and archived threads
- * must not make a project appear recently active.
- */
 export function sortScopedProjectsForSidebar<
   TProject extends ScopedSidebarProject,
   TThread extends ScopedSidebarThread,

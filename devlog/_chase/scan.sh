@@ -126,7 +126,7 @@ echo "## upstream t3_* MCP tools without a goat_* name"
 tool_files='apps/server/src/mcp/toolkits/*/tools.ts'
 missing=$(comm -23 \
   <(git grep -ohE '"t3_[a-z_]+"' "$up" -- "$tool_files" | tr -d '"' | sort -u) \
-  <(git grep -ohE '"goat_[a-z_]+"' "$target" -- "$tool_files" | tr -d '"' | sed 's/^goat_/t3_/' | sort -u))
+  <(git grep -ohE '"goat_[a-z_]+"' "$target" -- "$tool_files" 'packages/contracts/src/agentSurface/*.ts' | tr -d '"' | sed 's/^goat_/t3_/' | sort -u))
 if [ -n "$missing" ]; then printf '%s\n' "$missing" | sed 's/^/  /'; else echo "  none"; fi
 
 echo
@@ -149,7 +149,7 @@ if [ "$commits" = 1 ]; then
     shared=$(printf '%s\n' "$files" | grep -cxFf "$goat_files" || true)
     conf=""
     if [ -s "$conflict_files" ]; then
-      conf=$(printf '%s\n' "$files" | grep -xFf "$conflict_files" | xargs -n1 basename | paste -sd' ' - || true)
+      conf=$(printf '%s\n' "$files" | grep -xFf "$conflict_files" | xargs -r -n1 basename | paste -sd' ' - || true)
     fi
     names=$(git show --format= "$commit" -- apps packages ':!*.md' | grep -cE "$t3_name" || true)
     printf '%s shared=%s t3=%s conf=[%s] %s\n' "$(git rev-parse --short "$commit")" "$shared" "$names" "$conf" \

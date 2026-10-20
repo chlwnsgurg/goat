@@ -1,6 +1,6 @@
 import { assert } from "@effect/vitest";
-import * as NetService from "@t3tools/shared/Net";
-import * as HostProcess from "@t3tools/shared/HostProcess";
+import * as NetService from "@goat/shared/Net";
+import * as HostProcess from "@goat/shared/HostProcess";
 import * as Crypto from "effect/Crypto";
 import * as Hex from "effect/encoding/Hex";
 import * as Duration from "effect/Duration";
@@ -11,6 +11,7 @@ import * as Sink from "effect/Sink";
 import * as Stream from "effect/Stream";
 import { HttpClient, HttpClientResponse } from "effect/http";
 import { ChildProcess, ChildProcessSpawner } from "effect/process";
+import { REMOTE_RUNTIME_STATE_KEY } from "./command.ts";
 import * as SshTunnel from "./tunnel.ts";
 
 // Select the shell for every real remote-script fixture, including direct runner-file execution.
@@ -92,6 +93,10 @@ export function commandArgs(command: ChildProcess.Command): ReadonlyArray<string
   return command._tag === "StandardCommand" ? command.args : [];
 }
 
+/** Every ssh command ends its options with `--`; only the remote launch passes args after `sh -s --`. */
+export const isRemoteLaunch = (args: ReadonlyArray<string>): boolean =>
+  args.some((arg, index) => arg === "-s" && args[index + 1] === "--");
+
 export const ARCHIVE = { archiveVersion: "1.2.3-preview.20260911.4" } as const;
 // Protocol-only cases explicitly select the mirror compatibility path.
 export const PROTOCOL_ARCHIVE = { ...ARCHIVE, releaseBaseUrl: "https://example.invalid/mirror" };
@@ -112,7 +117,7 @@ export const encoder = new TextEncoder();
 export const makeUploadFixture = Effect.fn("test.makeUploadFixture")(function* () {
   const fs = yield* FileSystem.FileSystem;
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
-  const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-preparation-" });
+  const root = yield* fs.makeTempDirectoryScoped({ prefix: "goat-preparation-" });
   const stem = `goat-${ARCHIVE.archiveVersion}-${platform}-${arch}`;
   const stage = `${root}/stage/${stem}`;
   const directory = `${root}/mirror/v${ARCHIVE.archiveVersion}`;
@@ -158,7 +163,7 @@ export const makeProtocolTestSpawner = (spawn: Parameters<typeof ChildProcessSpa
         const script = new TextDecoder().decode(
           new Uint8Array(bytes.flatMap((chunk) => Array.from(chunk))),
         );
-        if (script.includes("ready=false"))
+        if (script.includes("ready=false") && !isRemoteLaunch(commandArgs(command)))
           return makeSuccessfulProcess(JSON.stringify({ platform, arch, ready: true }));
         if (command._tag === "StandardCommand")
           return yield* spawn({
@@ -185,7 +190,7 @@ type NativeScripts = {
 // One native Node process renders every request; Vite reformats Function.toString().
 export const nativeScriptsBatch = Effect.fn("test.nativeScriptsBatch")(function* (
   requests: ReadonlyArray<{
-    input: SshTunnel.RemoteT3RunnerOptions;
+    input: SshTunnel.RemoteGoatRunnerOptions;
     selection?: SshTunnel.PreparedRemoteRuntime | undefined;
   }>,
 ) {
@@ -193,7 +198,7 @@ export const nativeScriptsBatch = Effect.fn("test.nativeScriptsBatch")(function*
   const moduleUrl = new URL("./tunnel.ts", import.meta.url).href;
   const script = `import * as t from ${JSON.stringify(moduleUrl)};
 const requests = ${JSON.stringify(requests)};
-console.log(JSON.stringify(requests.map(({ input, selection }) => ({ runner: t.buildRemoteT3RunnerScript(input), launch: t.buildRemoteLaunchScript(input, selection), pairing: t.buildRemotePairingScript("711bc738002d72fd", input, selection), mcp: t.buildRemoteMcpSessionScript("711bc738002d72fd", { label: "fixture", ttl: "1h", runtimeModeCeiling: null }, input, selection), probe: t.buildRemoteRuntimeProbeScript(input.archiveVersion ?? "", "711bc738002d72fd", true), upload: input.nodeScriptPath ? null : t.buildRemoteT3UploadInstallerScript(input, "A".repeat(64)) }))));`;
+console.log(JSON.stringify(requests.map(({ input, selection }) => ({ runner: t.buildRemoteGoatRunnerScript(input), launch: t.buildRemoteLaunchScript(input, selection), pairing: t.buildRemotePairingScript(${JSON.stringify(REMOTE_RUNTIME_STATE_KEY)}, input, selection), mcp: t.buildRemoteMcpSessionScript(${JSON.stringify(REMOTE_RUNTIME_STATE_KEY)}, { label: "fixture", ttl: "1h", runtimeModeCeiling: null }, input, selection), probe: t.buildRemoteRuntimeProbeScript(input.archiveVersion ?? "", ${JSON.stringify(REMOTE_RUNTIME_STATE_KEY)}, true), upload: input.nodeScriptPath ? null : t.buildRemoteGoatUploadInstallerScript(input, "A".repeat(64)) }))));`;
   const child = yield* spawner.spawn(
     ChildProcess.make(process.execPath, ["--input-type=module", "-e", script]),
   );
@@ -210,12 +215,12 @@ console.log(JSON.stringify(requests.map(({ input, selection }) => ({ runner: t.b
   assert.equal(all.length, requests.length);
   for (const scripts of all)
     for (const entry of ["launch", "pairing", "mcp", "probe"] as const)
-      assert.notMatch(scripts[entry], /@@T3_[A-Z_]+@@/);
+      assert.notMatch(scripts[entry], /@@(?:GOAT|T3)_[A-Z_]+@@/);
   return all;
 });
 
 export const nativeScripts = (
-  input: SshTunnel.RemoteT3RunnerOptions,
+  input: SshTunnel.RemoteGoatRunnerOptions,
   selection?: SshTunnel.PreparedRemoteRuntime,
 ) => nativeScriptsBatch([{ input, selection }]).pipe(Effect.map((all) => all[0]!));
 

@@ -1,5 +1,7 @@
 import { describe, expect, it } from "@effect/vitest";
 
+import * as NodeServices from "@effect/platform-node/NodeServices";
+import * as FileSystem from "effect/FileSystem";
 import * as Effect from "effect/Effect";
 import * as EffectAcpErrors from "effect-acp/errors";
 
@@ -10,6 +12,7 @@ import {
   grokAcpSpawnArgs,
   isValidGrokReasoningEffortToken,
   resolveGrokAcpBaseModelId,
+  requireGrokMemoryIsolation,
 } from "./acpSupport.ts";
 
 describe("grokAcpRuntimeProcessOwnership", () => {
@@ -261,5 +264,49 @@ describe("applyGrokAcpModelSelection", () => {
       );
       expect(error).toBe(failure.message);
     }),
+  );
+});
+
+describe("Grok memory isolation", () => {
+  it.effect.each(["resolveMemoryConflict", "generateMemorySummary"] as const)(
+    "%s uses an empty workspace and copies only authentication",
+    (operation) =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const home = yield* fs.makeTempDirectoryScoped();
+        yield* fs.writeFileString(`${home}/auth.json`, '{"synthetic":true}');
+        yield* fs.writeFileString(`${home}/config.toml`, "[hooks]\nunsafe = true");
+        const isolated = yield* requireGrokMemoryIsolation(operation, { GROK_HOME: home });
+        expect(isolated.environment.GROK_HOME).not.toBe(home);
+        expect(yield* fs.readDirectory(isolated.cwd)).toEqual([]);
+        expect(yield* fs.readFileString(`${isolated.environment.GROK_HOME}/auth.json`)).toBe(
+          '{"synthetic":true}',
+        );
+        expect(
+          yield* fs.readFileString(`${isolated.environment.GROK_HOME}/config.toml`),
+        ).not.toContain("unsafe");
+      }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+  );
+  it.effect.each(["resolveMemoryConflict", "generateMemorySummary"] as const)(
+    "%s rejects mandatory system configuration before spawning",
+    (operation) =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const root = yield* fs.makeTempDirectoryScoped();
+        const config = `${root}/managed_config.toml`;
+        yield* fs.writeFileString(config, "[hooks]\nunsafe = true");
+        const redirect = (file: string) =>
+          file === "/etc/grok/managed_config.toml" ? config : file;
+        const failure = yield* requireGrokMemoryIsolation(operation, { GROK_HOME: root }).pipe(
+          Effect.provideService(FileSystem.FileSystem, {
+            ...fs,
+            exists: (file) => fs.exists(redirect(file)),
+            stat: (file) => fs.stat(redirect(file)),
+            readFileString: (file, encoding) => fs.readFileString(redirect(file), encoding),
+          }),
+          Effect.flip,
+        );
+        expect(failure.cause).toMatchObject({ code: "unavailable" });
+      }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
   );
 });

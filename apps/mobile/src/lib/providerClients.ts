@@ -1,23 +1,26 @@
-import { isProviderDriverKind } from "@t3tools/contracts";
-import { acpRegistryClient } from "@t3tools/provider-acp-registry/client";
-import { makeProviderClientRegistry } from "@t3tools/provider-core/client";
-import { cursorClient } from "@t3tools/provider-cursor/client";
-import { grokClient } from "@t3tools/provider-grok/client";
-import { museClient } from "@t3tools/provider-muse/client";
-import { openCodeClient } from "@t3tools/provider-opencode/client";
-import { piClient } from "@t3tools/provider-pi/client";
+import { isProviderDriverKind } from "@goat/contracts";
+import { acpRegistryClient } from "@goat/provider-acp-registry/client";
+import { makeProviderClientRegistry } from "@goat/provider-core/client";
+import { cursorClient, cursorCloudClient } from "@goat/provider-cursor/client";
+import { devinCloudClient } from "@goat/provider-devin-cloud/client";
+import { claudeCloudClient } from "@goat/provider-claude-cloud/client";
+import { grokClient } from "@goat/provider-grok/client";
+import { museClient } from "@goat/provider-muse/client";
+import { openCodeClient } from "@goat/provider-opencode/client";
+import { piClient } from "@goat/provider-pi/client";
 
-/** The provider client definitions this mobile build ships. */
 const providerClients = makeProviderClientRegistry([
   cursorClient,
+  cursorCloudClient,
+  claudeCloudClient,
   grokClient,
   museClient,
   openCodeClient,
   piClient,
   acpRegistryClient,
+  devinCloudClient,
 ]);
 
-/** The client definition for a driver kind, or `undefined` for drivers drawn by hand. */
 export function getProviderClient(driver: string | null | undefined) {
   return isProviderDriverKind(driver) ? providerClients.get(driver) : undefined;
 }

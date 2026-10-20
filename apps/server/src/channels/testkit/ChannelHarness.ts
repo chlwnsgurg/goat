@@ -17,15 +17,20 @@ import {
   EnvironmentId,
   MessageId,
   type OrchestrationV2Run,
+  type OrchestrationV2RuntimeRequest,
+  type OrchestrationV2Subagent,
+  type OrchestrationV2ServerCommand,
+  type OrchestrationV2ThreadShell,
   ProjectId,
   ProviderDriverKind,
   ProviderInstanceId,
   RunId,
   ThreadId,
+  type ThreadPullRequestLink,
   TextGenerationError,
-} from "@t3tools/contracts";
-import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
-import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
+} from "@goat/contracts";
+import * as IdAllocator from "@goat/provider-core/server/IdAllocator";
+import type * as ProviderAdapter from "@goat/provider-core/server/ProviderAdapter";
 import * as DateTime from "effect/DateTime";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
@@ -34,6 +39,8 @@ import * as Option from "effect/Option";
 
 import * as ServerConfig from "../../config.ts";
 import * as ServerEnvironment from "../../environment/ServerEnvironment.ts";
+import * as MemoryService from "../../memory/MemoryService.ts";
+import * as MemorySyncService from "../../memory/MemorySyncService.ts";
 import { CodexProviderCapabilitiesV2 } from "../../orchestration-v2/Adapters/CodexAdapterV2.ts";
 import * as Orchestrator from "../../orchestration-v2/Orchestrator.ts";
 import * as ProjectStore from "../../orchestration-v2/ProjectStore.ts";
@@ -95,8 +102,38 @@ export class WorkerWorld {
   readonly runs = new Map<string, Array<OrchestrationV2Run>>();
   readonly finalText = new Map<string, string>();
   readonly background = new Set<string>();
+  readonly pullRequests = new Map<string, ReadonlyArray<ThreadPullRequestLink>>();
+  readonly runtimeRequests = new Map<string, ReadonlyArray<OrchestrationV2RuntimeRequest>>();
+  /** Approval prompts by request id, served as the thread's approval_request turn items. */
+  readonly approvalPrompts = new Map<string, string>();
+  /** Subagents a worker (or a subagent) thread started, by parent thread id. */
+  readonly subagents = new Map<string, ReadonlyArray<OrchestrationV2Subagent>>();
+  readonly shells = new Map<
+    string,
+    Partial<
+      Pick<
+        OrchestrationV2ThreadShell,
+        "latestRunId" | "lastErrorClass" | "usageLimitResetAt" | "limitRecovery"
+      >
+    >
+  >();
+  readonly commands: Array<OrchestrationV2ServerCommand> = [];
+  /** Worker threads whose shell read fails, and whose commands the orchestrator refuses. */
+  readonly shellFailures = new Set<string>();
+  readonly dispatchFailures = new Set<string>();
   readonly launches: Array<ThreadLaunch.ThreadLaunchInput> = [];
   readonly sends: Array<ThreadManagement.ThreadManagementSendInput> = [];
+  /** Interrupts and subagent stops sent to worker threads, by thread id. */
+  readonly interrupts: Array<string> = [];
+  readonly subagentStops: Array<string> = [];
+  /** Command ids the orchestrator refuses for good, as a persisted rejection would. */
+  readonly rejectedCommands = new Set<string>();
+  /** A worker thread's cloud task status, when it has one. */
+  readonly cloudTasks = new Map<string, "running" | "submitting" | "completed">();
+  /** Follow-ups that joined a running run, by message id, and the run they joined. */
+  readonly steered = new Map<string, RunId>();
+  /** Sends to fail, by message id, with the error the orchestrator would give. */
+  readonly sendFailures = new Map<string, unknown>();
 
   addRun(threadId: ThreadId, userMessageId: MessageId) {
     const existing = this.runs.get(threadId) ?? [];
@@ -187,9 +224,61 @@ export const layerNoSshHosts = Layer.mock(SshRemoteDispatch.SshRemoteDispatch)({
   listHosts: () => Effect.succeed([]),
 });
 
+/** A provider account on this machine as placement sees it: signed in, with one weekly window. */
+export interface FakeProviderInstance {
+  readonly instanceId: string;
+  readonly displayName?: string;
+  /** The weekly window's use; absent when the account reports no quota. */
+  readonly weeklyUsedPercent?: number;
+  readonly resetsAt?: string;
+}
+
+const fakeInstance = (instance: FakeProviderInstance) =>
+  ({
+    instanceId: ProviderInstanceId.make(instance.instanceId),
+    driverKind: "codex",
+    displayName: instance.displayName,
+    enabled: true,
+    snapshot: {
+      getSnapshot: Effect.succeed({
+        enabled: true,
+        installed: true,
+        status: "ready",
+        auth: { status: "authenticated" },
+        // No models listed, so any model counts as offered.
+        models: [],
+        ...(instance.weeklyUsedPercent === undefined
+          ? {}
+          : {
+              usageLimits: {
+                checkedAt: "2026-10-12T00:00:00.000Z",
+                windows: [
+                  {
+                    id: "weekly",
+                    kind: "weekly",
+                    label: "Weekly",
+                    usedPercent: instance.weeklyUsedPercent,
+                    ...(instance.resetsAt === undefined ? {} : { resetsAt: instance.resetsAt }),
+                  },
+                ],
+              },
+            }),
+      }),
+    },
+  }) as never;
+
 export function makeHarness(
   options: {
     readonly projects?: number;
+    /**
+     * Provider accounts on this machine. By default only the configured one exists and it lists
+     * no models, so any model counts as offered and placement has nothing to choose.
+     */
+    readonly providerInstances?: ReadonlyArray<FakeProviderInstance>;
+    /** List the bot's own workspace among the projects, as a real server does. */
+    readonly botWorkspace?: boolean;
+    /** Settings overrides, including a publisher for live home changes. */
+    readonly settingsLayer?: Layer.Layer<ServerSettings.ServerSettingsService>;
     /** The channel services under test; defaults to the assembled core without background loops. */
     readonly channelsLayer?: ChannelServicesLayer;
     /** Register the fake Slack transport behind `slackSent` and `slackFailures` (default true). */
@@ -200,6 +289,10 @@ export function makeHarness(
     readonly sshRemote?: Layer.Layer<SshRemoteDispatch.SshRemoteDispatch>;
     /** The state database; defaults to a fresh in-memory one. A file lets a test restart. */
     readonly databaseLayer?: typeof SqlitePersistence.layerMemory;
+    /** GOAT memory for the bot's memory reads; absent by default, as in embeddings without it. */
+    readonly memoryLayer?: Layer.Layer<
+      MemoryService.MemoryService | MemorySyncService.MemorySyncService
+    >;
   } = {},
 ) {
   const world = new WorkerWorld();
@@ -225,7 +318,17 @@ export function makeHarness(
     ]),
     { databaseLayer: layerDatabase, runEffectWorker: false },
   );
-  const layerRealThreads = ThreadManagement.layer.pipe(Layer.provide(layerOrchestrator));
+  const layerSettings =
+    options.settingsLayer ??
+    ServerSettings.layerTest({
+      textGenerationModelSelection: modelSelection,
+      defaultRuntimeMode: "full-access",
+    });
+  const layerRealThreads = ThreadManagement.layer.pipe(
+    Layer.provide(layerOrchestrator),
+    Layer.provide(CommandReceiptStore.layer.pipe(Layer.provide(layerDatabase))),
+    Layer.provide(layerSettings),
+  );
   const isWorker = (threadId: ThreadId) => world.runs.has(threadId);
 
   const layerThreads = Layer.effect(
@@ -241,24 +344,165 @@ export function makeHarness(
             filter as { readonly messageRunIds?: ReadonlyArray<string> } | undefined
           )?.messageRunIds;
           return Effect.succeed({
-            thread: { id: threadId, projectId, archivedAt: null, deletedAt: null },
+            thread: {
+              id: threadId,
+              projectId,
+              archivedAt: null,
+              deletedAt: null,
+              pullRequests: world.pullRequests.get(threadId) ?? [],
+            },
             runs,
-            providerThreads: world.background.has(threadId)
-              ? [{ pendingBackgroundTasks: [{ taskId: "background" }] }]
-              : [],
+            runtimeRequests: world.runtimeRequests.get(threadId) ?? [],
+            turnItems: (world.runtimeRequests.get(threadId) ?? []).flatMap((request) => {
+              const prompt = world.approvalPrompts.get(request.id);
+              return prompt === undefined
+                ? []
+                : [{ type: "approval_request", requestId: request.id, prompt }];
+            }),
+            providerThreads: [
+              ...(world.background.has(threadId)
+                ? [{ pendingBackgroundTasks: [{ taskId: "background" }] }]
+                : []),
+              ...(world.cloudTasks.has(threadId)
+                ? [{ cloudTask: { status: world.cloudTasks.get(threadId) } }]
+                : []),
+            ],
+            subagents: world.subagents.get(threadId) ?? [],
             messages: runs
               .filter((run) => messageRunIds === undefined || messageRunIds.includes(run.id))
               .flatMap((run) => {
                 const text = world.finalText.get(run.id);
                 return text === undefined
                   ? []
-                  : [{ role: "assistant", text, streaming: false, runId: run.id }];
+                  : [
+                      {
+                        role: "assistant",
+                        text,
+                        streaming: false,
+                        runId: run.id,
+                        createdAt: DateTime.makeUnsafe("2026-10-12T00:05:00.000Z"),
+                      },
+                    ];
               }),
           } as never);
         }) as typeof real.getThreadRecords,
+        getThreadShell: (threadId) => {
+          if (!isWorker(threadId)) return real.getThreadShell(threadId);
+          if (world.shellFailures.has(threadId)) {
+            return Effect.fail(
+              new Orchestrator.OrchestratorDispatchError({
+                commandId: CommandId.make("shell-read"),
+                commandType: "thread.shell.read",
+              }),
+            );
+          }
+          return Effect.succeed({
+            id: threadId,
+            latestRunId: world.latestRun(threadId)?.id ?? null,
+            ...world.shells.get(threadId),
+          } as OrchestrationV2ThreadShell);
+        },
+        dispatch: (command) => {
+          if (!("threadId" in command) || !isWorker(command.threadId)) {
+            return real.dispatch(command);
+          }
+          if (world.dispatchFailures.has(command.threadId)) {
+            return Effect.fail(
+              new Orchestrator.OrchestratorDispatchError({
+                commandId: command.commandId,
+                commandType: command.type,
+              }),
+            );
+          }
+          if (world.rejectedCommands.has(command.commandId)) {
+            return Effect.fail({ _tag: "OrchestratorCommandPreviouslyRejectedError" } as never);
+          }
+          // An answer resolves a pending request once; the orchestrator refuses a later one, and a
+          // repeated command id returns what the first one did, as command receipts do.
+          if (command.type === "runtime-request.respond") {
+            const target = (world.runtimeRequests.get(command.threadId) ?? []).find(
+              (request) => request.id === command.requestId,
+            );
+            const repeated = world.commands.some((sent) => sent.commandId === command.commandId);
+            if (repeated) return Effect.succeed({ sequence: 0, storedEvents: [] });
+            if (target?.status !== "pending") {
+              return Effect.fail(
+                new Orchestrator.OrchestratorDispatchError({
+                  commandId: command.commandId,
+                  commandType: command.type,
+                }),
+              );
+            }
+          }
+          return Effect.sync(() => {
+            world.commands.push(command);
+            if (command.type === "runtime-request.respond") {
+              const requests = world.runtimeRequests.get(command.threadId) ?? [];
+              world.runtimeRequests.set(
+                command.threadId,
+                requests.map((request) =>
+                  request.id === command.requestId
+                    ? {
+                        ...request,
+                        status: "resolved" as const,
+                        ...(command.decision === undefined ? {} : { decision: command.decision }),
+                        ...(command.respondedBy === undefined
+                          ? {}
+                          : { respondedBy: command.respondedBy }),
+                      }
+                    : request,
+                ),
+              );
+            }
+            // A thread stop ends the running run and holds the queue, as the orchestrator does.
+            if (command.type === "thread.stop") {
+              world.interrupts.push(command.threadId);
+              const latest = world.latestRun(command.threadId);
+              if (latest !== undefined && latest.status === "running") {
+                world.setStatus(command.threadId, latest.ordinal, "cancelled");
+              }
+            }
+            if (command.type === "thread.metadata.update" && command.limitRecovery !== undefined) {
+              const previous = world.shells.get(command.threadId);
+              const recovery = command.limitRecovery;
+              world.shells.set(command.threadId, {
+                ...previous,
+                limitRecovery:
+                  recovery === null
+                    ? null
+                    : {
+                        ...recovery,
+                        autoResume:
+                          recovery.autoResume ?? previous?.limitRecovery?.autoResume ?? false,
+                      },
+              });
+            }
+            return { sequence: 0, storedEvents: [] };
+          });
+        },
         sendToThread: (input) => {
           if (!isWorker(input.threadId)) return real.sendToThread(input);
           world.sends.push(input);
+          const failure = world.sendFailures.get(input.messageId);
+          if (failure !== undefined) return Effect.fail(failure as never);
+          // "auto" joins a running run, as steering does, and starts the next run otherwise. A
+          // repeated message id lands where it landed the first time, as command receipts do.
+          const steeredInto = world.steered.get(input.messageId);
+          const latest = world.latestRun(input.threadId);
+          if (steeredInto !== undefined) {
+            const run = (world.runs.get(input.threadId) ?? []).find((r) => r.id === steeredInto);
+            return Effect.succeed({ run, delivery: "steered" } as never);
+          }
+          if (
+            input.mode === "auto" &&
+            latest?.status === "running" &&
+            !(world.runs.get(input.threadId) ?? []).some(
+              (run) => run.userMessageId === input.messageId,
+            )
+          ) {
+            world.steered.set(input.messageId, latest.id);
+            return Effect.succeed({ run: latest, delivery: "steered" } as never);
+          }
           if (
             !(world.runs.get(input.threadId) ?? []).some(
               (run) => run.userMessageId === input.messageId,
@@ -266,9 +510,26 @@ export function makeHarness(
           ) {
             world.addRun(input.threadId, input.messageId);
           }
-          return Effect.succeed({} as never);
+          const run = (world.runs.get(input.threadId) ?? []).find(
+            (candidate) => candidate.userMessageId === input.messageId,
+          );
+          return Effect.succeed({ run, delivery: "started" } as never);
         },
         delegatedTaskResultPending: () => Effect.succeed(false),
+        interruptThread: (input) => {
+          if (!isWorker(input.threadId)) return real.interruptThread(input);
+          world.interrupts.push(input.threadId);
+          const latest = world.latestRun(input.threadId);
+          if (latest !== undefined && latest.status === "running") {
+            world.setStatus(input.threadId, latest.ordinal, "cancelled");
+          }
+          return Effect.succeed({ type: "no_active_run" } as const);
+        },
+        stopDelegatedTasks: (input) => {
+          if (!isWorker(input.threadId)) return real.stopDelegatedTasks(input);
+          world.subagentStops.push(input.threadId);
+          return Effect.void;
+        },
       });
     }),
   ).pipe(Layer.provide(layerRealThreads));
@@ -290,15 +551,30 @@ export function makeHarness(
       }),
   });
 
-  const shells = Array.from({ length: options.projects ?? 1 }, (_, index) => ({
-    id: index === 0 ? projectId : ProjectId.make("project:channel-work-" + index),
-    title: index === 0 ? "Channel work" : "Other work " + index,
-    workspaceRoot: "/nonexistent/channel-work-" + index,
-    defaultModelSelection: modelSelection,
-    scripts: [],
-    createdAt: "2026-10-12T00:00:00.000Z",
-    updatedAt: "2026-10-12T00:00:00.000Z",
-  }));
+  const shells = [
+    ...Array.from({ length: options.projects ?? 1 }, (_, index) => ({
+      id: index === 0 ? projectId : ProjectId.make("project:channel-work-" + index),
+      title: index === 0 ? "Channel work" : "Other work " + index,
+      workspaceRoot: "/nonexistent/channel-work-" + index,
+      defaultModelSelection: modelSelection,
+      scripts: [],
+      createdAt: "2026-10-12T00:00:00.000Z",
+      updatedAt: "2026-10-12T00:00:00.000Z",
+    })),
+    ...(options.botWorkspace
+      ? [
+          {
+            id: scratchProjectId,
+            title: "Scratch",
+            workspaceRoot: "/nonexistent/scratch",
+            defaultModelSelection: modelSelection,
+            scripts: [],
+            createdAt: "2026-10-12T00:00:00.000Z",
+            updatedAt: "2026-10-12T00:00:00.000Z",
+          },
+        ]
+      : []),
+  ];
 
   const layerExternal = Layer.mergeAll(
     Layer.mock(TextGeneration.TextGeneration)({
@@ -309,23 +585,34 @@ export function makeHarness(
     }),
     Layer.mock(ProviderInstanceRegistry.ProviderInstanceRegistry)({
       // Every instance exists and lists no models, so any model counts as offered.
-      getInstance: () =>
-        Effect.succeed({ snapshot: { getSnapshot: Effect.succeed({ models: [] }) } } as never),
+      getInstance: (instanceId) => {
+        const listed = options.providerInstances?.find(
+          (instance) => instance.instanceId === instanceId,
+        );
+        return Effect.succeed(
+          listed !== undefined
+            ? fakeInstance(listed)
+            : ({ snapshot: { getSnapshot: Effect.succeed({ models: [] }) } } as never),
+        );
+      },
+      listInstances: Effect.succeed((options.providerInstances ?? []).map(fakeInstance)),
     }),
     Layer.mock(ServerEnvironment.ServerEnvironment)({
       getEnvironmentId: Effect.succeed(environmentId),
+      getDescriptor: Effect.succeed({ environmentId, label: "test-machine" } as never),
     }),
     Layer.mock(ManagedProjectFolders.ManagedProjectFolders)({
       namedProjectsRoot: "/unused",
       ensureScratchProject: Effect.succeed({ projectId: scratchProjectId }),
+      ensureBotProject: Effect.succeed({ projectId: scratchProjectId }),
       folderForThread: () => Effect.succeed(Option.none()),
+      isScratchProject: () => Effect.succeed(false),
     }),
-    ServerSettings.layerTest({
-      textGenerationModelSelection: modelSelection,
-      defaultRuntimeMode: "full-access",
-    }),
+    layerSettings,
   ).pipe(
-    Layer.provideMerge(ServerConfig.layerTest(process.cwd(), { prefix: "t3-channel-scenarios-" })),
+    Layer.provideMerge(
+      ServerConfig.layerTest(process.cwd(), { prefix: "goat-channel-scenarios-" }),
+    ),
     Layer.provideMerge(NodeServices.layer),
   );
 
@@ -387,6 +674,7 @@ export function makeHarness(
         layerDatabase,
         IdAllocator.layer,
         options.sshRemote ?? layerNoSshHosts,
+        options.memoryLayer ?? Layer.empty,
       ),
     ),
   );

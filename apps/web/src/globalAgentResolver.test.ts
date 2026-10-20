@@ -1,4 +1,4 @@
-import type { EnvironmentId, ThreadId } from "@t3tools/contracts";
+import type { EnvironmentId, ThreadId } from "@goat/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
 import type { DraftId } from "./composerDraftStore";
@@ -18,6 +18,7 @@ const DELETED = { archivedAt: null, deletedAt: "2026-10-10T00:00:00.000Z" };
 function input(overrides: Partial<GlobalAgentResolverInput>): GlobalAgentResolverInput {
   return {
     bootstrapped: true,
+    refEnvironmentBootstrapped: true,
     ref: REF,
     threadShell: null,
     draftState: "none",
@@ -31,6 +32,41 @@ const CREATE = { kind: "create", environmentId: SCRATCH_ENV };
 describe("resolveGlobalAgent", () => {
   it("waits until shells bootstrap", () => {
     expect(resolveGlobalAgent(input({ bootstrapped: false }))).toEqual({ kind: "wait" });
+  });
+  it("opens a live saved thread while another machine is still loading", () => {
+    expect(resolveGlobalAgent(input({ bootstrapped: false, threadShell: LIVE }))).toEqual({
+      kind: "open-thread",
+      environmentId: ENV,
+      threadId: REF.threadId,
+    });
+  });
+  it("opens an unsent draft once its own machine has bootstrapped", () => {
+    expect(resolveGlobalAgent(input({ bootstrapped: false, draftState: "unpromoted" }))).toEqual({
+      kind: "open-draft",
+      draftId: REF.draftId,
+    });
+  });
+  it("waits for an unsent draft's own machine", () => {
+    expect(
+      resolveGlobalAgent(
+        input({ bootstrapped: false, refEnvironmentBootstrapped: false, draftState: "unpromoted" }),
+      ),
+    ).toEqual({ kind: "wait" });
+  });
+  it("waits before replacing an archived saved thread", () => {
+    expect(resolveGlobalAgent(input({ bootstrapped: false, threadShell: ARCHIVED }))).toEqual({
+      kind: "wait",
+    });
+  });
+  it("waits before replacing a deleted saved thread", () => {
+    expect(resolveGlobalAgent(input({ bootstrapped: false, threadShell: DELETED }))).toEqual({
+      kind: "wait",
+    });
+  });
+  it("waits before confirming a promoted draft without a shell", () => {
+    expect(resolveGlobalAgent(input({ bootstrapped: false, draftState: "promoted" }))).toEqual({
+      kind: "wait",
+    });
   });
   it("falls back when the saved machine is unknown", () => {
     expect(resolveGlobalAgent(input({ refEnvironmentKnown: false }))).toEqual({ kind: "fallback" });

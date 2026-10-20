@@ -10,11 +10,11 @@ import * as Semaphore from "effect/Semaphore";
 import * as NodePath from "node:path";
 import { FetchHttpClient, HttpClient, HttpClientRequest } from "effect/http";
 import { ChildProcessSpawner } from "effect/process";
-import { decodeJsonResult } from "@t3tools/shared/schemaJson";
-import * as HostProcess from "@t3tools/shared/HostProcess";
-import * as SourceControlHost from "@t3tools/source-control-core/server/SourceControlHost";
-import { collectUint8StreamText } from "@t3tools/provider-core/server/collectStreamText";
-import type { SourceControlProviderContext } from "@t3tools/source-control-core/server/SourceControlProvider";
+import { decodeJsonResult } from "@goat/shared/schemaJson";
+import * as HostProcess from "@goat/shared/HostProcess";
+import * as SourceControlHost from "@goat/source-control-core/server/SourceControlHost";
+import { collectUint8StreamText } from "@goat/provider-core/server/collectStreamText";
+import type { SourceControlProviderContext } from "@goat/source-control-core/server/SourceControlProvider";
 
 const encodeApiBody = Schema.encodeEffect(Schema.fromJsonString(Schema.Unknown));
 
@@ -63,7 +63,6 @@ export const ForgejoKeysSchema = Schema.Struct({
 
 const parseForgejoKeys = decodeJsonResult(ForgejoKeysSchema);
 
-/** Matches fj's directories::ProjectDirs, including its pre-0.6 organization name. */
 function forgejoKeysPaths(input: {
   readonly platform: string;
   readonly home: string;
@@ -149,7 +148,7 @@ export class ForgejoCli extends Context.Service<
       input: ForgejoApiInput,
     ) => Effect.Effect<SourceControlHost.SourceControlProcessOutput, ForgejoCliError>;
   }
->()("@t3tools/source-control-forgejo/server/ForgejoCli") {}
+>()("@goat/source-control-forgejo/server/ForgejoCli") {}
 
 export function parseForgejoRemote(value: string) {
   if (/^(?:https?|ssh):\/\//i.test(value)) {
@@ -516,7 +515,10 @@ export const make = Effect.gen(function* () {
         const matchingUrls = [
           ...new Set(
             result.stdout.split("\n").flatMap((line) => {
-              const url = /^\S+\s+(https?:\/\/\S+)\s+\(fetch\)$/.exec(line.trim())?.[1];
+              // Partial clones append the promisor filter, e.g. `(fetch) [blob:none]`.
+              const url = /^\S+\s+(https?:\/\/\S+)\s+\(fetch\)(?:\s+\[[^\]]+\])?$/.exec(
+                line.trim(),
+              )?.[1];
               return url && parseForgejoRemote(url)?.host === input.host?.toLowerCase()
                 ? [url]
                 : [];

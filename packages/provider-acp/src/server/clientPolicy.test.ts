@@ -90,7 +90,6 @@ describe("acpPermissionDisposition", () => {
   });
 
   it("auto-accept-edits approves file changes without locations and asks for the rest", () => {
-    // ACP permission requests need not carry locations.
     const autoAcceptEdits: AcpRuntimePolicy = { runtimeMode: "auto-accept-edits", cwd };
     for (const kind of ["edit", "delete", "move"] as const) {
       assert.equal(acpPermissionDisposition(autoAcceptEdits, permissionRequest(kind)), "allow");
@@ -128,10 +127,10 @@ describe("acpPermissionDisposition", () => {
       const fileSystem = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
       const workspace = yield* fileSystem.makeTempDirectoryScoped({
-        prefix: "t3-acp-permission-workspace-",
+        prefix: "goat-acp-permission-workspace-",
       });
       const outside = yield* fileSystem.makeTempDirectoryScoped({
-        prefix: "t3-acp-permission-outside-",
+        prefix: "goat-acp-permission-outside-",
       });
       const outsideFile = path.join(outside, "existing.ts");
       yield* fileSystem.writeFileString(outsideFile, "outside");
@@ -180,10 +179,10 @@ describe("acpPermissionDisposition", () => {
       const fileSystem = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
       const workspace = yield* fileSystem.makeTempDirectoryScoped({
-        prefix: "t3-acp-permission-workspace-",
+        prefix: "goat-acp-permission-workspace-",
       });
       const workspaceLinkParent = yield* fileSystem.makeTempDirectoryScoped({
-        prefix: "t3-acp-permission-link-parent-",
+        prefix: "goat-acp-permission-link-parent-",
       });
       const workspaceLink = path.join(workspaceLinkParent, "workspace-link");
       yield* fileSystem.makeDirectory(path.join(workspace, "src"), { recursive: true });

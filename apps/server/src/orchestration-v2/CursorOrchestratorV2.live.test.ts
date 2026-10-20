@@ -1,3 +1,6 @@
+import * as CloudPty from "@goat/shared/PtyAdapter";
+import * as CloudPullRequests from "../pullRequest/PullRequestService.ts";
+import * as CloudProjection from "./ProjectionStore.ts";
 import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
 import * as SourceControlProviderRegistry from "../sourceControl/SourceControlProviderRegistry.ts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -11,7 +14,7 @@ import {
   ProviderInstanceId,
   ThreadId,
   type OrchestrationV2ThreadProjection,
-} from "@t3tools/contracts";
+} from "@goat/contracts";
 import * as Console from "effect/Console";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -29,11 +32,11 @@ import * as CodexInstallation from "../provider/CodexInstallation.ts";
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import * as ModelManifest from "../provider/ModelManifest.ts";
 import * as ProviderInstanceRegistryHydration from "../provider/ProviderInstanceRegistryHydration.ts";
-import * as ProviderLatestVersions from "@t3tools/provider-core/server/ProviderLatestVersions";
-import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
-import * as ProviderEventLoggers from "@t3tools/provider-core/server/ProviderEventLoggers";
-import * as OpenCodeRuntime from "@t3tools/provider-opencode/server/OpenCodeRuntime";
-import * as OpenCodeServerLedger from "@t3tools/provider-opencode/server/OpenCodeServerLedger";
+import * as ProviderLatestVersions from "@goat/provider-core/server/ProviderLatestVersions";
+import * as McpProviderSessions from "@goat/provider-core/server/McpProviderSessions";
+import * as ProviderEventLoggers from "@goat/provider-core/server/ProviderEventLoggers";
+import * as OpenCodeRuntime from "@goat/provider-opencode/server/OpenCodeRuntime";
+import * as OpenCodeServerLedger from "@goat/provider-opencode/server/OpenCodeServerLedger";
 import * as ServerSettings from "../serverSettings.ts";
 import * as VcsDriverRegistry from "../vcs/VcsDriverRegistry.ts";
 import * as VcsProcess from "../vcs/VcsProcess.ts";
@@ -52,7 +55,7 @@ const layerPlatformTest = Layer.merge(
 );
 
 const layerServerConfig = ServerConfig.layerTest(process.cwd(), {
-  prefix: "t3-cursor-v2-live-",
+  prefix: "goat-cursor-v2-live-",
 });
 
 const layerVcsDriverRegistry = VcsDriverRegistry.layer.pipe(
@@ -76,6 +79,14 @@ const layerBackgroundPolicy = BackgroundPolicy.layer.pipe(
   Layer.provide(layerServerSettings),
 );
 const layerProviderInstanceRegistry = ProviderInstanceRegistryHydration.layer.pipe(
+  // These local-provider fixtures never create a cloud instance.
+  Layer.provide(
+    Layer.mergeAll(
+      Layer.mock(CloudPty.PtyAdapter)({}),
+      Layer.mock(CloudPullRequests.PullRequestService)({}),
+      Layer.mock(CloudProjection.ProjectionStoreV2)({}),
+    ),
+  ),
   Layer.provide(
     Layer.mergeAll(
       layerServerConfig.pipe(Layer.provide(layerPlatformTest)),
@@ -101,7 +112,6 @@ const layerProviderInstanceRegistry = ProviderInstanceRegistryHydration.layer.pi
         Layer.provide(FetchHttpClient.layer),
         Layer.provide(layerPlatformTest),
       ),
-      // The Codex driver now resolves managed ChatGPT installs; these runs never launch Codex.
       Layer.mock(CodexInstallation.CodexInstallation)({
         managedDirectory: "unused-managed-installation",
       }),
@@ -147,7 +157,7 @@ const waitForIdle = Effect.fn("CursorOrchestratorV2Live.waitForIdle")(function* 
   return yield* Effect.die(new Error(`Timed out waiting for Cursor thread ${threadId}.`));
 });
 
-describe.runIf(process.env.T3_CURSOR_LIVE_ORCHESTRATOR === "1")(
+describe.runIf(process.env.GOAT_CURSOR_LIVE_ORCHESTRATOR === "1")(
   "Cursor V2 live orchestrator",
   () => {
     it.live(

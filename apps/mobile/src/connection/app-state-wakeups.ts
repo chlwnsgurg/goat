@@ -1,4 +1,4 @@
-import type { Wakeups } from "@t3tools/client-runtime/connection";
+import type { Wakeups } from "@goat/client-runtime/connection";
 
 export const MOBILE_BACKGROUND_RECONNECT_AFTER_MS = 10_000;
 
@@ -10,8 +10,10 @@ export type MobileApplicationActiveWakeup = Extract<
 export function mobileApplicationActiveWakeup(
   backgroundedAtMs: number | null,
   activeAtMs: number,
+  foregroundHandoffActive = false,
 ): MobileApplicationActiveWakeup {
-  return backgroundedAtMs !== null &&
+  return !foregroundHandoffActive &&
+    backgroundedAtMs !== null &&
     activeAtMs - backgroundedAtMs >= MOBILE_BACKGROUND_RECONNECT_AFTER_MS
     ? "application-active-reconnect"
     : "application-active-probe";

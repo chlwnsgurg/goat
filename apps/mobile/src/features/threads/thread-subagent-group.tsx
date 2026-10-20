@@ -1,18 +1,18 @@
 import { useAtomValue } from "@effect/atom-react";
 import { StackActions, useIsFocused, useNavigation } from "@react-navigation/native";
-import { scopeThreadRef } from "@t3tools/client-runtime/environment";
-import { summarizeSubagentStatuses } from "@t3tools/client-runtime/state/subagent-display";
-import { isActiveSubagentStatus } from "@t3tools/client-runtime/state/subagentRuntime";
+import { scopeThreadRef } from "@goat/client-runtime/environment";
+import { summarizeSubagentStatuses } from "@goat/client-runtime/state/subagent-display";
+import { isActiveSubagentStatus } from "@goat/client-runtime/state/subagentRuntime";
 import type {
   EnvironmentId,
   OrchestrationV2Subagent,
   OrchestrationV2TurnItem,
-} from "@t3tools/contracts";
+} from "@goat/contracts";
 import { useEffect, useState } from "react";
 import { AppState, Pressable, View, type ColorValue } from "react-native";
 
-import { AppText as Text } from "../../components/AppText";
-import { SymbolView } from "../../components/AppSymbol";
+import { AppText as Text } from "../../components/ui/AppText";
+import { SymbolView } from "../../components/ui/AppSymbol";
 import { ProviderIcon } from "../../components/ProviderIcon";
 import { cn } from "../../lib/cn";
 import type { ThreadFeedActivity } from "../../lib/threadActivity";
@@ -120,7 +120,7 @@ export function ThreadSubagentGroup(props: {
             ) : null}
           </View>
           <View className="min-w-0 flex-1 gap-0.5">
-            <Text numberOfLines={1} className="font-t3-medium text-sm text-foreground">
+            <Text numberOfLines={1} className="font-goat-medium text-sm text-foreground">
               {label}
             </Text>
             <Text

@@ -1,5 +1,5 @@
-import type { DesktopBridge, DesktopUpdateState } from "@t3tools/contracts";
-import { ExternalLinkIcon } from "lucide-react";
+import type { DesktopBridge, DesktopUpdateState } from "@goat/contracts";
+import { ExternalLinkIcon } from "~/components/solar";
 
 import {
   getDesktopUpdateReleaseHistoryUrl,
@@ -59,20 +59,8 @@ export function SidebarUpdateReleaseNotes({
   return (
     <div className="flex max-h-[calc(var(--available-height)-0.5rem)] min-h-0 w-fit max-w-[min(24rem,calc(100vw-2rem))] flex-col text-left">
       <div className="shrink-0 px-1">
-        {state.status === "available" ? (
-          <div>
-            <div className="whitespace-nowrap text-sm leading-5 font-medium">
-              Update ready to download
-            </div>
-            {state.availableVersion ? (
-              <div className="mt-0.5 text-xs leading-4 text-muted-foreground">
-                {state.availableVersion}
-              </div>
-            ) : null}
-          </div>
-        ) : (
-          <div className="text-sm leading-5 font-medium">{tooltip}</div>
-        )}
+        {/* The tooltip names everything the button updates, which can be more than this app. */}
+        <div className="text-sm leading-5 font-medium whitespace-pre-line">{tooltip}</div>
       </div>
       <div className="min-h-0 max-h-[min(28rem,calc(100vh-6rem))] overflow-y-auto px-1 pt-4 pb-1">
         {state.releaseNotes.map((releaseNote, index) => {

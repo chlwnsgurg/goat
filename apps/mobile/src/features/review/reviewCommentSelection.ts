@@ -1,5 +1,5 @@
 import { useSyncExternalStore } from "react";
-import { replaceComposerContextReferences } from "@t3tools/shared/composerContextReferences";
+import { replaceComposerContextReferences } from "@goat/shared/composerContextReferences";
 
 import type { ReviewRenderableLineRow } from "./reviewModel";
 
@@ -302,7 +302,6 @@ export function parseReviewCommentMessageSegments(
   const segments: ReviewCommentMessageSegment[] = [];
   let cursor = 0;
   let parsedCommentIndex = 0;
-  // Labels are opaque text, even when they contain legacy review markup. Keep offsets intact.
   const masked = replaceComposerContextReferences(value, (reference) =>
     " ".repeat(reference.source.length),
   );
@@ -317,8 +316,6 @@ export function parseReviewCommentMessageSegments(
       });
     }
 
-    // Use the masked delimiters but read the original payload. Re-parsing raw text could
-    // mistake a closing tag inside a chip label for the end of the review.
     const raw = value.slice(matchIndex, matchIndex + match[0].length);
     const attributeStart = "<review_comment".length;
     const attributeEnd = attributeStart + (match[1]?.length ?? 0);

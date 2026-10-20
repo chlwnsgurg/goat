@@ -1,11 +1,13 @@
+import * as ServerEnvironment from "../../environment/ServerEnvironment.ts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { expect, it } from "@effect/vitest";
 import {
+  EnvironmentId,
   ANTIGRAVITY_DEFAULT_MODEL,
   ProviderInstanceId,
   type AntigravitySettings,
-} from "@t3tools/contracts";
-import * as HostProcess from "@t3tools/shared/HostProcess";
+} from "@goat/contracts";
+import * as HostProcess from "@goat/shared/HostProcess";
 import * as Effect from "effect/Effect";
 import * as Deferred from "effect/Deferred";
 import * as Fiber from "effect/Fiber";
@@ -15,6 +17,7 @@ import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 import * as TestClock from "effect/testing/TestClock";
 import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
+import { HttpClient } from "effect/http";
 
 import * as BackgroundPolicy from "../../background/BackgroundPolicy.ts";
 import * as ServerConfig from "../../config.ts";
@@ -24,10 +27,10 @@ import {
   ANTIGRAVITY_AUTH_STDOUT_PREFIX,
   resolveAntigravityInstanceDirectories,
 } from "../antigravityAuthSupport.ts";
-import * as ProviderEventLoggers from "@t3tools/provider-core/server/ProviderEventLoggers";
-import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
+import * as ProviderEventLoggers from "@goat/provider-core/server/ProviderEventLoggers";
+import * as McpProviderSessions from "@goat/provider-core/server/McpProviderSessions";
 import * as ModelManifest from "../ModelManifest.ts";
-import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
+import * as IdAllocator from "@goat/provider-core/server/IdAllocator";
 import { AntigravityDriver } from "./AntigravityDriver.ts";
 import * as ProviderHostLive from "../ProviderHostLive.ts";
 import * as ServerSecretStore from "../../auth/ServerSecretStore.ts";
@@ -62,7 +65,7 @@ const makeHarness = Effect.fn("makeAntigravityDriverHarness")(function* (
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
   const nodePath = yield* HostProcess.ExecutablePath;
   const baseEnv = yield* HostProcess.Environment;
-  const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-antigravity-driver-" });
+  const root = yield* fs.makeTempDirectoryScoped({ prefix: "goat-antigravity-driver-" });
   const instanceId = ProviderInstanceId.make(path.basename(root));
   const mockAgentPath = yield* path.fromFileUrl(
     new URL("../../../scripts/acp-mock-agent.ts", import.meta.url),
@@ -174,8 +177,6 @@ const makeHarness = Effect.fn("makeAntigravityDriverHarness")(function* (
           blockedCredentialKeys.has(key.toUpperCase()),
         ),
         geminiApiKey: environment.GEMINI_API_KEY,
-        // Only the agent gets a per-process temp directory. Other launches
-        // inherit the host TMPDIR.
         tempDirectory:
           environment.ANTIGRAVITY_HARNESS_PATH === undefined ? undefined : environment.TMPDIR,
         handle,
@@ -186,12 +187,12 @@ const makeHarness = Effect.fn("makeAntigravityDriverHarness")(function* (
   const instance = yield* AntigravityDriver.create({
     instanceId,
     displayName: "Google test account",
-    enabled: options.enabled ?? false,
+    enabled: options.enabled ?? true,
     config: { ...AntigravityDriver.defaultConfig(), ...options.config },
     environment: [
       { name: "PATH", value: instancePath },
-      { name: "T3_ACP_ANTIGRAVITY", value: "1" },
-      { name: "T3_ACP_REQUEST_LOG_PATH", value: requestLog },
+      { name: "GOAT_ACP_ANTIGRAVITY", value: "1" },
+      { name: "GOAT_ACP_REQUEST_LOG_PATH", value: requestLog },
       { name: "GEMINI_API_KEY", value: "must-not-be-used" },
       { name: "google_api_key", value: "must-not-be-used" },
       { name: "GOOGLE_APPLICATION_CREDENTIALS", value: "/must-not-be-used.json" },
@@ -215,7 +216,6 @@ const makeHarness = Effect.fn("makeAntigravityDriverHarness")(function* (
   });
   const assertClosed = Effect.gen(function* () {
     for (const launch of launches) {
-      // Cancelled startup can report a signal instead of a numeric exit code.
       yield* launch.handle.exitCode.pipe(Effect.ignore);
       expect(yield* launch.handle.isRunning).toBe(false);
       if (launch.cwd) expect(yield* fs.exists(launch.cwd)).toBe(false);
@@ -243,9 +243,15 @@ const makeHarness = Effect.fn("makeAntigravityDriverHarness")(function* (
 });
 
 const layerDeps = ServerConfig.layerTest(process.cwd(), {
-  prefix: "t3-antigravity-driver-config-",
+  prefix: "goat-antigravity-driver-config-",
 }).pipe(
   Layer.provideMerge(NodeServices.layer),
+  Layer.provideMerge(
+    Layer.succeed(
+      HttpClient.HttpClient,
+      HttpClient.make(() => Effect.die("Unexpected quota request")),
+    ),
+  ),
   Layer.provideMerge(ServerSettings.layerTest()),
   Layer.provideMerge(
     Layer.mock(BackgroundPolicy.BackgroundPolicy)({
@@ -263,6 +269,11 @@ const layerDeps = ServerConfig.layerTest(process.cwd(), {
   Layer.provideMerge(McpProviderSessions.layer),
 );
 const layerTest = ProviderHostLive.layer.pipe(
+  Layer.provide(
+    Layer.succeed(ServerEnvironment.ServerEnvironmentIdentity, {
+      getEnvironmentId: Effect.succeed(EnvironmentId.make("memory-host-fixture")),
+    }),
+  ),
   Layer.provideMerge(ServerSecretStore.layer),
   Layer.provideMerge(layerDeps),
 );
@@ -285,7 +296,7 @@ it.layer(layerTest)("AntigravityDriver", (it) => {
 
   it.effect.skipIf(windowsHost)("does not launch a process for a disabled instance", () =>
     Effect.gen(function* () {
-      const h = yield* makeHarness();
+      const h = yield* makeHarness({ enabled: false });
       const snapshot = yield* h.instance.snapshot.refresh;
       expect(snapshot.status).toBe("disabled");
       expect(h.acquisitions).toEqual([]);
@@ -315,13 +326,13 @@ it.layer(layerTest)("AntigravityDriver", (it) => {
   );
 
   it.effect.skipIf(windowsHost)(
-    "refreshes a disabled instance through the selected executable and personal Google ACP",
+    "refreshes through the selected executable and personal Google ACP",
     () =>
       Effect.gen(function* () {
         const h = yield* makeHarness();
         yield* h.refresh();
         const snapshot = yield* h.instance.snapshot.getSnapshot;
-        expect(snapshot.status).toBe("disabled");
+        expect(snapshot.status).toBe("ready");
         expect(snapshot.auth.status).toBe("authenticated");
         expect(snapshot.models.map((model) => model.slug)).toEqual([
           "gemini-test-low",
@@ -507,7 +518,6 @@ it.layer(layerTest)("AntigravityDriver", (it) => {
           config.stateDir,
           instanceId,
         );
-        // Older builds unpacked inside the profile.
         const legacyRoot = path.join(directories.profile, "antigravity-acp", "tmp");
         for (const root of [directories.runtimeTemp, legacyRoot]) {
           const orphan = path.join(root, "run-orphan", "_MEI123", "google3");

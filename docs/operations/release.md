@@ -1,6 +1,6 @@
 # Release Checklist
 
-> For maintainers. Using T3 Code? See [docs/user](../user/).
+> For maintainers. Using GOAT? See [docs/user](../user/).
 
 This document covers the unified release workflow for stable and nightly desktop releases.
 
@@ -14,7 +14,7 @@ This document covers the unified release workflow for stable and nightly desktop
   - push tag matching `v*.*.*` for a stable release of an explicit commit
   - scheduled nightly check every 30 minutes
   - manual `workflow_dispatch` with `channel=nightly`
-  - manual `workflow_dispatch` with `channel=preview`, the maintainers' test train. It exercises the whole release flow (build, sign, notarize, smoke, publish) for a commit that end users must never receive, which is how an unmerged branch or a risky change gets a real release run before it lands. It builds the triggering commit with nightly's versioning under the `preview` prerelease identifier (`0.0.41-preview.<date>.<run>`) and publishes a GitHub prerelease plus the npm packages under the `preview` dist-tag. Preview is not on the schedule, no default npm dist-tag points at it, its desktop builds carry no update feed, and no updater manifest (`latest*.yml`, `nightly*.yml`, blockmaps) is attached, so a stable or nightly install cannot be offered one. The only ways onto it are downloading the release by hand, `npx t3@preview`, `T3CODE_CHANNEL=preview` for the install scripts, or `goat update --channel preview` from a terminal; each prints a warning, and the CLI asks for confirmation when the running build is not itself a preview. The release itself is named as a maintainer test build and its body is a warning rather than generated notes: a changelog of unmerged branch history is not a changelog, and nightly and stable notes are unaffected because each series resolves its previous tag within its own channel. The hosted web app, AUR, and Discord announcements are skipped. Keep it; it costs nothing when idle.
+  - manual `workflow_dispatch` with `channel=preview`, the maintainers' test train. It exercises the whole release flow (build, sign, notarize, smoke, publish) for a commit that end users must never receive, which is how an unmerged branch or a risky change gets a real release run before it lands. It builds the triggering commit with nightly's versioning under the `preview` prerelease identifier (`0.0.41-preview.<date>.<run>`) and publishes a GitHub prerelease plus the npm packages under the `preview` dist-tag. Preview is not on the schedule, no default npm dist-tag points at it, its desktop builds carry no update feed, and no updater manifest (`latest*.yml`, `nightly*.yml`, blockmaps) is attached, so a stable or nightly install cannot be offered one. The only ways onto it are downloading the release by hand, `npx t3@preview`, `GOAT_CHANNEL=preview` for the install scripts, or `goat update --channel preview` from a terminal; each prints a warning, and the CLI asks for confirmation when the running build is not itself a preview. The release itself is named as a maintainer test build and its body is a warning rather than generated notes: a changelog of unmerged branch history is not a changelog, and nightly and stable notes are unaffected because each series resolves its previous tag within its own channel. The hosted web app, AUR, and Discord announcements are skipped. Keep it; it costs nothing when idle.
 - A manual stable release builds the commit of the latest published nightly, not `main` HEAD.
   Nightly is the release candidate: verify the nightly, then promote it. Merges to `main` keep
   landing while you verify and never leak into the stable build.
@@ -37,16 +37,16 @@ This document covers the unified release workflow for stable and nightly desktop
   - Nightly runs are always GitHub prereleases and never marked latest.
   - Automatically generated release notes are pinned to the previous tag in the same channel, so stable compares to the previous stable tag and nightly compares to the previous nightly tag.
 - Includes Electron auto-update metadata (for example `latest*.yml`, `nightly*.yml`, and `*.blockmap`) in release assets.
-- Builds a self-contained CLI archive per platform (`goat-<version>-<platform>-<arch>.tar.gz`, `.zip` on Windows) in the same job as that target's desktop artifact and attaches them to the GitHub Release with a `SHA256SUMS` file, on every channel, for five targets: macOS arm64, Linux x64 and arm64, Windows x64 and arm64. Every archive is built, signed, and smoke-tested on hardware of its own architecture. There is no macOS x64 archive: Node single-executables are unsupported on x64 macOS (the SEA docs list macOS as arm64 only) and the binary segfaults on start; the x64 desktop app is Electron and unaffected.
-  - The archive holds the server as a Node single-executable (`scripts/build-cli-archive.ts`), so unpacking it needs neither Node, npm, nor a compiler. It is the only form in which T3 Code manages a runtime: the desktop's SSH environments, the boot service, `goat update`, and the install scripts all download and verify this archive against `SHA256SUMS`. The npm packages exist for people who run `npx t3` or `npm install -g t3` themselves and carry the same archive contents; nothing in the product installs from npm. The `curl | sh` installers are `scripts/install.sh` and `scripts/install.ps1`; the marketing site copies them into its `public/` at build time (`apps/marketing/scripts/stage-install-scripts.mjs`) and serves them at `t3.codes/install.sh` and `/install.ps1`.
+- Builds a self-contained CLI archive per platform (`goat-<version>-<platform>-<arch>.tar.gz`, `.zip` on Windows) in the same job as that target's desktop artifact and attaches them to the GitHub Release with a `goat-<version>-runtime.json` compatibility manifest and a `SHA256SUMS` file covering both, on every channel, for five targets: macOS arm64, Linux x64 and arm64, Windows x64 and arm64. Every archive is built, signed, and smoke-tested on hardware of its own architecture. There is no macOS x64 archive: Node single-executables are unsupported on x64 macOS (the SEA docs list macOS as arm64 only) and the binary segfaults on start; the x64 desktop app is Electron and unaffected.
+  - The archive holds the server as a Node single-executable (`scripts/build-cli-archive.ts`), so unpacking it needs neither Node, npm, nor a compiler. It is the only form in which GOAT manages a runtime: the desktop's SSH environments, the boot service, `goat update`, and the install scripts all download and verify this archive against `SHA256SUMS`. The `t3` npm package exists for people who run `npx t3` or `npm install -g t3` themselves, and it downloads this same archive too; nothing in the product installs from npm. The `curl | sh` installers are `scripts/install.sh` and `scripts/install.ps1`, plus `scripts/install-goat-server.sh`, which wraps `install.sh` for a server-only machine (service and pairing links) and is published to goat-releases beside them; the marketing site copies them into its `public/` at build time (`apps/marketing/scripts/stage-install-scripts.mjs`) and serves them at `t3.codes/install.sh` and `/install.ps1`.
   - The executable is built with a Node that supports `--build-sea` (`VP_NODE_VERSION=26.8.2`, kept in step with `SEA_NODE_VERSION` in `apps/server/vite.config.ts`), while the repo stays on `engines.node`.
   - macOS archives are signed with the Developer ID certificate and notarized when the Apple secrets are present (ad hoc otherwise, which still runs from `curl`/`tar` installs). Windows executables use the same Azure Trusted Signing setup as the installer. Every native addon in the macOS archive is signed too, since the hardened runtime refuses unsigned libraries.
   - Each archive is extracted and executed on its build runner (`scripts/smoke-cli-archive.ts`) before it is uploaded.
-- Publishes the CLI to npm with OIDC trusted publishing from the same workflow file, as the same bytes the GitHub Release carries: `scripts/build-npm-platform-packages.ts` unpacks the five CLI archives into `@t3code/t3-<platform>-<arch>` packages (each with `os`/`cpu` set so npm installs only the matching one) and generates the `t3` launcher, whose `bin/t3.js` lists them as `optionalDependencies` and exposes both `goat` and `t3` bins and execs the installed `goat` executable. `npx t3` therefore needs Node only to run the launcher, never to run the server. `node apps/server/scripts/cli.ts publish` publishes the platform packages first and the launcher last, after a `--dry-run` pass over all of them so an auth or scope error fails before anything is live.
+- After the GitHub Release is published, publishes the `goat` npm package with OIDC trusted publishing from the same workflow file. It is only a launcher (`scripts/npm-launcher/goat.mjs`) that exposes both `goat` and `t3` bins: on first run it downloads its exact version's CLI archive from the GitHub Release, verifies it against `SHA256SUMS`, and unpacks it into `<GOAT home>/runtime/goat/versions/<version>`, the layout the install scripts and `goat update` share. The executables are not on npm. They used to be, as `@goat/cli-<platform>-<arch>` optional dependencies, but npm's publish-time scanning held those 80-250 MB packages back for up to an hour after the launcher was live, and every install in that window got a launcher with no executable. Those packages stay on npm at their old versions and get no new ones. Because the launcher reads from the release, `publish_cli` runs after `release`, never before.
   - stable releases publish npm dist-tag `latest`
   - nightly releases publish npm dist-tag `nightly`
   - preview releases publish npm dist-tag `preview`, which nothing resolves unless asked for by name
-  - one-time setup: the `@t3code` npm scope (org) must exist, and `t3` and each `@t3code/t3-<platform>-<arch>` package needs a trusted publisher registered for this workflow file (see below).
+  - one-time setup: package `t3` needs a trusted publisher registered for this workflow file (see below).
 - Builds the hosted web app on Vercel while the desktop jobs run, and makes it live only after a release is published:
   - stable releases are aliased to the `latest` hosted app channel
   - nightly releases are aliased to the `nightly` hosted app channel
@@ -54,8 +54,8 @@ This document covers the unified release workflow for stable and nightly desktop
 
 ## Pull request macOS previews
 
-Labeling a PR `preview:mac` publishes a signed, notarized Apple Silicon DMG with T3 Connect enabled
-to the rolling `desktop-preview` prerelease, and works for fork PRs. The label is a one-shot request
+Labeling a PR `preview:mac` publishes a signed, notarized Apple Silicon DMG with T3 Connect public configuration
+(the feature itself stays off until GOAT Connect ships) to the rolling `desktop-preview` prerelease, and works for fork PRs. The label is a one-shot request
 for the commit it is applied to: the trusted workflow removes it once the build is in hand, and later
 pushes do not build until a maintainer applies it again. Every signed preview is therefore a
 per-commit maintainer decision, which matters because the result carries the Developer ID signature.
@@ -199,7 +199,7 @@ A deleted legacy tunnel keeps its allocation, so its hostname is kept. When the 
 - On a build with recovery, the connector is rejected and the host requests a replacement tunnel at
   the same hostname.
 - On an older build with a CLI link, startup provisions a new tunnel.
-- On an older build linked from web or mobile, the host stays offline until T3 Code on that computer
+- On an older build linked from web or mobile, the host stays offline until GOAT on that computer
   is updated.
 
 Ship the web and mobile builds that show the offline reason before enabling legacy cleanup, so a
@@ -216,7 +216,7 @@ column in its first deploy with this change; the legacy switch stays `off` until
    They include ones the reaper skips, so they are an upper bound on the backlog. The share of `wouldDeleteLegacy` in each sweep's `scanned` estimates how
    much of that total is eligible.
 3. Run the legacy steps of the disposable-host canary below.
-4. Before enabling, confirm the web and mobile builds that show the "update T3 Code on that computer"
+4. Before enabling, confirm the web and mobile builds that show the "update GOAT on that computer"
    message are live. Without them, a user whose older host lost its tunnel only sees it as offline.
 5. Set the legacy mode to `enabled`. One sweep deletes at most 100 tunnels, four at a time, and
    stops starting new deletions after 90 seconds. A backlog of 20,000 takes about 17 hours if each
@@ -231,8 +231,8 @@ chart the `attributes.custom.relay.managed_endpoint_reaper.*` fields over time.
 Set the legacy mode back to `off` and deploy if any of these happen:
 
 - `failed` stays above a few per sweep. Read the warning log for the Cloudflare error.
-- Users report an environment that is offline with the update message after they have updated T3
-  Code on that computer and restarted it.
+- Users report an environment that is offline with the update message after they have updated GOAT
+  on that computer and restarted it.
 - Relay request errors rise while sweeps run. Deletions share the Postgres connection pool with
   request handlers.
 
@@ -244,7 +244,7 @@ recover as described above.
 
 This test has not been run against a real Cloudflare account. Run it against a disposable relay
 stage, test Cloudflare account, disposable host, and disposable T3 home. Keep production cleanup at
-`off` or `dry-run` until it passes. Do not stop a daily-use T3 server.
+`off` or `dry-run` until it passes. Do not stop a daily-use GOAT server.
 
 1. Deploy the disposable stage with cleanup `dry-run`. Link a first disposable environment through
    web or mobile settings and confirm its tunnel is healthy and recovery is registered.
@@ -290,6 +290,48 @@ The job looks up the `t3code-marketing` project using the existing `VERCEL_TOKEN
 and `VERCEL_ORG_ID` secrets. It also respects the optional `VERCEL_TEAM_SLUG`
 variable. The Vercel project's root directory must be `apps/marketing`.
 Git deployments remain disabled in `apps/marketing/vercel.ts`.
+
+## Mobile TestFlight and store releases
+
+Merges to main publish compatible OTAs and build iOS prereleases with the `testflight`
+profile at version `3.0.0`. Build numbers increment automatically. The committed app
+version remains the App Store release version; Android keeps using that version.
+
+To release iOS, dispatch **Mobile EAS Production** with `mode=build`,
+`profile=production`, `platform=ios`, and the intended version, such as `2.0.1`.
+The workflow commits and pushes the version before building and uploading it.
+Select that build in App Store Connect for App Store review.
+
+To force a TestFlight rebuild, select `profile=testflight`, `platform=ios`, and
+leave the version blank. Submit the first `3.0.0` build for external beta review
+in App Store Connect. Later builds may still require review; uploads alone do
+not guarantee external approval. TestFlight builds expire after 90 days.
+
+Both release and TestFlight binaries receive compatible production-channel OTAs,
+separated by their major-version fingerprints. Manual `mode=update` uses the
+selected profile's version. Before releasing `3.0.0` to the App Store, advance
+`build.testflight.env.GOAT_MOBILE_VERSION` in `apps/mobile/eas.json` to the next
+unreleased major and get its first beta build approved.
+
+## Android APK mirror
+
+`.github/workflows/mobile-android-apk.yml` checks the Google Play Alpha closed-testing
+track hourly. Each new beta gets one `android-beta-<build-number>` prerelease
+containing its APK. Unchanged checks publish nothing, and interrupted draft
+uploads resume on the next check.
+
+Normal Nightly releases include the newest processed internal-testing APK available
+when the release publishes. Internal builds do not create separate Android releases.
+If Play credentials or a processed APK are unavailable, the Nightly can still publish
+without an APK. Android submissions continue to go to internal testing; promote a
+build to Alpha to publish it as a beta.
+
+The APK is the universal APK Play generates and signs from the
+uploaded bundle, so no signing key lives in GitHub. The job skips itself until
+`GOOGLE_PLAY_SERVICE_ACCOUNT_JSON` holds a Play service account key with the "Release to
+production, exclude devices, and use Play App Signing" permission, which downloading generated
+APKs requires. The job reads tracks without opening a Play edit, so it can share the service
+account EAS Submit uses.
 
 ## Hosted web app release deployment
 
@@ -361,24 +403,30 @@ One-time Vercel dashboard setup:
   - `make_latest` is always `false`
 - Uses the next stable patch version as the nightly base. For example, `0.0.17` produces nightlies on `0.0.18-nightly.*`.
 - Publishes Electron auto-update metadata to the dedicated `nightly` updater channel, so desktop users can opt into that track independently from stable.
-- Publishes the CLI npm packages (`t3` and `@t3code/t3-<platform>-<arch>`) to the `nightly` npm dist-tag using the same nightly version.
+- Publishes the `t3` npm launcher to the `nightly` npm dist-tag using the same nightly version.
 - Does not commit version bumps back to `main`.
 
 ## Server self-update release invariant
 
-Connected servers update to the client's exact version, not to an npm dist-tag. Every released
-desktop or hosted client version must therefore have a matching `t3@<version>` package available on
-npm before users can receive that client.
+Connected servers update to the client's exact version, not to an npm dist-tag. Servers that update
+themselves download that version's CLI archive from the GitHub Release; servers run through npm are
+handed a `t3@<version>` command to run. Every released client version must therefore have its
+release archives, and then its npm launcher, available before users can receive that client.
 
 The workflow enforces this ordering:
 
-1. `publish_cli` publishes the exact release version to npm, on every channel.
-2. `release` depends on `publish_cli` before exposing desktop artifacts in GitHub Releases.
-3. `deploy_web` depends on `release` before moving the hosted channel to the new client.
+1. `release` publishes the GitHub Release with the CLI archives and `SHA256SUMS`.
+2. `publish_cli` publishes the `t3@<version>` launcher, which downloads from that release, on every
+   channel.
+3. `deploy_web` depends on both before moving the hosted channel to the new client.
    `build_web` builds that client earlier with `vercel deploy --prod --skip-domain`, which
    leaves the custom domains alone but moves the project's own `*.vercel.app` production
    hostname. That hostname is behind Vercel SSO, so users only get the client through the
    custom domains.
+
+Desktop auto-update reads the GitHub Release directly, so a desktop client can see the new version
+a few minutes before `t3@<version>` is on npm. Only the copied manual command for npm-run servers
+depends on npm, and it works once `publish_cli` finishes.
 
 Preserve these dependencies when changing the release graph. Publishing a client first would leave
 the **Update server** action targeting a package version that does not exist yet.
@@ -403,7 +451,7 @@ available.
   - The desktop UI shows a rocket update button when an update is available; click once to download, click again after download to restart/install.
 - Provider: GitHub Releases (`provider: github`) configured at build time.
 - Repository slug source:
-  - `T3CODE_DESKTOP_UPDATE_REPOSITORY` (format `owner/repo`), if set.
+  - `GOAT_DESKTOP_UPDATE_REPOSITORY` (format `owner/repo`), if set.
   - otherwise `GITHUB_REPOSITORY` from GitHub Actions.
 - Required release assets for updater:
   - platform installers (`.exe`, `.dmg`, `.AppImage`, `.deb`, plus macOS `.zip` for Squirrel.Mac update payloads)
@@ -461,32 +509,21 @@ blockmaps, with a 60 MB maximum for a representative sidecar-to-sidecar update.
 
 ## 0) npm OIDC trusted publishing setup (CLI)
 
-The workflow runs `node scripts/build-npm-platform-packages.ts` on the downloaded CLI archives, then
+After the GitHub Release is published, the workflow runs `node scripts/build-npm-launcher.ts`, then
 `node apps/server/scripts/cli.ts publish --packages-dir npm-packages`, which runs `npm publish` on
-each `@t3code/t3-<platform>-<arch>.tgz` and finally on `t3.tgz`, the launcher. The script publishes
-tarballs it built itself rather than directories: `npm publish <dir>` strips `node_modules/` from the
-tarball no matter what `files` says, and the executable loads its native addons from there. Seven
-packages are published per release: `t3`, `@t3code/t3-darwin-arm64`, `@t3code/t3-darwin-x64`,
-`@t3code/t3-linux-arm64`, `@t3code/t3-linux-x64`, `@t3code/t3-win32-arm64`,
-`@t3code/t3-win32-x64`.
+`goat.tgz`. That is the only package published per release.
 
 Checklist:
 
-1. Confirm the npm org owns package `t3` and the `@t3code` scope exists on npm (create the org if
-   it does not).
-2. For `t3` and each `@t3code/t3-<platform>-<arch>` package, configure a Trusted Publisher in the
-   npm package settings (a package that has never been published needs a first publish or a
-   placeholder before the setting exists; the `--dry-run` step in `publish_cli` reports which
-   names are still rejected):
+1. Confirm the npm org owns package `goat`.
+2. For `goat`, configure a Trusted Publisher in the npm package settings:
    - Provider: GitHub Actions
    - Repository: this repo
    - Workflow file: `.github/workflows/release.yml`
    - Environment (if used): match your npm trusted publishing config
-3. Ensure npm account and org policies allow trusted publishing for every package.
-4. Create release tag `vX.Y.Z` and push; workflow will:
-   - build and smoke-test the five CLI archives
-   - build the npm packages from those archives
-   - publish them with npm dist-tag `latest`
+3. Ensure npm account and org policies allow trusted publishing for the package.
+4. Create release tag `vX.Y.Z` and push; the workflow publishes the GitHub Release and then the
+   launcher with npm dist-tag `latest`.
 5. Nightly runs publish with npm dist-tag `nightly`; preview runs with `preview`.
 
 ## 1) Release validation and unsigned builds

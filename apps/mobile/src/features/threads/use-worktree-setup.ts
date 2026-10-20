@@ -1,11 +1,10 @@
-import type { EnvironmentId, ThreadId, WorktreeSetupSnapshot } from "@t3tools/contracts";
-import { resolveVisibleWorktreeSetup } from "@t3tools/client-runtime/worktree-setup";
+import type { EnvironmentId, ThreadId, WorktreeSetupSnapshot } from "@goat/contracts";
+import { resolveVisibleWorktreeSetup } from "@goat/client-runtime/worktree-setup";
 import { useEffect, useState } from "react";
 import { useEnvironmentQuery } from "../../state/query";
 import { vcsEnvironment } from "../../state/vcs";
 import { resolveWorktreeSetupSnapshot } from "./worktree-setup-state";
 
-/** Retain the last live snapshot when its subscription closes after setup. */
 export function useWorktreeSetup(input: {
   environmentId: EnvironmentId | null;
   threadId: ThreadId | null;

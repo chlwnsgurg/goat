@@ -1,4 +1,4 @@
-import { ThreadId } from "@t3tools/contracts";
+import { ThreadId } from "@goat/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
 import { resolveMediaSource } from "./mediaSource.ts";
@@ -53,7 +53,6 @@ describe("resolveMediaSource", () => {
   });
 
   describe("host paths", () => {
-    // POSIX, Windows, UNC, and file URLs must all reach the same media-file resource.
     it.each([
       ["/tmp/frame%23one.png:12", "/tmp/frame#one.png"],
       ["/tmp/frame%3Fone.png:12:3", "/tmp/frame?one.png"],

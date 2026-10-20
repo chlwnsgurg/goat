@@ -1,9 +1,10 @@
 import { useIsFocused } from "@react-navigation/native";
-import { videoMimeType } from "@t3tools/shared/video";
-import { useEffect, useRef, useState } from "react";
-import { ActivityIndicator, Keyboard, Modal, Pressable, View } from "react-native";
+import { videoMimeType } from "@goat/shared/video";
+import { useEffect, useEffectEvent, useState } from "react";
+import { Keyboard, Modal, Pressable, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
+import { AppActivityIndicator } from "./ui/AppActivityIndicator";
 import { loadLocalAttachmentPreview } from "../lib/localAttachmentPreview";
 import { useMediaActions } from "../state/mediaActions";
 import { type MediaActionsSource } from "../lib/mediaActionsSource";
@@ -16,8 +17,8 @@ import {
 } from "../lib/videoPreviewSource";
 import { useAssetUrlState, useRefreshAssetUrl } from "../state/assets";
 import { usePreparedConnection } from "../state/session";
-import { AppText } from "./AppText";
-import { SymbolView } from "./AppSymbol";
+import { AppText } from "./ui/AppText";
+import { SymbolView } from "./ui/AppSymbol";
 import { MediaActionsMenu } from "./MediaActionsMenu";
 import { MediaSourceCaption } from "./MediaSourceCaption";
 import { MediaVideoPlayer } from "./MediaVideoPlayer";
@@ -59,14 +60,15 @@ function useLocalPlayback(source: LocalVideoPreviewSource): PlaybackState {
   const [error, setError] = useState<string | null>(null);
   // Only a different file needs a new lease; a metadata update on the same
   // draft must not dispose the file Android is still playing.
-  const attachmentRef = useRef(attachment);
-  attachmentRef.current = attachment;
+  const loadAttachment = useEffectEvent((signal: AbortSignal) =>
+    loadLocalAttachmentPreview(attachment, signal),
+  );
   const { id: attachmentId, fileUri } = attachment;
   useEffect(() => {
     setUri(null);
     setError(null);
     const controller = new AbortController();
-    const loading = loadLocalAttachmentPreview(attachmentRef.current, controller.signal);
+    const loading = loadAttachment(controller.signal);
     void loading.then(
       (file) => {
         if (file === null) return;
@@ -149,7 +151,7 @@ function OpenVideoPreviewModal(props: {
         style={{ paddingTop: insets.top, paddingBottom: insets.bottom }}
       >
         <View className="min-h-14 flex-row items-center gap-3 pl-4 pr-2">
-          <AppText className="flex-1 font-t3-medium text-base text-white" numberOfLines={2}>
+          <AppText className="flex-1 font-goat-medium text-base text-white" numberOfLines={2}>
             {props.name}
           </AppText>
           <MediaActionsMenu media={mediaActions} inModal />
@@ -165,7 +167,7 @@ function OpenVideoPreviewModal(props: {
         <MediaSourceCaption source={mediaActions.title} />
         {playback.uri === null && !playback.unavailable ? (
           <View className="flex-1 items-center justify-center gap-3 px-6">
-            <ActivityIndicator color="#ffffff" />
+            <AppActivityIndicator color="#ffffff" />
             <AppText className="text-sm text-white/80">Loading video...</AppText>
           </View>
         ) : (
@@ -192,7 +194,7 @@ function OpenVideoPreviewModal(props: {
           onPress={mediaActions.share}
           className="mx-4 my-3 min-h-12 items-center justify-center rounded-xl bg-white/15 px-4"
         >
-          <AppText className="font-t3-medium text-base text-white">
+          <AppText className="font-goat-medium text-base text-white">
             {mediaActions.sharing ? "Opening share sheet..." : "Save or share video"}
           </AppText>
         </Pressable>

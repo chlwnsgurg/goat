@@ -20,10 +20,10 @@ import type {
   VcsStatusResult,
   VcsStatusStreamEvent,
   VcsStatusSubscriptionInput,
-} from "@t3tools/contracts";
-import { mergeGitStatusParts } from "@t3tools/shared/git";
-import * as KeyedLock from "@t3tools/shared/KeyedLock";
-import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
+} from "@goat/contracts";
+import { mergeGitStatusParts } from "@goat/shared/git";
+import * as KeyedLock from "@goat/shared/KeyedLock";
+import { resolveProjectSettings } from "@goat/shared/projectSettings";
 
 import * as BackgroundPolicy from "../background/BackgroundPolicy.ts";
 import * as GitWorkflowService from "../git/GitWorkflowService.ts";
@@ -146,7 +146,7 @@ interface StreamStatusOptions {
 
 export class VcsAutoPullPolicy extends Context.Reference<{
   readonly isEnabled: (cwd: string) => Effect.Effect<boolean, never>;
-}>("t3/vcs/VcsAutoPullPolicy", {
+}>("goat/vcs/VcsAutoPullPolicy", {
   defaultValue: () => ({ isEnabled: () => Effect.succeed(false) }),
 }) {}
 
@@ -193,11 +193,6 @@ export class VcsStatusBroadcaster extends Context.Service<
       cwd: string,
     ) => Effect.Effect<VcsStatusLocalResult, GitManagerServiceError>;
     readonly refreshStatus: (cwd: string) => Effect.Effect<VcsStatusResult, GitManagerServiceError>;
-    /**
-     * Refresh a loaded cwd after a turn if background policy allows it.
-     * GitManager retries missing PRs for the current branch and keeps known
-     * PRs and failed lookup backoff cached. This does not fetch Git remotes.
-     */
     readonly refreshPullRequestStatus: (
       cwd: string,
     ) => Effect.Effect<VcsStatusRemoteResult | null, GitManagerServiceError>;
@@ -206,7 +201,7 @@ export class VcsStatusBroadcaster extends Context.Service<
       options?: StreamStatusOptions,
     ) => Stream.Stream<VcsStatusStreamEvent, GitManagerServiceError>;
   }
->()("t3/vcs/VcsStatusBroadcaster") {}
+>()("goat/vcs/VcsStatusBroadcaster") {}
 
 function fingerprintStatusPart(status: unknown): string {
   return JSON.stringify(status);
@@ -411,6 +406,7 @@ export const make = Effect.gen(function* () {
     remote: VcsStatusRemoteResult | null,
     policyCwds: ReadonlyArray<string>,
   ) {
+    let pullAttempted = false;
     return yield* Effect.gen(function* () {
       const autoPullEnabled = (yield* Effect.forEach(policyCwds, autoPullPolicy.isEnabled, {
         concurrency: "unbounded",
@@ -429,6 +425,7 @@ export const make = Effect.gen(function* () {
       const local = yield* workflow.localStatus({ cwd });
       if (!local.isRepo || !local.isDefaultRef || local.hasWorkingTreeChanges) return null;
 
+      pullAttempted = true;
       yield* workflow.pullCurrentBranch(cwd);
       yield* workflow.invalidateStatus(cwd);
       const [refreshedLocal, refreshedRemote] = yield* Effect.all(
@@ -438,8 +435,20 @@ export const make = Effect.gen(function* () {
       yield* updateCachedStatus(cwd, refreshedLocal, refreshedRemote, { publish: true });
       return { local: refreshedLocal, remote: refreshedRemote };
     }).pipe(
-      Effect.catch(() =>
-        Effect.logWarning("Automatic project pull failed", { cwd }).pipe(Effect.as(null)),
+      Effect.catch((error) =>
+        Effect.gen(function* () {
+          yield* Effect.logWarning("Automatic project pull failed", {
+            cwdLength: cwd.length,
+            errorTag: error._tag,
+          });
+          if (!pullAttempted) return null;
+          // A pull or its follow-up reads can fail after local state has changed.
+          // Let a failed reconciliation reach the caller instead of publishing old status.
+          yield* workflow.invalidateLocalStatus(cwd);
+          const local = yield* workflow.localStatus({ cwd });
+          yield* updateCachedStatus(cwd, local, remote, { publish: true });
+          return { local, remote };
+        }),
       ),
     );
   });
@@ -461,9 +470,6 @@ export const make = Effect.gen(function* () {
         const remote = yield* workflow.remoteStatus({ cwd }, options);
         const pulled = yield* maybeAutoPull(cwd, remote, options?.policyCwds ?? [cwd]);
         if (pulled !== null) return pulled.remote;
-        // Local status holds the Changes totals, which compare against remote refs. A fetch can
-        // move them with no local trigger (a push from a terminal, a PR merged on the host), so
-        // re-read local status on the first fetch and whenever divergence moves.
         if (
           remote &&
           (!previousRemote ||

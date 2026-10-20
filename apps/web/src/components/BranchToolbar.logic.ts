@@ -4,18 +4,17 @@ import type {
   VcsRef,
   ProjectId,
   WorktreeSubmodules,
-} from "@t3tools/contracts";
+} from "@goat/contracts";
 import * as Schema from "effect/Schema";
-import { sanitizeNewRefName } from "@t3tools/shared/git";
+import { isTemporaryWorktreeBranch, sanitizeNewRefName } from "@goat/shared/git";
 export {
   dedupeRemoteBranchesWithLocalMatches,
   deriveLocalBranchNameFromRemoteRef,
   sanitizeNewRefName,
-} from "@t3tools/shared/git";
+} from "@goat/shared/git";
 
 export interface EnvironmentOption {
   environmentId: EnvironmentId;
-  /** Null when the machine's "No project" folder is not created yet. */
   projectId: ProjectId | null;
   label: string;
   isPrimary: boolean;
@@ -52,9 +51,6 @@ export function resolveEnvironmentOptionLabel(input: {
   return runtimeLabel ?? savedLabel ?? input.environmentId;
 }
 
-// A remote (non-primary) environment is always surfaced, even when it is the
-// only environment available: with a single connected machine there is nothing
-// to pick, but the user still needs to see where the project runs.
 export function shouldShowEnvironmentIndicator(input: {
   activeEnvironment: Pick<EnvironmentOption, "isPrimary"> | null;
   canPickEnvironment: boolean;
@@ -69,7 +65,6 @@ export function shouldShowComposerContextStrip(input: {
   hasActiveProject: boolean;
   isGitRepo: boolean;
   showEnvironmentIndicator: boolean;
-  /** A collapsed composer's controls currently fit in their measured strip host. */
   hostsRestingComposerControls: boolean;
 }): boolean {
   return (
@@ -129,10 +124,6 @@ export function resolveEffectiveEnvMode(input: {
   activeWorktreePath: string | null;
   hasServerThread: boolean;
   draftThreadEnvMode: EnvMode | undefined;
-  /**
-   * The server is still creating this thread's worktree. The thread exists
-   * from the start of that setup but gets its worktree path only at the end.
-   */
   preparingWorktree?: boolean;
 }): EnvMode {
   const { activeWorktreePath, hasServerThread, draftThreadEnvMode, preparingWorktree } = input;
@@ -207,20 +198,35 @@ export function resolveBranchToolbarPrBranch(input: {
   return input.activeThreadBranch === input.resolvedActiveBranch ? input.activeThreadBranch : null;
 }
 
-export function resolveLocalCheckoutBranchMismatch(input: {
+export function resolveCheckoutBranchMismatch(input: {
   effectiveEnvMode: EnvMode;
   activeWorktreePath: string | null;
   activeThreadBranch: string | null;
   currentGitBranch: string | null;
-}): { threadBranch: string; currentBranch: string } | null {
+}) {
   const { effectiveEnvMode, activeWorktreePath, activeThreadBranch, currentGitBranch } = input;
-  if (effectiveEnvMode !== "local" || activeWorktreePath !== null) {
+  const isLocalCheckout = effectiveEnvMode === "local" && activeWorktreePath === null;
+  const isEstablishedWorktree = effectiveEnvMode === "worktree" && activeWorktreePath !== null;
+  if (!isLocalCheckout && !isEstablishedWorktree) {
     return null;
   }
   if (!activeThreadBranch || !currentGitBranch || activeThreadBranch === currentGitBranch) {
     return null;
   }
-  return { threadBranch: activeThreadBranch, currentBranch: currentGitBranch };
+  // Cached status can predate the automatic rename of a temporary worktree branch.
+  if (
+    isEstablishedWorktree &&
+    !isTemporaryWorktreeBranch(activeThreadBranch) &&
+    isTemporaryWorktreeBranch(currentGitBranch)
+  ) {
+    return null;
+  }
+  return {
+    threadBranch: activeThreadBranch,
+    currentBranch: currentGitBranch,
+    // Restoring a worktree checkout could switch the branch for sibling threads.
+    canRestoreThreadBranch: isLocalCheckout,
+  };
 }
 
 export function resolveBranchSelectionTarget(input: {
@@ -277,9 +283,6 @@ export function shouldIncludeBranchPickerItem(input: {
     return true;
   }
 
-  // A query containing whitespace can only ever match a ref under its sanitized
-  // name, because that is the name such a ref would have been created with.
-  // Without this, typing "new branch" hides an existing "new-branch".
   const sanitizedQuery = sanitizeNewRefName(normalizedQuery);
   return (
     sanitizedQuery.length > 0 &&
@@ -294,6 +297,6 @@ export function resolveSshWorkspaceLabel(input: {
   savedLabel: string | null;
 }): string {
   return input.sshSelected
-    ? `Worktree · ${input.savedLabel ?? "unavailable SSH connection"}`
+    ? `SSH · ${input.savedLabel ?? "unavailable connection"}`
     : input.workspaceLabel;
 }

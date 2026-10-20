@@ -1,5 +1,5 @@
 {
-  "name": "@t3tools/provider-testing",
+  "name": "@goat/provider-testing",
   "private": true,
   "type": "module",
   "exports": {
@@ -25,14 +25,14 @@
     }
   },
   "scripts": {
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc-rs --noEmit",
     "test": "vp test run --config ../../vite.config.ts --dir ."
   },
   "dependencies": {
     "@effect/platform-node": "catalog:",
-    "@t3tools/contracts": "workspace:*",
-    "@t3tools/provider-core": "workspace:*",
-    "@t3tools/shared": "workspace:*",
+    "@goat/contracts": "workspace:*",
+    "@goat/provider-core": "workspace:*",
+    "@goat/shared": "workspace:*",
     "effect": "catalog:"
   },
   "devDependencies": {

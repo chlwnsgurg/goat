@@ -1,4 +1,4 @@
-import { parseKeybindingShortcut } from "@t3tools/shared/keybindings";
+import { parseKeybindingShortcut } from "@goat/shared/keybindings";
 import { readKdlNodes, type KdlNode } from "./captureConfigKdl.ts";
 import { niriCaptureBinding } from "./linuxCaptureSession.ts";
 
@@ -188,7 +188,6 @@ export function editCaptureConfig(
     readKdlNodes(after);
   } else {
     // Do not append executable Lua inside a block/string, or after an early return.
-    // The normal Omarchy binding file is a sequence of top-level hl.bind calls.
     after += `${after && !after.endsWith("\n") ? newline : ""}${newline}${binding}${newline}`;
   }
   return { after, shortcut: keys };

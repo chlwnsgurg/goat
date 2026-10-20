@@ -4,8 +4,8 @@ import * as Exit from "effect/Exit";
 import * as Option from "effect/Option";
 import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
-import { PositiveInt, TrimmedNonEmptyString } from "@t3tools/contracts";
-import { decodeJsonResult } from "@t3tools/shared/schemaJson";
+import { PositiveInt, TrimmedNonEmptyString } from "@goat/contracts";
+import { decodeJsonResult } from "@goat/shared/schemaJson";
 
 export interface NormalizedGitHubPullRequestRecord {
   readonly number: number;
@@ -13,7 +13,6 @@ export interface NormalizedGitHubPullRequestRecord {
   readonly url: string;
   readonly baseRefName: string;
   readonly headRefName: string;
-  /** The head commit, when the read asked for `headRefOid`. */
   readonly headSha?: string;
   readonly state: "open" | "closed" | "merged";
   readonly isDraft?: boolean;
@@ -80,7 +79,8 @@ function normalizeGitHubPullRequestState(input: {
   return "open";
 }
 
-function normalizeGitHubPullRequestRecord(
+/** A pull request row, in `gh --json` or GraphQL node shape, as every read reports it. */
+export function normalizeGitHubPullRequestRecord(
   raw: Schema.Schema.Type<typeof GitHubPullRequestSchema>,
 ): NormalizedGitHubPullRequestRecord {
   const explicitNameWithOwner = trimOptionalString(raw.headRepository?.nameWithOwner);
@@ -122,7 +122,7 @@ const decodeGitHubPullRequestEntry = Schema.decodeUnknownExit(GitHubPullRequestS
  * Pull request rows in `gh --json` or GraphQL node shape. A row that does not decode is
  * skipped, so one malformed pull request cannot hide the rest.
  */
-export function decodeGitHubPullRequestEntries(
+function decodeGitHubPullRequestEntries(
   entries: ReadonlyArray<unknown>,
 ): ReadonlyArray<NormalizedGitHubPullRequestRecord> {
   const pullRequests: NormalizedGitHubPullRequestRecord[] = [];

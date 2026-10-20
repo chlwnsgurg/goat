@@ -1,10 +1,12 @@
 import * as RemoteDispatchCoordinator from "../remoteReports/RemoteDispatchCoordinator.ts";
+import * as RemoteReportService from "../remoteReports/RemoteReportService.ts";
 import {
   OrchestratorMcpFailure,
   OrchestratorMcpThreadInterruptResult,
   OrchestratorMcpThreadListResult,
   OrchestratorMcpThreadReadResult,
   OrchestratorMcpThreadSendResult,
+  OrchestratorMcpThreadStatusResult,
   OrchestratorMcpThreadUnwatchResult,
   OrchestratorMcpThreadWaitResult,
   OrchestratorMcpThreadWatchListResult,
@@ -14,29 +16,36 @@ import {
   type OrchestratorMcpThreadListItem,
   type OrchestratorMcpThreadReadInput,
   type OrchestratorMcpThreadSendInput,
+  type OrchestratorMcpThreadSendRelayed,
+  type OrchestratorMcpThreadStatusInput,
   type OrchestratorMcpThreadWaitInput,
   type OrchestratorMcpThreadWatch,
   type OrchestratorMcpThreadWatchInput,
-} from "@t3tools/contracts";
+  type ThreadId,
+} from "@goat/contracts";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 
 import * as SshRemoteDispatch from "../sshRemote/SshRemoteDispatch.ts";
 import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
 import { hostFailure } from "./hostFailure.ts";
+import { withHostFanOutDeadline } from "./hostFanOutDeadline.ts";
 import type { LaunchWatch } from "./launchWatch.ts";
 import * as LaunchWatchService from "./LaunchWatchService.ts";
 import { McpInvocationContext, type McpInvocationScope } from "./McpInvocationContext.ts";
 import * as OrchestratorMcpService from "./OrchestratorMcpService.ts";
-import { assertLiveCaller, readCaller } from "./threadAccess.ts";
+import * as ThreadResultService from "../threadResults/ThreadResultService.ts";
+import { assertLiveCaller, readCaller, unavailable } from "./threadAccess.ts";
+import { boundedStatus, statusFromRead } from "./threadStatus.ts";
 
 /**
  * Routes the thread tools by host. A thread id belongs to the environment that
  * created it, so a thread is named by (host, threadId): an omitted host is
- * this environment, any other is an SSH alias whose own T3 server is called
+ * this environment, any other is an SSH alias whose own GOAT server is called
  * through SshRemoteDispatch as an outside client. That server judges the call
  * again; this side only makes sure the caller asks for no more than it has.
  */
@@ -44,6 +53,7 @@ import { assertLiveCaller, readCaller } from "./threadAccess.ts";
 const DEFAULT_LIST_LIMIT = 50;
 const MAX_FAN_OUT_LIMIT = 100;
 const REMOTE_TIMEOUT_MS = 120_000;
+const SENT_REQUEST_CACHE_LIMIT = 1_000;
 const DEFAULT_WAIT_MS = 10 * 60 * 1_000;
 const MAX_WAIT_MS = 60 * 60 * 1_000;
 /** Extra time a remote wait gets to answer after its own timeout. */
@@ -99,6 +109,7 @@ const decodeRead = Schema.decodeUnknownEffect(OrchestratorMcpThreadReadResult);
 const decodeWait = Schema.decodeUnknownEffect(OrchestratorMcpThreadWaitResult);
 const decodeSend = Schema.decodeUnknownEffect(OrchestratorMcpThreadSendResult);
 const decodeInterrupt = Schema.decodeUnknownEffect(OrchestratorMcpThreadInterruptResult);
+const decodeStatus = Schema.decodeUnknownEffect(OrchestratorMcpThreadStatusResult);
 
 const iso = (ms: number) => DateTime.formatIso(DateTime.makeUnsafe(ms));
 
@@ -136,6 +147,14 @@ export interface HostThreadsMcpServiceShape {
     scope: McpInvocationScope,
     input: OrchestratorMcpThreadSendInput,
   ) => Effect.Effect<OrchestratorMcpThreadSendResult, OrchestratorMcpFailure>;
+  /**
+   * Where a thread's current run is, here or on a host, with the caller's own
+   * watch on it. Never waits on the run.
+   */
+  readonly threadStatus: (
+    scope: McpInvocationScope,
+    input: OrchestratorMcpThreadStatusInput,
+  ) => Effect.Effect<OrchestratorMcpThreadStatusResult, OrchestratorMcpFailure>;
   readonly interruptThread: (
     scope: McpInvocationScope,
     input: OrchestratorMcpThreadInterruptInput,
@@ -150,6 +169,11 @@ export interface HostThreadsMcpServiceShape {
       readonly host: string;
       readonly tool: string;
       readonly arguments: Readonly<Record<string, unknown>>;
+      /** Defaults to the thread-tool deadline. Host status passes a shorter one. */
+      readonly timeoutMs?: number;
+      readonly requireReady?: true;
+      /** Ask the host for a session that may answer approvals; see SshHostToolCall. */
+      readonly approvals?: boolean;
     },
     decode: (value: unknown) => Effect.Effect<A, E>,
   ) => Effect.Effect<A & { readonly host: string }, OrchestratorMcpFailure>;
@@ -171,6 +195,7 @@ export interface HostThreadsMcpServiceShape {
       readonly host: string;
       readonly tool: string;
       readonly arguments: Readonly<Record<string, unknown>>;
+      readonly approvals?: boolean;
     },
     decode: (value: unknown) => Effect.Effect<A, E>,
   ) => Effect.Effect<A & { readonly host: string }, OrchestratorMcpFailure>;
@@ -179,7 +204,7 @@ export interface HostThreadsMcpServiceShape {
 export class HostThreadsMcpService extends Context.Service<
   HostThreadsMcpService,
   HostThreadsMcpServiceShape
->()("t3/mcp/HostThreadsMcpService") {}
+>()("goat/mcp/HostThreadsMcpService") {}
 
 /**
  * The caller's current runtime mode, reloaded each time. Changing a thread on
@@ -204,12 +229,15 @@ const authorize = (writes: boolean) =>
 
 const make = Effect.gen(function* () {
   const local = yield* OrchestratorMcpService.OrchestratorMcpService;
+  const results = yield* ThreadResultService.ThreadResultService;
   const dispatch = yield* SshRemoteDispatch.SshRemoteDispatch;
   const coordinator = yield* RemoteDispatchCoordinator.RemoteDispatchCoordinator;
+  // Only words an error better, so a layer without report bindings goes without.
+  const reports = yield* Effect.serviceOption(RemoteReportService.RemoteReportService);
   const threads = yield* ThreadManagementService.ThreadManagementService;
   const launchWatches = yield* LaunchWatchService.LaunchWatchService;
 
-  /** Only an agent inside a T3 thread owns watches; it is woken in that thread. */
+  /** Only an agent inside a GOAT thread owns watches; it is woken in that thread. */
   const watcherOf = (scope: McpInvocationScope) =>
     scope.thread === undefined
       ? Effect.fail(
@@ -221,22 +249,33 @@ const make = Effect.gen(function* () {
       : Effect.succeed(scope.thread.threadId);
 
   /**
+   * The caller's own watch of a thread: its thread's, or for an outside caller
+   * the launcherless watch its own launch made, never another caller's.
+   */
+  const watchKeyOf = (
+    scope: McpInvocationScope,
+    target: { readonly host: string | undefined; readonly threadId: ThreadId },
+  ): LaunchWatchService.LaunchWatchKey =>
+    scope.thread === undefined
+      ? { launcherThreadId: null, owner: scope.requestNamespace, ...target }
+      : { launcherThreadId: scope.thread.threadId, ...target };
+
+  /**
    * A send from a watching thread is followed like its launch: the run it
-   * started or joined is reported when it ends. Bookkeeping must never fail
-   * the send itself.
+   * started or joined is reported when it ends. A send from outside any thread
+   * re-arms the launcherless watch its launch made, so the completion webhook
+   * hears about follow-up runs too. Bookkeeping must never fail the send itself.
    */
   const rearmAfterSend = (
     scope: McpInvocationScope,
     input: OrchestratorMcpThreadSendInput,
     result: OrchestratorMcpThreadSendResult,
   ) =>
-    scope.thread === undefined
+    result.delivery === "relayed"
       ? Effect.void
       : launchWatches
           .rearm({
-            launcherThreadId: scope.thread.threadId,
-            host: input.host,
-            threadId: input.threadId,
+            ...watchKeyOf(scope, { host: input.host, threadId: input.threadId }),
             runId: result.runId,
           })
           .pipe(
@@ -248,6 +287,80 @@ const make = Effect.gen(function* () {
             ),
           );
 
+  /**
+   * A thread started from another machine names hosts as that machine knows them.
+   * One this machine cannot reach may still be reachable from there, so say where
+   * this thread came from and how to hand the call back. A send is handed back by
+   * `relay` when that machine declared at launch that it delivers them.
+   */
+  const unknownHostFailure = (
+    scope: McpInvocationScope,
+    host: string,
+    error: SshRemoteDispatch.SshRemoteDispatchError,
+    relay: ((originLabel: string) => Effect.Effect<unknown, OrchestratorMcpFailure>) | undefined,
+  ) =>
+    (scope.thread === undefined || Option.isNone(reports)
+      ? Effect.succeed(null)
+      : reports.value.origin(scope.thread.threadId).pipe(Effect.orElseSucceed(() => null))
+    ).pipe(
+      Effect.flatMap((origin) =>
+        origin !== null && origin.relaySend && relay !== undefined
+          ? relay(origin.originLabel)
+          : Effect.fail(
+              origin === null
+                ? hostFailure(error)
+                : failure(
+                    "invalid_request",
+                    `${error.message} This thread was started from ${origin.originLabel}, which may reach ${host}. To have it delivered from there, call goat_origin_report with status progress, naming host ${host}, the thread, and the message; the origin can forward it.`,
+                  ),
+            ),
+      ),
+    );
+
+  /**
+   * Hands a send to the launching machine, which delivers it as its launcher
+   * thread. The caller must still be allowed to change a thread on another machine.
+   */
+  const relaySend =
+    (
+      scope: McpInvocationScope,
+      input: OrchestratorMcpThreadSendInput & { readonly host: string },
+    ) =>
+    (originLabel: string) =>
+      Effect.gen(function* () {
+        yield* authorize(true).pipe(
+          Effect.provideService(McpInvocationContext, scope),
+          Effect.provideService(ThreadManagementService.ThreadManagementService, threads),
+        );
+        if (scope.thread === undefined || Option.isNone(reports))
+          return yield* failure("invalid_request", "Only a launched thread can relay a send.");
+        yield* reports.value
+          .relay(scope.thread.threadId, {
+            host: input.host,
+            threadId: input.threadId,
+            message: input.message,
+            ...(input.mode === undefined ? {} : { mode: input.mode }),
+            ...(input.clientRequestId === undefined
+              ? {}
+              : { clientRequestId: input.clientRequestId }),
+          })
+          .pipe(
+            Effect.mapError((error) =>
+              error.reason === "relay_queue_full"
+                ? failure(
+                    "invalid_request",
+                    `${originLabel} has not collected this thread's earlier relayed sends yet; nothing was sent. Try again once it has.`,
+                  )
+                : failure("orchestration_error", `Could not hand the send to ${originLabel}.`),
+            ),
+          );
+        return {
+          threadId: input.threadId,
+          delivery: "relayed",
+          via: originLabel,
+        } satisfies OrchestratorMcpThreadSendRelayed;
+      });
+
   const call = (
     scope: McpInvocationScope,
     input: {
@@ -256,6 +369,10 @@ const make = Effect.gen(function* () {
       readonly arguments: Readonly<Record<string, unknown>>;
       readonly writes: boolean;
       readonly timeoutMs?: number;
+      readonly requireReady?: true;
+      readonly approvals?: boolean;
+      /** Only goat_thread_send relays through the origin. */
+      readonly relay?: (originLabel: string) => Effect.Effect<unknown, OrchestratorMcpFailure>;
     },
   ) =>
     dispatch
@@ -266,6 +383,8 @@ const make = Effect.gen(function* () {
           arguments: input.arguments,
           writes: input.writes,
           timeoutMs: input.timeoutMs ?? REMOTE_TIMEOUT_MS,
+          ...(input.requireReady === true ? { requireReady: true } : {}),
+          ...(input.approvals === true ? { approvals: true } : {}),
         },
         authorize(input.writes).pipe(
           Effect.provideService(McpInvocationContext, scope),
@@ -273,8 +392,12 @@ const make = Effect.gen(function* () {
         ),
       )
       .pipe(
-        Effect.mapError((error) =>
-          error instanceof SshRemoteDispatch.SshRemoteDispatchError ? hostFailure(error) : error,
+        Effect.catch((error) =>
+          !(error instanceof SshRemoteDispatch.SshRemoteDispatchError)
+            ? Effect.fail(error)
+            : error.reason === "host_unknown"
+              ? unknownHostFailure(scope, input.host, error, input.relay)
+              : Effect.fail(hostFailure(error)),
         ),
       );
 
@@ -287,6 +410,9 @@ const make = Effect.gen(function* () {
       readonly arguments: Readonly<Record<string, unknown>>;
       readonly writes: boolean;
       readonly timeoutMs?: number;
+      readonly requireReady?: true;
+      readonly approvals?: boolean;
+      readonly relay?: (originLabel: string) => Effect.Effect<unknown, OrchestratorMcpFailure>;
     },
     decode: (value: unknown) => Effect.Effect<A, E>,
   ) =>
@@ -364,6 +490,7 @@ const make = Effect.gen(function* () {
           hosts,
           (host) =>
             listOnHost(scope, host, filters).pipe(
+              withHostFanOutDeadline(host),
               Effect.result,
               Effect.map((result) => ({ host, result })),
             ),
@@ -393,7 +520,14 @@ const make = Effect.gen(function* () {
 
   const readThread: HostThreadsMcpServiceShape["readThread"] = (scope, input) =>
     input.host === undefined
-      ? local.readThread(scope, input)
+      ? local.readThread(scope, input).pipe(
+          Effect.flatMap((read) =>
+            results.forRun(input.threadId, read.thread.latestRunId).pipe(
+              Effect.mapError(unavailable),
+              Effect.map((result) => ({ ...read, result })),
+            ),
+          ),
+        )
       : onHost(
           scope,
           {
@@ -448,6 +582,66 @@ const make = Effect.gen(function* () {
     return { watch: watchView(watch) } satisfies OrchestratorMcpThreadWatchResult;
   });
 
+  const threadStatus: HostThreadsMcpServiceShape["threadStatus"] = Effect.fn(
+    "HostThreadsMcpService.threadStatus",
+  )(function* (scope, input) {
+    const status =
+      input.host === undefined
+        ? yield* local.threadStatus(scope, { threadId: input.threadId })
+        : yield* onHost(
+            scope,
+            {
+              host: input.host,
+              tool: "goat_thread_status",
+              arguments: withoutHost(input),
+              writes: false,
+            },
+            decodeStatus,
+          ).pipe(
+            Effect.catchIf(
+              (error) => error.message.includes(SshRemoteDispatch.REMOTE_THREAD_STATUS_UNSUPPORTED),
+              () =>
+                readThread(scope, {
+                  threadId: input.threadId,
+                  host: input.host,
+                  limit: 1,
+                  runLimit: 2,
+                }).pipe(Effect.map(statusFromRead)),
+            ),
+          );
+    // The watch lives on this machine, whichever machine runs the thread.
+    const watch = yield* launchWatches
+      .find(watchKeyOf(scope, { host: input.host, threadId: input.threadId }))
+      .pipe(Effect.mapError(storeFailure));
+    return boundedStatus({
+      ...status,
+      watch:
+        watch === null
+          ? null
+          : {
+              // Only the next run; a thread sent to many times queues many.
+              pendingRunIds: watch.pendingRuns.slice(0, 1),
+              pendingRunCount: watch.pendingRuns.length,
+              lastReportedRunId: watch.reportedRuns.at(-1) ?? null,
+              webhook: watch.notifyWebhook || watch.webhookTarget !== null,
+            },
+    }) satisfies OrchestratorMcpThreadStatusResult;
+  });
+
+  // The caller may lose a successful response and retry after the review
+  // finishes. Reuse that response before applying new-send lifecycle checks.
+  // Direct SSH sends have no local durable request receipt. After eviction or
+  // restart they still pass the new-send checks; relay handoffs can recover
+  // their receipt from RemoteReportService below.
+  const sentRequests = new Map<string, OrchestratorMcpThreadSendResult>();
+  const rememberSentRequest = (key: string, result: OrchestratorMcpThreadSendResult) => {
+    sentRequests.set(key, result);
+    if (sentRequests.size > SENT_REQUEST_CACHE_LIMIT) {
+      const oldest = sentRequests.keys().next().value;
+      if (oldest !== undefined) sentRequests.delete(oldest);
+    }
+  };
+
   return HostThreadsMcpService.of({
     listThreads: (scope, input) =>
       input.allHosts === true
@@ -456,6 +650,7 @@ const make = Effect.gen(function* () {
           ? local.listThreads(scope, input)
           : listOnHost(scope, input.host, input),
     readThread,
+    threadStatus,
     waitForThread: (scope, input) => {
       if (input.host === undefined) return local.waitForThread(scope, input);
       const timeoutMs = Math.min(MAX_WAIT_MS, Math.max(1, input.timeoutMs ?? DEFAULT_WAIT_MS));
@@ -478,31 +673,112 @@ const make = Effect.gen(function* () {
       );
     },
     sendToThread: (scope, input) =>
-      (input.host === undefined
-        ? local.sendToThread(scope, input)
-        : onHost(
-            scope,
-            {
-              host: input.host,
-              tool: "goat_thread_send",
-              arguments: withoutHost(input),
-              writes: true,
-            },
-            decodeSend,
-          )
-      ).pipe(
-        Effect.tap((result) => rearmAfterSend(scope, input, result)),
-        // A send to a remote thread this one launched follows its reports again.
-        Effect.tap(() =>
-          input.host === undefined
-            ? Effect.void
-            : coordinator
-                .resume(input.host, input.threadId)
-                .pipe(
-                  Effect.catch(() => Effect.logWarning("Could not resume SSH report observation.")),
+      Effect.gen(function* () {
+        const host = input.host;
+        const requestKey =
+          host === undefined || input.clientRequestId === undefined
+            ? undefined
+            : [
+                scope.requestNamespace,
+                scope.thread?.threadId ?? "",
+                host,
+                input.threadId,
+                input.clientRequestId,
+              ]
+                .map(encodeURIComponent)
+                .join(":");
+        const delivered = requestKey === undefined ? undefined : sentRequests.get(requestKey);
+        if (delivered !== undefined) return delivered;
+        // Relay requests survive report collection, cache eviction and restarts.
+        // A receipt acknowledges the earlier handoff; it does not enqueue a send.
+        if (
+          host !== undefined &&
+          input.clientRequestId !== undefined &&
+          scope.thread !== undefined &&
+          Option.isSome(reports)
+        ) {
+          const receipt = yield* reports.value
+            .relayReceipt(scope.thread.threadId, input.clientRequestId)
+            .pipe(
+              Effect.mapError(() =>
+                failure("orchestration_error", "Unable to read the remote relay receipt."),
+              ),
+            );
+          if (receipt !== null) {
+            const result = {
+              host,
+              threadId: input.threadId,
+              delivery: "relayed",
+              via: receipt.originLabel,
+            } satisfies OrchestratorMcpThreadSendResult;
+            if (requestKey !== undefined) rememberSentRequest(requestKey, result);
+            return result;
+          }
+        }
+        const result = yield* (
+          host === undefined
+            ? local
+                .sendToThread(scope, input)
+                .pipe(Effect.map((result): OrchestratorMcpThreadSendResult => result))
+            : coordinator.taskOrigin(host, input.threadId).pipe(
+                Effect.mapError((error) => failure("orchestration_error", error.message)),
+                Effect.flatMap((originThreadId) =>
+                  threads
+                    .assertReviewTaskSendAllowed({
+                      threadId: input.threadId,
+                      ...(originThreadId === null ? {} : { senderThreadId: originThreadId }),
+                      host,
+                      createdBy: "agent",
+                    })
+                    .pipe(
+                      Effect.mapError((error) =>
+                        failure(
+                          error._tag === "ThreadManagementReviewTaskFinishedError"
+                            ? "thread_not_sendable"
+                            : "orchestration_error",
+                          error.message,
+                        ),
+                      ),
+                    ),
                 ),
-        ),
-      ),
+                Effect.andThen(() =>
+                  onHost(
+                    scope,
+                    {
+                      host,
+                      tool: "goat_thread_send",
+                      // The remote sees an outside client; a thread's queue or steer still means "like
+                      // steering" there, which its auto now does.
+                      arguments:
+                        scope.thread !== undefined &&
+                        (input.mode === "queue" || input.mode === "steer")
+                          ? { ...withoutHost(input), mode: "auto" }
+                          : withoutHost(input),
+                      writes: true,
+                      relay: relaySend(scope, { ...input, host }),
+                    },
+                    decodeSend,
+                  ),
+                ),
+              )
+        ).pipe(
+          Effect.tap((result) => rearmAfterSend(scope, input, result)),
+          // A send to a remote thread this one launched follows its reports again.
+          Effect.tap((result) =>
+            host === undefined || result.delivery === "relayed"
+              ? Effect.void
+              : coordinator
+                  .resume(host, input.threadId)
+                  .pipe(
+                    Effect.catch(() =>
+                      Effect.logWarning("Could not resume SSH report observation."),
+                    ),
+                  ),
+          ),
+        );
+        if (requestKey !== undefined) rememberSentRequest(requestKey, result);
+        return result;
+      }),
     interruptThread: (scope, input) =>
       input.host === undefined
         ? local.interruptThread(scope, input)

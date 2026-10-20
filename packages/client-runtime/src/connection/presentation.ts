@@ -1,9 +1,10 @@
-import type { ServerConfig } from "@t3tools/contracts";
+import type { ServerConfig } from "@goat/contracts";
 import * as Option from "effect/Option";
 
 import type { ConnectionCatalogEntry } from "./catalog.ts";
 import type {
   ConnectionAttemptStage,
+  ConnectionAttemptError,
   ConnectionTarget,
   SupervisorConnectionState,
 } from "./model.ts";
@@ -22,32 +23,68 @@ export interface EnvironmentConnectionPresentation {
   readonly phase: EnvironmentConnectionPhase;
   readonly error: string | null;
   readonly traceId: string | null;
+  readonly failure?: {
+    readonly kind: "blocked" | "retrying";
+    readonly reason: ConnectionAttemptError["reason"];
+    readonly detail: string;
+    readonly traceId?: string;
+  };
   /** The step an attempt in progress has reached. */
   readonly stage?: ConnectionAttemptStage | null;
   /** When the next automatic attempt starts (epoch ms), while waiting to retry. */
   readonly retryAt?: number | null;
+  /**
+   * Reconnecting because the host could not be reached at all, such as a
+   * laptop asleep in a bag. Surfaces show this quietly: it is expected, and
+   * retrying on its own is the right response.
+   */
+  readonly unreachable?: boolean;
 }
+
+/**
+ * Provider statuses are pushed every few minutes with fresh `checkedAt` stamps, and every root
+ * coordinator reads environment presentations. Leaving them out keeps a presentation stable
+ * across those pushes; provider readers subscribe to the server's providers atom instead.
+ */
+export type EnvironmentServerConfig = Omit<ServerConfig, "providers">;
 
 export interface EnvironmentPresentation {
   readonly entry: ConnectionCatalogEntry;
   readonly connection: EnvironmentConnectionPresentation;
-  readonly serverConfig: ServerConfig | null;
+  readonly serverConfig: EnvironmentServerConfig | null;
 }
 
 export function presentConnectionState(
   state: SupervisorConnectionState,
 ): EnvironmentConnectionPresentation {
+  const unreachable = state.lastFailure?.reason === "host-unreachable";
+  const failure =
+    state.lastFailure === null
+      ? {}
+      : {
+          failure: {
+            kind:
+              state.lastFailure._tag === "ConnectionBlockedError"
+                ? ("blocked" as const)
+                : ("retrying" as const),
+            reason: state.lastFailure.reason,
+            detail: state.lastFailure.detail,
+            ...(state.lastFailure.traceId ? { traceId: state.lastFailure.traceId } : {}),
+          },
+        };
   switch (state.phase) {
     case "available":
       return { phase: "available", error: null, traceId: null };
     case "offline":
-      return { phase: "offline", error: null, traceId: null };
+      return { phase: "offline", error: null, traceId: null, ...failure };
     case "connecting":
       return {
         phase: state.attempt <= 1 && state.lastFailure === null ? "connecting" : "reconnecting",
         error: state.lastFailure?.message ?? null,
         traceId: state.lastFailure?.traceId ?? null,
         stage: state.stage,
+        ...failure,
+        ...(unreachable ? { unreachable } : {}),
       };
     case "connected":
       return { phase: "connected", error: null, traceId: null };
@@ -57,12 +94,15 @@ export function presentConnectionState(
         error: state.lastFailure?.message ?? null,
         traceId: state.lastFailure?.traceId ?? null,
         retryAt: state.retryAt,
+        ...failure,
+        ...(unreachable ? { unreachable } : {}),
       };
     case "blocked":
       return {
         phase: state.lastFailure?.reason === "unsupported" ? "unsupported" : "error",
         error: state.lastFailure?.message ?? null,
         traceId: state.lastFailure?.traceId ?? null,
+        ...failure,
       };
   }
 }
@@ -76,6 +116,11 @@ export function connectionStatusText(connection: EnvironmentConnectionPresentati
     case "connecting":
       return "Connecting...";
     case "reconnecting":
+      if (connection.unreachable) {
+        return connection.error
+          ? `Host unreachable. Reconnecting... Reason: ${connection.error}`
+          : "Host unreachable. Reconnecting...";
+      }
       return connection.error
         ? `Failed to connect. Reconnecting... Reason: ${connection.error}`
         : "Reconnecting...";
@@ -91,6 +136,7 @@ export function connectionStatusText(connection: EnvironmentConnectionPresentati
 }
 
 export function connectionStatusTitle(connection: EnvironmentConnectionPresentation): string {
+  if (connection.phase === "reconnecting" && connection.unreachable) return "Host unreachable";
   if (connection.phase === "reconnecting" && connection.error) {
     return "Failed to connect. Reconnecting...";
   }
@@ -114,6 +160,13 @@ export function connectionProgressLabel(
   switch (connection.phase) {
     case "connecting":
     case "reconnecting": {
+      if (connection.unreachable) {
+        const seconds =
+          connection.retryAt == null ? 0 : Math.ceil((connection.retryAt - nowMs) / 1000);
+        return seconds > 0
+          ? `Unreachable, retrying in ${formatRetryDelay(seconds)}`
+          : "Unreachable, retrying";
+      }
       if (connection.retryAt != null) {
         const seconds = Math.ceil((connection.retryAt - nowMs) / 1000);
         return seconds > 0 ? `Retrying in ${formatRetryDelay(seconds)}` : "Retrying";
@@ -147,11 +200,8 @@ export function presentEnvironmentConnection(
 }
 
 /**
- * The address an agent outside T3 (Claude Code, Codex) uses to reach this
- * environment's MCP server: the route this device is connected over, since an
- * agent beside this client can reach it too, else the first route in
- * preference order that has an address. SSH connections ride a local forward
- * that disappears with the client, so they have no stable address.
+ * SSH connections ride a local forward that disappears with the client, so they have no stable
+ * address.
  */
 export function environmentMcpUrl(input: {
   readonly entry: ConnectionCatalogEntry;

@@ -1,4 +1,4 @@
-import { EnvironmentId, MessageId, ThreadId } from "@t3tools/contracts";
+import { EnvironmentId, MessageId, ThreadId } from "@goat/contracts";
 import * as Schema from "effect/Schema";
 
 import { writeFileAtomically } from "../lib/atomic-file";
@@ -86,8 +86,6 @@ export const expoThreadOutboxStorage: ThreadOutboxStorage = {
         try {
           messages.push(decodeQueuedThreadMessage(JSON.parse(await entry.text()) as unknown));
         } catch (cause) {
-          // Recover readable messages without treating their attachment
-          // owners as the complete inventory needed for cleanup.
           errors.push(
             new ThreadOutboxStorageError({
               operation: "read-message",

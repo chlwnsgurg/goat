@@ -1,4 +1,4 @@
-import { Check, Copy } from "lucide";
+import { Check, Copy } from "~/components/solar/nodes";
 
 import { MorphIcon } from "~/components/MorphIcon";
 import { useCopyToClipboard } from "~/hooks/useCopyToClipboard";
@@ -6,7 +6,6 @@ import { cn } from "~/lib/utils";
 
 import { Button } from "./ui/button";
 
-/** A shell command to copy and run elsewhere, such as on the environment's host. */
 export function CommandBlock({
   command,
   className,

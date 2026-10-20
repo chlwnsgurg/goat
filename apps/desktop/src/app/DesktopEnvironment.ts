@@ -3,8 +3,10 @@ import type {
   DesktopAppStageLabel,
   DesktopRuntimeArch,
   DesktopRuntimeInfo,
-} from "@t3tools/contracts";
+} from "@goat/contracts";
 import * as Config from "effect/Config";
+// @effect-diagnostics-next-line nodeBuiltinImport:off - A one-time synchronous check while the environment is built.
+import * as NodeFS from "node:fs";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -16,7 +18,8 @@ import * as DesktopConfig from "./DesktopConfig.ts";
 import { resolveLinuxDesktopEntryName } from "./DesktopEarlyElectronStartup.ts";
 import { resolveDesktopBaseDir, resolveDesktopStateDir } from "./DesktopStatePaths.ts";
 import { isNightlyDesktopVersion } from "../updates/updateChannels.ts";
-import type { OtlpProtocol } from "@t3tools/shared/observability";
+import type { OtlpProtocol } from "@goat/shared/observability";
+import { LEGACY_DESKTOP_RUNTIME_APP_BASE_NAME } from "@goat/contracts/legacyT3Names";
 
 export interface MakeDesktopEnvironmentInput {
   readonly dirname: string;
@@ -39,6 +42,7 @@ export class DesktopEnvironment extends Context.Service<
     readonly processArch: string;
     readonly isPackaged: boolean;
     readonly isDevelopment: boolean;
+    readonly insecureDevSecretStorage?: boolean;
     readonly appVersion: string;
     readonly appPath: string;
     readonly resourcesPath: string;
@@ -54,23 +58,15 @@ export class DesktopEnvironment extends Context.Service<
     readonly browserArtifactsDir: string;
     readonly rootDir: string;
     readonly appRoot: string;
-    // Root of the tree containing apps/server/dist and node_modules for the
-    // backend. Equals appRoot everywhere except packaged Windows, where the
-    // server tree ships as the resources/server.asar sidecar (see
-    // scripts/build-desktop-artifact.ts) that the asar-aware
-    // ELECTRON_RUN_AS_NODE primary reads in place and the WSL backend
-    // extracts on demand (see DesktopWslServerTree).
     readonly serverRoot: string;
     readonly backendEntryPath: string;
-    // Built web client the packaged renderer is served from over t3code://app.
     readonly clientAssetsDir: string;
     readonly backendCwd: string;
     readonly preloadPath: string;
-    // Preload that turns on the V8 compile cache for the local backend.
     readonly compileCachePath: string;
     readonly appUpdateYmlPath: string;
     readonly devServerUrl: Option.Option<URL>;
-    readonly devRemoteT3ServerEntryPath: Option.Option<string>;
+    readonly devRemoteGoatServerEntryPath: Option.Option<string>;
     readonly configuredBackendPort: Option.Option<number>;
     readonly commitHashOverride: Option.Option<string>;
     readonly otlpTracesUrl: Option.Option<string>;
@@ -91,15 +87,23 @@ export class DesktopEnvironment extends Context.Service<
     readonly resolvePickFolderDefaultPath: (rawOptions: unknown) => Option.Option<string>;
     readonly resolveResourcePathCandidates: (fileName: string) => readonly string[];
   }
->()("@t3tools/desktop/app/DesktopEnvironment") {}
+>()("@goat/desktop/app/DesktopEnvironment") {}
 
 /** Shown to people: About panel, app menu, branding injected into the web UI. */
 const APP_BASE_NAME = "GOAT";
 /**
- * Electron's runtime name (app.setName). It keys the macOS Keychain "Safe Storage" entry and
- * the Linux secret store that encrypt saved connections, so it must stay the upstream value.
+ * Electron's runtime name (app.setName). It keys the safeStorage key (macOS Keychain "Safe
+ * Storage" item, Linux Secret Service entry), which DesktopSafeStorageKeyMigration copies over
+ * from the legacy name before first use.
  */
-export const DESKTOP_RUNTIME_APP_BASE_NAME = "T3 Code";
+export const DESKTOP_RUNTIME_APP_BASE_NAME = "GOAT";
+
+export const desktopRuntimeAppName = (stageLabel: DesktopAppStageLabel) =>
+  `${DESKTOP_RUNTIME_APP_BASE_NAME} ${stageLabel}`;
+
+/** The runtime name builds before D13 used, whose safeStorage key holds existing secrets. */
+export const legacyDesktopRuntimeAppName = (stageLabel: DesktopAppStageLabel) =>
+  `${LEGACY_DESKTOP_RUNTIME_APP_BASE_NAME} ${stageLabel}`;
 
 function resolveDesktopAppStageLabel(input: {
   readonly isDevelopment: boolean;
@@ -173,8 +177,9 @@ const make = Effect.fn("desktop.environment.make")(function* (
   const baseDir = resolveDesktopBaseDir({
     homeDirectory,
     joinPath: path.join,
-    t3Home: config.t3Home,
+    goatHome: config.goatHome,
     isDevelopment,
+    pathExists: NodeFS.existsSync,
   });
   const rootDir = path.resolve(input.dirname, "../../..");
   const appRoot = input.isPackaged ? input.appPath : rootDir;
@@ -191,7 +196,7 @@ const make = Effect.fn("desktop.environment.make")(function* (
     baseDir,
     isDevelopment,
     joinPath: path.join,
-    t3Home: config.t3Home,
+    goatHome: config.goatHome,
   });
   const linuxApplicationsDir = path.join(
     Option.getOrElse(config.xdgDataHome, () => path.join(homeDirectory, ".local", "share")),
@@ -206,6 +211,7 @@ const make = Effect.fn("desktop.environment.make")(function* (
     processArch: input.processArch,
     isPackaged: input.isPackaged,
     isDevelopment,
+    insecureDevSecretStorage: config.insecureDevSecretStorage,
     appVersion: input.appVersion,
     appPath: input.appPath,
     resourcesPath,
@@ -231,7 +237,7 @@ const make = Effect.fn("desktop.environment.make")(function* (
       ? path.join(resourcesPath, "app-update.yml")
       : path.join(input.appPath, "dev-app-update.yml"),
     devServerUrl,
-    devRemoteT3ServerEntryPath: config.devRemoteT3ServerEntryPath,
+    devRemoteGoatServerEntryPath: config.devRemoteGoatServerEntryPath,
     configuredBackendPort: config.configuredBackendPort,
     commitHashOverride: config.commitHashOverride,
     otlpTracesUrl: config.otlpTracesUrl,

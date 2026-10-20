@@ -1,5 +1,5 @@
 import { assert, describe, it } from "@effect/vitest";
-import { ProviderDriverKind, ProviderInstanceId } from "@t3tools/contracts";
+import { ProviderDriverKind, ProviderInstanceId } from "@goat/contracts";
 
 import { hasValidClaudeManifestAdapters } from "./ClaudeModelManifest.ts";
 import { resolveProviderCatalog, type ModelManifestData } from "./ModelManifest.ts";
@@ -15,13 +15,6 @@ import {
   resolveClaudeUpdateRequiredModels,
   scopeClaudeModelCatalog,
 } from "./ClaudeModelCatalog.ts";
-
-/**
- * Test policy: adding or changing a real Claude model in model-manifest.json
- * must not add or update tests here. These synthetic fixtures cover resolver
- * behavior once. Add a test only when Claude adapter semantics change, such
- * as introducing a new compatibility rule or dispatch mapping type.
- */
 
 const manifest = (): ModelManifestData => ({
   version: 1,
@@ -73,7 +66,6 @@ const manifest = (): ModelManifestData => ({
 
 const CLAUDE = ProviderDriverKind.make("claudeAgent");
 
-/** Resolves Claude's catalog the way the driver does: through its manifest catalog entry. */
 const catalogFromManifest = (data: ModelManifestData) =>
   resolveClaudeModelCatalog(resolveProviderCatalog(data, CLAUDE) ?? undefined);
 
@@ -200,6 +192,16 @@ describe("Claude model catalog", () => {
     assert.isFalse(hasValidClaudeManifestAdapters(malformed));
   });
 
+  it("preserves only SDK effort levels for uncatalogued models", () => {
+    const catalog = catalogFromManifest(manifest());
+    for (const effort of ["low", "medium", "high", "xhigh", "max"]) {
+      assert.strictEqual(resolveClaudeCatalogEffort(catalog, "custom", ` ${effort} `), effort);
+    }
+    for (const effort of [undefined, null, "", "  ", "brutal", "extreme", "HIGH", "ultrathink"]) {
+      assert.isUndefined(resolveClaudeCatalogEffort(catalog, "custom", effort));
+    }
+  });
+
   it("appends custom models with their own descriptors and keeps bare slugs opaque", () => {
     const catalog = scopeClaudeModelCatalog(catalogFromManifest(manifest()), [
       "synthetic",
@@ -222,12 +224,11 @@ describe("Claude model catalog", () => {
       },
     ]);
 
-    // The bare custom slug shadows the built-in alias, so it no longer resolves to it.
     assert.strictEqual(resolveClaudeModelSlug(catalog, "synthetic"), "synthetic");
-    assert.strictEqual(resolveClaudeCatalogEffort(catalog, "synthetic", "extreme"), undefined);
+    assert.isUndefined(resolveClaudeCatalogEffort(catalog, "synthetic", "extreme"));
+    assert.strictEqual(resolveClaudeCatalogEffort(catalog, "synthetic", "max"), "max");
+    assert.strictEqual(normalizeClaudeCatalogEffort(catalog, "max", "synthetic"), "max");
 
-    // The entry with descriptors resolves user-defined effort ids and passes
-    // them through untouched (no effortMap, no model suffix).
     assert.strictEqual(
       resolveClaudeCatalogEffort(catalog, "claude-custom-tuned", "brutal"),
       "brutal",

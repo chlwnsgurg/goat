@@ -1,9 +1,6 @@
 import { useFocusEffect } from "@react-navigation/native";
 import { useCallback, useEffect, useRef } from "react";
-import {
-  voiceInputBlocksSubmission,
-  type VoiceInputState,
-} from "@t3tools/client-runtime/voice-input";
+import { voiceInputBlocksSubmission, type VoiceInputState } from "@goat/client-runtime/voice-input";
 
 import type { ComposerEditorSelection } from "../../components/ComposerEditor";
 import { useGlobalVoiceInput } from "./VoiceInputProvider";
@@ -13,7 +10,6 @@ const IDLE_STATE: VoiceInputState = { phase: "idle", error: null, errorAction: n
 
 export function useVoiceInputController(input: {
   readonly ownerKey: string | null;
-  /** Shown by the global dictation pill when this composer is off screen. */
   readonly label: string;
   readonly readDraftMessage: () => string | null;
   readonly subscribeToDraftChanges: (onChange: () => void) => () => void;

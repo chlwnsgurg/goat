@@ -3,7 +3,7 @@ import {
   OrchestrationSearchThreadsInput,
   type OrchestrationSearchThreadsResult,
   type OrchestrationThreadSearchMatch,
-} from "@t3tools/contracts";
+} from "@goat/contracts";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import { AsyncResult, Atom } from "effect/reactivity";
@@ -42,11 +42,6 @@ export function threadSearchMatchKey(
   return JSON.stringify([match.environmentId, match.threadId]);
 }
 
-/**
- * Combines one search query atom per environment. Invalid search keys, failed
- * requests, and disconnected environments contribute no content matches,
- * preserving local title search as the compatibility fallback.
- */
 export function createThreadSearchResultsAtomFamily<E>(options: {
   readonly getSearchAtom: (
     environmentId: EnvironmentId,

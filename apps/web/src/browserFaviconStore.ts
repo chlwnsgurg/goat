@@ -1,16 +1,16 @@
+import { migratingStorage } from "@goat/client-runtime/storage-migration";
 import {
   scopedProjectKey,
   scopedThreadKey,
   scopeProjectRef,
-} from "@t3tools/client-runtime/environment";
-import type { DesktopPreviewFavicon, ScopedProjectRef, ScopedThreadRef } from "@t3tools/contracts";
+} from "@goat/client-runtime/environment";
+import type { DesktopPreviewFavicon, ScopedProjectRef, ScopedThreadRef } from "@goat/contracts";
 import * as Option from "effect/Option";
-import { useMemo } from "react";
 import { create } from "zustand";
 import { createJSONStorage, persist } from "zustand/middleware";
 
 import { normalizeHostname } from "~/browser/browserTargetResolver";
-import { useThreadShell } from "~/state/entities";
+import { useQuietThreadShell } from "~/state/entities";
 import { usePreparedConnection } from "~/state/session";
 
 import {
@@ -26,7 +26,7 @@ import {
 } from "./browserFaviconLogic";
 import { createMemoryStorage, type StateStorage } from "./lib/storage";
 
-const BROWSER_FAVICON_STORAGE_KEY = "t3code:browser-favicons:v1";
+const BROWSER_FAVICON_STORAGE_KEY = "goat:browser-favicons:v1";
 const MAX_PENDING_ORIGINS_PER_THREAD = 10;
 const MAX_PENDING_THREADS = 20;
 const MAX_REGISTERED_THREADS = 100;
@@ -36,9 +36,7 @@ type PendingFaviconsByOrigin = Record<string, PendingFavicon>;
 
 export interface BrowserFaviconStoreState {
   byKey: Record<string, BrowserFaviconEntry>;
-  /** Capture buffering only. */
   pendingByThreadKey: Record<string, PendingFaviconsByOrigin>;
-  /** Non-persisted fallback for draft/background threads without a hydrated shell. */
   projectRefByThreadKey: Record<string, ScopedProjectRef>;
   recordFavicon: (
     key: string,
@@ -82,10 +80,10 @@ function addPendingFavicon(
 export function resolveBrowserFaviconStorage(): StateStorage {
   const fallback = createMemoryStorage();
   const shadowedNames = new Set<string>();
-  let primary: Storage;
+  let primary: Pick<Storage, "getItem" | "setItem" | "removeItem">;
   try {
     if (typeof window === "undefined") return fallback;
-    primary = window.localStorage;
+    primary = migratingStorage(window.localStorage);
   } catch {
     return fallback;
   }
@@ -199,12 +197,10 @@ export function registerFaviconProjectForThread(
 }
 
 export function useFaviconProjectRefForThread(threadRef: ScopedThreadRef): ScopedProjectRef | null {
-  const shell = useThreadShell(threadRef);
+  const shell = useQuietThreadShell(threadRef);
   const shellProjectId = shell?.projectId ?? null;
-  const shellProjectRef = useMemo(
-    () => (shellProjectId ? scopeProjectRef(threadRef.environmentId, shellProjectId) : null),
-    [shellProjectId, threadRef.environmentId],
-  );
+  const environmentId = threadRef.environmentId;
+  const shellProjectRef = shellProjectId ? scopeProjectRef(environmentId, shellProjectId) : null;
   const registered = useBrowserFaviconStore(
     (state) => state.projectRefByThreadKey[scopedThreadKey(threadRef)] ?? null,
   );

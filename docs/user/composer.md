@@ -55,12 +55,17 @@ On web and desktop, choose **Settings → General → Follow-up behavior** to qu
 new messages for a later turn or steer the running turn immediately. The setting
 applies to this client; already queued messages keep their place. Queued messages
 are saved on the server and can be edited, reordered, or removed above the composer.
-`Cmd+Enter` on macOS or `Ctrl+Enter` on Windows and Linux uses the opposite action:
-it steers when your default is Queue and queues when your default is Steer.
+When Enter sends, `Cmd+Enter` on macOS or `Ctrl+Enter` on Windows and Linux uses
+the opposite action: it steers when your default is Queue and queues when your
+default is Steer.
+If your **Send shortcut** requires `Cmd+Enter` or `Ctrl+Enter`, that shortcut uses
+your default follow-up behavior; add **Shift** to use the opposite action. This
+applies only to multiline messages when you choose the multiline send option.
 
 Use `Cmd+Shift+Enter` on macOS or `Ctrl+Shift+Enter` on Windows and Linux to send
 the oldest queued message as a steer. This leaves the current draft intact and
-requires an active turn that supports steering. Change
+requires an active turn that supports steering. If that shortcut sends the opposite
+action for your draft, move focus outside the composer to steer the queued message. Change
 `thread.steerQueuedMessage` in **Settings → Keybindings** to use another shortcut.
 
 Press `Option+Up` on macOS or `Alt+Up` on Windows and Linux with the cursor at the
@@ -72,18 +77,50 @@ running the send button shows which action it will take. Long-press it to use th
 other action for a single message, or hold `Cmd` while sending from a hardware
 keyboard. The button only offers Steer when the running agent supports it.
 
+## Cloud tasks
+
+Most cloud providers use the published remote branch and exclude local edits and
+unpushed commits; push first if you want those tasks to use them. Some also require
+a clean checkout of that pushed revision. Claude Cloud starts from the project
+folder and its current branch instead, and local changes may be included without
+publishing the branch. Check the provider's source notice before sending.
+
+Open the task or its returned pull request from the conversation. Cloud changes
+stay in the remote repository, so this thread has no local checkpoint or worktree
+to diff or rewind. Project files, editor and terminal still show your local source;
+they do not show cloud changes. Your task history keeps its summary and links.
+
+Follow-ups use the same cloud conversation when supported. Otherwise the composer
+explains why another message cannot be sent. A task marked “Running in the cloud”
+with link-only tracking has been submitted; its link is the place to check progress.
+Restarting GOAT does not stop remote cloud work.
+
 ## Queue messages offline on mobile
 
 Mobile keeps local copies of draft attachments, so you can preview them and queue
 messages while disconnected. Uploads resume when you reconnect. Drafts and queued
-messages survive app restarts. Signing out of T3 Connect keeps that work on your
-device until you sign back into the same account.
+messages survive app restarts. Reconnect to the environment to send queued work.
 
 ## Custom models
 
 On web and desktop, use Settings → Providers → **Models** to add an unlisted model with a custom
 name and options. Only options supported by the provider integration affect turns. Antigravity
 uses its account catalog and does not support custom models.
+
+To rename a built-in model on every client, edit the server's `settings.json` in its `userdata`
+directory. Add a custom model entry with the built-in model ID and a new name under that provider
+instance:
+
+```json
+{
+  "providerInstances": {
+    "codex": {
+      "driver": "codex",
+      "config": { "customModels": [{ "slug": "gpt-5.5", "name": "Team GPT" }] }
+    }
+  }
+}
+```
 
 ## Model defaults
 
@@ -164,6 +201,13 @@ minutes long. Canceling, leaving the screen, or an audio interruption discards t
 recording and preserves your existing draft. While recording, the screen stays
 awake; it can sleep normally once recording stops.
 
+Voice input records from the first connected microphone in **Settings → Microphone**.
+The list mixes kinds (built-in, other wired, other Bluetooth, CarPlay) with wired and
+Bluetooth devices you have dictated with, listed by name. Drag to rank them together:
+for example, put **Other Bluetooth** above your AirPods so a new headset is preferred
+while the AirPods microphone stays low. By default, CarPlay comes after the built-in
+microphone.
+
 Transcription runs on your device. GOAT deletes the temporary audio after
 transcription or cancellation; only the message text is sent when you submit.
 
@@ -179,9 +223,10 @@ Queued messages appear above the composer. Rows show a thumbnail of any attached
 the text. Drag a row by its handle to reorder it, use the handle's arrow keys, promote the message
 to a steer, or remove it.
 
-If the server restarts, saved queued messages keep their order and are held. Press
-**Resume** in an empty composer on web or desktop, or **Resume queue** in the queue
-sheet on mobile, to continue. You can edit, reorder, or remove held messages without starting them.
+If you stop the agent or the server restarts, queued messages keep their order and are held.
+Press **Resume** in an empty composer on web and desktop, or **Resume queue** on mobile, to
+continue. Sending a new message also resumes the queue, unless it steers a turn that is already
+running. You can edit, reorder, or remove held messages without starting them.
 
 The pencil on a queued row opens that message in the composer for editing. The original message
 stays in the queue until you save, and its row is highlighted while you edit. The message's
@@ -210,6 +255,19 @@ Provider commands must start the message to run. GOAT commands such as
 Send `/compact` in an existing conversation to reduce context usage when the
 provider supports it. Web and desktop also offer compaction from the context meter.
 
+## Side chat
+
+On web and desktop, send `/side <question>` to ask about the current thread without
+adding to it. The question opens in a **Side chat** tab in the right panel, and its
+answers never enter the thread's history. Send `/side` alone, use the side chat button
+in the thread header, or press `Mod+/` to open or close the tab.
+
+The side chat starts from the conversation up to the last finished turn, so you can
+ask while the agent is still working. It has the full composer, with the thread's
+model, workspace, and permission mode. It is meant for questions and leaves files alone
+unless you ask it to change something. Use **Start a new side chat** to discard it and
+pick up the latest conversation, or **Open as a full thread** to continue it on its own.
+
 ## Goals
 
 With Codex and Claude, send `/goal` followed by what "done" means, for example
@@ -235,7 +293,8 @@ excerpt, Terminal 1 lines 3-4" and similar to screen readers.
 A pull request appears as its icon and number. Its color reflects whether it was open, draft,
 merged, or closed when it was attached. Select it to inspect the captured title and branches,
 then choose **Open pull request** to visit the pull request. On web and desktop, type `#` to browse the newest
-pull requests in the current project's repository. Continue typing digits to filter the recent list
+pull requests in the current project's repository. Pull requests linked to the thread are included
+from any repository and listed first, after any exact number match. Continue typing digits to filter the recent list
 by any part of its pull request numbers. A complete number is also resolved directly, even when that
 pull request is older than the recent list. Type a single word after `#` to search pull requests in
 the repository by text. Choose a result to insert it as a chip.
@@ -247,10 +306,15 @@ opens it when selected. Your prompt only carries a reference: the agent reads th
 history on demand, so attaching a long thread costs nothing until the agent looks. Attaching a
 thread does not change it, and the agent cannot send messages to it unless you ask.
 
-In the desktop app you can also drop a thread from a machine you connected over SSH into a
-thread that runs on this computer; the agent reads it through that SSH connection. An
-environment connected only through T3 Connect or a URL has no such route, and neither does an
-agent running on another machine, so those drops are refused with the reason.
+Dropping a thread from another environment attaches a saved transcript file. The source
+environment must be connected and up to date. The transcript includes the visible history and
+saved text context at the time of the drop; later messages and the contents of attached files
+are not copied. The agent can read the saved transcript after the source disconnects. Normal
+file attachment limits apply.
+
+In the desktop app, a thread from a machine you connected over SSH dropped into a thread that
+runs on this computer is attached as a reference instead; the agent reads it through that SSH
+connection.
 
 Images keep their thumbnail shelf above the text and also get a chip at your cursor, so you can
 say exactly which image you mean. Deleting an image chip leaves the image on the shelf; removing

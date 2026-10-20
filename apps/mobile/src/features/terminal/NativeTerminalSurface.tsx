@@ -10,7 +10,7 @@ import {
   type ViewProps,
 } from "react-native";
 
-import { AppText as Text } from "../../components/AppText";
+import { AppText as Text } from "../../components/ui/AppText";
 import { MOBILE_TYPOGRAPHY } from "../../lib/typography";
 import { useAppearancePreferences } from "../settings/appearance/AppearancePreferencesProvider";
 import {
@@ -175,7 +175,7 @@ const FallbackTerminalSurface = memo(function FallbackTerminalSurface(
           })}
           onPress={() => props.onInput("\u0003")}
         >
-          <Text className="text-2xs font-t3-bold" style={{ color: theme.foreground }}>
+          <Text className="text-2xs font-goat-bold" style={{ color: theme.foreground }}>
             Ctrl-C
           </Text>
         </Pressable>
@@ -201,7 +201,6 @@ const ReadyTerminalSurface = memo(function ReadyTerminalSurface(props: ReadyTerm
     terminalDebugLog("native:surface", {
       terminalKey: props.terminalKey,
       native: hasNativeSurface,
-      // null = installed binary predates native hardware-key handling (rebuild needed).
       hardwareKeyRevision: getNativeTerminalHardwareKeyRevision(),
       bufferLen: props.buffer.length,
       isRunning: props.isRunning,

@@ -5,8 +5,8 @@ import {
   type KeybindingShortcut,
   type SnapShotModifier,
   type SnapShotShortcut,
-} from "@t3tools/contracts";
-import { parseKeybindingShortcut } from "@t3tools/shared/keybindings";
+} from "@goat/contracts";
+import { parseKeybindingShortcut } from "@goat/shared/keybindings";
 
 import { formatShortcutKeyLabel, formatShortcutLabel, shortcutConflictKey } from "../keybindings";
 import { isMacPlatform, isWindowsPlatform } from "./utils";
@@ -23,7 +23,6 @@ const DESKTOP_KEY_ALIASES: Readonly<Record<string, string>> = {
   minus: "-",
 };
 
-/** Portal labels are descriptions, not a keybinding protocol. Only parse known key notation. */
 export function parseDesktopSnapShotShortcut(label: string): KeybindingShortcut | null {
   const text = label.trim().replace(/^Press\s+/i, "");
   if (!text) return null;

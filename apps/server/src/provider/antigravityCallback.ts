@@ -1,7 +1,7 @@
 // @effect-diagnostics nodeBuiltinImport:off - node:http sends the one-shot loopback callback with no proxy, redirect handling, or response logging.
 import * as NodeHttp from "node:http";
 
-import { ProviderSetupError, type ProviderInstanceId } from "@t3tools/contracts";
+import { ProviderSetupError, type ProviderInstanceId } from "@goat/contracts";
 import * as Effect from "effect/Effect";
 
 export interface AntigravityPendingCallback {
@@ -9,7 +9,6 @@ export interface AntigravityPendingCallback {
   readonly state: string;
 }
 
-/** Only the callback advertised by this running ACP process may receive a request. */
 export const validateAntigravityCallbackUrl = Effect.fn("validateAntigravityCallbackUrl")(
   function* (
     instanceId: ProviderInstanceId,
@@ -62,7 +61,6 @@ export const validateAntigravityCallbackUrl = Effect.fn("validateAntigravityCall
   },
 );
 
-/** Sends one callback, without proxies, redirects, readiness probes, or response logging. */
 export const forwardAntigravityCallback = (
   instanceId: ProviderInstanceId,
   callback: URL,

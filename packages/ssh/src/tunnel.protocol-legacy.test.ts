@@ -1,8 +1,8 @@
-import { SSH_RUNTIME_PROTOCOL_VERSION } from "@t3tools/shared/sshRuntimeProtocol";
-import { ORCHESTRATION_PROTOCOL_VERSION } from "@t3tools/contracts";
+import { SSH_RUNTIME_PROTOCOL_VERSION } from "@goat/shared/sshRuntimeProtocol";
+import { ORCHESTRATION_PROTOCOL_VERSION } from "@goat/contracts";
 import { assert, describe, it } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import * as HostProcess from "@t3tools/shared/HostProcess";
+import * as HostProcess from "@goat/shared/HostProcess";
 import * as Effect from "effect/Effect";
 import * as Result from "effect/Result";
 import { ARCHIVE } from "./tunnel.fixture.ts";
@@ -51,7 +51,7 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")(
           const source = yield* f.fs.readFileString(`${f.state}/run-t3.sh`);
           yield* f.fs.writeFileString(
             `${f.state}/run-t3.sh`,
-            source.replace("T3_ARCHIVE_VERSION='1.2.2'", "T3_ARCHIVE_VERSION='1.2.2\t'"),
+            source.replace("GOAT_ARCHIVE_VERSION='1.2.2'", "GOAT_ARCHIVE_VERSION='1.2.2\t'"),
           );
         }
         const psPath = `${f.test}/identity-bin/ps`;
@@ -96,9 +96,45 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")(
         } else assert.deepEqual(after, before);
         if (linked !== undefined) assert.equal(yield* f.fs.readLink(linked), `${linked}.original`);
         const events = yield* f.fs.readFileString(`${f.test}/events`);
-        assert.notInclude(events, '"type":"stop"');
+        for (const type of ["stop", "drain", "self-stop", "supervise"])
+          assert.notInclude(events, `"type":"${type}"`);
         assert.notInclude(events, '"type":"auth"');
       }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+    );
+
+    it.live.each([false, true])(
+      "legacy no-drain refusal preserves ownership; outer permits adoption=%s",
+      (outerDrain) =>
+        Effect.gen(function* () {
+          const f = yield* makeProtocolFixture({
+            live: true,
+            kind: "managed",
+            oldVersion: "1.2.2",
+            drain: true,
+            ssh: SSH_RUNTIME_PROTOCOL_VERSION,
+            orchestration: ORCHESTRATION_PROTOCOL_VERSION,
+          });
+          yield* f.fs.remove(`${f.state}/identity`);
+          yield* f.shiftHostClock(0, true);
+          yield* f.setCompat(outerDrain ? ["real", "compatible 0 -"] : ["compatible 0 -"]);
+          const before = yield* f.snapshot;
+          const result = yield* f.run("launch", false, {
+            refreshOwnedRuntimeOnFirstConnection: true,
+          });
+          assert.isTrue(Result.isFailure(result));
+          if (Result.isFailure(result) && outerDrain)
+            assert.include(
+              String((result.failure as { stderr?: string }).stderr),
+              "was started by an older app that cannot hand over ownership without draining",
+            );
+          assert.deepEqual(yield* f.snapshot, before);
+          assert.equal(before.identity, null);
+          yield* Effect.sync(() => process.kill(f.pid, 0));
+          const events = yield* f.fs.readFileString(`${f.test}/events`);
+          for (const type of ["drain", "self-stop", "supervise", "stop", "activity"])
+            assert.notInclude(events, `"type":"${type}"`);
+          assert.isAbove(Number(yield* f.fs.readFileString(`${f.test}/compat-requests`)), 0);
+        }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
     );
 
     it.live("legacy acquisition failure preserves all running-server files", () =>
@@ -117,7 +153,8 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")(
         assert.isTrue(Result.isFailure(yield* f.run("launch")));
         assert.deepEqual(yield* f.snapshot, before);
         yield* Effect.sync(() => process.kill(f.pid, 0));
-        assert.notInclude(yield* f.fs.readFileString(`${f.test}/events`), '"type":"stop"');
+        for (const type of ["stop", "drain", "self-stop", "supervise"])
+          assert.notInclude(yield* f.fs.readFileString(`${f.test}/events`), `"type":"${type}"`);
       }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
     );
 
@@ -129,6 +166,7 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")(
             live: true,
             kind: "managed",
             oldVersion: "1.2.2",
+            drain: true,
             ssh: SSH_RUNTIME_PROTOCOL_VERSION,
             orchestration: ORCHESTRATION_PROTOCOL_VERSION,
           });
@@ -155,7 +193,10 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")(
           }
           const events = yield* f.fs.readFileString(`${f.test}/events`);
           if (activity === "idle") {
-            assert.include(events, '"type":"stop"');
+            assert.notInclude(events, '"type":"stop"');
+            assert.include(events, '"type":"drain"');
+            assert.include(events, '"type":"self-stop"');
+            assert.include(events, '"type":"supervise"');
             assert.include(
               yield* f.fs.readFileString(`${f.state}/identity`),
               `/versions/${ARCHIVE.archiveVersion}/goat`,
@@ -164,7 +205,8 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")(
           } else {
             assert.deepEqual(yield* f.snapshot, before);
             yield* Effect.sync(() => process.kill(f.pid, 0));
-            assert.notInclude(events, '"type":"stop"');
+            for (const type of ["stop", "drain", "self-stop", "supervise"])
+              assert.notInclude(events, `"type":"${type}"`);
           }
         }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
     );

@@ -1,31 +1,37 @@
+import { GOAT_CONNECT_COMING_SOON, isGoatConnectEnabled } from "@goat/shared/goatConnect";
+import { environmentCatalog } from "../../connection/catalog";
+import { isGoatConnectOnlyEnvironment } from "./environmentSections";
+import * as Dialog from "../../components/ui/Dialog";
 import { ConnectionTraceId } from "./ConnectionTraceId";
-import { SymbolView } from "../../components/AppSymbol";
-import { connectionStatusText } from "@t3tools/client-runtime/connection";
-import type { AtomCommandResult } from "@t3tools/client-runtime/state/runtime";
-import { type EnvironmentId, resolveEnvironmentMachineKind } from "@t3tools/contracts";
+import { SymbolView } from "../../components/ui/AppSymbol";
+import { hasSavedBearerRoute } from "@goat/client-runtime/connection";
+import type { AtomCommandResult } from "@goat/client-runtime/state/runtime";
+import { type EnvironmentId, resolveEnvironmentMachineKind } from "@goat/contracts";
 import { useAtomValue } from "@effect/atom-react";
 import * as Cause from "effect/Cause";
 import { AsyncResult } from "effect/reactivity";
 import { useCallback, useState } from "react";
-import { Platform, Alert, Pressable, View } from "react-native";
+import { Platform, Pressable, View } from "react-native";
 import Animated, { FadeIn, FadeOut, LinearTransition } from "react-native-reanimated";
 
-import { AppText as Text } from "../../components/AppText";
+import { AppText as Text } from "../../components/ui/AppText";
 import { EnvironmentMachineSymbol } from "../../components/EnvironmentMachineSymbol";
-import { MaterialButton } from "../../components/MaterialButton";
-import { MaterialIconButton } from "../../components/MaterialIconButton";
-import { ThemedSwitch } from "../../components/ThemedSwitch";
+import { Button } from "../../components/ui/Button";
+import { IconButton } from "../../components/ui/IconButton";
+import { ThemedSwitch } from "../../components/ui/ThemedSwitch";
 import { cn } from "../../lib/cn";
 import type { ConnectedEnvironmentSummary } from "../../state/remote-runtime-types";
 import { serverEnvironment } from "../../state/server";
+import { environmentPresentations } from "../../state/presentation";
 import { ConnectionFormField } from "./ConnectionFormField";
 import { ConnectionStatusDot } from "./ConnectionStatusDot";
+import { environmentStatusText } from "./environmentStatusText";
 
 function connectionStatusLabel(environment: ConnectedEnvironmentSummary): string | null {
   if (!environment.isEnabled && environment.connectionState !== "unsupported") {
     return "Off";
   }
-  return connectionStatusText({
+  return environmentStatusText({
     phase: environment.connectionState,
     error: environment.connectionError,
     traceId: environment.connectionErrorTraceId,
@@ -50,11 +56,21 @@ export function ConnectionEnvironmentRow(props: {
   const serverConfig = useAtomValue(
     serverEnvironment.configValueAtom(props.environment.environmentId),
   );
-  const unsupported = props.environment.connectionState === "unsupported";
+  const catalog = useAtomValue(environmentCatalog.catalogValueAtom);
+  const connectUnavailable =
+    !isGoatConnectEnabled() &&
+    isGoatConnectOnlyEnvironment(catalog.entries.get(props.environment.environmentId));
+  const unsupported = connectUnavailable || props.environment.connectionState === "unsupported";
+  const presentation = useAtomValue(
+    environmentPresentations.presentationAtom(props.environment.environmentId),
+  );
+  const canRetry =
+    !connectUnavailable && presentation !== null && hasSavedBearerRoute(presentation.entry);
   const enabled = props.environment.isEnabled && !unsupported;
-  const statusLabel = connectionStatusLabel(props.environment);
+  const statusLabel = connectUnavailable
+    ? `${GOAT_CONNECT_COMING_SOON.title} · ${GOAT_CONNECT_COMING_SOON.status}. ${GOAT_CONNECT_COMING_SOON.description}`
+    : connectionStatusLabel(props.environment);
   const statusTraceId = enabled ? props.environment.connectionErrorTraceId : null;
-  // Unsupported is a compatibility note, not a failure, so it stays muted.
   const hasConnectionFailure = enabled && props.environment.connectionError !== null;
   const isRetrying =
     enabled &&
@@ -70,7 +86,7 @@ export function ConnectionEnvironmentRow(props: {
       return;
     }
     const error = Cause.squash(result.cause);
-    Alert.alert(
+    Dialog.alert(
       "Could not update environment",
       error instanceof Error ? error.message : "The environment could not be updated.",
     );
@@ -78,18 +94,26 @@ export function ConnectionEnvironmentRow(props: {
 
   return (
     <Animated.View layout={LinearTransition.duration(250)} className="bg-grouped-card">
-      <Pressable
-        className="flex-row items-center gap-3 px-4 py-3.5 active:opacity-70"
-        accessibilityRole="button"
-        accessibilityLabel={
-          props.opensDetails ? `Manage ${props.environment.environmentLabel}` : undefined
-        }
-        onPress={props.onToggle}
-      >
-        <View className="flex-1 gap-0.5">
+      <View className="flex-row items-center gap-3 px-4 py-3.5">
+        <Pressable
+          className="min-w-0 flex-1 gap-0.5 active:opacity-70"
+          accessibilityRole="button"
+          accessibilityLabel={
+            props.opensDetails
+              ? `Manage ${props.environment.environmentLabel}`
+              : `${props.expanded ? "Collapse" : "Expand"} details for ${props.environment.environmentLabel}`
+          }
+          onPress={props.onToggle}
+        >
           <View className="flex-row items-center gap-1.5">
             <ConnectionStatusDot
-              state={enabled || unsupported ? props.environment.connectionState : "available"}
+              state={
+                connectUnavailable
+                  ? "unsupported"
+                  : enabled || unsupported
+                    ? props.environment.connectionState
+                    : "available"
+              }
               pulse={isRetrying}
               size={8}
             />
@@ -99,7 +123,7 @@ export function ConnectionEnvironmentRow(props: {
               tintColorClassName="accent-foreground-muted"
             />
             <Text
-              className="min-w-0 flex-shrink text-base font-t3-bold leading-snug text-foreground"
+              className="min-w-0 flex-shrink text-base font-goat-bold leading-snug text-foreground"
               numberOfLines={1}
             >
               {props.environment.environmentLabel}
@@ -129,24 +153,39 @@ export function ConnectionEnvironmentRow(props: {
               ) : null}
             </Text>
           ) : null}
-        </View>
+        </Pressable>
 
         <ThemedSwitch
+          accessibilityLabel={`Enable ${props.environment.environmentLabel}`}
           style={{ alignSelf: "center" }}
-          disabled={unsupported}
+          disabled={unsupported && !canRetry}
           onValueChange={(next) => props.onSetEnabled(props.environment.environmentId, next)}
           value={enabled}
         />
-        <SymbolView
-          name={props.opensDetails ? "chevron.right" : "chevron.down"}
-          size={12}
-          tintColorClassName="accent-icon-subtle"
-          type="monochrome"
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel={
+            props.opensDetails
+              ? `Manage ${props.environment.environmentLabel}`
+              : `${props.expanded ? "Collapse" : "Expand"} details for ${props.environment.environmentLabel}`
+          }
+          onPress={props.onToggle}
           style={{
-            transform: [{ rotate: props.expanded ? "180deg" : "0deg" }],
+            minWidth: 44,
+            minHeight: 44,
+            alignItems: "center",
+            justifyContent: "center",
           }}
-        />
-      </Pressable>
+        >
+          <SymbolView
+            name={props.opensDetails ? "chevron.right" : "chevron.down"}
+            size={12}
+            tintColorClassName="accent-icon-subtle"
+            type="monochrome"
+            style={{ transform: [{ rotate: props.expanded ? "180deg" : "0deg" }] }}
+          />
+        </Pressable>
+      </View>
 
       {props.expanded ? (
         <Animated.View
@@ -156,7 +195,9 @@ export function ConnectionEnvironmentRow(props: {
         >
           {props.environment.isRelayManaged ? (
             <Text className="text-sm text-foreground-muted">
-              Managed by T3 Connect. Tunnel details update automatically.
+              {isGoatConnectEnabled()
+                ? "Managed by T3 Connect. Tunnel details update automatically."
+                : `${GOAT_CONNECT_COMING_SOON.title} · ${GOAT_CONNECT_COMING_SOON.status}. ${GOAT_CONNECT_COMING_SOON.description}`}
             </Text>
           ) : (
             <>
@@ -185,7 +226,7 @@ export function ConnectionEnvironmentRow(props: {
             <View className="flex-row items-center justify-end gap-2">
               {props.environment.isRelayManaged ? null : (
                 <View className="flex-1">
-                  <MaterialButton
+                  <Button
                     label="Save"
                     tone="primary"
                     fullWidth
@@ -195,14 +236,14 @@ export function ConnectionEnvironmentRow(props: {
                   />
                 </View>
               )}
-              <MaterialIconButton
+              <IconButton
                 accessibilityLabel="Reconnect environment"
                 icon="arrow.clockwise"
                 variant="tonal"
                 disabled={!enabled}
                 onPress={() => props.onReconnect(props.environment.environmentId)}
               />
-              <MaterialIconButton
+              <IconButton
                 accessibilityLabel="Remove environment"
                 icon="trash"
                 variant="danger"
@@ -222,7 +263,7 @@ export function ConnectionEnvironmentRow(props: {
                     tintColorClassName="accent-primary-foreground"
                     type="monochrome"
                   />
-                  <Text className="text-xs font-t3-bold tracking-[0.8px] uppercase text-primary-foreground">
+                  <Text className="text-xs font-goat-bold tracking-[0.8px] uppercase text-primary-foreground">
                     Save
                   </Text>
                 </Pressable>

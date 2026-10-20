@@ -1,5 +1,6 @@
 import { StackActions, useNavigation } from "@react-navigation/native";
-import { resolveThreadReferenceCopyTarget } from "@t3tools/shared/threadReference";
+import { resolveThreadReferenceCopyTarget } from "@goat/shared/threadReference";
+import { deriveCloudTaskState } from "@goat/client-runtime/state/cloud-task";
 import {
   createContext,
   use,
@@ -16,6 +17,8 @@ import {
 import { tryCopyTextWithHaptic } from "../../lib/copyTextWithHaptic";
 import { T3KeyboardCommands } from "../../native/T3KeyboardCommands";
 import { useThreadShell } from "../../state/entities";
+import { useThreadProjection } from "../../state/use-thread-detail";
+import { useRemoteEnvironmentRuntime } from "../../state/use-remote-environment-registry";
 import type { GitActionProgress } from "../../state/use-vcs-action-state";
 import { GitActionProgressOverlay } from "../threads/GitActionProgressOverlay";
 import { CommandPalette } from "./CommandPalette";
@@ -51,6 +54,17 @@ export function HardwareKeyboardCommandProvider({
   const closePalette = useCallback(() => setPaletteOpen(false), []);
   const activeThreadRef = useMemo(() => parseActiveThreadPath(pathname), [pathname]);
   const activeThread = useThreadShell(activeThreadRef);
+  const projection = useThreadProjection({
+    environmentId: activeThreadRef?.environmentId ?? null,
+    threadId: activeThreadRef?.threadId ?? null,
+  });
+  const runtime = useRemoteEnvironmentRuntime(activeThreadRef?.environmentId ?? null);
+  const provider = runtime?.serverConfig?.providers.find(
+    (candidate) =>
+      candidate.instanceId ===
+      (projection?.projection.thread.providerInstanceId ?? activeThread?.providerInstanceId),
+  );
+  const { showLocalWorkspace } = deriveCloudTaskState(projection?.projection, provider);
   const copyTarget = useMemo(
     () =>
       activeThreadRef === null
@@ -109,14 +123,16 @@ export function HardwareKeyboardCommandProvider({
     if (activeThreadRef !== null) {
       commands.add("files");
       commands.add("terminal");
-      commands.add("review");
+      if (showLocalWorkspace) commands.add("review");
       if (pathname.split("/")[4] !== "terminal") commands.add("copyThreadReference");
     }
+    if (!showLocalWorkspace) commands.delete("review");
     return [...commands];
-  }, [activeThreadRef, pathname, registrationVersion, navigation]);
+  }, [activeThreadRef, pathname, registrationVersion, navigation, showLocalWorkspace]);
 
   const onCommand = useCallback(
     (command: HardwareKeyboardCommand) => {
+      if (command === "review" && !showLocalWorkspace) return;
       if (command === "commandPalette") {
         setPaletteOpen(true);
         return;
@@ -172,7 +188,7 @@ export function HardwareKeyboardCommandProvider({
         navigation.navigate("ThreadReview", thread);
       }
     },
-    [copyTarget, navigation, pathname, showCopyFeedback],
+    [copyTarget, navigation, pathname, showCopyFeedback, showLocalWorkspace],
   );
 
   const palette = useMemo(

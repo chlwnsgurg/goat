@@ -1,7 +1,8 @@
 import { expect, it } from "@effect/vitest";
-import * as HostProcess from "@t3tools/shared/HostProcess";
+import * as HostProcess from "@goat/shared/HostProcess";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
+import * as TestClock from "effect/testing/TestClock";
 
 import {
   SERVICE_LAUNCHER_CONTEXT_ENV,
@@ -12,12 +13,13 @@ import {
 import * as ServiceLauncherClient from "./serviceLauncherClient.ts";
 
 class FakeLauncherProcess {
-  readonly connected = true;
+  readonly connected: boolean;
   readonly env: Record<string, string | undefined>;
   readonly sent: ServiceLauncherChildMessage[] = [];
   readonly #listeners = new Map<string, Set<(...args: ReadonlyArray<unknown>) => void>>();
 
-  constructor(context: unknown) {
+  constructor(context: unknown, connected = true) {
+    this.connected = connected;
     this.env = { [SERVICE_LAUNCHER_CONTEXT_ENV]: JSON.stringify(context) };
   }
 
@@ -135,4 +137,66 @@ it.effect("rejects contradictory trial context instead of leaving activation clo
     const error = yield* makeClient(host, "1.1.0").pipe(Effect.flip);
     expect(error.message).toBe("The service launcher supplied invalid startup context.");
   }),
+);
+
+it.effect("ignores launcher context inherited without an IPC channel", () =>
+  Effect.gen(function* () {
+    const host = new FakeLauncherProcess(
+      { protocol: SERVICE_LAUNCHER_PROTOCOL, childVersion: "1.0.0" },
+      false,
+    );
+    const client = yield* makeClient(host, "1.1.0");
+    const error = yield* client
+      .requestUpdate({ targetVersion: "1.2.0", dbPath: "/tmp/state.sqlite" })
+      .pipe(Effect.flip);
+    expect(error).toMatchObject({ _tag: "ServiceLauncherClientError", operation: "unmanaged" });
+    expect(host.sent).toEqual([]);
+  }),
+);
+
+it.effect("reports the bound port and allows the launcher's complete smoke deadline", () =>
+  Effect.gen(function* () {
+    const host = new FakeLauncherProcess({
+      protocol: SERVICE_LAUNCHER_PROTOCOL,
+      childVersion: "1.1.0",
+      update: {
+        id: "smoke-update",
+        fromVersion: "1.0.0",
+        targetVersion: "1.1.0",
+        dbPath: "/tmp/state.sqlite",
+        status: "pending",
+      },
+    });
+    const client = yield* makeClient(host, "1.1.0").pipe(
+      Effect.provideService(ServiceLauncherClient.ServiceLauncherPort, 43210),
+    );
+    const prepared = yield* Effect.forkChild(client.prepareTrial, { startImmediately: true });
+    yield* Effect.yieldNow;
+    expect(host.sent).toEqual([{ type: "prepared", updateId: "smoke-update", port: 43210 }]);
+    yield* TestClock.adjust("31 seconds");
+    host.emit({ type: "committed", updateId: "smoke-update" });
+    expect(yield* Fiber.join(prepared)).toMatchObject({ status: "committed", id: "smoke-update" });
+  }),
+);
+
+it.effect.each(["failed", "rolled-back"] as const)(
+  "exposes the last %s update without sending IPC",
+  (status) =>
+    Effect.gen(function* () {
+      const update = {
+        id: "update-1",
+        fromVersion: "1.0.0",
+        targetVersion: "1.1.0",
+        status,
+        reason: "failed trial",
+      };
+      const host = new FakeLauncherProcess({
+        protocol: SERVICE_LAUNCHER_PROTOCOL,
+        childVersion: "1.0.0",
+        update,
+      });
+      const client = yield* makeClient(host, "1.0.0");
+      expect(client.lastUpdate).toEqual(update);
+      expect(host.sent).toEqual([]);
+    }),
 );

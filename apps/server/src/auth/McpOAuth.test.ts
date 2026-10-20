@@ -1,9 +1,12 @@
+import * as MemoryToolkitFixture from "../mcp/toolkits/memory/handlers.testkit.ts";
+import * as McpHttpServer from "../mcp/McpHttpServer.ts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import {
-  AuthAdministrativeScopes,
+  AuthStandardClientScopes,
   type AuthCreatePairingCredentialInput,
+  type AuthEnvironmentScope,
   EnvironmentHttpApi,
-} from "@t3tools/contracts";
+} from "@goat/contracts";
 import { expect, it } from "@effect/vitest";
 import * as Context from "effect/Context";
 import * as Crypto from "effect/Crypto";
@@ -30,14 +33,13 @@ class AuthTestApi extends HttpApi.make("environment")
   .add(EnvironmentHttpApi.groups.auth)
   .add(EnvironmentHttpApi.groups.mcpOAuth) {}
 
-const layerConfig = ServerConfig.layerTest(process.cwd(), { prefix: "t3-mcp-oauth-test-" });
+const layerConfig = ServerConfig.layerTest(process.cwd(), { prefix: "goat-mcp-oauth-test-" });
 const layerEnvironmentAuth = EnvironmentAuth.layer.pipe(
   Layer.provide(Sqlite.layerMemory),
   Layer.provideMerge(ServerSecretStore.layer),
   Layer.provideMerge(ServerEnvironment.layerIdentity),
   Layer.provide(layerConfig),
 );
-// Each router gets its own database; the capture hands that router's EnvironmentAuth to its test.
 const makeLayerRoutes = (capture: (auth: EnvironmentAuth.EnvironmentAuth["Service"]) => void) =>
   Layer.mergeAll(
     Layer.effectDiscard(
@@ -64,10 +66,8 @@ const encodeJson = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
 const ORIGIN = "https://box.example.ts.net";
 const REDIRECT = "http://localhost/callback";
 const verifier = "a".repeat(43) + "-verifier-for-tests";
-/** base64url(SHA-256(verifier)), the S256 challenge for `verifier`. */
 const challenge = "DeB41nTVkPwpbbYecrnqtVq7VXLezustdHAK4SWt13c";
 
-/** Requests as they arrive behind an https proxy: plain http with the public Host. */
 const at = (path: string, init?: RequestInit) =>
   new Request(`http://127.0.0.1${path}`, {
     ...init,
@@ -96,7 +96,6 @@ const withRoutes = <A, E>(
       (web) =>
         Effect.gen(function* () {
           const handler: Handler = (request) => Effect.promise(() => web.handler(request, context));
-          // The router builds its layer on first request; a metadata read warms it.
           yield* handler(at("/.well-known/oauth-authorization-server"));
           return yield* use(handler, routerAuth!);
         }),
@@ -113,17 +112,54 @@ const postJson = (path: string, body: unknown, cookie?: string) =>
     body: encodeJson(body),
   });
 
-/** What the approval page posts: the agent's request plus the user's choice. */
 const decide = (
   handler: Handler,
   authorization: Record<string, string>,
-  decision: Record<string, string>,
+  decision: Record<string, unknown>,
   cookie?: string,
 ) =>
   handler(postJson("/oauth/mcp/decision", { authorization, decision }, cookie)).pipe(
     Effect.flatMap((response) =>
       json<{ redirectTo?: string; message?: string }>(response).pipe(
         Effect.map((payload) => ({ status: response.status, ...payload })),
+      ),
+    ),
+  );
+
+const withAuthenticatedMemoryTools = (
+  auth: EnvironmentAuth.EnvironmentAuth["Service"],
+  token: string,
+) =>
+  Effect.gen(function* () {
+    const authenticator = yield* McpHttpServer.McpClientAuthenticator;
+    const invocation = yield* authenticator.authenticate(
+      HttpServerRequest.fromWeb(at("/mcp", { headers: { authorization: `Bearer ${token}` } })),
+    );
+    expect(invocation).toBeDefined();
+    const list = yield* MemoryToolkitFixture.call(
+      "memory_list",
+      { memorySpaceId: MemoryToolkitFixture.space, includeQuarantined: false },
+      invocation!,
+    );
+    const write = yield* MemoryToolkitFixture.call(
+      "memory_upsert",
+      MemoryToolkitFixture.upsert(),
+      invocation!,
+    );
+    return { list, write };
+  }).pipe(
+    Effect.provide(
+      Layer.mergeAll(
+        MemoryToolkitFixture.layer,
+        McpOAuth.layerMcpClientAuthenticator.pipe(
+          Layer.provide(Layer.succeed(EnvironmentAuth.EnvironmentAuth, auth)),
+          Layer.provide(
+            Layer.succeed(ServerEnvironment.ServerEnvironment, {
+              getEnvironmentId: Effect.succeed(MemoryToolkitFixture.scope().environmentId),
+              getDescriptor: Effect.die("unused"),
+            }),
+          ),
+        ),
       ),
     ),
   );
@@ -217,7 +253,6 @@ it.live("registers loopback and https clients and never redirects for an unverif
       expect(unregistered.status).toBe(400);
       expect(unregistered.headers.get("location")).toBeNull();
 
-      // A valid request is handed to the web app's approval page, query intact.
       const query = new URLSearchParams(authorizeParams(clientId)).toString();
       const handoff = yield* handler(at(`/oauth/mcp/authorize?${query}`));
       expect(handoff.status).toBe(302);
@@ -231,7 +266,6 @@ it.live("registers loopback and https clients and never redirects for an unverif
         environmentHost: "box.example.ts.net",
       });
 
-      // The approval endpoints re-check the request: a forged client gets a message, not a URL.
       const forgedDetails = yield* handler(
         postJson("/oauth/mcp/approval", authorizeParams(`${clientId.split(".")[0]}.forged`)),
       );
@@ -290,7 +324,6 @@ it.live("signs in with a pairing code and issues a token only /mcp accepts", () 
       };
       expect(token.scope).toBe("orchestration:read orchestration:operate");
 
-      // Codes are single use.
       expect((yield* exchange(verifier)).status).toBe(400);
 
       const client = yield* auth.authenticateMcpClient(
@@ -300,7 +333,6 @@ it.live("signs in with a pairing code and issues a token only /mcp accepts", () 
       );
       expect(client).toMatchObject({ label: "Claude Code", access: "auto" });
 
-      // The same token is refused by the rest of the environment.
       const session = yield* handler(
         at("/api/auth/session", { headers: { authorization: `Bearer ${token.access_token}` } }),
       );
@@ -336,7 +368,6 @@ it.live("signs in a hosted agent with an https callback that asked for a client 
         client_id: string;
         token_endpoint_auth_method: string;
       };
-      // Registered as a public client: PKCE, not a secret, proves it at the token endpoint.
       expect(client.token_endpoint_auth_method).toBe("none");
 
       const params = authorizeParams(client.client_id, callbackUrl);
@@ -362,7 +393,6 @@ it.live("signs in a hosted agent with an https callback that asked for a client 
             code: callback.searchParams.get("code")!,
             redirect_uri: callbackUrl,
             client_id: client.client_id,
-            // Sent by a client that asked for one; there is none to check.
             client_secret: "unused",
             code_verifier: verifier,
           }),
@@ -429,7 +459,6 @@ it.live(
         const approveWith = (code: string) =>
           decide(handler, params, { _tag: "pairing-code", access: "auto", code });
 
-        // A T3 Connect code is bound to a device key: refused, and still usable by its device.
         const bound = yield* auth.createPairingLink({
           proofKeyThumbprint: "device-key-thumbprint",
         });
@@ -451,8 +480,16 @@ it.live(
         const readOnlyResponse = yield* approveWith(readOnly.credential);
         expect(readOnlyResponse.status).toBe(400);
         expect(readOnlyResponse.message).toContain("cannot grant this access");
+        const operator = yield* auth.issuePairingCredential({
+          scopes: ["orchestration:read", "orchestration:operate"],
+        });
+        const operatorFull = yield* decide(handler, params, {
+          _tag: "pairing-code",
+          access: "full-access",
+          code: operator.credential,
+        });
+        expect(operatorFull.status).toBe(400);
 
-        // A read-only code can approve read-only access.
         const readOnlyCode = yield* auth.issuePairingCredential({ scopes: ["orchestration:read"] });
         const readOnlyApproval = yield* decide(handler, params, {
           _tag: "pairing-code",
@@ -489,7 +526,6 @@ it.live("one-click approves only access the browser session holds the scopes for
     Effect.gen(function* () {
       const clientId = yield* registeredClientId(handler);
       const params = authorizeParams(clientId);
-      // Signs a browser in through the real route and returns its session cookie.
       const browserCookie = (scopes: NonNullable<AuthCreatePairingCredentialInput["scopes"]>) =>
         Effect.gen(function* () {
           const pairing = yield* auth.issuePairingCredential({ scopes });
@@ -504,11 +540,18 @@ it.live("one-click approves only access the browser session holds the scopes for
         });
       const details = (cookie: string) =>
         handler(postJson("/oauth/mcp/approval", params, cookie)).pipe(
-          Effect.flatMap(json<{ csrfToken?: string; oneClickAccess?: ReadonlyArray<string> }>),
+          Effect.flatMap(
+            json<{
+              csrfToken?: string;
+              oneClickAccess?: ReadonlyArray<string>;
+              oneClickMemoryScopes?: ReadonlyArray<string>;
+            }>,
+          ),
         );
 
-      const admin = yield* browserCookie([...AuthAdministrativeScopes]);
+      const admin = yield* browserCookie([...AuthStandardClientScopes]);
       const adminDetails = yield* details(admin);
+      expect(adminDetails.oneClickMemoryScopes).toEqual(["memory:read", "memory:write"]);
       expect(adminDetails.csrfToken).toEqual(expect.any(String));
       expect(adminDetails.oneClickAccess).toEqual([
         "read-only",
@@ -520,12 +563,16 @@ it.live("one-click approves only access the browser session holds the scopes for
       const oneClick = yield* decide(
         handler,
         params,
-        { _tag: "browser-session", access: "auto", csrfToken: adminDetails.csrfToken! },
+        {
+          _tag: "browser-session",
+          access: "auto",
+          memoryScopes: ["memory:read"],
+          csrfToken: adminDetails.csrfToken!,
+        },
         admin,
       );
       expect(new URL(oneClick.redirectTo!).searchParams.get("code")).toEqual(expect.any(String));
 
-      // access:write alone cannot hand an agent thread control it does not hold.
       const accessOnly = yield* browserCookie(["access:read", "access:write"]);
       expect((yield* details(accessOnly)).csrfToken).toBeUndefined();
       const forged = yield* decide(
@@ -537,11 +584,23 @@ it.live("one-click approves only access the browser session holds the scopes for
       expect(forged.status).toBe(400);
       expect(forged.message).toContain("Enter a pairing code instead");
 
-      // A session that can read but not operate threads may approve read-only access only.
       const reader = yield* browserCookie(["access:write", "orchestration:read"]);
       const readerDetails = yield* details(reader);
+      expect(readerDetails.oneClickMemoryScopes).toEqual([]);
+      const memoryTooBroad = yield* decide(
+        handler,
+        params,
+        {
+          _tag: "browser-session",
+          access: "read-only",
+          csrfToken: readerDetails.csrfToken!,
+          memoryScopes: ["memory:read"],
+        },
+        reader,
+      );
+      expect(memoryTooBroad.status).toBe(400);
+      expect(memoryTooBroad.redirectTo).toBeUndefined();
       expect(readerDetails.csrfToken).toEqual(expect.any(String));
-      // The page shows the pairing-code field for anything above read only.
       expect(readerDetails.oneClickAccess).toEqual(["read-only"]);
       const tooBroad = yield* decide(
         handler,
@@ -572,3 +631,134 @@ it("matches loopback redirects on everything but the port, and https redirects e
   expect(matches("https://bot.example/cb", "https://bot.example/cb?x=1")).toBe(false);
   expect(matches("https://bot.example/cb", "https://evil.example/cb")).toBe(false);
 });
+
+it.effect("grants approvals only to issued clients with operate and approve, and records use", () =>
+  Effect.gen(function* () {
+    const auth = yield* EnvironmentAuth.EnvironmentAuth;
+    const issue = (scopes: ReadonlyArray<AuthEnvironmentScope>) =>
+      auth.issueSession({
+        subject: "mcp-client",
+        scopes,
+        label: "Grok Bot",
+        runtimeModeCeiling: "approval-required",
+      });
+    const authenticate = (token: string) =>
+      auth.authenticateMcpClient(
+        HttpServerRequest.fromWeb(at("/mcp", { headers: { authorization: `Bearer ${token}` } })),
+      );
+
+    const approver = yield* issue([
+      "orchestration:read",
+      "orchestration:operate",
+      "orchestration:approve",
+    ]);
+    expect(yield* authenticate(approver.token)).toMatchObject({
+      label: "Grok Bot",
+      access: "approval-required",
+      approvals: true,
+    });
+    const operator = yield* issue(["orchestration:read", "orchestration:operate"]);
+    expect((yield* authenticate(operator.token)).approvals).toBe(false);
+    const reader = yield* issue(["orchestration:read", "orchestration:approve"]);
+    expect(yield* authenticate(reader.token)).toMatchObject({
+      access: "read-only",
+      approvals: false,
+    });
+
+    const sessions = yield* auth.listSessions();
+    expect(
+      sessions.find((session) => session.sessionId === approver.sessionId)?.lastConnectedAt,
+    ).not.toBeNull();
+  }).pipe(Effect.provide(layerEnvironmentAuth.pipe(Layer.provideMerge(NodeServices.layer)))),
+);
+
+it.live.each([
+  { memoryScopes: [] },
+  { memoryScopes: ["memory:read"] },
+  { memoryScopes: ["memory:write"] },
+  { memoryScopes: ["memory:read", "memory:write"] },
+] as const)(
+  "carries only explicitly selected memory scopes through OAuth: $memoryScopes",
+  ({ memoryScopes }) =>
+    withRoutes((handler, auth) =>
+      Effect.gen(function* () {
+        const params = authorizeParams(yield* registeredClientId(handler));
+        const pairing = yield* auth.issuePairingCredential({
+          scopes: [...AuthStandardClientScopes],
+        });
+        const approved = yield* decide(handler, params, {
+          _tag: "pairing-code",
+          access: "auto",
+          code: pairing.credential,
+          ...(memoryScopes.length === 0 ? {} : { memoryScopes }),
+        });
+        expect(approved.status).toBe(200);
+        const code = new URL(approved.redirectTo!).searchParams.get("code")!;
+        const response = yield* handler(
+          at(
+            "/oauth/mcp/token",
+            form({
+              grant_type: "authorization_code",
+              client_id: params.client_id,
+              redirect_uri: params.redirect_uri,
+              code,
+              code_verifier: verifier,
+              resource: params.resource,
+              scope: "memory:read memory:write",
+            }),
+          ),
+        );
+        const token = yield* json<{ access_token: string; scope: string }>(response);
+        expect(response.status).toBe(200);
+        expect(token.scope.split(" ").filter((scope) => scope.startsWith("memory:"))).toEqual([
+          ...memoryScopes,
+        ]);
+        const client = yield* auth.authenticateMcpClient(
+          HttpServerRequest.fromWeb(
+            at("/mcp", { headers: { authorization: `Bearer ${token.access_token}` } }),
+          ),
+        );
+        expect(client.grantedScopes?.filter((scope) => scope.startsWith("memory:"))).toEqual([
+          ...memoryScopes,
+        ]);
+        expect(client.access).toBe("auto");
+        const tools = yield* withAuthenticatedMemoryTools(auth, token.access_token);
+        expect(tools.list.result.isError === true).toBe(
+          !memoryScopes.some((scope) => scope === "memory:read"),
+        );
+        expect(tools.write.result.isError === true).toBe(
+          !memoryScopes.some((scope) => scope === "memory:write"),
+        );
+        yield* client.reauthorize!([...memoryScopes]);
+        for (const scope of ["memory:read", "memory:write"] as const) {
+          if (!memoryScopes.some((selected) => selected === scope)) {
+            const error = yield* client.reauthorize!([scope]).pipe(Effect.flip);
+            expect(error.requiredScope).toBe(scope);
+          }
+        }
+        yield* auth.revokeSession(client.sessionId);
+        expect((yield* client.reauthorize!([...memoryScopes]).pipe(Effect.flip))._tag).toBe(
+          "EnvironmentAuthorizationError",
+        );
+      }),
+    ),
+);
+
+it.live("pairing approval cannot add memory scopes absent from the code", () =>
+  withRoutes((handler, auth) =>
+    Effect.gen(function* () {
+      const params = authorizeParams(yield* registeredClientId(handler));
+      const pairing = yield* auth.issuePairingCredential({
+        scopes: ["orchestration:read", "orchestration:operate"],
+      });
+      const denied = yield* decide(handler, params, {
+        _tag: "pairing-code",
+        access: "auto",
+        code: pairing.credential,
+        memoryScopes: ["memory:read"],
+      });
+      expect(denied.status).toBe(400);
+      expect(denied.redirectTo).toBeUndefined();
+    }),
+  ),
+);

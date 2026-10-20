@@ -1,8 +1,10 @@
+// Adopts legacy T3 env names before anything reads the environment.
+import "@goat/contracts/adoptLegacyEnv";
 import {
   MOBILE_DEFAULT_THEME_ID,
   MOBILE_THEME_IDS,
   type MobileThemeId,
-} from "@t3tools/shared/themePalettes";
+} from "@goat/shared/themePalettes";
 
 import { SHOWCASE_SCENES, type ShowcaseScene } from "./mobile-showcase-environment.ts";
 
@@ -11,14 +13,12 @@ export type { ShowcaseScene };
 
 export type ShowcaseAppearance = "light" | "dark";
 
-/** Every palette the mobile appearance settings can select. */
 export const SHOWCASE_THEMES = MOBILE_THEME_IDS;
 export const DEFAULT_SHOWCASE_THEME = MOBILE_DEFAULT_THEME_ID;
 export type ShowcaseTheme = MobileThemeId;
 
 export interface ShowcaseStoreAssetSpec {
   readonly store: "apple" | "google-play";
-  /** Device directory relative to ShowcaseConfig.outputDirectory. */
   readonly directory: string;
   readonly width: number;
   readonly height: number;
@@ -30,15 +30,10 @@ export interface ShowcaseStoreAssetSpec {
 export interface ShowcaseIosDevice {
   readonly id: string;
   readonly platform: "ios";
-  /** Exact name from `xcrun simctl list devices available`. */
   readonly simulator: string;
-  /** Device type used to create a disposable simulator when the named one is absent. */
   readonly simulatorDeviceType?: string;
-  /** Appearance used when the CLI does not pass --appearance. */
   readonly appearance: ShowcaseAppearance;
-  /** Palette used when the CLI does not pass --theme. */
   readonly theme: ShowcaseTheme;
-  /** Orientation applied by the capture harness. Defaults to portrait. */
   readonly orientation?: "portrait" | "landscape";
   readonly scenes: ReadonlyArray<ShowcaseScene>;
   readonly storeAsset: ShowcaseStoreAssetSpec;
@@ -47,16 +42,11 @@ export interface ShowcaseIosDevice {
 export interface ShowcaseAndroidDevice {
   readonly id: string;
   readonly platform: "android";
-  /** Exact name from `emulator -list-avds`. */
   readonly avd: string;
-  /** Appearance used when the CLI does not pass --appearance. */
   readonly appearance: ShowcaseAppearance;
-  /** Palette used when the CLI does not pass --theme. */
   readonly theme: ShowcaseTheme;
-  /** Native ABI used by the AVD, from its config.ini `abi.type`. */
   readonly abi?: "arm64-v8a" | "x86_64" | "x86" | "armeabi-v7a";
   readonly scenes: ReadonlyArray<ShowcaseScene>;
-  /** Optional capture viewport. Omit to use the AVD's native size and density. */
   readonly viewport?: {
     readonly width: number;
     readonly height: number;
@@ -84,16 +74,10 @@ export function resolveShowcaseAndroidAbi(
     return value as NonNullable<ShowcaseAndroidDevice["abi"]>;
   }
   throw new Error(
-    `Unsupported T3_SHOWCASE_ANDROID_ABI '${value}'. Use ${ANDROID_ABIS.join(", ")}.`,
+    `Unsupported GOAT_SHOWCASE_ANDROID_ABI '${value}'. Use ${ANDROID_ABIS.join(", ")}.`,
   );
 }
 
-/**
- * The defaults cover every App Store Connect and Google Play upload slot used
- * by the mobile app. Edit this matrix (or pass --device / --scene) without
- * changing the runner. Every target declares and validates its exact upload
- * dimensions so SDK or emulator changes cannot silently produce invalid files.
- */
 const config: ShowcaseConfig = {
   outputDirectory: "artifacts/app-store/screenshots",
   // Dedicated port so the harness cannot attach to a normal mobile dev server
@@ -104,8 +88,6 @@ const config: ShowcaseConfig = {
     {
       id: "iphone-6.9",
       platform: "ios",
-      // A disposable device lands on the newest runtime, whose default lock
-      // screen wallpaper suits both appearances; a stock one may be older.
       simulator: "T3 Showcase iPhone 17 Pro Max",
       simulatorDeviceType: "com.apple.CoreSimulator.SimDeviceType.iPhone-17-Pro-Max",
       appearance: "dark",
@@ -163,7 +145,7 @@ const config: ShowcaseConfig = {
       avd: "Pixel_10_Pro",
       // Apple Silicon uses ARM64 locally; CI overrides this with x86_64 so its
       // Blacksmith Linux runner can use KVM acceleration.
-      abi: resolveShowcaseAndroidAbi(process.env.T3_SHOWCASE_ANDROID_ABI),
+      abi: resolveShowcaseAndroidAbi(process.env.GOAT_SHOWCASE_ANDROID_ABI),
       appearance: "dark",
       theme: DEFAULT_SHOWCASE_THEME,
       viewport: {
@@ -186,7 +168,7 @@ const config: ShowcaseConfig = {
       id: "android-tablet-7",
       platform: "android",
       avd: "Pixel_10_Pro",
-      abi: resolveShowcaseAndroidAbi(process.env.T3_SHOWCASE_ANDROID_ABI),
+      abi: resolveShowcaseAndroidAbi(process.env.GOAT_SHOWCASE_ANDROID_ABI),
       appearance: "dark",
       theme: DEFAULT_SHOWCASE_THEME,
       viewport: {
@@ -209,7 +191,7 @@ const config: ShowcaseConfig = {
       id: "android-tablet-10",
       platform: "android",
       avd: "Pixel_10_Pro",
-      abi: resolveShowcaseAndroidAbi(process.env.T3_SHOWCASE_ANDROID_ABI),
+      abi: resolveShowcaseAndroidAbi(process.env.GOAT_SHOWCASE_ANDROID_ABI),
       appearance: "dark",
       theme: DEFAULT_SHOWCASE_THEME,
       viewport: {

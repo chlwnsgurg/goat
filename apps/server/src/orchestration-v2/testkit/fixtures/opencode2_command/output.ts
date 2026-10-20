@@ -1,5 +1,5 @@
 import { assert } from "@effect/vitest";
-import type { ProviderReplayTranscript } from "@t3tools/contracts";
+import type { ProviderReplayTranscript } from "@goat/contracts";
 
 import type { OrchestratorV2ScenarioResult } from "../../OrchestratorScenario.ts";
 import {
@@ -12,11 +12,6 @@ import {
   projectionFor,
 } from "../shared.ts";
 
-/**
- * `/hello WORLD` names a workspace command, so it runs through
- * `session.command` and OpenCode expands the template ("Reply with exactly:
- * HELLO $ARGUMENTS") in its own execution, which ends the turn.
- */
 export function assertOpenCode2CommandOutput(
   result: OrchestratorV2ScenarioResult,
   transcript: ProviderReplayTranscript,

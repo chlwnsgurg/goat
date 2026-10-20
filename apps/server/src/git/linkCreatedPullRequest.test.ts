@@ -6,7 +6,7 @@ import {
   type GitRunStackedActionResult,
   type OrchestrationV2ServerCommand as OrchestrationCommand,
   type OrchestrationProjectShell,
-} from "@t3tools/contracts";
+} from "@goat/contracts";
 import { describe, expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -216,7 +216,6 @@ describe("linkCreatedPullRequest", () => {
       yield* linkCreatedPullRequest({ threadId: THREAD_ID, result, commandId }).pipe(
         Effect.provide(layerDependenciesFor(() => Effect.die(new Error("engine down")))),
       );
-      // A thread that vanished between the action and the link is not an error either.
       yield* linkCreatedPullRequest({ threadId: THREAD_ID, result, commandId }).pipe(
         Effect.provide(layerDependenciesFor(() => Effect.die(new Error("unreachable")), null)),
       );

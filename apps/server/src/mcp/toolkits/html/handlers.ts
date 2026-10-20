@@ -1,4 +1,4 @@
-import { OrchestratorMcpFailure } from "@t3tools/contracts";
+import { OrchestratorMcpFailure } from "@goat/contracts";
 import * as Effect from "effect/Effect";
 
 import * as HtmlRender from "../../../htmlRender/HtmlRender.ts";
@@ -12,7 +12,6 @@ const INVALID_PAGE_ERRORS = new Set([
   "HtmlRenderPageTooLargeError",
 ]);
 
-// Every HTML render error message is built on the server and tells the agent what to do next.
 const toFailure = (error: { readonly _tag: string; readonly message: string }) =>
   new OrchestratorMcpFailure({
     code: INVALID_PAGE_ERRORS.has(error._tag) ? "invalid_request" : "orchestration_error",
@@ -21,7 +20,7 @@ const toFailure = (error: { readonly _tag: string; readonly message: string }) =
 
 const handlers = {
   // The headless browser runs on the host and can open local files, so only
-  // agents T3 launched, which already work on this machine, get it.
+  // agents GOAT launched, which already work on this machine, get it.
   html_preview: McpToolAccess.readsAsCaller((input) =>
     Effect.gen(function* () {
       const htmlRender = yield* HtmlRender.HtmlRender;
@@ -37,7 +36,6 @@ const handlers = {
       };
     }),
   ),
-  // The page is stored in the calling thread, so it needs that thread's live run.
   html_render: McpToolAccess.actsAsCaller((input) =>
     Effect.gen(function* () {
       const scope = yield* McpInvocationContext.McpInvocationContext;

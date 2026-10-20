@@ -5,7 +5,7 @@ import {
   ProviderDriverKind,
   ProviderInstanceId,
   ThreadId,
-} from "@t3tools/contracts";
+} from "@goat/contracts";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
@@ -15,7 +15,7 @@ import * as Orchestrator from "./Orchestrator.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
 import * as ProviderAdapterRegistry from "./ProviderAdapterRegistry.ts";
 import * as ProviderReplayHarness from "./testkit/ProviderReplayHarness.ts";
-import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
+import type * as ProviderAdapter from "@goat/provider-core/server/ProviderAdapter";
 
 const instanceId = ProviderInstanceId.make("codex");
 const adapter = {
@@ -63,7 +63,6 @@ it.layer(layerTest)("DispatchModeLimit", (it) => {
       const projections = yield* ProjectionStore.ProjectionStoreV2;
       const threadId = ThreadId.make("thread:limit-raised");
       yield* createThread(threadId);
-      // The user raises the thread; the user's own commands have no limit.
       yield* orchestrator.dispatch({
         type: "thread.runtime-mode.set",
         commandId: CommandId.make("raise"),
@@ -82,8 +81,6 @@ it.layer(layerTest)("DispatchModeLimit", (it) => {
       assert.equal(refused._tag, "OrchestratorThreadAboveModeLimitError");
       assert.equal((yield* projections.getThreadShell(threadId))?.title, "Before");
 
-      // Refused before planning, so no receipt holds the command id: once the
-      // user lowers the thread again, the same command goes through.
       yield* orchestrator.dispatch({
         type: "thread.runtime-mode.set",
         commandId: CommandId.make("lower"),
@@ -150,8 +147,6 @@ it.layer(layerTest)("DispatchModeLimit", (it) => {
       assert.equal(refused.threadId, sourceThreadId);
       assert.isNull(yield* projections.getThreadShell(targetThreadId));
 
-      // The refusal records no receipt: once the source is lowered, the same
-      // command is planned again (and fails only for want of a finished run).
       yield* orchestrator.dispatch({
         type: "thread.runtime-mode.set",
         commandId: CommandId.make("lower-source"),

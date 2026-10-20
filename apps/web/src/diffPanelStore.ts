@@ -1,5 +1,6 @@
-import { scopedThreadKey } from "@t3tools/client-runtime/environment";
-import type { RunId, ScopedThreadRef } from "@t3tools/contracts";
+import type { GitReviewScope } from "@goat/client-runtime/state/review";
+import { scopedThreadKey } from "@goat/client-runtime/environment";
+import type { RunId, ScopedThreadRef } from "@goat/contracts";
 import { create } from "zustand";
 import { createJSONStorage, persist } from "zustand/middleware";
 
@@ -7,16 +8,15 @@ import { resolveStorage } from "./lib/storage";
 
 export type DiffPanelSelection =
   | { kind: "branch"; baseRef: string | null }
-  | { kind: "unstaged" }
+  | { kind: "uncommitted" | "staged" | "unstaged" }
   | { kind: "turn"; turnId: RunId; filePath: string | null; revealRequestId: number };
 
-// "branch" is the Changes view: everything this checkout changed since its base.
 const DEFAULT_SELECTION: DiffPanelSelection = { kind: "branch", baseRef: null };
 
 interface DiffPanelStoreState {
   byThreadKey: Record<string, DiffPanelSelection>;
   branchBaseRefByThreadKey: Record<string, string | null>;
-  selectGitScope: (ref: ScopedThreadRef, scope: "branch" | "unstaged") => void;
+  selectGitScope: (ref: ScopedThreadRef, scope: GitReviewScope) => void;
   selectBranchBaseRef: (ref: ScopedThreadRef, baseRef: string | null) => void;
   selectTurn: (ref: ScopedThreadRef, turnId: RunId, filePath?: string) => void;
   reconcileTurnSelection: (ref: ScopedThreadRef, availableTurnIds: ReadonlyArray<RunId>) => void;
@@ -45,9 +45,7 @@ export const useDiffPanelStore = create<DiffPanelStoreState>()(
             byThreadKey: {
               ...state.byThreadKey,
               [threadKey]:
-                scope === "branch"
-                  ? { kind: "branch", baseRef: previousBaseRef }
-                  : { kind: "unstaged" },
+                scope === "branch" ? { kind: "branch", baseRef: previousBaseRef } : { kind: scope },
             },
             branchBaseRefByThreadKey:
               previous?.kind === "branch"
@@ -118,8 +116,23 @@ export const useDiffPanelStore = create<DiffPanelStoreState>()(
         }),
     }),
     {
-      name: "t3code:diff-panel-state:v1",
-      version: 2,
+      name: "goat:diff-panel-state:v1",
+      version: 3,
+      migrate: (persisted, version) => {
+        const previous = persisted as Pick<
+          DiffPanelStoreState,
+          "byThreadKey" | "branchBaseRefByThreadKey"
+        >;
+        return {
+          ...previous,
+          byThreadKey: Object.fromEntries(
+            Object.entries(previous.byThreadKey ?? {}).map(([key, selection]) => [
+              key,
+              version < 3 && selection.kind === "unstaged" ? { kind: "uncommitted" } : selection,
+            ]),
+          ),
+        };
+      },
       storage: createJSONStorage(() =>
         resolveStorage(typeof window !== "undefined" ? window.localStorage : undefined),
       ),

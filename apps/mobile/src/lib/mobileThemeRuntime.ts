@@ -1,5 +1,5 @@
 import { resolveTextScaleVariables } from "./appearancePreferences";
-import { BUILT_IN_THEME_IDS, type BuiltInThemeId } from "@t3tools/shared/themePalettes";
+import { BUILT_IN_THEME_IDS, type BuiltInThemeId } from "@goat/shared/themePalettes";
 import {
   DEFAULT_MOBILE_THEME_ID,
   type MobileThemeAppearance,
@@ -47,11 +47,6 @@ export function getMobileUniwindThemeName(
     : `${themeId}-${appearance}`;
 }
 
-/**
- * Plans imperative runtime work separately from theme selection. Palette
- * changes are handled by one root ScopedTheme render; only typography and the
- * native appearance override need imperative Uniwind/React Native updates.
- */
 export function createMobileThemeRuntimeOperations(
   previous: MobileThemeRuntimeState | null,
   next: MobileThemeRuntimeState,

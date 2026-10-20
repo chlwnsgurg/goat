@@ -1,5 +1,5 @@
-import type { ServerSelfUpdateOutcome } from "@t3tools/contracts";
-import * as HostProcess from "@t3tools/shared/HostProcess";
+import type { ServerSelfUpdateOutcome } from "@goat/contracts";
+import * as HostProcess from "@goat/shared/HostProcess";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -12,6 +12,7 @@ import {
   SERVICE_LAUNCHER_CONTEXT_ENV,
   type ServiceLauncherChildMessage,
   type ServiceLauncherParentMessage,
+  type ServiceUpdateRecord,
 } from "./serviceProtocol.ts";
 
 export class ServiceLauncherClientError extends Schema.TaggedError<ServiceLauncherClientError>()(
@@ -20,7 +21,6 @@ export class ServiceLauncherClientError extends Schema.TaggedError<ServiceLaunch
     operation: Schema.Literals([
       "decode-context",
       "version-mismatch",
-      "ipc-unavailable",
       "unmanaged",
       "send",
       "disconnect",
@@ -35,8 +35,6 @@ export class ServiceLauncherClientError extends Schema.TaggedError<ServiceLaunch
         return "The service launcher supplied invalid startup context.";
       case "version-mismatch":
         return "The service launcher started a different goat version.";
-      case "ipc-unavailable":
-        return "The service launcher IPC channel is unavailable.";
       case "unmanaged":
         return "This server is not managed by the launcher.";
       case "send":
@@ -44,7 +42,7 @@ export class ServiceLauncherClientError extends Schema.TaggedError<ServiceLaunch
       case "disconnect":
         return "The service launcher disconnected before acknowledging the request.";
       case "timeout":
-        return "The service launcher did not respond within 30 seconds.";
+        return "The service launcher did not respond within the acknowledgement deadline.";
     }
   }
 }
@@ -78,7 +76,7 @@ interface ServiceLauncherProcess {
 }
 
 export const ServiceLauncherHostProcess = Context.Reference<ServiceLauncherProcess>(
-  "t3/cloud/serviceLauncherHostProcess",
+  "goat/cloud/serviceLauncherHostProcess",
   {
     defaultValue: () => ({
       connected: process.connected && process.send !== undefined,
@@ -96,10 +94,22 @@ export const ServiceLauncherHostProcess = Context.Reference<ServiceLauncherProce
   },
 );
 
+export const ServiceLauncherPort = Context.Reference<number | undefined>(
+  "goat/cloud/serviceLauncherPort",
+  { defaultValue: () => undefined },
+);
+
+/** The hostname the HTTP server bound, reported with the port for the launcher's smoke probe. */
+export const ServiceLauncherHost = Context.Reference<string | undefined>(
+  "goat/cloud/serviceLauncherHost",
+  { defaultValue: () => undefined },
+);
+
 export class ServiceLauncherClient extends Context.Service<
   ServiceLauncherClient,
   {
     readonly managed: boolean;
+    readonly lastUpdate?: ServiceUpdateRecord;
     readonly requestUpdate: (input: {
       readonly targetVersion: string;
       readonly dbPath: string;
@@ -109,14 +119,17 @@ export class ServiceLauncherClient extends Context.Service<
       ServiceLauncherClientError
     >;
   }
->()("t3/cloud/serviceLauncherClient") {}
+>()("goat/cloud/serviceLauncherClient") {}
 
 const resolveStartup = Effect.fn("cloud.service_launcher_client.resolve_startup")(
   function* (options?: { readonly currentVersion?: string }) {
     const host = yield* ServiceLauncherHostProcess;
     const environment = yield* HostProcess.Environment;
     const currentVersion = options?.currentVersion ?? packageJson.version;
-    const rawContext = environment[SERVICE_LAUNCHER_CONTEXT_ENV];
+    // The launcher always spawns its child with an IPC channel, and Node does
+    // not pass that channel on. Without one, the context was inherited from an
+    // ancestor (e.g. `t3 serve` run in a T3 terminal), so it describes someone else.
+    const rawContext = host.connected ? environment[SERVICE_LAUNCHER_CONTEXT_ENV] : undefined;
     const context = rawContext === undefined ? undefined : decodeServiceLauncherContext(rawContext);
 
     if (rawContext !== undefined && context === undefined) {
@@ -126,10 +139,7 @@ const resolveStartup = Effect.fn("cloud.service_launcher_client.resolve_startup"
       return yield* new ServiceLauncherClientError({ operation: "version-mismatch" });
     }
 
-    const managed = context !== undefined && host.connected;
-    if (context !== undefined && !managed) {
-      return yield* new ServiceLauncherClientError({ operation: "ipc-unavailable" });
-    }
+    const managed = context !== undefined;
 
     return { host, context, managed };
   },
@@ -146,10 +156,13 @@ export const make = Effect.fn("cloud.service_launcher_client.make")(function* (o
   readonly currentVersion?: string;
 }) {
   const { host, context, managed } = yield* resolveStartup(options);
+  const port = yield* ServiceLauncherPort;
+  const boundHost = yield* ServiceLauncherHost;
 
   const exchange = (
     message: ServiceLauncherChildMessage,
     accept: (reply: ServiceLauncherParentMessage) => boolean,
+    timeoutMs = 30_000,
   ) =>
     Effect.callback<ServiceLauncherParentMessage, ServiceLauncherClientError>((resume) => {
       if (!managed) {
@@ -194,7 +207,7 @@ export const make = Effect.fn("cloud.service_launcher_client.make")(function* (o
       return Effect.sync(cleanup);
     }).pipe(
       Effect.timeoutOrElse({
-        duration: "30 seconds",
+        duration: timeoutMs,
         orElse: () => Effect.fail(new ServiceLauncherClientError({ operation: "timeout" })),
       }),
     );
@@ -226,8 +239,15 @@ export const make = Effect.fn("cloud.service_launcher_client.make")(function* (o
   const prepareTrial =
     pending !== undefined
       ? exchange(
-          { type: "prepared", updateId: pending.id },
+          {
+            type: "prepared",
+            updateId: pending.id,
+            ...(port === undefined ? {} : { port }),
+            ...(port === undefined || boundHost === undefined ? {} : { host: boundHost }),
+          },
           (reply) => reply.type === "committed" && reply.updateId === pending.id,
+          // The launcher may spend 30 seconds probing HTTP before its durable commit.
+          60_000,
         ).pipe(
           Effect.flatMap((reply) => {
             if (reply.type !== "committed") {
@@ -245,6 +265,7 @@ export const make = Effect.fn("cloud.service_launcher_client.make")(function* (o
 
   return ServiceLauncherClient.of({
     managed,
+    ...(context?.update === undefined ? {} : { lastUpdate: context.update }),
     requestUpdate,
     prepareTrial,
   });

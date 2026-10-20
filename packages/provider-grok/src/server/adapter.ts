@@ -1,17 +1,17 @@
-import { makeProviderFailure } from "@t3tools/provider-core/server/failure";
+import { makeProviderFailure } from "@goat/provider-core/server/failure";
 import {
   XAiPromptFailureText,
   isXAiTaskCompletedWakeNotification,
   xAiRateLimitedErrorCode,
 } from "./xaiAcpExtension.ts";
-import * as HostProcess from "@t3tools/shared/HostProcess";
-import { resolveSelfInvocation, type SelfInvocation } from "@t3tools/shared/nodeRuntime";
+import * as HostProcess from "@goat/shared/HostProcess";
+import { resolveSelfInvocation, type SelfInvocation } from "@goat/shared/nodeRuntime";
 import {
   defaultInstanceIdForDriver,
   ProviderDriverKind,
   type OrchestrationV2ProviderCapabilities,
   type RuntimeMode,
-} from "@t3tools/contracts";
+} from "@goat/contracts";
 import { GrokSettings } from "../settings.ts";
 import * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
@@ -23,9 +23,9 @@ import type * as Scope from "effect/Scope";
 import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 import * as EffectAcpErrors from "effect-acp/errors";
 
-import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
-import * as ProviderHost from "@t3tools/provider-core/server/ProviderHost";
-import { makeAcpNativeLoggerFactory } from "@t3tools/provider-acp/server/nativeLogging";
+import * as McpProviderSessions from "@goat/provider-core/server/McpProviderSessions";
+import * as ProviderHost from "@goat/provider-core/server/ProviderHost";
+import { makeAcpNativeLoggerFactory } from "@goat/provider-acp/server/nativeLogging";
 import {
   applyGrokAcpModelSelection,
   currentGrokModelIdFromSessionSetup,
@@ -54,25 +54,26 @@ import {
   XAiAskUserQuestionRequest,
   XAiExitPlanModeRequest,
 } from "./xaiAcpExtension.ts";
-import { mergeProviderInstanceEnvironment } from "@t3tools/provider-core/server/instanceEnvironment";
-import { acpPermissionDisposition } from "@t3tools/provider-acp/server/clientPolicy";
-import * as AcpSessionRuntime from "@t3tools/provider-acp/server/AcpSessionRuntime";
-import * as ProviderEventLoggers from "@t3tools/provider-core/server/ProviderEventLoggers";
-import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
-import * as ProviderContinuationRequests from "@t3tools/provider-core/server/ProviderContinuationRequests";
-import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
+import { mergeProviderInstanceEnvironment } from "@goat/provider-core/server/instanceEnvironment";
+import { acpPermissionDisposition } from "@goat/provider-acp/server/clientPolicy";
+import { sessionModelStateFromInitialize } from "@goat/provider-acp/server/runtimeModel";
+import * as AcpSessionRuntime from "@goat/provider-acp/server/AcpSessionRuntime";
+import * as ProviderEventLoggers from "@goat/provider-core/server/ProviderEventLoggers";
+import * as IdAllocator from "@goat/provider-core/server/IdAllocator";
+import * as ProviderContinuationRequests from "@goat/provider-core/server/ProviderContinuationRequests";
+import * as ProviderAdapter from "@goat/provider-core/server/ProviderAdapter";
 import {
   ProviderAdapterDriverCreateError,
   type ProviderAdapterDriver,
   type ProviderAdapterDriverCreateInput,
-} from "@t3tools/provider-core/server/adapterDriver";
+} from "@goat/provider-core/server/adapterDriver";
 import {
   AcpProviderCapabilitiesV2,
   makeAcpAdapterV2,
   type AcpAdapterV2ExtensionContext,
   type AcpAdapterV2Flavor,
   type AcpAdapterV2RuntimeInput,
-} from "@t3tools/provider-acp/server/adapter";
+} from "@goat/provider-acp/server/adapter";
 
 export const GROK_PROVIDER = ProviderDriverKind.make("grok");
 const GROK_DRIVER_KIND = GROK_PROVIDER;
@@ -150,10 +151,8 @@ const registerGrokAcpExtensions: NonNullable<AcpAdapterV2Flavor["registerExtensi
 
 /**
  * Grok intercepts exit_plan_mode and reverse-requests client approval. Capture
- * the plan into T3's proposed-plan card and abandon the native gate so the
- * turn does not hang (#8358; mirrors the Claude ExitPlanMode pattern). Plan
- * content preference: the request payload, then the plan.md contents sniffed
- * from tool calls this turn, then the empty-state placeholder.
+ * the plan into GOAT's proposed-plan card and abandon the native gate so the turn
+ * does not hang (#8358; mirrors the Claude ExitPlanMode pattern).
  */
 const registerGrokExitPlanModeExtensions = ({
   runtime,
@@ -188,9 +187,7 @@ const registerGrokAskUserQuestionExtensions = ({
       runtime.handleExtRequest(method, XAiAskUserQuestionRequest, (params, requestContext) => {
         const identity = extractXAiAskUserQuestionIdentity(params);
         const questions = extractXAiAskUserQuestions(params).map((question) => ({
-          id: question.id,
-          header: question.header,
-          question: question.question,
+          ...question,
           options: [...question.options],
         }));
         return requestUserInput(
@@ -215,7 +212,7 @@ const registerGrokAskUserQuestionExtensions = ({
 
 /**
  * Grok's permission mode is fixed at launch. Explicit approval or sandbox
- * overrides launch it asking, so every mutating prompt reaches T3's policy
+ * overrides launch it asking, so every mutating prompt reaches GOAT's policy
  * check instead of being bypassed by always-approve or Grok's auto classifier.
  */
 export function grokLaunchRuntimeMode(
@@ -226,7 +223,6 @@ export function grokLaunchRuntimeMode(
     : "approval-required";
 }
 
-/** The flavor runs Grok's launcher through the adapter's spawner. */
 export function makeGrokAcpAdapterFlavor(
   options: GrokAdapterV2Options,
   homeDirectory: string,
@@ -237,13 +233,10 @@ export function makeGrokAcpAdapterFlavor(
     capabilities: GrokProviderCapabilitiesV2,
     interruptPromptOnCancel: false,
     // User Stop (requestRuntimeRestart) still hard-kills the process group and
-    // respawns so existing background tasks stop too. Older 0.2.x builds could
-    // detach a cancelled foreground command (E3 harness 2026-07-18); current
-    // source kills foreground work but intentionally preserves already-
-    // backgrounded tasks. Non-Stop interrupts (mid-prompt steering,
-    // restart_active) omit requestRuntimeRestart and stay soft: session/cancel
-    // carries cancelTrigger=ctrl_c, the session survives, and background work
-    // remains available to the replacement turn.
+    // respawns so existing background tasks stop too. Non-Stop interrupts
+    // (mid-prompt steering, restart_active) omit requestRuntimeRestart and stay
+    // soft: session/cancel carries cancelTrigger=ctrl_c, the session survives,
+    // and background work remains available to the replacement turn.
     restartRuntimeAfterInterrupt: true,
     terminateRuntimeProcessGroupOnInterrupt: true,
     // Steering restarts on a settled turn additionally skip session/cancel so
@@ -255,6 +248,19 @@ export function makeGrokAcpAdapterFlavor(
     supportsImagePrompts: true,
     supportsCompaction: true,
     resolveModelId: (selection) => resolveGrokAcpBaseModelId(selection.model),
+    getModelContextWindow: (selection, session) => {
+      if (selection.instanceId !== options.instanceId) return undefined;
+      const modelId = resolveGrokAcpBaseModelId(selection.model);
+      const models =
+        session.sessionSetupResult.models ??
+        sessionModelStateFromInitialize(session.initializeResult);
+      const window = models?.availableModels.find((model) => model.modelId === modelId)?._meta
+        ?.totalContextTokens;
+      // contextWindows includes selectable larger windows; totalContextTokens is the default.
+      return typeof window === "number" && Number.isSafeInteger(window) && window > 0
+        ? window
+        : undefined;
+    },
     applyModelSelection: ({ runtime, startResult, modelSelection }) =>
       Effect.gen(function* () {
         const legacy = startResult.initializeResult.protocolVersion === 1;
@@ -293,8 +299,6 @@ export function makeGrokAcpAdapterFlavor(
         cause,
         ...(isAcpRequestError(cause)
           ? {
-              // Grok's own failure text rides on the cause; makeProviderFailure
-              // redacts and bounds it before it reaches the user.
               message:
                 cause.cause instanceof XAiPromptFailureText
                   ? cause.cause.message
@@ -308,8 +312,6 @@ export function makeGrokAcpAdapterFlavor(
     extractSubagentUpdate: extractXAiAcpSubagentUpdate,
     extractSubagentEndNotice: extractXAiAcpSubagentEndNotice,
     normalizeToolCall: normalizeXAiAcpToolCallState,
-    // Show the plan while Grok is still writing it: plan.md writes under the
-    // Grok session dir surface as the proposed-plan card before exit (#8358).
     extractProposedPlanMarkdown: (toolCall) =>
       extractGrokPlanMarkdownFromToolCallData(toolCall.data, {
         platform: options.hostPlatform,

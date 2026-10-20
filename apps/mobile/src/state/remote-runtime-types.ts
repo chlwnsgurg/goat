@@ -1,5 +1,5 @@
-import { type EnvironmentConnectionPhase } from "@t3tools/client-runtime/connection";
-import { EnvironmentId, ThreadId, type ServerConfig } from "@t3tools/contracts";
+import { type EnvironmentConnectionPhase } from "@goat/client-runtime/connection";
+import { EnvironmentId, ThreadId, type ServerConfig } from "@goat/contracts";
 
 export interface EnvironmentRuntimeState {
   readonly connectionState: EnvironmentConnectionPhase;
@@ -13,7 +13,6 @@ export interface ConnectedEnvironmentSummary {
   readonly environmentLabel: string;
   readonly displayUrl: string;
   readonly isRelayManaged: boolean;
-  /** False when the user switched the environment off in Settings. */
   readonly isEnabled: boolean;
   readonly connectionState: EnvironmentConnectionPhase;
   readonly connectionError: string | null;

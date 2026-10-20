@@ -1,4 +1,4 @@
-import { EnvironmentId } from "@t3tools/contracts";
+import { EnvironmentId } from "@goat/contracts";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
@@ -25,8 +25,6 @@ export type StoredGitHubRoutingPermission = typeof StoredGitHubRoutingPermission
  * reordering keeps trust but adding or changing an address revokes it.
  */
 export function gitHubRoutingConnectionKey(entry: ConnectionCatalogEntry): string | null {
-  // Learned routes come and go with the server's addresses and reuse a saved
-  // route's credential, so they leave trust where the user put it.
   const routes = [
     { target: entry.target, profile: entry.profile },
     ...(entry.alternateRoutes ?? []),
@@ -95,7 +93,7 @@ export class GitHubRoutingPermissions extends Context.Reference<{
     permission: GitHubRoutingPermission,
   ) => Effect.Effect<void, ConnectionAttemptError>;
   readonly forget: (environmentId: EnvironmentId) => Effect.Effect<void, ConnectionAttemptError>;
-}>("@t3tools/client-runtime/connection/GitHubRoutingPermissions", {
+}>("@goat/client-runtime/connection/GitHubRoutingPermissions", {
   defaultValue: () => ({
     get: () => Effect.succeed("off"),
     changes: Stream.succeed([]),

@@ -1,6 +1,6 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
-import { ProviderInstanceId, ProviderSetupError, type ProviderAuthState } from "@t3tools/contracts";
+import { ProviderInstanceId, ProviderSetupError, type ProviderAuthState } from "@goat/contracts";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
@@ -17,7 +17,7 @@ import {
   type AntigravityAuth,
   type AntigravityAuthRuntime,
 } from "./AntigravityAuth.ts";
-import type * as AcpSessionRuntime from "@t3tools/provider-acp/server/AcpSessionRuntime";
+import type * as AcpSessionRuntime from "@goat/provider-acp/server/AcpSessionRuntime";
 
 const instanceId = ProviderInstanceId.make("antigravity-auth-test");
 const owner = "t3-auth-session-owner";
@@ -322,7 +322,6 @@ it.layer(NodeServices.layer)("AntigravityAuth", (it) => {
       });
       const state = yield* harness.auth.controller.start(owner);
       yield* phase(harness.auth, "waiting");
-      // The client sends the callback, then its socket drops before Google answers.
       const request = yield* harness.auth.controller
         .complete(owner, { flowId: state.flowId!, callbackUrl })
         .pipe(Effect.forkScoped);

@@ -1,18 +1,15 @@
-import { buildProjectGroups } from "@t3tools/client-runtime/state/project-grouping";
-import type {
-  EnvironmentProject,
-  EnvironmentThreadShell,
-} from "@t3tools/client-runtime/state/shell";
+import { buildProjectGroups } from "@goat/client-runtime/state/project-grouping";
+import type { EnvironmentProject, EnvironmentThreadShell } from "@goat/client-runtime/state/shell";
 import {
   getThreadSortTimestamp,
   toSortableTimestamp,
-} from "@t3tools/client-runtime/state/thread-sort";
+} from "@goat/client-runtime/state/thread-sort";
 import type {
   EnvironmentId,
   ScopedProjectRef,
   SidebarProjectGroupingMode,
   SidebarProjectSortOrder,
-} from "@t3tools/contracts";
+} from "@goat/contracts";
 import * as Arr from "effect/Array";
 import * as Order from "effect/Order";
 
@@ -50,6 +47,7 @@ export function buildHomeProjectScopes(input: {
   );
   return buildProjectGroups({
     projects,
+    groupScratchProjects: true,
     settings: {
       sidebarProjectGroupingMode: input.projectGroupingMode,
       sidebarProjectGroupingOverrides: {},
@@ -65,8 +63,6 @@ export function buildHomeProjectScopes(input: {
   });
 }
 
-// Prefers an exact scope key so a caller-supplied project ID that equals another
-// project's normalized workspace root cannot select the wrong group.
 export function findHomeProjectScope(
   scopes: ReadonlyArray<HomeProjectScope>,
   key: string | null,

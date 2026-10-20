@@ -2,7 +2,7 @@ import {
   EnvironmentId,
   ORCHESTRATION_PROTOCOL_VERSION,
   type ExecutionEnvironmentDescriptor,
-} from "@t3tools/contracts";
+} from "@goat/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
 import {
@@ -83,5 +83,37 @@ describe("orchestration protocol compatibility", () => {
         desktopAppUpdate: true,
       }),
     ).toMatchObject({ serverUpdateRequired: true });
+  });
+
+  describe("with an advertised range", () => {
+    const V = ORCHESTRATION_PROTOCOL_VERSION;
+    const ranged = (min: number, max: number) =>
+      orchestrationProtocolCompatibilityError({
+        ...descriptor(max),
+        protocol: { ssh: { min: 1001, max: 1001 }, orchestration: { min, max } },
+        capabilities: { repositoryIdentity: true, serverSelfUpdate: "boot-service" },
+      });
+
+    it("connects to a newer server that still serves this client's protocol", () => {
+      expect(ranged(V, V + 1)).toBeNull();
+      expect(ranged(V - 1, V + 2)).toBeNull();
+    });
+
+    it("asks for an app update only when the server dropped this protocol", () => {
+      const error = ranged(V + 1, V + 2);
+      expect(error?.message).toContain("This client is not supported");
+      expect(error).not.toHaveProperty("serverUpdateRequired");
+    });
+
+    it("asks for a server update when every protocol the server serves is older", () => {
+      const error = ranged(V - 2, V - 1);
+      expect(error?.message).toContain("This client requires a newer server");
+      expect(error).toMatchObject({ serverUpdateRequired: true });
+    });
+
+    it("refuses a malformed range instead of guessing from the integer", () => {
+      expect(ranged(V + 1, V)?.message).toContain("unreadable protocol range");
+      expect(ranged(0, V)?.message).toContain("unreadable protocol range");
+    });
   });
 });

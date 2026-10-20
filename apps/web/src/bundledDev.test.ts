@@ -16,7 +16,7 @@ import { tailwindPlugins } from "../vite/tailwind";
 const execFile = NodeUtil.promisify(NodeChildProcess.execFile);
 
 it("initializes React refresh before a shared UI chunk runs in bundled dev", async () => {
-  const root = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-bootstrap-"));
+  const root = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "goat-bootstrap-"));
   const output = NodePath.join(root, "output");
   let resolveBundle!: (files: Map<string, string>) => void;
   let rejectBundle!: (error: unknown) => void;
@@ -73,8 +73,6 @@ export const startup = Promise.resolve().then(() => globalThis.onStarted(Shared(
         rolldownOptions: {
           experimental: { devMode: { lazy: false } },
           output: {
-            // Reproduce the shared chunks Vite creates after lazy routes load,
-            // without needing a browser to trigger the lazy compiler first.
             codeSplitting: {
               groups: [
                 { name: "vendor", test: /node_modules|@react-refresh/, priority: 10 },
@@ -93,8 +91,6 @@ export const startup = Promise.resolve().then(() => globalThis.onStarted(Shared(
       await NodeFSP.writeFile(target, code);
     }
 
-    // Run the actual generated ES modules so their import order and refresh
-    // checks execute. These stubs replace only the browser and HMR transport.
     const runner = NodePath.join(output, "check.mjs");
     await NodeFSP.writeFile(
       runner,
@@ -127,7 +123,7 @@ console.log("App started with React refresh ready.");`,
 });
 
 it("hot updates Tailwind classes when a source file changes in bundled dev", async () => {
-  const root = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-tailwind-"));
+  const root = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "goat-tailwind-"));
   const events = new NodeEvents.EventEmitter();
   let server: Awaited<ReturnType<typeof createServer>> | undefined;
   let socket: WebSocket | undefined;

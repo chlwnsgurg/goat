@@ -1,5 +1,5 @@
 import { expect, it } from "@effect/vitest";
-import { ThreadId } from "@t3tools/contracts";
+import { ThreadId } from "@goat/contracts";
 import * as Deferred from "effect/Deferred";
 import * as Fiber from "effect/Fiber";
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
@@ -12,11 +12,16 @@ import * as DeviceService from "./DeviceService.ts";
 it.effect("keeps hosts independent when serials collide and another host fails", () =>
   Effect.gen(function* () {
     const host = (id: string, failed = false): DeviceHost.DeviceHost["Service"] => {
-      const ready = {
+      const ready: DeviceHost.DeviceHostAgentReady = {
         nodePath: process.execPath,
         hub: { origin: `http://${id}` },
         agentDevice: { baseUrl: `http://${id}`, token: "test", entryPath: "/agent-device" },
-        run: () => Effect.succeed({ stdout: "", stderr: "", code: 0 }),
+        run: (command) =>
+          Effect.succeed({
+            stdout: command === "emulator" ? "" : " V....D libx264",
+            stderr: "",
+            code: 0,
+          }),
         helpers: { serveSimAxSettings: null, serveSimCli: null },
       };
       return {

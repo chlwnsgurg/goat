@@ -11,7 +11,7 @@ import {
   TurnItemId,
   type OrchestrationV2AppThread,
   type OrchestrationV2Run,
-} from "@t3tools/contracts";
+} from "@goat/contracts";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -285,7 +285,6 @@ it.effect.each(["sqlite", "memory"] as const)(
       assert.deepEqual(yield* store.getTurnStartHistory(threadId, [oldRunId]), [item]);
       assert.deepEqual(yield* store.getTurnStartHistory(threadId, [runId]), []);
       assert.deepEqual(yield* store.getTurnStartHistory(threadId, []), []);
-      // Pairing depends on IDs, not payload decoding or item status.
       const resultId = TurnItemId.make("interrupt-result");
       assert.isTrue(yield* store.hasUnpairedRunInterruptRequest(threadId, item.id, resultId));
       assert.isFalse(yield* store.hasUnpairedRunInterruptRequest(threadId, resultId, item.id));

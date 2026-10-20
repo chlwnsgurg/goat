@@ -1,18 +1,25 @@
+import { ProviderMemoryImportRuntime } from "../memory/imports/MemoryImportTypes.ts";
 import {
   EnvironmentId,
   ORCHESTRATION_PROTOCOL_VERSION,
   PROVIDER_SEND_TURN_MAX_FILE_BYTES,
   type ExecutionEnvironmentDescriptor,
-} from "@t3tools/contracts";
-import * as HostProcess from "@t3tools/shared/HostProcess";
-import { SSH_RUNTIME_PROTOCOL_VERSION } from "@t3tools/shared/sshRuntimeProtocol";
+} from "@goat/contracts";
+import * as HostProcess from "@goat/shared/HostProcess";
+import {
+  SSH_RUNTIME_PROTOCOL_VERSION,
+  servedRuntimeProtocolRanges,
+} from "@goat/shared/sshRuntimeProtocol";
 import * as Context from "effect/Context";
 import * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
+
+import * as RuntimeIdentity from "../runtimeIdentity.ts";
 
 import packageJson from "../../package.json" with { type: "json" };
 import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
@@ -21,6 +28,8 @@ import { readAgentActivityPublishingActive } from "../cloud/config.ts";
 import { resolveServerSelfUpdateCapability } from "../cloud/selfUpdate.ts";
 import { resolveServiceLauncherMode } from "../cloud/serviceLauncherClient.ts";
 import * as ServerConfig from "../config.ts";
+import * as Settings from "../serverSettings.ts";
+import * as MemoryHubHttp from "../memory/MemoryHubHttp.ts";
 import * as ProcessRunner from "../processRunner.ts";
 import { resolveServerEnvironmentLabel } from "./ServerEnvironmentLabel.ts";
 import { detectServerEnvironmentMachineKind } from "./ServerEnvironmentMachine.ts";
@@ -47,14 +56,14 @@ export class ServerEnvironment extends Context.Service<
     readonly getEnvironmentId: Effect.Effect<EnvironmentId>;
     readonly getDescriptor: Effect.Effect<ExecutionEnvironmentDescriptor>;
   }
->()("t3/environment/ServerEnvironment") {}
+>()("goat/environment/ServerEnvironment") {}
 
 export class ServerEnvironmentIdentity extends Context.Service<
   ServerEnvironmentIdentity,
   {
     readonly getEnvironmentId: Effect.Effect<EnvironmentId>;
   }
->()("t3/environment/ServerEnvironment/ServerEnvironmentIdentity") {}
+>()("goat/environment/ServerEnvironment/ServerEnvironmentIdentity") {}
 
 function platformOs(platform: NodeJS.Platform): ExecutionEnvironmentDescriptor["platform"]["os"] {
   switch (platform) {
@@ -159,7 +168,7 @@ const makeIdentity = Effect.gen(function* () {
       return persisted;
     }
 
-    const generated = yield* crypto.randomUUIDv4;
+    const generated = yield* crypto.randomUUIDv4();
     yield* persistEnvironmentId(generated, "create");
     let winner = yield* readPersistedEnvironmentId;
     if (winner === null) {
@@ -181,15 +190,19 @@ const makeIdentity = Effect.gen(function* () {
   });
 });
 
-/** @public Service construction is part of the canonical Effect module API. */
+/** @public */
 export const make = Effect.gen(function* () {
   const path = yield* Path.Path;
   const serverConfig = yield* ServerConfig.ServerConfig;
   const secrets = yield* ServerSecretStore.ServerSecretStore;
+  const importRuntime = yield* Effect.serviceOption(ProviderMemoryImportRuntime);
+  const hubRoutes = yield* Effect.serviceOption(MemoryHubHttp.MemoryHubHttpReady);
+  const settings = yield* Effect.serviceOption(Settings.ServerSettingsService);
   const identity = yield* ServerEnvironmentIdentity;
   const hostPlatform = yield* HostProcess.Platform;
   const hostArchitecture = yield* HostProcess.Architecture;
   const environmentId = yield* identity.getEnvironmentId;
+  const { instanceId } = yield* RuntimeIdentity.RuntimeIdentity;
   const cwdBaseName = path.basename(serverConfig.cwd).trim();
   const label = yield* resolveServerEnvironmentLabel({ cwdBaseName });
   const machine = yield* detectServerEnvironmentMachineKind();
@@ -200,9 +213,9 @@ export const make = Effect.gen(function* () {
   });
   const serverInstallation = serverSelfUpdate === null ? yield* resolveServerInstallation : null;
   // Static is correct: the control fd is known at bootstrap, and the desktop
-  // app and its bundled server ship in one artifact, so a present fd means
-  // the app speaks the requestDesktopUpdate protocol. WSL backends never get
-  // the fd and correctly do not advertise.
+  // app and its bundled server ship in one artifact, so a present fd means the
+  // app speaks the requestDesktopUpdate protocol.
+
   const desktopAppUpdate =
     serverSelfUpdate === "desktop-managed" && serverConfig.desktopTelemetryControlFd !== undefined;
 
@@ -215,9 +228,20 @@ export const make = Effect.gen(function* () {
       ...(machine === null ? {} : { machine }),
     },
     serverVersion: packageJson.version,
+    instanceId,
+    protocol: servedRuntimeProtocolRanges(),
     sshRuntimeProtocolVersion: SSH_RUNTIME_PROTOCOL_VERSION,
     orchestrationProtocolVersion: ORCHESTRATION_PROTOCOL_VERSION,
     capabilities: {
+      // The core and owner memory RPC groups are always installed by ws.ts.
+      memory: {
+        protocolVersion: 1,
+        refusedReverts: true,
+        resolutionInputs: true,
+        retainedLocalSpace: true,
+        hubDiagnostics: true,
+        ...(importRuntime._tag === "Some" ? { importProvider: true } : {}),
+      },
       repositoryIdentity: true,
       connectionProbe: true,
       attachmentUploads: true,
@@ -231,10 +255,16 @@ export const make = Effect.gen(function* () {
       threadAutoSettlement: true,
       storageCleanup: true,
       storageCleanupRun: true,
+      databaseStorage: true,
+      otlpEndpointCheck: true,
       projectWorktreeCleanup: true,
+      settledWorktreeCleanup: true,
       worktreesDirectory: true,
+      worktreesDirectoryStatus: true,
+      threadAutoSettlementScope: true,
       threadRestartContinuation: true,
       projectSettingsOverrides: true,
+      projectProviderInstanceOverrides: true,
       threadSnooze: true,
       threadPromotion: true,
       environmentThemes: true,
@@ -246,6 +276,7 @@ export const make = Effect.gen(function* () {
       threadActiveReorder: true,
       threadAutoSettleOptOut: true,
       threadTitleRegeneration: true,
+      commandOutputStreaming: true,
       threadVisitedTracking: true,
       threadPullRequests: true,
       threadPullRequestWatch: true,
@@ -256,15 +287,17 @@ export const make = Effect.gen(function* () {
       projectCloneTracking: true,
       ...(serverSelfUpdate === null ? {} : { serverSelfUpdate }),
       ...(serverInstallation === null ? {} : { serverInstallation }),
-      // V2 restart recovery uses the environment-owned opt-in. The old
-      // per-update request flag is not wired into the V2 update RPC path.
       ...(serverSelfUpdate === "boot-service" || desktopAppUpdate
         ? { serverSelfUpdateProgress: true }
         : {}),
       ...(desktopAppUpdate ? { desktopAppUpdate: true } : {}),
       serverBrowser: true,
       sshActivity: true,
+      drainRestart: true,
       channelLedger: true,
+      goatBotHome: true,
+      goatBotStatus: true,
+      goatBotWaitingRead: true,
       // ChannelLayers assembles the live Slack runtime behind the slackChannel.* RPCs.
       slackChannel: true,
     },
@@ -275,24 +308,34 @@ export const make = Effect.gen(function* () {
     // The publish opt-in and relay link change at runtime (`t3 connect
     // publish`, the client settings toggle), so the capability is read per
     // descriptor request rather than baked in at startup.
-    getDescriptor: readAgentActivityPublishingActive(secrets).pipe(
-      Effect.map((agentActivityPublishing) => ({
+    getDescriptor: Effect.gen(function* () {
+      const agentActivityPublishing = yield* readAgentActivityPublishingActive(secrets);
+      const hubSettings = Option.isSome(settings)
+        ? yield* Effect.result(settings.value.getSettings)
+        : null;
+      const hubReady =
+        Option.isSome(hubRoutes) &&
+        hubSettings?._tag === "Success" &&
+        hubSettings.success.memoryHub.mode === "hub" &&
+        hubSettings.success.memoryHub.memorySpaceId !== null;
+      return {
         ...descriptor,
-        capabilities: { ...descriptor.capabilities, agentActivityPublishing },
-      })),
-    ),
+        capabilities: {
+          ...descriptor.capabilities,
+          ...(hubReady && Option.isSome(hubRoutes)
+            ? { memoryHubProtocolVersion: hubRoutes.value.protocolVersion }
+            : {}),
+          agentActivityPublishing,
+        },
+      };
+    }),
   });
 });
 
 export const layerIdentity = Layer.effect(ServerEnvironmentIdentity, makeIdentity);
 
-/**
- * ServerEnvironment is acquired from persisted filesystem and host-process
- * state. It intentionally has no fallback Layer.succeed value: callers must
- * provide the external platform services, a ServerConfig, and the
- * ServerSecretStore backing the descriptor's publishing capability.
- */
 export const layer = Layer.effect(ServerEnvironment, make).pipe(
   Layer.provideMerge(layerIdentity),
+  Layer.provideMerge(RuntimeIdentity.layer),
   Layer.provide(ProcessRunner.layer),
 );

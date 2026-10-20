@@ -4,15 +4,16 @@ import {
   EnvironmentId,
   MessageId,
   ThreadId,
-} from "@t3tools/contracts";
+} from "@goat/contracts";
 import {
   formatAssistantCitationHref,
   parseAssistantCitationHref,
-} from "@t3tools/shared/assistantCitations";
+} from "@goat/shared/assistantCitations";
 
 import {
   type AssistantTextSelector,
   captureAssistantTextSelection,
+  captureRenderedTextSelection,
   createAssistantTextSelector,
   findAssistantCitationText,
 } from "./assistantTextSelection";
@@ -120,8 +121,6 @@ function nativeSelection(
 ) {
   let root = start[0];
   while (root.parentElement !== null) root = root.parentElement;
-  // Give every DOM boundary its own position, including element boundaries
-  // immediately before text offset 0 and after its final character.
   const positions = new Map<SelectionNode, number[]>();
   let position = 0;
   const index = (node: SelectionNode) => {
@@ -200,6 +199,29 @@ function capture(viewport: SelectionNode, selection: Selection) {
 }
 
 describe("captureAssistantTextSelection", () => {
+  it.each([
+    ["assistant citations", captureAssistantTextSelection],
+    ["rendered file quotes", captureRenderedTextSelection],
+  ] as const)("omits unselectable interior filename text from %s", (_label, captureSelection) => {
+    const first = textNode("Before");
+    const code = textNode("run();");
+    const last = textNode("After");
+    const source = assistantSource(
+      new SelectionNode("P").append(first),
+      new SelectionNode("DIV", "", { "data-select-none": "" }).append(
+        new SelectionNode("SPAN").append(textNode("example.ts")),
+      ),
+      new SelectionNode("PRE").append(new SelectionNode("CODE").append(code)),
+      new SelectionNode("P").append(last),
+    );
+    expect(
+      captureSelection(
+        source as unknown as HTMLElement,
+        nativeSelection([first, 0], [last, last.length]),
+      )?.selector,
+    ).toEqual(selector("Before\nrun();\nAfter"));
+  });
+
   it.each([
     { boundary: "next text", backwards: false },
     { boundary: "next block", backwards: false },

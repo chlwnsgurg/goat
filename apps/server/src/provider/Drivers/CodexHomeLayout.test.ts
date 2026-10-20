@@ -6,14 +6,14 @@ import * as Path from "effect/Path";
 import * as PlatformError from "effect/PlatformError";
 import * as Schema from "effect/Schema";
 
-import { CodexSettings } from "@t3tools/contracts";
+import { CodexSettings } from "@goat/contracts";
 import {
   CodexShadowHomeEntryConflictError,
   CodexShadowHomePathConflictError,
   materializeCodexShadowHome,
   resolveCodexHomeLayout,
 } from "./CodexHomeLayout.ts";
-import { symlinksSupported } from "@t3tools/shared/testing/symlinks";
+import { symlinksSupported } from "@goat/shared/testing/symlinks";
 const decodeCodexSettingsValue = Schema.decodeSync(CodexSettings);
 
 const decodeCodexSettings = (input: {
@@ -43,7 +43,7 @@ it.layer(NodeServices.layer)("CodexHomeLayout", (it) => {
   describe("resolveCodexHomeLayout", () => {
     it.effect("uses direct CODEX_HOME when no shadow home is configured", () =>
       Effect.gen(function* () {
-        const homePath = yield* makeTempDir("t3code-codex-home-");
+        const homePath = yield* makeTempDir("goat-codex-home-");
 
         const layout = yield* resolveCodexHomeLayout(
           decodeCodexSettings({
@@ -63,8 +63,8 @@ it.layer(NodeServices.layer)("CodexHomeLayout", (it) => {
     it.effect("uses the shared home for continuation and the shadow home for runtime", () =>
       Effect.gen(function* () {
         const path = yield* Path.Path;
-        const sharedHome = yield* makeTempDir("t3code-codex-shared-");
-        const shadowRoot = yield* makeTempDir("t3code-codex-shadow-root-");
+        const sharedHome = yield* makeTempDir("goat-codex-shared-");
+        const shadowRoot = yield* makeTempDir("goat-codex-shadow-root-");
         const shadowHome = path.join(shadowRoot, "shadow");
 
         const layout = yield* resolveCodexHomeLayout(
@@ -86,13 +86,52 @@ it.layer(NodeServices.layer)("CodexHomeLayout", (it) => {
 
   describe("materializeCodexShadowHome", () => {
     it.effect.skipIf(!symlinksSupported)(
+      "keeps Finder metadata local across repeated shadow home setup",
+      () =>
+        Effect.gen(function* () {
+          const fileSystem = yield* FileSystem.FileSystem;
+          const path = yield* Path.Path;
+          const sharedHome = yield* makeTempDir("goat-codex-shared-");
+          const shadowHome = yield* makeTempDir("goat-codex-shadow-");
+          const sharedMetadata = path.join(sharedHome, ".DS_Store");
+          const shadowMetadata = path.join(shadowHome, ".DS_Store");
+
+          yield* writeTextFile(sharedMetadata, "shared Finder metadata");
+          yield* writeTextFile(shadowMetadata, "shadow Finder metadata");
+          yield* writeTextFile(path.join(shadowHome, "auth.json"), '{"shadow":true}\n');
+          const layout = yield* resolveCodexHomeLayout(
+            decodeCodexSettings({ homePath: sharedHome, shadowHomePath: shadowHome }),
+          );
+
+          yield* materializeCodexShadowHome(layout);
+          expect(yield* fileSystem.readFileString(shadowMetadata)).toBe("shadow Finder metadata");
+          yield* fileSystem.remove(shadowMetadata);
+          yield* materializeCodexShadowHome(layout);
+          expect(yield* fileSystem.exists(shadowMetadata)).toBe(false);
+
+          yield* writeTextFile(shadowMetadata, "shadow Finder metadata");
+          yield* materializeCodexShadowHome(layout);
+          yield* materializeCodexShadowHome(layout);
+
+          expect(yield* fileSystem.readFileString(sharedMetadata)).toBe("shared Finder metadata");
+          expect(yield* fileSystem.readFileString(shadowMetadata)).toBe("shadow Finder metadata");
+          expect(yield* fileSystem.readFileString(path.join(shadowHome, "auth.json"))).toBe(
+            '{"shadow":true}\n',
+          );
+          expect(yield* fileSystem.readLink(path.join(shadowHome, "sessions"))).toBe(
+            path.join(sharedHome, "sessions"),
+          );
+        }),
+    );
+
+    it.effect.skipIf(!symlinksSupported)(
       "materializes a shadow home with shared state links and private auth",
       () =>
         Effect.gen(function* () {
           const fileSystem = yield* FileSystem.FileSystem;
           const path = yield* Path.Path;
-          const sharedHome = yield* makeTempDir("t3code-codex-shared-");
-          const shadowRoot = yield* makeTempDir("t3code-codex-shadow-root-");
+          const sharedHome = yield* makeTempDir("goat-codex-shared-");
+          const shadowRoot = yield* makeTempDir("goat-codex-shadow-root-");
           const shadowHome = path.join(shadowRoot, "shadow");
 
           yield* fileSystem.makeDirectory(path.join(sharedHome, "sessions"));
@@ -146,8 +185,8 @@ it.layer(NodeServices.layer)("CodexHomeLayout", (it) => {
         Effect.gen(function* () {
           const fileSystem = yield* FileSystem.FileSystem;
           const path = yield* Path.Path;
-          const sharedHome = yield* makeTempDir("t3code-codex-shared-");
-          const shadowRoot = yield* makeTempDir("t3code-codex-shadow-root-");
+          const sharedHome = yield* makeTempDir("goat-codex-shared-");
+          const shadowRoot = yield* makeTempDir("goat-codex-shadow-root-");
           const shadowHome = path.join(shadowRoot, "shadow");
           const sharedLock = path.join(sharedHome, ".sqlite-maintenance.lock");
           const shadowLock = path.join(shadowHome, ".sqlite-maintenance.lock");
@@ -174,8 +213,8 @@ it.layer(NodeServices.layer)("CodexHomeLayout", (it) => {
         Effect.gen(function* () {
           const fileSystem = yield* FileSystem.FileSystem;
           const path = yield* Path.Path;
-          const sharedHome = yield* makeTempDir("t3code-codex-shared-");
-          const shadowRoot = yield* makeTempDir("t3code-codex-shadow-root-");
+          const sharedHome = yield* makeTempDir("goat-codex-shared-");
+          const shadowRoot = yield* makeTempDir("goat-codex-shadow-root-");
           const shadowHome = path.join(shadowRoot, "shadow");
           const sharedLocks = path.join(sharedHome, "mcp-oauth-locks");
           const shadowLocks = path.join(shadowHome, "mcp-oauth-locks");
@@ -208,8 +247,8 @@ it.layer(NodeServices.layer)("CodexHomeLayout", (it) => {
         Effect.gen(function* () {
           const fileSystem = yield* FileSystem.FileSystem;
           const path = yield* Path.Path;
-          const sharedHome = yield* makeTempDir("t3code-codex-shared-");
-          const shadowRoot = yield* makeTempDir("t3code-codex-shadow-root-");
+          const sharedHome = yield* makeTempDir("goat-codex-shared-");
+          const shadowRoot = yield* makeTempDir("goat-codex-shadow-root-");
           const shadowHome = path.join(shadowRoot, "shadow");
 
           yield* fileSystem.makeDirectory(path.join(sharedHome, "log"));
@@ -250,7 +289,7 @@ it.layer(NodeServices.layer)("CodexHomeLayout", (it) => {
 
     it.effect("rejects shadow homes that point at the shared home", () =>
       Effect.gen(function* () {
-        const sharedHome = yield* makeTempDir("t3code-codex-shared-");
+        const sharedHome = yield* makeTempDir("goat-codex-shared-");
         const layout = yield* resolveCodexHomeLayout(
           decodeCodexSettings({
             homePath: sharedHome,
@@ -276,8 +315,8 @@ it.layer(NodeServices.layer)("CodexHomeLayout", (it) => {
       () =>
         Effect.gen(function* () {
           const path = yield* Path.Path;
-          const sharedHome = yield* makeTempDir("t3code-codex-shared-");
-          const shadowRoot = yield* makeTempDir("t3code-codex-shadow-root-");
+          const sharedHome = yield* makeTempDir("goat-codex-shared-");
+          const shadowRoot = yield* makeTempDir("goat-codex-shadow-root-");
           const shadowHome = path.join(shadowRoot, "shadow");
           yield* writeTextFile(path.join(sharedHome, "config.toml"), 'model = "gpt-5-codex"\n');
           yield* writeTextFile(path.join(shadowHome, "config.toml"), 'model = "local"\n');
@@ -308,9 +347,9 @@ it.layer(NodeServices.layer)("CodexHomeLayout", (it) => {
     it.effect("preserves filesystem operation, paths, and cause", () =>
       Effect.gen(function* () {
         const path = yield* Path.Path;
-        const sharedRoot = yield* makeTempDir("t3code-codex-shared-root-");
+        const sharedRoot = yield* makeTempDir("goat-codex-shared-root-");
         const sharedHome = path.join(sharedRoot, "shared-home");
-        const shadowRoot = yield* makeTempDir("t3code-codex-shadow-root-");
+        const shadowRoot = yield* makeTempDir("goat-codex-shadow-root-");
         const shadowHome = path.join(shadowRoot, "shadow");
         yield* writeTextFile(sharedHome, "not a directory\n");
 

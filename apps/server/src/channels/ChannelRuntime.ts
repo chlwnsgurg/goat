@@ -13,7 +13,7 @@
 // @effect-diagnostics-next-line nodeBuiltinImport:off -- the owner token only needs a random UUID.
 import * as NodeCrypto from "node:crypto";
 
-import type { ChannelInputId } from "@t3tools/contracts";
+import type { ChannelInputId } from "@goat/contracts";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
@@ -33,6 +33,7 @@ import * as ChannelReceptionService from "./ChannelReceptionService.ts";
 import * as ChannelRemoteWorkers from "./ChannelRemoteWorkers.ts";
 import * as ChannelWake from "./ChannelWake.ts";
 import * as ChannelWorkerReports from "./ChannelWorkerReports.ts";
+import * as ImessageChannelRuntime from "./imessage/ImessageChannelRuntime.ts";
 
 const HEARTBEAT_MS = 10_000;
 const STALE_MS = 30_000;
@@ -52,7 +53,7 @@ export class ChannelRuntime extends Context.Service<
     readonly recover: Effect.Effect<void, ChannelLedger.ChannelLedgerError>;
     readonly ownerToken: string;
   }
->()("t3/channels/ChannelRuntime") {}
+>()("goat/channels/ChannelRuntime") {}
 
 const make = Effect.gen(function* () {
   const ledger = yield* ChannelLedger.ChannelLedger;
@@ -61,6 +62,7 @@ const make = Effect.gen(function* () {
   const reports = yield* ChannelWorkerReports.ChannelWorkerReports;
   const delivery = yield* ChannelDeliveryWorker.ChannelDeliveryWorker;
   const remoteWorkers = yield* ChannelRemoteWorkers.ChannelRemoteWorkers;
+  const imessage = yield* ImessageChannelRuntime.ImessageChannelRuntime;
   const owner = "channel-owner:" + NodeCrypto.randomUUID();
   const receptionSlots = yield* Semaphore.make(RECEPTION_CONCURRENCY);
   const inFlight = yield* Ref.make(new Map<ChannelInputId, Fiber.Fiber<void, unknown>>());
@@ -100,11 +102,28 @@ const make = Effect.gen(function* () {
     });
 
   const runPass = Effect.gen(function* () {
-    let started = 0;
+    // A Messages read failure must not stall other channels, but a lost owner or cursor fence
+    // means this process no longer owns the workers, so it stops the pass like any other write.
+    let started = yield* imessage.pollDue(owner).pipe(
+      Effect.catchIf(
+        (error) => error.reason !== "ownership_lost" && error.reason !== "version_conflict",
+        (error) =>
+          Effect.logWarning("iMessage poll failed", {
+            category: error.detail.startsWith("iMessage database ")
+              ? error.detail.slice("iMessage database ".length)
+              : error.reason,
+            detail: error.detail,
+          }).pipe(Effect.as(0)),
+      ),
+    );
     for (const inputId of yield* ledger.listPendingInputs(100)) {
       if (yield* startReception(inputId)) started += 1;
     }
-    for (const stored of yield* ledger.listTasksByStatus(["received", "dispatching"])) {
+    // Oldest request first, so work held back by the per-person cap starts in arrival order.
+    const waiting = (yield* ledger.listTasksByStatus(["received", "dispatching"])).toSorted(
+      (left, right) => left.task.createdAt.localeCompare(right.task.createdAt),
+    );
+    for (const stored of waiting) {
       yield* dispatcher.dispatch(stored.task.taskId, owner);
       started += 1;
     }

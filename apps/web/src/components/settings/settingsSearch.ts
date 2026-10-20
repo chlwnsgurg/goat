@@ -1,10 +1,12 @@
+import { GOAT_CONNECT_COMING_SOON, isGoatConnectEnabled } from "@goat/shared/goatConnect";
 import { HOSTED_APP_CHANNEL } from "~/branding";
 import { isElectron } from "~/env";
 import { isMacPlatform, isWindowsPlatform, normalizeSearchText } from "~/lib/utils";
-import { STATIC_KEYBINDING_COMMANDS, type KeybindingCommand } from "@t3tools/contracts";
-import type { EnvironmentId } from "@t3tools/contracts";
-import type { EnvironmentConnectionPhase } from "@t3tools/client-runtime/connection";
-import { DEFAULT_KEYBINDINGS } from "@t3tools/shared/keybindings";
+import { STATIC_KEYBINDING_COMMANDS, type KeybindingCommand } from "@goat/contracts";
+import type { EnvironmentId } from "@goat/contracts";
+import type { EnvironmentConnectionPhase } from "@goat/client-runtime/connection";
+import { sourceControlClients } from "@goat/client-runtime/source-control-clients";
+import { DEFAULT_KEYBINDINGS } from "@goat/shared/keybindings";
 import { commandLabel } from "./KeybindingsSettings.logic";
 import {
   validateSettingsScopeSearch,
@@ -13,24 +15,22 @@ import {
 } from "./settingsScope";
 
 export type SettingsPath =
+  | "/settings/memory"
   | "/settings/projects"
   | "/settings/general"
+  | "/settings/diagnostics"
   | "/settings/appearance"
   | "/settings/keybindings"
   | "/settings/snap-shot"
   | "/settings/providers"
   | "/settings/integrations"
+  | "/settings/goat-bot"
   | "/settings/scheduled-tasks"
   | "/settings/source-control"
   | "/settings/storage"
   | "/settings/connections"
   | "/settings/archived";
 
-/**
- * Where a setting can be edited. Device-local rows have no scope: they render
- * at every selection. `project-defaults` rows accept project overrides, so
- * they are reachable from any server-backed selection.
- */
 export type SettingsSearchScope =
   | "environment"
   | "environment-defaults"
@@ -44,18 +44,11 @@ export interface SettingsSearchItem {
   readonly title: string;
   readonly to: SettingsPath;
   readonly targetId?: string;
-  /** Descriptions, option labels, and aliases people may remember instead of the title. */
   readonly searchTerms?: ReadonlyArray<string>;
   readonly scope?: SettingsSearchScope;
-  // Its row only renders in the desktop app, so a browser result would land on
-  // an anchor that isn't there.
   readonly desktopOnly?: boolean;
   readonly macOnly?: boolean;
-  // Its row only renders on Windows desktop, so other desktop platforms must
-  // not expose a result that points to a missing anchor.
   readonly windowsOnly?: boolean;
-  // Its row renders only where the release channel can change: the desktop
-  // app, or a hosted web build deployed with a channel.
   readonly releaseChannelOnly?: boolean;
   readonly cloudOnly?: boolean;
   readonly environmentOnly?: boolean;
@@ -64,13 +57,9 @@ export interface SettingsSearchItem {
   readonly localBackendManagementOnly?: boolean;
   readonly localEnvironmentOnly?: boolean;
   readonly wslAvailableOnly?: boolean;
-  // Its row only renders while this environment's T3 Connect managed tunnel is on.
   readonly managedTunnelOnly?: boolean;
-  /**
-   * Sorts after every other match. Keybinding commands mirror rows on other
-   * surfaces, so "model" must still lead with Default model, not Model Picker.
-   */
   readonly secondary?: boolean;
+  readonly requiresMemory?: boolean;
   readonly requiresThreadAutoSettlement?: boolean;
 }
 
@@ -83,21 +72,21 @@ export interface SettingsSearchAvailability {
   readonly canManageLocalBackend: boolean;
   readonly isWslSettingsRowVisible: boolean;
   readonly hasThreadAutoSettlement: boolean;
+  readonly hasMemory?: boolean;
   readonly managedTunnelActive?: boolean;
 }
 
-/**
- * Section labels in sidebar order. The sidebar nav and the search-result
- * subtitles both render from this record, so each label exists once.
- */
 export const SETTINGS_SECTION_LABELS: Readonly<Record<SettingsPath, string>> = {
+  "/settings/diagnostics": "Diagnostics",
   "/settings/projects": "Project",
   "/settings/general": "General",
   "/settings/appearance": "Appearance",
   "/settings/keybindings": "Keybindings",
   "/settings/snap-shot": "SnapShots",
   "/settings/providers": "Providers",
+  "/settings/memory": "Memory",
   "/settings/integrations": "Integrations",
+  "/settings/goat-bot": "GOAT Bot",
   "/settings/scheduled-tasks": "Scheduled Tasks",
   "/settings/source-control": "Source Control",
   "/settings/storage": "Storage",
@@ -105,17 +94,10 @@ export const SETTINGS_SECTION_LABELS: Readonly<Record<SettingsPath, string>> = {
   "/settings/archived": "Archive",
 };
 
-/** Anchor id of the first row bound to `command` on the Keybindings page. */
 export function keybindingSearchAnchorId<Command extends KeybindingCommand>(command: Command) {
   return `keybinding-${command}` as const;
 }
 
-/**
- * One result per built-in command, alphabetical by label. The anchor is
- * the command's first row; default keys are searchable so "mod+b" lands on
- * Sidebar: Toggle. A command with no default binding may have no row, so it
- * points at the section instead.
- */
 const KEYBINDING_SEARCH_ITEMS = STATIC_KEYBINDING_COMMANDS.toSorted((left, right) =>
   commandLabel(left).localeCompare(commandLabel(right)),
 ).map((command) => {
@@ -132,12 +114,45 @@ const KEYBINDING_SEARCH_ITEMS = STATIC_KEYBINDING_COMMANDS.toSorted((left, right
   };
 });
 
-/**
- * Searchable settings and stable destinations, in result order. Rows with a
- * dedicated anchor render their id and title via `searchableSetting`; items
- * that may not be mounted point at their nearest stable section instead.
- */
+export function sourceControlHostSettingsSearchId(kind: string) {
+  return `source-control-host-${kind}` as const;
+}
+
+const SOURCE_CONTROL_HOST_SEARCH_ITEMS = sourceControlClients.definitions.flatMap((definition) =>
+  definition.settings && definition.kind !== "github"
+    ? [
+        {
+          id: sourceControlHostSettingsSearchId(definition.kind),
+          title: `${definition.label} credentials`,
+          to: "/settings/source-control" as const,
+          searchTerms: [
+            `${definition.label} ${Object.keys(definition.settings.fields).join(" ")} token credentials sign in`,
+          ],
+          environmentOnly: true,
+          scope: "environment-defaults" as const,
+        },
+      ]
+    : [],
+);
+
 export const SETTINGS_SEARCH_ITEMS = [
+  {
+    id: "memory-records",
+    title: "Memory",
+    to: "/settings/memory",
+    requiresMemory: true,
+    searchTerms: [
+      "forget",
+      "conflict",
+      "quarantine",
+      "revert",
+      "sync",
+      "sharing",
+      "import",
+      "source access",
+      "owner",
+    ],
+  },
   {
     id: "storage-worktree-keep-when",
     targetId: "storage-worktrees",
@@ -208,11 +223,19 @@ export const SETTINGS_SEARCH_ITEMS = [
     ],
   },
   {
+    id: "standing-instructions",
+    title: "Standing instructions",
+    to: "/settings/general",
+    scope: "project-defaults",
+    searchTerms: [
+      "dispatch launch launched threads agents orchestrator preamble policy prompt rules subagents hotl",
+    ],
+  },
+  {
     id: "color-scheme",
     title: "Color scheme",
     to: "/settings/appearance",
     searchTerms: ["appearance light dark system mode"],
-    // The scheme tiles sit at the top of the Appearance section.
     targetId: "appearance",
   },
   {
@@ -220,8 +243,6 @@ export const SETTINGS_SEARCH_ITEMS = [
     title: "Themes",
     to: "/settings/appearance",
     searchTerms: ["appearance colors palette custom import"],
-    // Theme cards live directly under the scheme tiles; the section is the
-    // stable scroll destination for both.
     targetId: "appearance",
   },
   {
@@ -260,7 +281,6 @@ export const SETTINGS_SEARCH_ITEMS = [
     title: "Environment identification",
     to: "/settings/appearance",
     searchTerms: ["dev nightly artwork pill label hide none"],
-    // The setting is stage-dependent, so its parent section is the stable destination.
     targetId: "appearance-interface",
   },
   {
@@ -355,6 +375,64 @@ export const SETTINGS_SEARCH_ITEMS = [
     scope: "project-defaults",
   },
   {
+    id: "pull-request-watch-automatic",
+    title: "Watch pull requests automatically",
+    to: "/settings/general",
+    scope: "project-defaults",
+    searchTerms: ["pull request watching react keep as context ignore auto watch PR create link"],
+  },
+  {
+    id: "pull-request-watch-checks-failed",
+    title: "Failed checks",
+    to: "/settings/general",
+    scope: "project-defaults",
+    searchTerms: ["pull request watching react keep as context ignore CI failure"],
+  },
+  {
+    id: "pull-request-watch-checks-passed",
+    title: "Passed checks",
+    to: "/settings/general",
+    scope: "project-defaults",
+    searchTerms: ["pull request watching react keep as context ignore CI success"],
+  },
+  {
+    id: "pull-request-watch-human-remarks",
+    title: "Comments from people",
+    to: "/settings/general",
+    scope: "project-defaults",
+    searchTerms: ["pull request watching react keep as context ignore human review feedback"],
+  },
+  {
+    id: "pull-request-watch-bot-remarks",
+    title: "Comments from bots",
+    to: "/settings/general",
+    scope: "project-defaults",
+    searchTerms: ["pull request watching react keep as context ignore bot review feedback"],
+  },
+  {
+    id: "pull-request-watch-conflicts",
+    title: "Merge conflicts",
+    to: "/settings/general",
+    scope: "project-defaults",
+    searchTerms: ["pull request watching react keep as context ignore merge conflict"],
+  },
+  {
+    id: "pull-request-watch-allowed-bots",
+    title: "Bots that count as people",
+    to: "/settings/general",
+    scope: "project-defaults",
+    searchTerms: ["pull request watching react keep as context ignore allowlist bot logins"],
+  },
+  {
+    id: "pull-request-watch-conflict-idle-days",
+    title: "Skip conflicts on threads idle for",
+    to: "/settings/general",
+    scope: "project-defaults",
+    searchTerms: [
+      "pull request watching react keep as context ignore conflict inactivity days never",
+    ],
+  },
+  {
     id: "thread-notifications",
     title: "Thread notifications",
     to: "/settings/general",
@@ -439,6 +517,13 @@ export const SETTINGS_SEARCH_ITEMS = [
     to: "/settings/general",
     searchTerms: ["installed cli versions newer available codex claude cursor grok opencode"],
     scope: "environment-defaults",
+  },
+  {
+    id: "automatic-server-updates",
+    title: "Automatic server updates",
+    to: "/settings/general",
+    scope: "environment-defaults",
+    searchTerms: ["background service stable nightly channel idle automatic update"],
   },
   {
     id: "continue-threads-after-server-update",
@@ -546,10 +631,30 @@ export const SETTINGS_SEARCH_ITEMS = [
     desktopOnly: true,
   },
   {
+    id: "icon-credits",
+    title: "Icons",
+    to: "/settings/general",
+    searchTerms: ["solar 480 design attribution credits creative commons"],
+  },
+  {
+    id: "mobile-app",
+    title: "Mobile app",
+    to: "/settings/general",
+    searchTerms: ["phone tablet iPhone iPad iOS Android App Store Google Play QR"],
+  },
+  {
     id: "privacy-policy",
     title: "Privacy policy",
     to: "/settings/general",
     searchTerms: ["telemetry analytics usage data tracking legal opt out"],
+  },
+  {
+    id: "telemetry-export",
+    title: "OpenTelemetry export",
+    to: "/settings/diagnostics",
+    targetId: "telemetry-export",
+    scope: "environment",
+    searchTerms: ["OTel OTLP telemetry export endpoints logs traces metrics Grafana"],
   },
   {
     id: "diagnostics",
@@ -693,12 +798,32 @@ export const SETTINGS_SEARCH_ITEMS = [
     searchTerms: ["xcode android studio sdk avd runtime"],
   },
   {
+    id: "goat-bot-home",
+    title: "Runs on",
+    to: "/settings/goat-bot",
+    targetId: "goat-bot",
+    searchTerms: ["goat bot home computer environment cluster"],
+  },
+  {
+    id: "goat-bot-model",
+    title: "GOAT Bot model",
+    to: "/settings/goat-bot",
+    targetId: "goat-bot",
+    searchTerms: ["goat bot model provider llm assistant turns"],
+  },
+  {
     id: "slack-connection",
     title: "Slack connection",
-    to: "/settings/integrations",
+    to: "/settings/goat-bot",
     targetId: "slack-channel",
     environmentOnly: true,
     searchTerms: ["slack socket mode bot app token mention direct message dm channel thread reply"],
+  },
+  {
+    id: "imessage-channel",
+    title: "iMessage",
+    to: "/settings/goat-bot",
+    searchTerms: ["goat bot imessage messages text sms phone mac link code"],
   },
   {
     id: "browser-profiles",
@@ -752,6 +877,18 @@ export const SETTINGS_SEARCH_ITEMS = [
     title: "Open links in",
     to: "/settings/integrations",
     searchTerms: ["links default browser in-app browser external open"],
+  },
+  {
+    id: "browser-search-engine",
+    title: "Search engine",
+    to: "/settings/integrations",
+    searchTerms: ["address bar duckduckgo google bing brave kagi ecosia custom"],
+  },
+  {
+    id: "pull-request-links-open-in-app",
+    title: "Open pull requests in GOAT",
+    to: "/settings/integrations",
+    searchTerms: ["pr links github browser external click default pull request view panel"],
   },
   {
     id: "browser-auto-show-floating-preview",
@@ -817,14 +954,7 @@ export const SETTINGS_SEARCH_ITEMS = [
     environmentOnly: true,
     scope: "environment-defaults",
   },
-  {
-    id: "bitbucket-credentials",
-    title: "Bitbucket credentials",
-    to: "/settings/source-control",
-    searchTerms: ["bitbucket atlassian access token api token email credentials sign in"],
-    environmentOnly: true,
-    scope: "environment-defaults",
-  },
+  ...SOURCE_CONTROL_HOST_SEARCH_ITEMS,
   {
     id: "source-control-writing-style",
     title: "Source control writing style",
@@ -848,6 +978,32 @@ export const SETTINGS_SEARCH_ITEMS = [
     searchTerms: [
       "override generated commit change request pr titles descriptions branch bookmark",
     ],
+    environmentOnly: true,
+    scope: "project-defaults",
+  },
+  {
+    id: "review-guides",
+    title: "Review guides (beta)",
+    to: "/settings/source-control",
+    searchTerms: ["pull request pr guided review guide tour beta experimental"],
+    environmentOnly: true,
+  },
+  {
+    id: "review-guide-model",
+    title: "Review guide model",
+    to: "/settings/source-control",
+    // Hidden until review guides are on, so a search lands on the switch that shows it.
+    targetId: "review-guides",
+    searchTerms: ["pull request pr guided review guide brief maintainer"],
+    environmentOnly: true,
+    scope: "project-defaults",
+  },
+  {
+    id: "review-guide-instructions",
+    title: "Review guide instructions",
+    to: "/settings/source-control",
+    targetId: "review-guides",
+    searchTerms: ["pull request pr guided review guide preferences taste prompt custom"],
     environmentOnly: true,
     scope: "project-defaults",
   },
@@ -881,10 +1037,16 @@ export const SETTINGS_SEARCH_ITEMS = [
     localBackendManagementOnly: true,
   },
   {
+    id: "hub-device",
+    title: "Use this device as a hub",
+    to: "/settings/connections",
+    searchTerms: ["hub phone qr pair pairing tailscale https share device"],
+  },
+  {
     id: "tailscale-https",
     title: "Tailscale HTTPS",
     to: "/settings/connections",
-    targetId: "connections-environment",
+    targetId: "hub-device",
     searchTerms: ["serve magicdns endpoint remote secure network"],
     desktopOnly: true,
     localBackendManagementOnly: true,
@@ -900,6 +1062,12 @@ export const SETTINGS_SEARCH_ITEMS = [
     windowsOnly: true,
     localBackendManagementOnly: true,
     wslAvailableOnly: true,
+  },
+  {
+    id: "goat-connect-coming-soon",
+    title: `${GOAT_CONNECT_COMING_SOON.title} · ${GOAT_CONNECT_COMING_SOON.status}`,
+    to: "/settings/connections",
+    searchTerms: ["Tailscale guide"],
   },
   {
     id: "t3-connect",
@@ -942,7 +1110,35 @@ export const SETTINGS_SEARCH_ITEMS = [
     id: "remote-environments",
     title: "Environments",
     to: "/settings/connections",
-    searchTerms: ["add pair backend host code ssh config agent tunnel saved goat connect"],
+    searchTerms: [
+      "add device environment pair backend host code ssh config agent tunnel saved goat connect tailscale server",
+    ],
+  },
+  {
+    id: "provider-host-matrix",
+    title: "Providers on your machines",
+    to: "/settings/connections",
+    searchTerms: ["hosts ssh sync install sign in codex claude cursor grok opencode pi versions"],
+  },
+  {
+    id: "hosts",
+    title: "Hosts",
+    to: "/settings/connections",
+    searchTerms: [
+      "host status ssh machines reachable cpu memory disk load average threads running queued quota usage limits",
+    ],
+  },
+  {
+    id: "remote-launches",
+    title: "Remote launches",
+    to: "/settings/connections",
+    searchTerms: ["ssh dispatch launched threads other machines hosts cross-host import open"],
+  },
+  {
+    id: "cloud-machines",
+    title: "Cloud machines",
+    to: "/settings/connections",
+    searchTerms: ["boat vm sandbox cloud machine create stop resume delete ssh api key"],
   },
   {
     id: "load-balancing",
@@ -971,15 +1167,16 @@ export type SettingsSearchItemId = (typeof SETTINGS_SEARCH_ITEMS)[number]["id"];
 const SEARCH_ITEMS_BY_ID = new Map(SETTINGS_SEARCH_ITEMS.map((item) => [item.id, item] as const));
 
 const SETTINGS_CATEGORY_SCOPES: Readonly<Record<SettingsPath, SettingsSearchScope | null>> = {
+  "/settings/memory": null,
+  "/settings/diagnostics": "environment",
   "/settings/projects": "project",
   "/settings/general": null,
   "/settings/appearance": null,
   "/settings/snap-shot": null,
-  // Keybindings fan out to the selection; Providers shows the representative
-  // environment at any selection. Neither needs a particular scope to render.
   "/settings/keybindings": null,
   "/settings/providers": null,
   "/settings/integrations": null,
+  "/settings/goat-bot": null,
   "/settings/source-control": "environment-defaults",
   "/settings/storage": "project-defaults",
   "/settings/connections": "connections",
@@ -987,7 +1184,6 @@ const SETTINGS_CATEGORY_SCOPES: Readonly<Record<SettingsPath, SettingsSearchScop
   "/settings/archived": "project-defaults",
 };
 
-/** Search keeps the selected target. A missing row can explain its owning scope instead. */
 export function getSettingsSearchTargetScope(targetId: string) {
   const items: readonly SettingsSearchItem[] = SETTINGS_SEARCH_ITEMS;
   const item =
@@ -1012,7 +1208,6 @@ interface AutoSettlementSearchEnvironment {
   } | null;
 }
 
-/** Discovery needs one capable environment; the selected page needs every connected target to support it. */
 export function getThreadAutoSettlementSearchAvailability(
   environments: readonly AutoSettlementSearchEnvironment[],
   scope?: Pick<ResolvedSettingsScope, "kind" | "environmentIds">,
@@ -1077,11 +1272,6 @@ export function isSettingsOverviewVisible(search: SettingsScopeSearch): boolean 
   return kind === "project" || kind === "checkout";
 }
 
-/**
- * `id` and `title` props for the element a search item anchors to. Panels
- * spread (or pick from) this instead of restating the strings, so the catalog
- * and the rendered settings cannot drift apart.
- */
 export function searchableSetting(id: SettingsSearchItemId): {
   readonly id: string;
   readonly title: string;
@@ -1090,12 +1280,25 @@ export function searchableSetting(id: SettingsSearchItemId): {
   return { id: anchorId, title };
 }
 
+const GOAT_BOT_SETTINGS_TARGETS = new Set(
+  (SETTINGS_SEARCH_ITEMS as ReadonlyArray<SettingsSearchItem>)
+    .filter((item) => item.to === "/settings/goat-bot")
+    .flatMap((item) => (item.targetId ? [item.id, item.targetId] : [item.id])),
+);
+
+/** Whether a settings hash names a GOAT Bot control, which once lived under Integrations. */
+export function isGoatBotSettingsTarget(hash: string): boolean {
+  return GOAT_BOT_SETTINGS_TARGETS.has(hash.replace(/^#/, ""));
+}
+
 export function filterAvailableSettingsSearchItems(
   availability: SettingsSearchAvailability,
 ): ReadonlyArray<SettingsSearchItem> {
   const items: ReadonlyArray<SettingsSearchItem> = SETTINGS_SEARCH_ITEMS;
   return items.filter(
     (item) =>
+      (item.id !== "goat-connect-coming-soon" || !isGoatConnectEnabled()) &&
+      (!item.requiresMemory || availability.hasMemory === true) &&
       (!item.cloudOnly || availability.hasCloudPublicConfig) &&
       (!item.environmentOnly || availability.hasEnvironment) &&
       (!item.providerSettingsOnly || availability.hasProviderSettingsEnvironment) &&

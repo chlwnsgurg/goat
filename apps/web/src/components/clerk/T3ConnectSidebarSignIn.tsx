@@ -1,9 +1,9 @@
 import { UserButton, useAuth } from "@clerk/react";
-import { LogInIcon } from "lucide-react";
+import { LogInIcon } from "~/components/solar";
 
 import { hasCloudPublicConfig } from "../../cloud/publicConfig";
 import { SidebarMenu, SidebarMenuButton, SidebarMenuItem } from "../ui/sidebar";
-import { T3_CONNECT_ACCOUNT_PAGES } from "./T3ConnectAccountPages";
+import { GOAT_CONNECT_ACCOUNT_PAGES } from "./T3ConnectAccountPages";
 import { useT3ConnectAuthPrompt } from "./useT3ConnectAuthPrompt";
 
 export function T3ConnectSidebarSignIn() {
@@ -32,7 +32,7 @@ function ConfiguredT3ConnectSidebarAvatar() {
         },
       }}
     >
-      {T3_CONNECT_ACCOUNT_PAGES.map((page) => (
+      {GOAT_CONNECT_ACCOUNT_PAGES.map((page) => (
         <UserButton.UserProfilePage
           key={page.url}
           label={page.label}

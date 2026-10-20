@@ -1,40 +1,29 @@
 import { RefreshIcon } from "~/components/ui/refresh-icon";
 import {
-  ArrowLeft,
-  ArrowRight,
-  Camera,
-  ExternalLink,
-  MousePointerClick,
-  PictureInPicture2,
-} from "lucide-react";
-import {
-  type FormEvent,
-  type KeyboardEvent,
-  type ReactNode,
-  useEffect,
-  useRef,
-  useState,
-} from "react";
+  ArrowLeftIcon as ArrowLeft,
+  ArrowRightIcon as ArrowRight,
+  CameraIcon as Camera,
+  MousePointerClickIcon as MousePointerClick,
+  PictureInPictureIcon as PictureInPicture2,
+} from "~/components/solar";
+import { type ReactNode, useEffect, useRef } from "react";
 
 import { Button } from "~/components/ui/button";
-import { InputGroup, InputGroupAddon, InputGroupInput } from "~/components/ui/input-group";
+import { PreviewAddressBar, type PreviewAddressBarProps } from "./PreviewAddressBar";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "~/components/ui/tooltip";
 import { cn } from "~/lib/utils";
 
-interface Props {
-  url: string;
+interface Props extends Omit<PreviewAddressBarProps, "disabled" | "inputRef"> {
   loading: boolean;
   canGoBack: boolean;
   canGoForward: boolean;
   refreshDisabled: boolean;
   inputDisabled?: boolean | undefined;
-  /** Bumping this value re-focuses and selects the URL input. */
   focusUrlNonce?: number | undefined;
   onBack: () => void;
   onForward: () => void;
   onRefresh: () => void;
   onSubmit: (url: string) => void;
-  /** When provided, renders an "Open in browser" affordance to the right. */
   onOpenInBrowser?: (() => void) | undefined;
   onCapture?: ((record: boolean) => void) | undefined;
   captureDisabled?: boolean | undefined;
@@ -42,31 +31,23 @@ interface Props {
   onPictureInPicture?: (() => void) | undefined;
   pictureInPicture?: boolean | undefined;
   pictureInPictureDisabled?: boolean | undefined;
-  /**
-   * When provided, renders an annotation-mode toggle button to the right of
-   * the URL input. Pressed while annotation mode is active (button shows in `pressed`
-   * state). Disabled in `pickDisabled` mode.
-   */
   onPickElement?: (() => void) | undefined;
   pickActive?: boolean | undefined;
   pickDisabled?: boolean | undefined;
-  /** Optional reason string surfaced in the disabled tooltip. */
   pickDisabledReason?: string | undefined;
-  /**
-   * Trailing slot rendered after the URL input. Used by the preview view
-   * to mount the three-dot menu (hard reload, devtools, zoom, clear data).
-   */
   trailingActions?: ReactNode;
-  /**
-   * Slot between the nav buttons and the URL input. The preview view uses it
-   * to name the tab's browser profile, which is otherwise invisible.
-   */
   leadingActions?: ReactNode;
 }
 
 const NOOP = () => {};
 
 export function PreviewChromeRow({
+  addressKey,
+  threadRef,
+  tabId,
+  tabs,
+  history,
+  onActivateTab,
   url,
   loading,
   canGoBack,
@@ -93,28 +74,15 @@ export function PreviewChromeRow({
   leadingActions,
 }: Props) {
   const inputRef = useRef<HTMLInputElement | null>(null);
-  const [draft, setDraft] = useState(url);
-  const [inputFocused, setInputFocused] = useState(false);
-
   useEffect(() => {
-    if (focusUrlNonce == null) return;
-    const node = inputRef.current;
-    if (!node) return;
-    node.focus();
+    if (focusUrlNonce === undefined) return;
+    inputRef.current?.focus();
+    inputRef.current?.select();
   }, [focusUrlNonce]);
-
-  const submit = (event?: FormEvent | KeyboardEvent) => {
-    event?.preventDefault();
-    const next = draft.trim();
-    if (next.length === 0) return;
-    onSubmit(next);
-    inputRef.current?.blur();
-  };
 
   return (
     <div className="relative">
-      <form
-        onSubmit={submit}
+      <div
         className="flex h-10 min-h-10 shrink-0 items-center gap-1 border-b border-border/60 bg-background px-2 in-data-[preview-panel-mode=inline]:mb-3 in-data-[preview-panel-mode=inline]:h-7 in-data-[preview-panel-mode=inline]:min-h-7 in-data-[preview-panel-mode=inline]:border-b-transparent"
         data-surface-subheader
       >
@@ -174,63 +142,20 @@ export function PreviewChromeRow({
 
         {leadingActions}
 
-        <InputGroup variant="ghost" className="group/address h-7 flex-1">
-          <Tooltip>
-            <TooltipTrigger
-              render={
-                <InputGroupInput
-                  ref={inputRef}
-                  value={inputFocused ? draft : url}
-                  onChange={(event) => setDraft(event.target.value)}
-                  onFocus={() => {
-                    setDraft(url);
-                    setInputFocused(true);
-                    queueMicrotask(() => inputRef.current?.select());
-                  }}
-                  onBlur={() => {
-                    setInputFocused(false);
-                  }}
-                  onKeyDown={(event) => {
-                    if (event.key === "Enter") submit(event);
-                    if (event.key === "Escape") {
-                      event.preventDefault();
-                      setDraft(url);
-                      inputRef.current?.blur();
-                    }
-                  }}
-                  placeholder="Search or enter URL"
-                  spellCheck={false}
-                  disabled={inputDisabled}
-                  data-preview-url-input
-                  size="sm"
-                />
-              }
-            />
-          </Tooltip>
-          {onOpenInBrowser && !inputFocused ? (
-            <InputGroupAddon align="inline-end">
-              {/* Revealed on hover so a resting address bar reads as plain text. */}
-              <span className="pointer-events-none flex opacity-0 transition-opacity focus-within:pointer-events-auto focus-within:opacity-100 group-hover/address:pointer-events-auto group-hover/address:opacity-100">
-                <Tooltip>
-                  <TooltipTrigger
-                    render={
-                      <Button
-                        variant="ghost"
-                        size="icon-xs"
-                        onClick={onOpenInBrowser}
-                        aria-label="Open in system browser"
-                        type="button"
-                      />
-                    }
-                  >
-                    <ExternalLink />
-                  </TooltipTrigger>
-                  <TooltipPopup>Open in system browser</TooltipPopup>
-                </Tooltip>
-              </span>
-            </InputGroupAddon>
-          ) : null}
-        </InputGroup>
+        <PreviewAddressBar
+          key={addressKey}
+          addressKey={addressKey}
+          threadRef={threadRef}
+          tabId={tabId}
+          url={url}
+          tabs={tabs}
+          history={history}
+          disabled={inputDisabled}
+          inputRef={inputRef}
+          onSubmit={onSubmit}
+          onActivateTab={onActivateTab}
+          onOpenInBrowser={onOpenInBrowser}
+        />
 
         {onPickElement ? (
           <Tooltip>
@@ -308,7 +233,7 @@ export function PreviewChromeRow({
           </Tooltip>
         ) : null}
         {trailingActions}
-      </form>
+      </div>
       <div
         aria-hidden
         data-loading={loading}

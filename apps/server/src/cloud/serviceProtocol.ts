@@ -1,9 +1,11 @@
-import type { ServerSelfUpdateOutcome } from "@t3tools/contracts";
+import type { ServerSelfUpdateOutcome } from "@goat/contracts";
 
 // Protocol 3 requires the standalone executable layout. Bump when runtimePaths
 // or the installed runtime tree changes incompatibly; launchers survive self-updates.
+// `prepared.port` and state probation are optional additions: protocol-3 launchers
+// ignore unknown fields, and new launchers still accept trials without a port.
 export const SERVICE_LAUNCHER_PROTOCOL = 3 as const;
-export const SERVICE_LAUNCHER_CONTEXT_ENV = "T3_SERVICE_LAUNCHER_CONTEXT";
+export const SERVICE_LAUNCHER_CONTEXT_ENV = "GOAT_SERVICE_LAUNCHER_CONTEXT";
 export const SERVICE_STATE_FILE = "service-state.json";
 /** Written by the launcher just before an explicit stop kills its child, so
     the child can tell "the service is going away" from "the launcher is about
@@ -29,13 +31,20 @@ export interface ServiceState {
   readonly protocol: typeof SERVICE_LAUNCHER_PROTOCOL;
   readonly activeVersion: string;
   readonly update?: ServiceUpdateRecord;
+  readonly probation?: {
+    readonly dbPath: string;
+    readonly deadline: number;
+    readonly rollbackReason?: string;
+  };
 }
 
-/** Context is copied from launcher-owned state when a child is spawned. */
 export interface ServiceLauncherContext {
   readonly protocol: typeof SERVICE_LAUNCHER_PROTOCOL;
   readonly childVersion: string;
   readonly update?: ServiceUpdateRecord;
+  /** Set for a committed target the launcher restarts while its update is on probation, so the
+      child records itself as part of that update and a probation rollback still restores. */
+  readonly probation?: true;
 }
 
 export type ServiceLauncherChildMessage =
@@ -47,6 +56,9 @@ export type ServiceLauncherChildMessage =
   | {
       readonly type: "prepared";
       readonly updateId: string;
+      readonly port?: number;
+      /** The address the trial bound, so the smoke probe reaches it on the right interface. */
+      readonly host?: string;
     };
 
 export type ServiceLauncherParentMessage =
@@ -69,7 +81,6 @@ const EXACT_SERVICE_VERSION = new RegExp(
   `^${SEMVER_NUMBER}\\.${SEMVER_NUMBER}\\.${SEMVER_NUMBER}(?:-${SEMVER_PRERELEASE}(?:\\.${SEMVER_PRERELEASE})*)?(?:\\+[0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*)?$`,
 );
 
-/** Accepts exact SemVer only: never dist-tags or ranges passed to npm or filesystem paths. */
 export const isExactServiceVersion = (version: string): boolean =>
   EXACT_SERVICE_VERSION.test(version);
 
@@ -109,7 +120,6 @@ function decodeServiceUpdate(value: unknown): ServiceUpdateRecord | undefined {
   return undefined;
 }
 
-/** SemVer precedence for exact versions. Build metadata is ignored. */
 export function compareExactServiceVersions(left: string, right: string): number {
   const parse = (version: string) => {
     const withoutBuild = version.split("+", 1)[0] ?? version;
@@ -150,8 +160,20 @@ export function compareExactServiceVersions(left: string, right: string): number
 export function decodeServiceState(value: unknown): ServiceState | undefined {
   if (!isRecord(value)) return undefined;
   const update = value.update === undefined ? undefined : decodeServiceUpdate(value.update);
+  const probation = value.probation;
   if (
     value.protocol !== SERVICE_LAUNCHER_PROTOCOL ||
+    (probation !== undefined &&
+      (!isRecord(probation) ||
+        update?.status !== "committed" ||
+        typeof probation.dbPath !== "string" ||
+        probation.dbPath.trim() === "" ||
+        typeof probation.deadline !== "number" ||
+        !Number.isSafeInteger(probation.deadline) ||
+        probation.deadline <= 0 ||
+        (probation.rollbackReason !== undefined &&
+          (typeof probation.rollbackReason !== "string" ||
+            probation.rollbackReason.trim() === "")))) ||
     typeof value.activeVersion !== "string" ||
     !isExactServiceVersion(value.activeVersion) ||
     (value.update !== undefined && update === undefined) ||
@@ -168,6 +190,17 @@ export function decodeServiceState(value: unknown): ServiceState | undefined {
     protocol: SERVICE_LAUNCHER_PROTOCOL,
     activeVersion: value.activeVersion,
     ...(update === undefined ? {} : { update }),
+    ...(isRecord(probation)
+      ? {
+          probation: {
+            dbPath: probation.dbPath as string,
+            deadline: probation.deadline as number,
+            ...(typeof probation.rollbackReason === "string"
+              ? { rollbackReason: probation.rollbackReason }
+              : {}),
+          },
+        }
+      : {}),
   };
 }
 
@@ -179,7 +212,6 @@ export function parseServiceState(value: string): ServiceState | undefined {
   }
 }
 
-/** Detects an in-flight update across launcher protocol versions before replacing its state. */
 export function serviceStateHasPendingUpdate(value: string): boolean {
   try {
     const parsed: unknown = JSON.parse(value);
@@ -189,7 +221,6 @@ export function serviceStateHasPendingUpdate(value: string): boolean {
   }
 }
 
-/** Reads the active version across launcher protocol revisions for downgrade protection. */
 export function serviceStateActiveVersion(value: string): string | undefined {
   try {
     const parsed: unknown = JSON.parse(value);
@@ -233,6 +264,9 @@ export function decodeServiceLauncherContext(value: string): ServiceLauncherCont
     protocol: SERVICE_LAUNCHER_PROTOCOL,
     childVersion: parsed.childVersion,
     ...(update === undefined ? {} : { update }),
+    ...(parsed.probation === true && update?.status === "committed"
+      ? { probation: true as const }
+      : {}),
   };
 }
 
@@ -247,8 +281,21 @@ export function decodeServiceLauncherChildMessage(
   ) {
     return { type: value.type, targetVersion: value.targetVersion, dbPath: value.dbPath };
   }
-  return value.type === "prepared" && typeof value.updateId === "string"
-    ? { type: value.type, updateId: value.updateId }
+  return value.type === "prepared" &&
+    typeof value.updateId === "string" &&
+    (value.port === undefined ||
+      (typeof value.port === "number" &&
+        Number.isInteger(value.port) &&
+        value.port > 0 &&
+        value.port <= 65535))
+    ? {
+        type: value.type,
+        updateId: value.updateId,
+        ...(typeof value.port === "number" ? { port: value.port } : {}),
+        ...(typeof value.host === "string" && value.host.length > 0 && value.host.length <= 255
+          ? { host: value.host }
+          : {}),
+      }
     : undefined;
 }
 

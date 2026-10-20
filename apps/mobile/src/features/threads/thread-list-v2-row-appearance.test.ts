@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vite-plus/test";
-import { MOBILE_THEME_IDS } from "@t3tools/shared/themePalettes";
+import { MOBILE_THEME_IDS } from "@goat/shared/themePalettes";
 
 import { getMobileThemeVariables } from "../../lib/mobileTheme";
 import { getThreadListV2RowAppearance as iosAppearance } from "./thread-list-v2-row-appearance";
@@ -21,7 +21,6 @@ describe.each([
         expect(idle.interactionClassName).toBe("bg-thread-hover");
         expect(idle.interactionOpacity).toBe(1);
         expect(active.style?.backgroundColor).toBe(theme["--color-thread-selected"]);
-        // Pointer feedback must not mix a second color into the active background.
         expect(active.interactionOpacity).toBe(0);
         expect(active.providerIconSurfaceColor).toBe(active.style?.backgroundColor);
         expect(idle.foregroundClassName).toBe("text-drawer-foreground");

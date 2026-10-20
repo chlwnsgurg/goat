@@ -50,6 +50,11 @@ and worktree while you stay in the new thread composer. This requires a Git proj
 
 Pin a thread from its menu to keep it above your active work.
 
+The GOAT Bot row shows its latest message or task update. A blue dot means the bot has
+sent something since you last opened it; the number badge counts tasks awaiting your
+response. If the connected server does not track visits yet, the row shows its last
+activity time and waiting count until that server is updated.
+
 On web and desktop, unpinning, settling, snoozing, and archiving a thread each show
 a notification with **Undo** for five seconds. Undo restores the thread's previous
 state, including its pinned position, and reopens an archived thread you were
@@ -89,7 +94,7 @@ spot where the thread will land. Drops into either section keep the position you
 mobile, open a thread's menu and choose **Arrange threads**. Drag a handle within or between
 **Pinned** and **Active** to reorder, pin, or unpin. Drop onto the **Settled** divider to
 settle a thread. The dragged card shows the action before you release it. Expand **Snoozed**
-or **Settled** to drag a parked thread back into either live section. Each drop saves; **Done** returns to the thread list.
+or **Settled** to drag a parked thread back into either live section. Each drop saves; close the sheet to return to the thread list.
 **Move up** and **Move down** are also available in the thread menu. The server
 saves the order, so it survives a refresh and appears on your other connected devices.
 
@@ -126,11 +131,57 @@ Pinned and settled threads can appear in Priority; when they no longer need atte
 return to their previous section.
 
 A thread you read stays in Priority while you keep Activity open, so rows do not move while you
-work through them. Switch away from Activity and back to move read threads out. Settling or
-unsettling a thread moves it right away.
+work through them. Switch away from Activity and back to move read threads out. Settling a thread
+clears an unacknowledged wake and moves the row right away. Unsettling moves it right away too.
+An archived thread stays in the list while a delegated task still needs an approval or an answer,
+and the parent row shows that request.
 
-Choose **Mark all as read** from Priority's menu to acknowledge unread completions on connections
-you can change. Work in progress and pending requests stay in Priority.
+Choose **Mark all as read** from Priority's menu to acknowledge unread completions and
+unacknowledged wakes on connections you can change. Those rows leave Priority. Work in progress
+and pending requests stay. The activity bell shows the same count as Priority.
+
+### Answer waiting decisions
+
+Open **Decisions** at the top of the thread sidebar, or search for it in the command palette,
+to answer agent questions and approve or reject tool requests from every connected environment.
+Requests from subagent threads are included; archived threads are not. Threads keep their place
+in Priority.
+
+Decisions starts with the oldest request and moves to the next one after each answer. **Skip**
+sends a request to the end of the queue for this visit. The sidebar counts waiting threads, so a
+thread with two requests counts once until Decisions loads and shows the real total.
+
+Use **Go to thread** for more context or to
+[attach files to an answer](./question-attachments.md). A request whose provider session cannot
+resume stays listed with answering turned off.
+
+### See everything running
+
+On web and desktop, **Fleet** in the rail beside the thread sidebar shows how many threads are
+running or need you across every connected machine; hover it for a count per machine. Open it,
+or search for it in the command palette, for a graph of your machines and the agents working on
+each, and a list of those threads grouped by machine; select a machine to show only its threads.
+The list keeps threads in the order they started, so rows stay put while they work. A thread
+leaves once it finishes and stays while it needs an approval or answer; open finished threads
+from the sidebar. Only top-level threads count: subagents are part of their parent's work, and
+archived threads do not count. Work an environment started on an SSH host you are not connected
+to appears as last reported by that environment.
+
+A machine in the graph turns amber, orange, or red as it gets busier, and a machine near its
+limit catches fire. Heat comes from the same reading as **Settings → Connections → Hosts**: CPU
+use, load per core, memory, and the fullest provider quota window; hover a machine to see which
+one is high. A machine that stopped answering shows no heat until it reports again.
+
+At the top, **Fleet telemetry** shows CPU, memory, and load for each machine over the last ten
+minutes, provider quota, runs started and finished in the last hour, and alerts for machines that
+are reconnecting, unreachable, or on a different GOAT version. It uses the same reading as the
+graph's heat, refreshed every 15 seconds while the page is open. A machine shows "No metrics"
+when no connected machine reports on it. Collapse the panel to a one-line summary; it stays
+collapsed until you open it again.
+
+Below the list, **Connections** shows your saved machines with the same controls as
+**Settings → Connections**: switch one off, check its routes and permissions, remove it, or pair
+another with **Add device**.
 
 ### Fold working threads on mobile
 
@@ -169,7 +220,8 @@ By default, environments settle inactive threads after three days and settle
 threads whose pull request merged. A closed pull request can also settle an idle
 thread. Work in progress, pending questions or approvals, and live background work
 prevent automatic settlement. An open pull request does not prevent inactivity
-settlement, but an old closed or merged pull request does not settle work you
+settlement unless you turn on **Keep threads with a PR** in **Settings → General**,
+but an old closed or merged pull request does not settle work you
 resumed after it closed. Only your own messages count as resuming. A turn that
 finished background work or a pull request watch starts on its own does not.
 

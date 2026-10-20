@@ -3,15 +3,16 @@ import {
   type AuthMcpApprovalDetails,
   AuthMcpApprovalError,
   AuthMcpClientAccess,
+  AuthMcpMemoryScope,
   type AuthMcpAuthorizationRequest,
-} from "@t3tools/contracts";
+} from "@goat/contracts";
 import { Radio as RadioPrimitive } from "@base-ui/react/radio";
-import { isLoopbackHost } from "@t3tools/shared/preview";
-import { EyeIcon, type LucideIcon } from "lucide-react";
+import { isLoopbackHost } from "@goat/shared/preview";
+import { EyeIcon, type IconComponent } from "~/components/solar";
 import type * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
-import { type ReactNode, useCallback, useEffect, useState } from "react";
+import { type ReactNode, useEffect, useState } from "react";
 
 import { PrimaryEnvironmentHttpClient } from "~/environments/primary/httpClient";
 import { runPrimaryHttp } from "~/lib/runtime";
@@ -19,6 +20,7 @@ import { cn } from "~/lib/utils";
 import { runtimeModeConfig } from "../chat/runtimeModeConfig";
 import { Alert, AlertDescription } from "../ui/alert";
 import { Button } from "../ui/button";
+import { Checkbox } from "../ui/checkbox";
 import { Input } from "../ui/input";
 import { RadioGroup } from "../ui/radio-group";
 import { Spinner } from "../ui/spinner";
@@ -26,7 +28,7 @@ import { AuthSurfaceShell } from "./AuthSurfaceShell";
 
 const accessConfig: Record<
   AuthMcpClientAccess,
-  { readonly label: string; readonly description: string; readonly icon: LucideIcon }
+  { readonly label: string; readonly description: string; readonly icon: IconComponent }
 > = {
   "read-only": {
     label: "Read only",
@@ -36,7 +38,6 @@ const accessConfig: Record<
   ...runtimeModeConfig,
 };
 
-/** A CLI agent's callback is a loopback address; a hosted agent's is its own server. */
 function redirectsToThisComputer(redirectHost: string): boolean {
   return isLoopbackHost(new URL(`http://${redirectHost}`).hostname);
 }
@@ -54,12 +55,6 @@ type Answer<A> =
   | { readonly kind: "redirect"; readonly url: string }
   | { readonly kind: "error"; readonly message: string };
 
-/**
- * Runs an approval call. The server validates the agent's request again on
- * every call and answers what the page asked for, a message to show, or a URL
- * the browser must follow (an approval, a denial, or a protocol error the
- * agent should receive).
- */
 function runApproval<A>(
   call: (
     client: Context.Service.Shape<typeof PrimaryEnvironmentHttpClient>,
@@ -88,23 +83,34 @@ function readAuthorizationRequest(): AuthMcpAuthorizationRequest {
 }
 
 /**
- * /connect-agent: where an outside agent's MCP sign-in lands after the server
- * checks the request. The user picks the most the agent may allow, then
- * approves with a pairing code, or in one click when this browser is already
- * signed in to the environment as an administrator.
- */
-/**
- * Whether this browser's session may approve `access` without a pairing code.
  * A session may only grant access whose scopes it holds itself.
  */
-function oneClickApproves(details: AuthMcpApprovalDetails, access: AuthMcpClientAccess) {
-  return details.csrfToken !== undefined && (details.oneClickAccess ?? []).includes(access);
+function oneClickApproves(
+  details: AuthMcpApprovalDetails,
+  access: AuthMcpClientAccess,
+  memoryScopes: ReadonlyArray<AuthMcpMemoryScope>,
+) {
+  return (
+    details.csrfToken !== undefined &&
+    (details.oneClickAccess ?? []).includes(access) &&
+    memoryScopes.every((scope) => (details.oneClickMemoryScopes ?? []).includes(scope))
+  );
 }
 
-export function ConnectAgentSurface() {
+function replaceLocation(url: string) {
+  window.location.replace(url);
+}
+
+export function ConnectAgentSurface({
+  redirect = replaceLocation,
+}: {
+  /** Leaves for the agent's callback; tests observe it instead of navigating away. */
+  readonly redirect?: (url: string) => void;
+}) {
   const [authorization] = useState(readAuthorizationRequest);
   const [loaded, setLoaded] = useState<Loaded>({ status: "loading" });
   const [access, setAccess] = useState<AuthMcpClientAccess>("read-only");
+  const [memoryScopes, setMemoryScopes] = useState<ReadonlyArray<AuthMcpMemoryScope>>([]);
   const [pairingCode, setPairingCode] = useState("");
   const [errorMessage, setErrorMessage] = useState("");
   const [pending, setPending] = useState<"approve" | "deny" | null>(null);
@@ -115,7 +121,7 @@ export function ConnectAgentSurface() {
       (answer) => {
         if (cancelled) return;
         if (answer.kind === "redirect") {
-          window.location.replace(answer.url);
+          redirect(answer.url);
           return;
         }
         setLoaded(
@@ -128,32 +134,29 @@ export function ConnectAgentSurface() {
     return () => {
       cancelled = true;
     };
-  }, [authorization]);
+  }, [authorization, redirect]);
 
-  const decide = useCallback(
-    async (choice: "approve" | "deny") => {
-      if (loaded.status !== "ready") return;
-      setPending(choice);
-      setErrorMessage("");
-      const { csrfToken } = loaded.details;
-      const decision: AuthMcpApprovalDecision =
-        choice === "deny"
-          ? { _tag: "deny" }
-          : csrfToken !== undefined && oneClickApproves(loaded.details, access)
-            ? { _tag: "browser-session", access, csrfToken }
-            : { _tag: "pairing-code", access, code: pairingCode.trim() };
-      const answer = await runApproval((client) =>
-        client.mcpOAuth.decision({ payload: { authorization, decision } }),
-      );
-      if (answer.kind === "redirect") {
-        window.location.replace(answer.url);
-        return;
-      }
-      setPending(null);
-      setErrorMessage(answer.kind === "error" ? answer.message : "The sign-in could not continue.");
-    },
-    [access, authorization, loaded, pairingCode],
-  );
+  const decide = async (choice: "approve" | "deny") => {
+    if (loaded.status !== "ready") return;
+    setPending(choice);
+    setErrorMessage("");
+    const { csrfToken } = loaded.details;
+    const decision: AuthMcpApprovalDecision =
+      choice === "deny"
+        ? { _tag: "deny" }
+        : csrfToken !== undefined && oneClickApproves(loaded.details, access, memoryScopes)
+          ? { _tag: "browser-session", access, csrfToken, memoryScopes }
+          : { _tag: "pairing-code", access, code: pairingCode.trim(), memoryScopes };
+    const answer = await runApproval((client) =>
+      client.mcpOAuth.decision({ payload: { authorization, decision } }),
+    );
+    if (answer.kind === "redirect") {
+      redirect(answer.url);
+      return;
+    }
+    setPending(null);
+    setErrorMessage(answer.kind === "error" ? answer.message : "The sign-in could not continue.");
+  };
 
   if (loaded.status === "loading") {
     return (
@@ -179,7 +182,7 @@ export function ConnectAgentSurface() {
   }
 
   const { details } = loaded;
-  const oneClick = oneClickApproves(details, access);
+  const oneClick = oneClickApproves(details, access, memoryScopes);
   const canApprove = pending === null && (oneClick || pairingCode.trim().length > 0);
 
   return (
@@ -231,6 +234,33 @@ export function ConnectAgentSurface() {
           <p className="text-xs text-muted-foreground">
             Beyond read only, it can start, message and stop threads, and none of them can run with
             more than the mode you pick.
+          </p>
+        </div>
+
+        <div className="space-y-2">
+          <span id="connect-agent-memory-label" className="text-sm font-medium">
+            Memory access (optional)
+          </span>
+          <div role="group" aria-labelledby="connect-agent-memory-label" className="space-y-2">
+            {AuthMcpMemoryScope.literals.map((scope) => (
+              <label key={scope} className="flex items-center gap-2 text-sm">
+                <Checkbox
+                  checked={memoryScopes.includes(scope)}
+                  disabled={pending !== null}
+                  onCheckedChange={(checked) =>
+                    setMemoryScopes((previous) =>
+                      checked === true
+                        ? [...previous.filter((selected) => selected !== scope), scope]
+                        : previous.filter((selected) => selected !== scope),
+                    )
+                  }
+                />
+                {scope === "memory:read" ? "Read memory" : "Write memory"}
+              </label>
+            ))}
+          </div>
+          <p className="text-xs text-muted-foreground">
+            Memory permissions are separate from thread access. Nothing is selected by default.
           </p>
         </div>
 

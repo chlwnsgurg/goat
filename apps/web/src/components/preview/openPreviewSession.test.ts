@@ -5,7 +5,7 @@ import {
   type PreviewOpenInput,
   type PreviewSessionSnapshot,
   type ScopedThreadRef,
-} from "@t3tools/contracts";
+} from "@goat/contracts";
 import * as Cause from "effect/Cause";
 import { AsyncResult } from "effect/reactivity";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
@@ -181,8 +181,6 @@ describe("openUrlInPreview from a link", () => {
 
     await openUrlInPreview({
       openPreview: async () => {
-        // The server activates the new tab, then the user selects another one
-        // before the open resolves.
         applyPreviewServerSnapshot(threadRef, snapshot);
         setActivePreviewTab(threadRef, "tab-other");
         return AsyncResult.success(snapshot);
@@ -201,7 +199,6 @@ describe("openUrlInPreview from a link", () => {
 
     await openUrlInPreview({
       openPreview: async () => {
-        // The server activates the new tab, then the user clicks that same tab.
         applyPreviewServerSnapshot(threadRef, snapshot);
         useRightPanelStore.getState().openBrowser(threadRef, snapshot.tabId);
         return AsyncResult.success(snapshot);

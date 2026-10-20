@@ -1,5 +1,5 @@
-import { PanelBottomIcon, PanelRightIcon, SquareMenuIcon } from "lucide-react";
-import { Maximize2, Minimize2 } from "lucide";
+import { PanelBottomIcon, PanelRightIcon, SquareMenuIcon } from "~/components/solar";
+import { Maximize as Maximize2, Minimize as Minimize2 } from "~/components/solar/nodes";
 import { MorphIcon } from "~/components/MorphIcon";
 import { memo, type ReactElement } from "react";
 
@@ -113,6 +113,7 @@ export const PanelLayoutControls = memo(function PanelLayoutControls({
               pressed={rightPanelOpen}
               onPressedChange={onToggleRightPanel}
               aria-label="Toggle right panel"
+              data-right-panel-toggle
               variant="ghost"
               size="sm"
               disabled={!rightPanelAvailable}

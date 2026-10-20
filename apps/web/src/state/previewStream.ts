@@ -1,10 +1,10 @@
 import { useAtomValue } from "@effect/atom-react";
-import { PREVIEW_STREAM_BASE_PATH } from "@t3tools/client-runtime/preview/server-browser-stream";
+import { PREVIEW_STREAM_BASE_PATH } from "@goat/client-runtime/preview/server-browser-stream";
 import {
   type DeviceHubAccess,
   resolveDeviceHubAccess,
-} from "@t3tools/client-runtime/state/deviceHubAccess";
-import type { EnvironmentId } from "@t3tools/contracts";
+} from "@goat/client-runtime/state/deviceHubAccess";
+import type { EnvironmentId } from "@goat/contracts";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 import { AsyncResult, Atom, AtomRegistry } from "effect/reactivity";
@@ -13,7 +13,6 @@ import { connectionAtomRuntime } from "../connection/runtime";
 import { appAtomRegistry } from "../rpc/atomRegistry";
 import { environmentSession } from "./session";
 
-// Re-pairing changes the prepared connection, invalidating its cached ticket.
 const previewStreamAccessAtom = Atom.family((environmentId: EnvironmentId) =>
   connectionAtomRuntime
     .atom((get) => {
@@ -35,7 +34,6 @@ export function refreshPreviewStreamAccess(environmentId: EnvironmentId): void {
   appAtomRegistry.refresh(previewStreamAccessAtom(environmentId));
 }
 
-/** Fresh stream access for a long-lived viewer outside React, e.g. system picture in picture. */
 export function readPreviewStreamAccess(
   environmentId: EnvironmentId,
   refresh: boolean,

@@ -6,10 +6,15 @@ import {
   ProviderInstanceId,
   ThreadId,
   type OrchestrationV2DomainEvent,
-} from "@t3tools/contracts";
+} from "@goat/contracts";
+import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as DateTime from "effect/DateTime";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
+import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
+import * as Path from "effect/Path";
 import * as SqlClient from "effect/sql/SqlClient";
 
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
@@ -54,7 +59,12 @@ const createProject = (projectId: ProjectId) =>
 const thread = (
   threadId: ThreadId,
   projectId: ProjectId,
-  overrides: { readonly archivedAt?: DateTime.Utc; readonly deletedAt?: DateTime.Utc } = {},
+  overrides: {
+    readonly archivedAt?: DateTime.Utc;
+    readonly deletedAt?: DateTime.Utc;
+    readonly title?: string;
+    readonly updatedAt?: DateTime.Utc;
+  } = {},
 ): OrchestrationV2DomainEvent => ({
   id: EventId.make(`created:${threadId}`),
   type: "thread.created",
@@ -66,7 +76,7 @@ const thread = (
     creationSource: "web",
     id: threadId,
     projectId,
-    title: threadId,
+    title: overrides.title ?? threadId,
     providerInstanceId,
     modelSelection: { instanceId: providerInstanceId, model: "gpt-5" },
     runtimeMode: "full-access",
@@ -77,7 +87,7 @@ const thread = (
     lineage: { parentThreadId: null, relationshipToParent: null, rootThreadId: threadId },
     forkedFrom: null,
     createdAt: at(0),
-    updatedAt: at(0),
+    updatedAt: overrides.updatedAt ?? at(0),
     archivedAt: overrides.archivedAt ?? null,
     settledOverride: null,
     settledAt: null,
@@ -170,8 +180,90 @@ it.layer(layerTest)("ThreadSearch", (it) => {
         ],
       );
       assert.lengthOf((yield* search.search({ query: "needle", limit: 1 })).matches, 1);
-      // LIKE wildcards in the query match literally.
       assert.deepEqual((yield* search.search({ query: "ne%le" })).matches, []);
+    }),
+  );
+
+  it.effect("matches titles or messages with filters, newest first", () =>
+    Effect.gen(function* () {
+      const projections = yield* ProjectionStore.ProjectionStoreV2;
+      const search = yield* ThreadSearch.ThreadSearch;
+      const project = ProjectId.make("project:match");
+      const other = ProjectId.make("project:match-other");
+      yield* createProject(project);
+      yield* createProject(other);
+      const titled = ThreadId.make("match:titled");
+      const both = ThreadId.make("match:both");
+      const long = ThreadId.make("match:long");
+      const archived = ThreadId.make("match:archived");
+      const elsewhere = ThreadId.make("match:elsewhere");
+      const longText = `${"a".repeat(400)} Modelflare rollout ${"b".repeat(400)}`;
+      const events: ReadonlyArray<OrchestrationV2DomainEvent> = [
+        thread(titled, project, { title: "Modelflare billing", updatedAt: at(50) }),
+        // A message moves its thread's update time, so each lands at its thread's.
+        message(titled, "titled-user", "user", "nothing relevant here", { minute: 50 }),
+        thread(both, project, { title: "Modelflare too", updatedAt: at(40) }),
+        message(both, "both-assistant", "assistant", "deployed modelflare today", { minute: 40 }),
+        thread(long, project, { updatedAt: at(30) }),
+        message(long, "long-user", "user", longText, { minute: 30 }),
+        thread(archived, project, { archivedAt: at(5), updatedAt: at(45) }),
+        message(archived, "archived-user", "user", "old MODELFLARE notes", { minute: 45 }),
+        thread(elsewhere, other, { updatedAt: at(20) }),
+        message(elsewhere, "elsewhere-user", "user", "modelflare in another project", {
+          minute: 20,
+        }),
+      ];
+      yield* Effect.forEach(events, projections.apply, { discard: true });
+      const base = {
+        query: "modelflare",
+        projectId: undefined,
+        includeArchived: false,
+        updatedAfter: undefined,
+        updatedBefore: undefined,
+        limit: 10,
+      };
+
+      const all = yield* search.matchThreads(base);
+      assert.deepEqual(
+        all.map((match) => [match.threadId, match.source, match.projectTitle]),
+        [
+          [titled, "title", project],
+          [both, "assistant", project],
+          [long, "user", project],
+          [elsewhere, "user", other],
+        ],
+      );
+      assert.equal(all[0]!.snippet, "Modelflare billing");
+      assert.equal(all[0]!.messageCreatedAt, null);
+      // A long message is cut around the match and says so on both sides.
+      const snippet = all[2]!.snippet;
+      assert.isAtMost(snippet.length, 240);
+      assert.include(snippet, "Modelflare rollout");
+      assert.isTrue(snippet.startsWith("…") && snippet.endsWith("…"));
+
+      assert.deepEqual(
+        (yield* search.matchThreads({ ...base, includeArchived: true })).map((m) => m.threadId),
+        [titled, archived, both, long, elsewhere],
+      );
+      assert.deepEqual(
+        (yield* search.matchThreads({ ...base, projectId: other })).map((m) => m.threadId),
+        [elsewhere],
+      );
+      assert.deepEqual(
+        (yield* search.matchThreads({
+          ...base,
+          updatedAfter: DateTime.formatIso(at(30)),
+          updatedBefore: DateTime.formatIso(at(50)),
+        })).map((m) => m.threadId),
+        [both, long],
+      );
+      assert.lengthOf(yield* search.matchThreads({ ...base, limit: 2 }), 2);
+      assert.deepEqual(
+        (yield* search.matchThreads({ ...base, threadIds: [long, elsewhere] })).map(
+          (m) => m.threadId,
+        ),
+        [long, elsewhere],
+      );
     }),
   );
 
@@ -199,3 +291,52 @@ it.layer(layerTest)("ThreadSearch", (it) => {
     }),
   );
 });
+
+it.effect("searches on the reader worker while the writer is busy", () =>
+  Effect.gen(function* () {
+    const fileSystem = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const directory = yield* fileSystem.makeTempDirectoryScoped({ prefix: "goat-thread-search-" });
+    const layerFile = Layer.mergeAll(
+      ThreadSearch.layer,
+      ProjectionStore.layer,
+      ProjectStore.layer,
+    ).pipe(
+      Layer.provideMerge(SqlitePersistence.layerFromPath(path.join(directory, "state.sqlite"))),
+      Layer.provide(NodeServices.layer),
+    );
+
+    yield* Effect.gen(function* () {
+      const projections = yield* ProjectionStore.ProjectionStoreV2;
+      const search = yield* ThreadSearch.ThreadSearch;
+      const sql = yield* SqlClient.SqlClient;
+      const project = ProjectId.make("project:search-reader");
+      const threadId = ThreadId.make("thread:reader");
+      yield* createProject(project);
+      yield* Effect.forEach(
+        [thread(threadId, project), message(threadId, "reader", "user", "needle on the reader")],
+        projections.apply,
+        { discard: true },
+      );
+
+      const writerHeld = yield* Deferred.make<void>();
+      const releaseWriter = yield* Deferred.make<void>();
+      const writer = yield* Effect.forkChild(
+        sql.withTransaction(
+          Deferred.succeed(writerHeld, undefined).pipe(
+            Effect.andThen(Deferred.await(releaseWriter)),
+          ),
+        ),
+      );
+      yield* Deferred.await(writerHeld);
+      const result = yield* search.search({ query: "needle" });
+      yield* Deferred.succeed(releaseWriter, undefined);
+      yield* Fiber.join(writer);
+
+      assert.deepEqual(
+        result.matches.map((match) => match.threadId),
+        [threadId],
+      );
+    }).pipe(Effect.provide(layerFile));
+  }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+);

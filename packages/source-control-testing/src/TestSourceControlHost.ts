@@ -1,18 +1,10 @@
-/**
- * A `SourceControlHost.SourceControlHost` for provider tests. Settings start from the defaults
- * or what the test supplies, and `TestSourceControlHostSettings` patches them mid-test the way a
- * client's settings write would. Process runs and git operations go to what the test supplies;
- * anything else dies, so an unexpected CLI or git call is visible.
- *
- * @module source-control-testing/TestSourceControlHost
- */
 import {
   DEFAULT_SERVER_SETTINGS,
   type ServerSettings,
   type ServerSettingsPatch,
-} from "@t3tools/contracts";
-import { applyServerSettingsPatch } from "@t3tools/shared/serverSettings";
-import * as SourceControlHost from "@t3tools/source-control-core/server/SourceControlHost";
+} from "@goat/contracts";
+import { applyServerSettingsPatch } from "@goat/shared/serverSettings";
+import * as SourceControlHost from "@goat/source-control-core/server/SourceControlHost";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -25,11 +17,10 @@ export interface TestSourceControlHostOptions {
   readonly git?: Partial<SourceControlHost.SourceControlHost["Service"]["git"]>;
 }
 
-/** Lets a test change the settings its `layer` reports. */
 export class TestSourceControlHostSettings extends Context.Service<
   TestSourceControlHostSettings,
   { readonly update: (patch: ServerSettingsPatch) => Effect.Effect<void> }
->()("@t3tools/source-control-testing/TestSourceControlHost/TestSourceControlHostSettings") {}
+>()("@goat/source-control-testing/TestSourceControlHost/TestSourceControlHostSettings") {}
 
 type Git = SourceControlHost.SourceControlHost["Service"]["git"];
 
@@ -74,7 +65,6 @@ export const layer = (
     }),
   );
 
-/** A successful run's output, for tests that script CLI responses. */
 export const processOutput = (
   stdout: string,
   options?: {

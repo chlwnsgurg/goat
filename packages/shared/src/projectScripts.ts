@@ -1,4 +1,5 @@
-import type { ProjectId, ProjectScript, ServerSettings } from "@t3tools/contracts";
+import type { ProjectId, ProjectScript, ServerSettings } from "@goat/contracts";
+import { withLegacyEnvNames } from "@goat/contracts/legacyT3Names";
 
 type ProjectScriptSettings = Pick<
   ServerSettings,
@@ -8,12 +9,6 @@ type ProjectScriptSettings = Pick<
   | "projectSettingsFolded"
 >;
 
-/**
- * The project's override wins, then environment defaults. Until the legacy
- * fields have been folded into `projectSettingsOverrides`, the old map (null
- * there meant "reset to machine defaults") and the aggregate's own scripts
- * still count, so a server that has not run the fold yet behaves as before.
- */
 export function resolveProjectScripts(
   settings: ProjectScriptSettings,
   project: { id: ProjectId; scripts: readonly ProjectScript[] },
@@ -59,30 +54,42 @@ export function projectScriptRuntimeEnv(
   input: ProjectScriptRuntimeEnvInput,
 ): Record<string, string> {
   const env: Record<string, string> = {
-    T3CODE_PROJECT_ROOT: input.project.cwd,
+    GOAT_PROJECT_ROOT: input.project.cwd,
   };
   if (input.worktreePath) {
-    env.T3CODE_WORKTREE_PATH = input.worktreePath;
+    env.GOAT_WORKTREE_PATH = input.worktreePath;
   }
-  if (input.extraEnv) {
-    return { ...env, ...input.extraEnv };
-  }
-  return env;
+  // User scripts written before the GOAT rename read the legacy names. Applied after
+  // overrides, so an overridden GOAT name carries its value to the legacy one.
+  return withLegacyEnvNames(input.extraEnv ? { ...env, ...input.extraEnv } : env);
 }
 
 export function setupProjectScript(scripts: readonly ProjectScript[]): ProjectScript | null {
   return scripts.find((script) => script.runOnWorktreeCreate) ?? null;
 }
 
-/** Menu label naming the lifecycle roles a script runs in, e.g. "Clean (on settle)". */
 export function projectScriptMenuLabel(script: ProjectScript): string {
   const roles = [
     ...(script.runOnWorktreeCreate ? ["setup"] : []),
     ...(script.runOnSettle ? ["on settle"] : []),
+    ...(script.runAsCheck ? ["check"] : []),
   ];
   return roles.length === 0 ? script.name : `${script.name} (${roles.join(", ")})`;
 }
 
 export function settleProjectScript(scripts: readonly ProjectScript[]): ProjectScript | null {
   return scripts.find((script) => script.runOnSettle === true) ?? null;
+}
+
+/**
+ * Leading spaces omit scripts from Bash history with ignorespace/ignoreboth,
+ * zsh with HIST_IGNORE_SPACE, and fish. Only the first line is prefixed, so later
+ * entries from multiline input may still enter history. PowerShell/PSReadLine history is not suppressed.
+ */
+export function projectScriptTerminalInput(command: string): string {
+  return ` ${command}\r`;
+}
+
+export function checkProjectScript(scripts: readonly ProjectScript[]): ProjectScript | null {
+  return scripts.find((script) => script.runAsCheck === true) ?? null;
 }

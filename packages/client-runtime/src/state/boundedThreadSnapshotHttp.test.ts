@@ -1,4 +1,4 @@
-import { ThreadId } from "@t3tools/contracts";
+import { ThreadId } from "@goat/contracts";
 import { describe, expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -158,7 +158,6 @@ describe("boundedThreadSnapshotLoader", () => {
     const fetchFn = ((input: RequestInfo | URL) => {
       const url = String(input);
       if (url.includes(`/api/orchestration/threads/${THREAD_ID}/bounded`)) {
-        // Generic HTML/route 404: not a structured thread_not_found payload.
         return Promise.resolve(
           new Response("Not Found", {
             status: 404,

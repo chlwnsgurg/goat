@@ -11,12 +11,32 @@ describe("reception results", () => {
     for (const action of [
       { type: "create_task", title: "Re-verify", instruction: "Run it again." },
       { type: "status", taskId: "task-1" },
+      { type: "move_task", taskId: "task-1", host: "mini" },
       { type: "answer_question", taskId: "task-1", questionId: "q-1", answer: "Use main." },
       { type: "clarify", question: "Which project?" },
       { type: "report_only" },
     ]) {
       expect(decode({ replyText: "Okay.", action })).toEqual({ replyText: "Okay.", action });
     }
+  });
+
+  it("decodes legacy notes without quotes and accepts quotes on new results and tasks", () => {
+    const legacy = {
+      replyText: "Okay.",
+      remember: "Reply in Korean.",
+      action: { type: "report_only" },
+    };
+    expect(decode(legacy)).toEqual(legacy);
+    expect(decode(legacy)).not.toHaveProperty("rememberQuote");
+    expect(decode({ ...legacy, rememberQuote: "remember that" })).toMatchObject({
+      rememberQuote: "remember that",
+    });
+    const action = { type: "create_task", title: "Forget a note", instruction: "Remove it." };
+    expect(decodeAction(action)).toEqual(action);
+    expect(decodeAction(action)).not.toHaveProperty("notesChangeRequested");
+    expect(
+      decodeAction({ ...action, notesChangeRequested: "forget the Korean note" }),
+    ).toMatchObject({ notesChangeRequested: "forget the Korean note" });
   });
 
   it("rejects actions outside the contract and empty replies", () => {
@@ -30,6 +50,15 @@ describe("reception results", () => {
         taskId: "task-1",
       }),
     ).toThrow();
+  });
+
+  it("requires a task and a nonempty destination for a move", () => {
+    for (const action of [
+      { type: "move_task", taskId: "task-1" },
+      { type: "move_task", host: "mini" },
+      { type: "move_task", taskId: "task-1", host: "  " },
+    ])
+      expect(() => decodeAction(action)).toThrow();
   });
 
   it("reads a requested host on new work, and inputs with or without host choices", () => {

@@ -5,7 +5,7 @@ import {
   type ServerConfig,
   type ThreadId,
   type VcsListRefsResult,
-} from "@t3tools/contracts";
+} from "@goat/contracts";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
@@ -46,28 +46,27 @@ export class ConnectionTargetStore extends Context.Service<
   ConnectionTargetStore,
   {
     readonly list: Effect.Effect<ReadonlyArray<ConnectionTarget>, ConnectionPersistenceError>;
-    /** Saved environments the user switched off. See `ConnectionRegistrationStore.setEnabled`. */
     readonly listDisabled: Effect.Effect<ReadonlyArray<EnvironmentId>, ConnectionPersistenceError>;
   }
->()("@t3tools/client-runtime/platform/persistence/ConnectionTargetStore") {}
+>()("@goat/client-runtime/platform/persistence/ConnectionTargetStore") {}
 
 export class ConnectionRegistrationStore extends Context.Service<
   ConnectionRegistrationStore,
   {
     /**
-     * Saves one route's records and sets the environment's full route list,
-     * preferred first. Records of routes missing from `routes` are dropped.
+     * Records of routes missing from `routes` are dropped.
      */
     readonly register: (
       registration: ConnectionRegistration,
       routes: ReadonlyArray<PersistedConnectionTarget>,
     ) => Effect.Effect<void, ConnectionPersistenceError>;
-    /** Reorders or drops routes without adding one. `routes` must not be empty. */
+    /**
+     * `routes` must not be empty.
+     */
     readonly setRoutes: (
       environmentId: EnvironmentId,
       routes: ReadonlyArray<PersistedConnectionTarget>,
     ) => Effect.Effect<void, ConnectionPersistenceError>;
-    /** Forgets the environment and every route it had. */
     readonly remove: (
       environmentId: EnvironmentId,
     ) => Effect.Effect<void, ConnectionPersistenceError>;
@@ -76,7 +75,7 @@ export class ConnectionRegistrationStore extends Context.Service<
       enabled: boolean,
     ) => Effect.Effect<void, ConnectionPersistenceError>;
   }
->()("@t3tools/client-runtime/platform/persistence/ConnectionRegistrationStore") {}
+>()("@goat/client-runtime/platform/persistence/ConnectionRegistrationStore") {}
 
 export class EnvironmentCacheStore extends Context.Service<
   EnvironmentCacheStore,
@@ -103,10 +102,6 @@ export class EnvironmentCacheStore extends Context.Service<
       environmentId: EnvironmentId,
       threadId: ThreadId,
     ) => Effect.Effect<void, ConnectionPersistenceError>;
-    /**
-     * The last complete server configuration. This deliberately includes provider
-     * metadata so offline task creation can still offer the models a user last saw.
-     */
     readonly loadServerConfig: (
       environmentId: EnvironmentId,
     ) => Effect.Effect<Option.Option<ServerConfig>, ConnectionPersistenceError>;
@@ -115,8 +110,8 @@ export class EnvironmentCacheStore extends Context.Service<
       config: ServerConfig,
     ) => Effect.Effect<void, ConnectionPersistenceError>;
     /**
-     * The unfiltered branch list for a workspace. Query-specific lists are not
-     * cached because they are incomplete and unsafe to present as a full picker.
+     * Query-specific lists are not cached because they are incomplete and unsafe
+     * to present as a full picker.
      */
     readonly loadVcsRefs: (
       environmentId: EnvironmentId,
@@ -132,9 +127,8 @@ export class EnvironmentCacheStore extends Context.Service<
       cwd: string,
     ) => Effect.Effect<void, ConnectionPersistenceError>;
     /**
-     * Removes every persisted branch-list snapshot for an environment. Git ref
-     * mutations are repository-wide, and linked worktrees may have cached the
-     * same refs under different working-directory keys.
+     * Git ref mutations are repository-wide, and linked worktrees may have
+     * cached the same refs under different working-directory keys.
      */
     readonly clearVcsRefs: (
       environmentId: EnvironmentId,
@@ -143,11 +137,11 @@ export class EnvironmentCacheStore extends Context.Service<
       environmentId: EnvironmentId,
     ) => Effect.Effect<void, ConnectionPersistenceError>;
   }
->()("@t3tools/client-runtime/platform/persistence/EnvironmentCacheStore") {}
+>()("@goat/client-runtime/platform/persistence/EnvironmentCacheStore") {}
 
 export class EnvironmentOwnedDataCleanup extends Context.Reference<{
   readonly clear: (environmentId: EnvironmentId) => Effect.Effect<void>;
-}>("@t3tools/client-runtime/platform/persistence/EnvironmentOwnedDataCleanup", {
+}>("@goat/client-runtime/platform/persistence/EnvironmentOwnedDataCleanup", {
   defaultValue: () => ({
     clear: () => Effect.void,
   }),

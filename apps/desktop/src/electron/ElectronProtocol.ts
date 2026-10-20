@@ -11,17 +11,44 @@ import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
 
 import * as Electron from "electron";
+import {
+  LEGACY_DESKTOP_DEV_RENDERER_SCHEME,
+  LEGACY_DESKTOP_RENDERER_SCHEME,
+} from "@goat/contracts/legacyT3Names";
 
 export const DESKTOP_HOST = "app";
-const DESKTOP_PRODUCTION_SCHEME = "t3code";
-const DESKTOP_DEVELOPMENT_SCHEME = "t3code-dev";
+const DESKTOP_PRODUCTION_SCHEME = "goat";
+const DESKTOP_DEVELOPMENT_SCHEME = "goat-dev";
+/**
+ * A blank page the renderer origin migration loads on both origins, so it can read and write
+ * their storage without starting the app.
+ */
+export const ORIGIN_MIGRATION_PATH = "/__goat-origin-migration";
 
+/** The scheme the renderer is served from. */
 export function getDesktopScheme(isDevelopment: boolean): string {
   return isDevelopment ? DESKTOP_DEVELOPMENT_SCHEME : DESKTOP_PRODUCTION_SCHEME;
 }
 
-function getDesktopOrigin(isDevelopment: boolean): string {
+/** The renderer scheme before D13. Its origin keeps the storage older builds wrote. */
+export function getLegacyDesktopScheme(isDevelopment: boolean): string {
+  return isDevelopment ? LEGACY_DESKTOP_DEV_RENDERER_SCHEME : LEGACY_DESKTOP_RENDERER_SCHEME;
+}
+
+/**
+ * URL schemes the OS hands to this app: the renderer's own, which return URLs built from
+ * `location` use, and the legacy one that existing prompt, thread and auth links use.
+ */
+export function getDesktopLinkSchemes(isDevelopment: boolean): readonly [string, string] {
+  return [getDesktopScheme(isDevelopment), getLegacyDesktopScheme(isDevelopment)];
+}
+
+export function getDesktopOrigin(isDevelopment: boolean): string {
   return `${getDesktopScheme(isDevelopment)}://${DESKTOP_HOST}`;
+}
+
+export function getLegacyDesktopOrigin(isDevelopment: boolean): string {
+  return `${getLegacyDesktopScheme(isDevelopment)}://${DESKTOP_HOST}`;
 }
 
 export function getDesktopUrl(isDevelopment: boolean): string {
@@ -52,8 +79,6 @@ export class ElectronProtocolUnregistrationError extends Schema.TaggedError<Elec
   }
 }
 
-// The scheme either proxies to a dev server (`targetOrigin`) or serves the
-// built client from disk (`assetDirectory`).
 export type DesktopProtocolRegistrationInput = {
   readonly scheme: string;
   readonly clerkFrontendApiHostname: string | undefined;
@@ -65,8 +90,12 @@ export class ElectronProtocol extends Context.Service<
     readonly registerDesktopProtocol: (
       input: DesktopProtocolRegistrationInput,
     ) => Effect.Effect<void, ElectronProtocolRegistrationError, Scope.Scope>;
+    /** Serves only the origin migration page on a legacy renderer scheme. */
+    readonly registerLegacyDesktopProtocol: (
+      scheme: string,
+    ) => Effect.Effect<void, ElectronProtocolRegistrationError, Scope.Scope>;
   }
->()("@t3tools/desktop/electron/ElectronProtocol") {}
+>()("@goat/desktop/electron/ElectronProtocol") {}
 
 export function makeDesktopContentSecurityPolicy(input: DesktopProtocolRegistrationInput): string {
   const clerkOrigin = input.clerkFrontendApiHostname
@@ -96,9 +125,8 @@ export function makeDesktopContentSecurityPolicy(input: DesktopProtocolRegistrat
     "style-src 'self' 'unsafe-inline'",
     `font-src 'self' ${input.scheme}: data:`,
     "worker-src 'self' blob:",
-    // Document viewers use local Blob URLs and signed assets from runtime environments.
-    // HTML viewers retain their own sandbox; the renderer's script policy stays unchanged.
     "frame-src 'self' blob: http: https:",
+    "object-src 'self' blob: http: https:",
     "form-action 'self'",
   ].join("; ");
 }
@@ -115,34 +143,35 @@ function withContentSecurityPolicy(response: Response, policy: string): Response
 
 /**
  * Must run synchronously during process bootstrap, before Electron emits `ready`.
+ * Legacy schemes stay privileged so their origin storage stays reachable for migration.
  */
 function registerDesktopSchemePrivilegesSync(): void {
+  const privileges = {
+    standard: true,
+    secure: true,
+    supportFetchAPI: true,
+    corsEnabled: true,
+    stream: true,
+  };
   Electron.protocol.registerSchemesAsPrivileged([
-    {
-      scheme: DESKTOP_PRODUCTION_SCHEME,
-      privileges: {
-        standard: true,
-        secure: true,
-        supportFetchAPI: true,
-        corsEnabled: true,
-        stream: true,
-        // Custom schemes skip Chromium's V8 code cache unless they opt in.
-        // Dev stays off: Vite serves changing code at stable URLs.
-        codeCache: true,
-      },
-    },
-    {
-      scheme: DESKTOP_DEVELOPMENT_SCHEME,
-      privileges: {
-        standard: true,
-        secure: true,
-        supportFetchAPI: true,
-        corsEnabled: true,
-        stream: true,
-      },
-    },
+    // Custom schemes skip Chromium's V8 code cache unless they opt in.
+    // Dev stays off: Vite serves changing code at stable URLs.
+    { scheme: DESKTOP_PRODUCTION_SCHEME, privileges: { ...privileges, codeCache: true } },
+    { scheme: DESKTOP_DEVELOPMENT_SCHEME, privileges },
+    { scheme: LEGACY_DESKTOP_RENDERER_SCHEME, privileges },
+    { scheme: LEGACY_DESKTOP_DEV_RENDERER_SCHEME, privileges },
   ]);
 }
+
+const isOriginMigrationRequest = (request: Request) => {
+  const url = new URL(request.url);
+  return url.host === DESKTOP_HOST && url.pathname === ORIGIN_MIGRATION_PATH;
+};
+
+const originMigrationPage = () =>
+  new Response("<!doctype html><title></title>", {
+    headers: { "content-type": "text/html; charset=utf-8" },
+  });
 
 const registerDesktopSchemePrivileges = Effect.sync(registerDesktopSchemePrivilegesSync).pipe(
   Effect.withSpan("desktop.electron.protocol.registerSchemePrivileges"),
@@ -161,8 +190,6 @@ const netFetch = (url: string, init: RequestInit) =>
     catch: (cause) => new ElectronProtocolFetchError({ cause }),
   });
 
-// The dev renderer target can briefly refuse connections while Vite restarts:
-// retry idempotent requests after 50ms, then 150ms, and keep the last failure.
 const fetchWithTransientRetry = (url: string, init: RequestInit) =>
   netFetch(url, init).pipe(
     Effect.retry({ schedule: Schedule.exponential("50 millis", 3), times: 2 }),
@@ -213,9 +240,6 @@ const proxyRequest = Effect.fn("desktop.protocol.proxyRequest")(function* (
   return withContentSecurityPolicy(response, contentSecurityPolicy);
 });
 
-// Serves the packaged web client without a backend: files resolve within the
-// asset directory, and any other path falls back to index.html so the SPA
-// router handles it, except for asset-shaped misses (`/missing.js`) which 404.
 const serveDesktopAsset = Effect.fn("desktop.protocol.serveAsset")(function* (
   request: Request,
   assetDirectory: string,
@@ -270,13 +294,13 @@ export const make = Effect.gen(function* () {
         Effect.try({
           try: () => {
             Electron.protocol.handle(input.scheme, async (request) => {
+              if (isOriginMigrationRequest(request)) return originMigrationPage();
               if ("assetDirectory" in input) {
                 return withContentSecurityPolicy(
                   await runPromise(serveDesktopAsset(request, input.assetDirectory)),
                   contentSecurityPolicy,
                 );
               }
-              // Reject with net.fetch's own error, as an unproxied fetch would.
               return runPromise(
                 proxyRequest(request, input.targetOrigin, contentSecurityPolicy).pipe(
                   Effect.catchTags({
@@ -301,7 +325,28 @@ export const make = Effect.gen(function* () {
     },
   );
 
-  return ElectronProtocol.of({ registerDesktopProtocol });
+  const registerLegacyDesktopProtocol = Effect.fn(
+    "desktop.electron.protocol.registerLegacyDesktopProtocol",
+  )(function* (scheme: string) {
+    yield* Effect.acquireRelease(
+      Effect.try({
+        try: () =>
+          Electron.protocol.handle(scheme, async (request) =>
+            isOriginMigrationRequest(request)
+              ? originMigrationPage()
+              : new Response(null, { status: 404 }),
+          ),
+        catch: (cause) => new ElectronProtocolRegistrationError({ scheme, cause }),
+      }),
+      () =>
+        Effect.try({
+          try: () => Electron.protocol.unhandle(scheme),
+          catch: (cause) => new ElectronProtocolUnregistrationError({ scheme, cause }),
+        }).pipe(Effect.orDie),
+    );
+  });
+
+  return ElectronProtocol.of({ registerDesktopProtocol, registerLegacyDesktopProtocol });
 });
 
 export const layer = Layer.effect(ElectronProtocol, make);

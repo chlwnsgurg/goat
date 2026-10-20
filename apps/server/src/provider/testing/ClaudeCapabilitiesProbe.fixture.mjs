@@ -16,7 +16,7 @@ if (rawMcpConfig) {
   }
 }
 NodeFS.writeFileSync(
-  process.env.T3_PROBE_INVOCATION_PATH,
+  process.env.GOAT_PROBE_INVOCATION_PATH,
   JSON.stringify({
     args,
     cwd: process.cwd(),
@@ -45,7 +45,6 @@ lines.on("line", (line) => {
       account: { email: "dev@example.com", subscriptionType: "pro", tokenSource: "oauth" },
     });
   }
-  // The probe follows initialize with get_usage on the same process.
   if (message.request?.subtype === "get_usage") {
     reply({
       session: {},

@@ -1,6 +1,14 @@
+import {
+  LEGACY_ENVIRONMENT_PATH,
+  GOAT_ENVIRONMENT_PATH,
+  LEGACY_ACTIVITY_PATH,
+  GOAT_ACTIVITY_PATH,
+  LEGACY_ORCHESTRATION_PROTOCOL_HEADER,
+} from "@goat/contracts/legacyT3Names";
 import * as Context from "effect/Context";
 import type * as DateTime from "effect/DateTime";
 import * as Schema from "effect/Schema";
+import * as SchemaGetter from "effect/SchemaGetter";
 import * as HttpApi from "effect/http-api/HttpApi";
 import * as HttpApiEndpoint from "effect/http-api/HttpApiEndpoint";
 import * as HttpApiGroup from "effect/http-api/HttpApiGroup";
@@ -41,7 +49,7 @@ import {
 import {
   ExecutionEnvironmentDescriptor,
   ORCHESTRATION_PROTOCOL_HEADER,
-  ORCHESTRATION_PROTOCOL_VERSION_TEXT,
+  servesOrchestrationProtocol,
 } from "./environment.ts";
 import {
   DpopFailureReason,
@@ -54,6 +62,7 @@ import {
   OrchestrationV2ThreadBoundedSnapshot,
   OrchestrationV2ThreadDetailSnapshot,
   OrchestrationV2ThreadHistoryPage,
+  OrchestrationV2ThreadTranscript,
 } from "./orchestrationV2.ts";
 import { Project, ProjectMutation, ProjectSnapshot } from "./project.ts";
 import {
@@ -77,11 +86,38 @@ const OptionalBearerHeaders = Schema.Struct({
   dpop: Schema.optionalKey(Schema.String),
 });
 
-const OrchestrationProtocolHeaders = Schema.Struct({
+const GoatOrchestrationProtocolHeaders = Schema.Struct({
   authorization: Schema.optionalKey(Schema.String),
   dpop: Schema.optionalKey(Schema.String),
-  [ORCHESTRATION_PROTOCOL_HEADER]: Schema.Literal(ORCHESTRATION_PROTOCOL_VERSION_TEXT),
+  [ORCHESTRATION_PROTOCOL_HEADER]: Schema.String.check(
+    Schema.makeFilter((announced) => servesOrchestrationProtocol(announced)),
+  ),
 });
+
+const OrchestrationProtocolHeaders = Schema.Struct({
+  ...OptionalBearerHeaders.fields,
+  [ORCHESTRATION_PROTOCOL_HEADER]: Schema.optionalKey(Schema.String),
+  [LEGACY_ORCHESTRATION_PROTOCOL_HEADER]: Schema.optionalKey(Schema.String),
+})
+  .check(
+    Schema.makeFilter((headers) =>
+      servesOrchestrationProtocol(
+        headers[ORCHESTRATION_PROTOCOL_HEADER] ?? headers[LEGACY_ORCHESTRATION_PROTOCOL_HEADER],
+      ),
+    ),
+  )
+  .pipe(
+    Schema.decodeTo(GoatOrchestrationProtocolHeaders, {
+      decode: SchemaGetter.transform(
+        ({ [LEGACY_ORCHESTRATION_PROTOCOL_HEADER]: legacyProtocol, ...headers }) => ({
+          ...headers,
+          [ORCHESTRATION_PROTOCOL_HEADER]:
+            headers[ORCHESTRATION_PROTOCOL_HEADER] ?? legacyProtocol ?? "",
+        }),
+      ),
+      encode: SchemaGetter.transform((headers) => headers),
+    }),
+  );
 
 const OptionalDpopProofHeaders = Schema.Struct({
   dpop: Schema.optionalKey(Schema.String),
@@ -92,6 +128,7 @@ export const EnvironmentRequestInvalidReason = Schema.Literals([
   "scope_not_granted",
   "invalid_command",
   "invalid_history_cursor",
+  "thread_transcript_too_large",
 ]);
 export type EnvironmentRequestInvalidReason = typeof EnvironmentRequestInvalidReason.Type;
 
@@ -150,7 +187,6 @@ export class EnvironmentAuthInvalidError extends Schema.TaggedError<EnvironmentA
   {
     code: Schema.Literal("auth_invalid"),
     reason: EnvironmentAuthInvalidReason,
-    // Older servers do not send a DPoP failure category.
     dpopFailureReason: Schema.optionalKey(DpopFailureReason),
     traceId: TrimmedNonEmptyString,
   },
@@ -383,7 +419,7 @@ export interface EnvironmentSessionPrincipalShape {
 export class EnvironmentAuthenticatedPrincipal extends Context.Service<
   EnvironmentAuthenticatedPrincipal,
   EnvironmentSessionPrincipalShape
->()("@t3tools/contracts/environmentHttp/EnvironmentAuthenticatedPrincipal") {}
+>()("@goat/contracts/environmentHttp/EnvironmentAuthenticatedPrincipal") {}
 
 export class EnvironmentAuthenticatedAuth extends HttpApiMiddleware.Service<
   EnvironmentAuthenticatedAuth,
@@ -412,21 +448,15 @@ export const EnvironmentCloudLinkStateResult = Schema.Struct({
   cloudUserId: Schema.NullOr(Schema.String),
   relayUrl: Schema.NullOr(Schema.String),
   relayIssuer: Schema.NullOr(Schema.String),
-  // A managed Cloudflare tunnel is provisioned for this link. False for a
-  // publish-only link (activity publishing without a relay-managed tunnel), so
-  // clients can present the two capabilities as independent settings.
-  // Optional so newer clients tolerate older environment servers.
   managedTunnelActive: Schema.optional(Schema.Boolean),
   publishAgentActivity: Schema.Boolean,
-  // Opt-in: T3 Connect holds webhook requests while this environment is
-  // offline. Optional so newer clients tolerate older environment servers.
   holdWebhooksWhileOffline: Schema.optional(Schema.Boolean),
+  linkRevoked: Schema.optional(Schema.Boolean),
 });
 export type EnvironmentCloudLinkStateResult = typeof EnvironmentCloudLinkStateResult.Type;
 
 export const EnvironmentCloudPreferencesRequest = Schema.Struct({
   publishAgentActivity: Schema.Boolean,
-  // Omit to leave the current value unchanged.
   holdWebhooksWhileOffline: Schema.optional(Schema.Boolean),
 });
 export type EnvironmentCloudPreferencesRequest = typeof EnvironmentCloudPreferencesRequest.Type;
@@ -452,14 +482,60 @@ export const SshServerActivity = Schema.Struct({
   pid: Schema.Int,
 });
 
+export const GOAT_RUNTIME_DRAIN_PATH = "/.well-known/goat/runtime/drain";
+/** Header carrying the host-user secret from `<userdata>/runtime-control.token`. */
+export const GOAT_RUNTIME_CONTROL_HEADER = "x-goat-runtime-control";
+export const RUNTIME_DRAIN_DEFAULT_GRACE_SECONDS = 60;
+export const RUNTIME_DRAIN_MAX_GRACE_SECONDS = 300;
+
+/**
+ * Asks the server to stop admitting new turns and wait for running work, so a successor can
+ * replace it. Without `force` an expired grace window cancels the drain and the server keeps
+ * serving. `force` is the user's confirmation; a second request with `force` confirms a drain
+ * that is already waiting.
+ */
+export const RuntimeDrainRequest = Schema.Struct({
+  expectedInstanceId: TrimmedNonEmptyString,
+  targetVersion: TrimmedNonEmptyString,
+  graceSeconds: Schema.optionalKey(
+    Schema.Int.check(Schema.isBetween({ minimum: 0, maximum: RUNTIME_DRAIN_MAX_GRACE_SECONDS })),
+  ),
+  force: Schema.optionalKey(Schema.Boolean),
+});
+export type RuntimeDrainRequest = typeof RuntimeDrainRequest.Type;
+
+/**
+ * `drained`: no work is running and the server exits on its own right after answering; restart
+ * recovery persists any interrupted work for the successor. `cancelled`: the grace window expired
+ * unconfirmed and the server admits turns again. `instance-changed`: the request named another
+ * server start; re-probe.
+ */
+export const RuntimeDrainResult = Schema.Struct({
+  status: Schema.Literals(["drained", "cancelled", "instance-changed"]),
+  instanceId: TrimmedNonEmptyString,
+  forced: Schema.Boolean,
+});
+export type RuntimeDrainResult = typeof RuntimeDrainResult.Type;
+
 class EnvironmentMetadataHttpApi extends HttpApiGroup.make("metadata")
   .add(
-    HttpApiEndpoint.get("descriptor", "/.well-known/t3/environment", {
+    HttpApiEndpoint.get("descriptor", GOAT_ENVIRONMENT_PATH, {
       success: ExecutionEnvironmentDescriptor,
     }),
   )
   .add(
-    HttpApiEndpoint.get("sshActivity", "/.well-known/t3/activity", {
+    HttpApiEndpoint.get("sshActivity", GOAT_ACTIVITY_PATH, {
+      success: SshServerActivity,
+      error: [EnvironmentInternalError, EnvironmentHttpForbiddenError],
+    }),
+  )
+  .add(
+    HttpApiEndpoint.get("legacyDescriptor", LEGACY_ENVIRONMENT_PATH, {
+      success: ExecutionEnvironmentDescriptor,
+    }),
+  )
+  .add(
+    HttpApiEndpoint.get("legacySshActivity", LEGACY_ACTIVITY_PATH, {
       success: SshServerActivity,
       error: [EnvironmentInternalError, EnvironmentHttpForbiddenError],
     }),
@@ -541,12 +617,6 @@ class EnvironmentAuthHttpApi extends HttpApiGroup.make("auth")
     }).middleware(EnvironmentAuthenticatedAuth),
   ) {}
 
-/**
- * The OAuth authorization server outside agents use to sign in to `/mcp`.
- * `authorize` is where the agent sends the browser: it answers a redirect to
- * the web app's approval page, or a plain error page for a request that names
- * an unverified client or redirect, so the response is not a schema.
- */
 class EnvironmentMcpOAuthHttpApi extends HttpApiGroup.make("mcpOAuth")
   .add(
     HttpApiEndpoint.get("protectedResource", "/.well-known/oauth-protected-resource", {
@@ -597,10 +667,6 @@ const EnvironmentOrchestrationThreadSnapshotParams = Schema.Struct({
   threadId: ThreadId,
 });
 
-/**
- * `compactTurnItems=1` opts into `turnItemsOmitLocalVisible`. Other values are
- * ignored, and older servers ignore the whole query.
- */
 const EnvironmentOrchestrationThreadBoundedSnapshotQuery = Schema.Struct({
   compactTurnItems: Schema.optionalKey(Schema.String),
 });
@@ -632,6 +698,14 @@ class EnvironmentOrchestrationHttpApi extends HttpApiGroup.make("orchestration")
       params: EnvironmentOrchestrationThreadSnapshotParams,
       success: OrchestrationV2ThreadDetailSnapshot,
       error: EnvironmentOrchestrationThreadSnapshotErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.get("threadTranscript", "/api/orchestration/threads/:threadId/transcript", {
+      headers: OrchestrationProtocolHeaders,
+      params: EnvironmentOrchestrationThreadSnapshotParams,
+      success: OrchestrationV2ThreadTranscript,
+      error: [EnvironmentRequestInvalidError, ...EnvironmentOrchestrationThreadSnapshotErrors],
     }).middleware(EnvironmentAuthenticatedAuth),
   )
   .add(
@@ -670,7 +744,6 @@ class EnvironmentProjectsHttpApi extends HttpApiGroup.make("projects")
     }).middleware(EnvironmentAuthenticatedAuth),
   ) {}
 
-/** Large, compressible pull-request payloads travel over HTTP rather than the RPC socket. */
 class EnvironmentPullRequestsHttpApi extends HttpApiGroup.make("pullRequests").add(
   HttpApiEndpoint.post("diff", "/api/pull-requests/diff", {
     headers: OptionalBearerHeaders,

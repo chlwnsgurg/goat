@@ -1,18 +1,9 @@
-/**
- * DirectEndpoints - the LAN and tailnet addresses this server listens on now.
- *
- * Clients connected one way (often T3 Connect) save these as extra routes so
- * they can move to a faster path when one is reachable, and replace a saved
- * LAN address when DHCP or a new Wi-Fi network changes it. Only addresses the
- * server is actually bound to are listed: a loopback-only server lists none,
- * because its loopback address means a different machine to every client.
- */
-import type { ServerDirectEndpoint } from "@t3tools/contracts";
+import type { ServerDirectEndpoint } from "@goat/contracts";
 import {
   buildTailscaleHttpsBaseUrl,
   probeTailscaleHttpsEndpoint,
   readTailscaleStatus,
-} from "@t3tools/tailscale";
+} from "@goat/tailscale";
 import * as Context from "effect/Context";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
@@ -23,7 +14,7 @@ import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 import * as NodeNet from "node:net";
 import * as NodeOS from "node:os";
 
-import { isPrivateNetworkHost, isTailnetHost } from "@t3tools/shared/hostClassification";
+import { isPrivateNetworkHost, isTailnetHost } from "@goat/shared/hostClassification";
 
 import * as ServerConfig from "../config.ts";
 import { formatHostForUrl, isLoopbackHost, isWildcardHost } from "../startupAccess.ts";
@@ -32,8 +23,7 @@ type NetworkInterfacesMap = ReturnType<typeof NodeOS.networkInterfaces>;
 
 /**
  * Stays under the config read's own discovery timeout, so a slow `tailscale`
- * CLI drops only the tailnet name and never the LAN addresses. An empty list
- * would make clients forget the routes they learned.
+ * CLI drops only the tailnet name and never the LAN addresses.
  */
 const TAILSCALE_ENDPOINT_TIMEOUT = Duration.seconds(3);
 
@@ -42,14 +32,12 @@ export class DirectEndpoints extends Context.Service<
   {
     readonly resolve: () => Effect.Effect<ReadonlyArray<ServerDirectEndpoint>>;
   }
->()("t3/environment/DirectEndpoints") {}
+>()("goat/environment/DirectEndpoints") {}
 
 /**
- * Only numeric private-network IPv4 addresses, including VPN ranges such as
- * 100.64.0.0/10, are reported. These routes are plain HTTP and carry the
- * client's credential, so a public address would send it across the internet
- * unencrypted, and a name (`server.local`) can resolve to a different machine
- * on each client's network.
+ * These routes are plain HTTP and carry the client's credential, so a public
+ * address would send it across the internet unencrypted, and a name
+ * (`server.local`) can resolve to a different machine on each client's network.
  */
 const isAdvertisableAddress = (address: string): boolean =>
   NodeNet.isIPv4(address) &&
@@ -79,11 +67,6 @@ const isTailscaleInterface = (
   /^tailscale/i.test(name) ||
   entries.some((entry) => entry.family === "IPv6" && isTailnetHost(entry.address));
 
-/**
- * Plain HTTP endpoints for the private addresses a server bound to `host`
- * accepts. IPv4 only: link-local and temporary IPv6 addresses change too
- * often to be worth saving.
- */
 export function resolveBoundEndpoints(input: {
   readonly host: string | undefined;
   readonly port: number;

@@ -1,27 +1,70 @@
 import {
+  GOAT_CONTEXT_LINK_PROTOCOL,
+  CONTEXT_LINK_PROTOCOLS,
+  LEGACY_CONTEXT_ENVELOPE_TAG,
+  GOAT_CONTEXT_ENVELOPE_TAG,
+} from "@goat/contracts/legacyT3Names";
+import {
   COMPOSER_CONTEXT_LABEL_MAX_CHARS,
   type ComposerContextId,
   type ComposerContextKind,
   type ComposerContextRecord,
   type ElementContextDetails,
+  type EnvironmentId,
   type KnownComposerContextRecord,
-} from "@t3tools/contracts";
+  type ThreadContextRecord,
+} from "@goat/contracts";
 
 /**
- * Canonical inline reference: `[label](t3-context://v1/<kind>/<contextId>)`, or the image
+ * Canonical inline reference: `[label](goat-context://v1/<kind>/<contextId>)`, or the image
  * form `![label](...)`. The link carries position and identity only; the payload lives in the
  * message's context records. Labels are display text and never identity.
  */
 
-const CONTEXT_PROTOCOL = "t3-context:";
+const CONTEXT_PROTOCOL = `${GOAT_CONTEXT_LINK_PROTOCOL}:`;
 const COMPOSER_CONTEXT_HREF_PREFIX = `${CONTEXT_PROTOCOL}//v1/`;
+const CONTEXT_HREF_PREFIXES = CONTEXT_LINK_PROTOCOLS.map((protocol) => `${protocol}://v1/`);
+const CONTEXT_HREF_PATTERN = `(?:${CONTEXT_LINK_PROTOCOLS.join("|")})://v1/`;
 const CONTEXT_KIND_PATTERN = /^[a-z][a-z0-9-]{0,39}$/;
 const CONTEXT_ID_PATTERN = /^[a-z0-9_-]{1,128}$/i;
 const MAX_LINK_LABEL_LENGTH = 512;
 const CONTEXT_LINK = new RegExp(
-  String.raw`(!?)\[([^\]\n]{0,${MAX_LINK_LABEL_LENGTH}})\]\((${COMPOSER_CONTEXT_HREF_PREFIX}[^\s)]{1,200})\)`,
+  String.raw`(!?)\[([^\]\n]{0,${MAX_LINK_LABEL_LENGTH}})\]\((${CONTEXT_HREF_PATTERN}[^\s)]{1,200})\)`,
   "g",
 );
+
+/**
+ * 64 bits of digest, because the slug in front of it is truncated: two long producer
+ * ids that agree on their first 48 characters are told apart by this alone.
+ */
+function fnv1a64(value: string): string {
+  let forward = 0x811c9dc5;
+  let reverse = 0x9dc5811c;
+  for (let index = 0; index < value.length; index += 1) {
+    forward ^= value.charCodeAt(index);
+    forward = Math.imul(forward, 0x01000193) >>> 0;
+    reverse ^= value.charCodeAt(value.length - 1 - index);
+    reverse = Math.imul(reverse, 0x01000193) >>> 0;
+  }
+  return `${forward.toString(16).padStart(8, "0")}${reverse.toString(16).padStart(8, "0")}`;
+}
+
+export function toComposerContextId(producerId: string): ComposerContextId {
+  if (CONTEXT_ID_PATTERN.test(producerId)) return producerId as ComposerContextId;
+  const slug = producerId
+    .replace(/[^a-z0-9_-]+/gi, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 48);
+  return `${slug || "ctx"}-${fnv1a64(producerId)}` as ComposerContextId;
+}
+
+export function toKindScopedComposerContextId(
+  kind: ComposerContextKind,
+  producerId: string,
+): ComposerContextId {
+  const prefix = `${kind}_`;
+  return toComposerContextId(`${prefix}${producerId}`);
+}
 
 export function formatComposerContextHref(kind: ComposerContextKind, contextId: ComposerContextId) {
   return `${COMPOSER_CONTEXT_HREF_PREFIX}${kind}/${contextId}`;
@@ -30,8 +73,9 @@ export function formatComposerContextHref(kind: ComposerContextKind, contextId: 
 export function parseComposerContextHref(
   href: string,
 ): { kind: ComposerContextKind; contextId: ComposerContextId } | null {
-  if (!href.startsWith(COMPOSER_CONTEXT_HREF_PREFIX)) return null;
-  const rest = href.slice(COMPOSER_CONTEXT_HREF_PREFIX.length);
+  const prefix = CONTEXT_HREF_PREFIXES.find((prefix) => href.startsWith(prefix));
+  if (prefix === undefined) return null;
+  const rest = href.slice(prefix.length);
   const parts = rest.split("/");
   if (parts.length !== 2) return null;
   const [kind, contextId] = parts as [string, string];
@@ -39,7 +83,6 @@ export function parseComposerContextHref(
   return { kind, contextId: contextId as ComposerContextId };
 }
 
-/** Labels must survive a Markdown link: no brackets or line breaks, bounded, never empty. */
 export function sanitizeComposerContextLabel(label: string, kind: ComposerContextKind): string {
   const cleaned = label
     .replace(/[[\]\\\r\n]/g, " ")
@@ -63,7 +106,6 @@ export interface ComposerContextReferenceOccurrence {
   kind: ComposerContextKind;
   contextId: ComposerContextId;
   label: string;
-  /** Whether the occurrence used the `![...]` image form. */
   image: boolean;
   source: string;
   start: number;
@@ -76,7 +118,7 @@ export function collectComposerContextReferences(
   const occurrences: ComposerContextReferenceOccurrence[] = [];
   // No link can match without the protocol prefix; skip the scan entirely on
   // plain prose so long messages never pay for a regex walk per `[`.
-  if (!text.includes("](t3-context:")) return occurrences;
+  if (!CONTEXT_HREF_PREFIXES.some((prefix) => text.includes(`](${prefix}`))) return occurrences;
   for (const match of text.matchAll(CONTEXT_LINK)) {
     const parsed = parseComposerContextHref(match[3]!);
     if (!parsed) continue;
@@ -92,6 +134,18 @@ export function collectComposerContextReferences(
   return occurrences;
 }
 
+export const ATTACHMENT_ONLY_BOOTSTRAP_PROMPT =
+  "[User attached one or more files without additional text. Respond using the conversation context and the attached files.]";
+
+export function isImageReferencesOnly(text: string): boolean {
+  const references = collectComposerContextReferences(text);
+  return (
+    references.length > 0 &&
+    references.every((reference) => reference.kind === "image") &&
+    replaceComposerContextReferences(text, () => "").trim() === ""
+  );
+}
+
 export function replaceComposerContextReferences(
   text: string,
   replace: (occurrence: ComposerContextReferenceOccurrence) => string,
@@ -105,11 +159,7 @@ export function replaceComposerContextReferences(
   return result + text.slice(cursor);
 }
 
-// ---------------------------------------------------------------------------
-// Provider projection
-// ---------------------------------------------------------------------------
-
-const CONTEXT_ENVELOPE_TAG = "t3_context";
+const CONTEXT_ENVELOPE_TAG = GOAT_CONTEXT_ENVELOPE_TAG;
 const CONTEXT_ENTRY_TAG = "context";
 
 function kindDisplayName(kind: ComposerContextKind): string {
@@ -117,7 +167,6 @@ function kindDisplayName(kind: ComposerContextKind): string {
   return spaced.charAt(0).toUpperCase() + spaced.slice(1);
 }
 
-/** `[Image: shot.png; ref=ctx_1]` — readable in place, with the id the payload is keyed by. */
 export function formatComposerContextProviderMarker(
   kind: ComposerContextKind,
   label: string,
@@ -131,12 +180,15 @@ export function formatComposerContextProviderMarker(
 }
 
 /**
- * Captured text is data. A terminal line or PR comment that contains `</t3_context>` or
- * `</context>` must not be able to close the envelope and forge a record.
+ * A terminal line or PR comment that contains `</t3_context>` or `</context>`
+ * must not be able to close the envelope and forge a record.
  */
 function escapeComposerContextPayloadText(text: string): string {
   return text.replace(
-    new RegExp(String.raw`<(?=/?(?:${CONTEXT_ENVELOPE_TAG}|${CONTEXT_ENTRY_TAG})\b)`, "gi"),
+    new RegExp(
+      String.raw`<(?=/?(?:${LEGACY_CONTEXT_ENVELOPE_TAG}|${GOAT_CONTEXT_ENVELOPE_TAG}|${CONTEXT_ENTRY_TAG})\b)`,
+      "gi",
+    ),
     "&lt;",
   );
 }
@@ -178,7 +230,6 @@ function formatElementDetails(element: ElementContextDetails): string[] {
   return lines;
 }
 
-/** Body lines for one payload, including authoritative paths and names behind display labels. */
 function formatComposerContextProviderPayload(record: KnownComposerContextRecord): string {
   switch (record.kind) {
     case "image":
@@ -265,11 +316,6 @@ function formatEnvelopeEntry(
   return `${open}>\n${escapeComposerContextPayloadText(body)}\n</${CONTEXT_ENTRY_TAG}>`;
 }
 
-/**
- * What the provider reads: every reference becomes an in-place marker, and each unique
- * referenced payload appears once in a trailing envelope, in first-reference order.
- * Unreferenced records are not emitted. Binary attachments travel on their own channel.
- */
 export function projectComposerContextForProvider(input: {
   text: string;
   records: ReadonlyArray<ComposerContextRecord>;
@@ -278,7 +324,6 @@ export function projectComposerContextForProvider(input: {
   if (occurrences.length === 0) return input.text;
   const recordsById = new Map<ComposerContextId, ComposerContextRecord | undefined>();
   for (const record of input.records) {
-    // Even callers that bypass the wire schema must not silently select an ambiguous payload.
     recordsById.set(record.contextId, recordsById.has(record.contextId) ? undefined : record);
   }
   const body = replaceComposerContextReferences(input.text, (occurrence) =>
@@ -305,12 +350,29 @@ export function projectComposerContextForProvider(input: {
   return `${body}\n\n<${CONTEXT_ENVELOPE_TAG} version="1">\n${entries.join("\n")}\n</${CONTEXT_ENVELOPE_TAG}>`;
 }
 
-/** Preserve context bindings when uploads become thread-owned attachments. */
+// Thread reads are environment-local even when a draft moves between machines.
+export function threadContextsOutsideEnvironment(input: {
+  text: string;
+  records: ReadonlyArray<ComposerContextRecord>;
+  environmentId: EnvironmentId;
+}): ThreadContextRecord[] {
+  const referenced = new Set(
+    collectComposerContextReferences(input.text).map((occurrence) => occurrence.contextId),
+  );
+  return input.records.filter(
+    (record): record is ThreadContextRecord =>
+      record.kind === "thread" &&
+      "threadId" in record &&
+      referenced.has(record.contextId) &&
+      record.environmentId !== input.environmentId,
+  );
+}
+
 export function remapComposerContextAttachments(
-  context: import("@t3tools/contracts").OrchestrationMessageContext | undefined,
+  context: import("@goat/contracts").OrchestrationMessageContext | undefined,
   before: ReadonlyArray<{ readonly id?: string | undefined }>,
   after: ReadonlyArray<{ readonly id: string }>,
-): import("@t3tools/contracts").OrchestrationMessageContext | undefined {
+): import("@goat/contracts").OrchestrationMessageContext | undefined {
   if (context === undefined) return undefined;
   const ids = new Map(
     before.flatMap((attachment, index) => {

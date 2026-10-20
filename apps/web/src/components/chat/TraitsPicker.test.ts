@@ -3,7 +3,7 @@ import {
   ProviderInstanceId,
   ProviderDriverKind,
   type ProviderOptionDescriptor,
-} from "@t3tools/contracts";
+} from "@goat/contracts";
 import {
   buildTraitsTriggerDisplay,
   buildUnavailableModelOptionDescriptors,
@@ -232,9 +232,6 @@ describe("buildTraitsTriggerDisplay", () => {
   });
 
   it("stays blank when descriptors resolve to no label and there is no fast mode", () => {
-    // A select with neither a currentValue nor an isDefault option yields no
-    // label. Without a fastMode descriptor present that must stay blank rather
-    // than falling through to a bogus "Normal".
     const unresolved: Extract<ProviderOptionDescriptor, { type: "select" }> = {
       id: "effort",
       label: "effort",

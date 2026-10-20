@@ -6,32 +6,25 @@ import {
   type DeviceSummary,
   DeviceToolUnavailableError,
   LOCAL_DEVICE_HOST_ID,
-} from "@t3tools/contracts";
+} from "@goat/contracts";
 import * as Effect from "effect/Effect";
 import * as Path from "effect/Path";
-import * as HostProcess from "@t3tools/shared/HostProcess";
+import * as HostProcess from "@goat/shared/HostProcess";
 import * as ServerConfig from "../../../config.ts";
 import { ensureAgentDeviceShim } from "../../../device/AgentDeviceShim.ts";
-import { nodeRuntimeUnavailableMessage } from "@t3tools/shared/nodeRuntime";
+import { nodeRuntimeUnavailableMessage } from "@goat/shared/nodeRuntime";
 
 import * as DeviceService from "../../../device/DeviceService.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
 import * as McpToolAccess from "../../McpToolAccess.ts";
 import { DeviceScreenshotToolkit, DeviceStandardToolkit, DeviceToolkit } from "./tools.ts";
 
-/** The flags that pin every agent-device command to one device. */
 export function agentDeviceTargetArgs(device: DeviceSummary): ReadonlyArray<string> {
   return device.platform === "ios"
     ? ["--platform", "ios", "--udid", device.id]
     : ["--platform", "android", "--serial", device.id];
 }
 
-/**
- * Just-in-time guidance returned from `device_open`. This is the one place
- * the agent learns how to drive the device, so it lives with the tool result
- * rather than in the always-on prompt block; threads that never open a device
- * never pay for it.
- */
 export function agentDeviceQuickStart(
   device: DeviceSummary,
   targetArgs = agentDeviceTargetArgs(device),
@@ -211,7 +204,6 @@ const handlers = {
       const scope = yield* requireDeviceAccess;
       const devices = yield* DeviceService.DeviceService;
       const sessions = yield* devices.sessionsForThread(scope.thread.threadId);
-      // Only devices this thread opened: another thread's device is not this agent's to watch.
       const hostId =
         input.deviceId === undefined ? input.hostId : (input.hostId ?? LOCAL_DEVICE_HOST_ID);
       const target = sessions.findLast(
@@ -238,22 +230,23 @@ const handlers = {
       };
     }).pipe(Effect.mapError(toolError)),
   ),
-  device_close: McpToolAccess.actsAsCaller((input) =>
-    Effect.gen(function* () {
-      const scope = yield* requireDeviceAccess;
-      const devices = yield* DeviceService.DeviceService;
-      yield* devices.close({
-        threadId: scope.thread.threadId,
-        ...(input.hostId === undefined ? {} : { hostId: input.hostId }),
-        ...(input.deviceId === undefined ? {} : { deviceId: input.deviceId }),
-        ...(input.shutdown === undefined ? {} : { shutdown: input.shutdown }),
-      });
-      return {};
-    }).pipe(Effect.mapError(toolError)),
+  device_close: McpToolAccess.destructive(
+    McpToolAccess.actsAsCaller((input) =>
+      Effect.gen(function* () {
+        const scope = yield* requireDeviceAccess;
+        const devices = yield* DeviceService.DeviceService;
+        yield* devices.close({
+          threadId: scope.thread.threadId,
+          ...(input.hostId === undefined ? {} : { hostId: input.hostId }),
+          ...(input.deviceId === undefined ? {} : { deviceId: input.deviceId }),
+          ...(input.shutdown === undefined ? {} : { shutdown: input.shutdown }),
+        });
+        return {};
+      }).pipe(Effect.mapError(toolError)),
+    ),
   ),
 } satisfies McpToolAccess.Handlers<typeof DeviceToolkit.tools>;
 
-/** Width and height from the IHDR chunk; a PNG that lacks one reports 0×0. */
 export function pngDimensions(png: Uint8Array): { width: number; height: number } {
   if (png.length < 24) return { width: 0, height: 0 };
   const view = new DataView(png.buffer, png.byteOffset, png.byteLength);

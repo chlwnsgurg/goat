@@ -1,12 +1,12 @@
-import { withAgentDeviceEnvironment } from "@t3tools/provider-core/server/mcpSession";
-import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
-import { AntigravitySettings, ProviderDriverKind, ProviderSetupError } from "@t3tools/contracts";
-import * as HostProcess from "@t3tools/shared/HostProcess";
-import { resolveSelfInvocation } from "@t3tools/shared/nodeRuntime";
+import { withAgentDeviceEnvironment } from "@goat/provider-core/server/mcpSession";
+import * as McpProviderSessions from "@goat/provider-core/server/McpProviderSessions";
+import { AntigravitySettings, ProviderDriverKind, ProviderSetupError } from "@goat/contracts";
+import * as HostProcess from "@goat/shared/HostProcess";
+import { resolveSelfInvocation } from "@goat/shared/nodeRuntime";
 import {
   NodeRuntimeUnavailableError,
   nodeRuntimeUnavailableMessage,
-} from "@t3tools/shared/nodeRuntime";
+} from "@goat/shared/nodeRuntime";
 import * as Crypto from "effect/Crypto";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
@@ -17,9 +17,10 @@ import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
+import { HttpClient } from "effect/http";
 import type { AcpError } from "effect-acp/errors";
 
-import * as ProviderHost from "@t3tools/provider-core/server/ProviderHost";
+import * as ProviderHost from "@goat/provider-core/server/ProviderHost";
 import {
   isAntigravityTextGenerationAvailable,
   makeAntigravityTextGeneration,
@@ -41,27 +42,28 @@ import {
   makeAntigravityAcpRuntime,
   type AntigravityAcpRuntimeInput,
 } from "../acp/AntigravityAcpSupport.ts";
-import type * as AcpSessionRuntime from "@t3tools/provider-acp/server/AcpSessionRuntime";
-import type { ServerProviderDraft } from "@t3tools/provider-core/server/snapshotProbe";
+import type * as AcpSessionRuntime from "@goat/provider-acp/server/AcpSessionRuntime";
+import type { ServerProviderDraft } from "@goat/provider-core/server/snapshotProbe";
 import {
   removeAntigravityRuntimeTempDirs,
   removeAntigravitySessionFiles,
 } from "../acp/AntigravitySessionFiles.ts";
-import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
-import * as ProviderContinuationRequests from "@t3tools/provider-core/server/ProviderContinuationRequests";
+import * as IdAllocator from "@goat/provider-core/server/IdAllocator";
+import * as ProviderContinuationRequests from "@goat/provider-core/server/ProviderContinuationRequests";
 import { makeAntigravityAdapterV2 } from "../../orchestration-v2/Adapters/AntigravityAdapterV2.ts";
-import { makeAcpNativeLoggerFactory } from "@t3tools/provider-acp/server/nativeLogging";
+import { makeAcpNativeLoggerFactory } from "@goat/provider-acp/server/nativeLogging";
 import { ProviderDriverError } from "../Errors.ts";
 import { makeAntigravityProvider } from "../AntigravityProvider.ts";
-import * as ProviderEventLoggers from "@t3tools/provider-core/server/ProviderEventLoggers";
-import * as ModelCatalog from "@t3tools/provider-core/server/ModelCatalog";
+import { makeAntigravityUsageProbe } from "../antigravityUsageLimits.ts";
+import * as ProviderEventLoggers from "@goat/provider-core/server/ProviderEventLoggers";
+import * as ModelCatalog from "@goat/provider-core/server/ModelCatalog";
 import {
   defaultProviderContinuationIdentity,
   type ProviderDriver,
   type ProviderInstance,
-} from "@t3tools/provider-core/server/driver";
-import { mergeProviderInstanceEnvironment } from "@t3tools/provider-core/server/instanceEnvironment";
-import { withInstanceIdentity } from "@t3tools/provider-core/server/instanceIdentity";
+} from "@goat/provider-core/server/driver";
+import { mergeProviderInstanceEnvironment } from "@goat/provider-core/server/instanceEnvironment";
+import { withInstanceIdentity } from "@goat/provider-core/server/instanceIdentity";
 import { discoverAntigravitySkills, resolveAntigravityUserHome } from "./AntigravitySkills.ts";
 
 const DRIVER = ProviderDriverKind.make("antigravity");
@@ -74,13 +76,13 @@ export type AntigravityDriverEnv =
   | ChildProcessSpawner.ChildProcessSpawner
   | Crypto.Crypto
   | FileSystem.FileSystem
+  | HttpClient.HttpClient
   | IdAllocator.IdAllocatorV2
   | McpProviderSessions.McpProviderSessions
   | ModelCatalog.ModelCatalog
   | Path.Path
   | ProviderEventLoggers.ProviderEventLoggers;
 
-/** Each instance owns its Google profile. Executable releases are shared by the environment. */
 export const AntigravityDriver: ProviderDriver<
   AntigravitySettings,
   AntigravityDriverEnv,
@@ -95,6 +97,7 @@ export const AntigravityDriver: ProviderDriver<
     Effect.gen(function* () {
       const crypto = yield* Crypto.Crypto;
       const fileSystem = yield* FileSystem.FileSystem;
+      const httpClient = yield* HttpClient.HttpClient;
       const path = yield* Path.Path;
       const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
       const host = yield* ProviderHost.ProviderHost;
@@ -136,9 +139,6 @@ export const AntigravityDriver: ProviderDriver<
         ),
       );
       const profileDirectory = directories.profile;
-      // No process of this instance exists yet, so every runtime temp
-      // directory it owns is an orphan from a killed server. Older builds
-      // unpacked inside the profile.
       for (const directory of [
         directories.runtimeTemp,
         path.join(profileDirectory, "antigravity-acp", "tmp"),
@@ -269,7 +269,7 @@ export const AntigravityDriver: ProviderDriver<
         input: Pick<AntigravityAcpRuntimeInput, "onAuthorizationUrl">,
       ) {
         const cwd = yield* fileSystem
-          .makeTempDirectoryScoped({ prefix: "t3-antigravity-setup-" })
+          .makeTempDirectoryScoped({ prefix: "goat-antigravity-setup-" })
           .pipe(
             Effect.mapError(
               () =>
@@ -338,14 +338,9 @@ export const AntigravityDriver: ProviderDriver<
         usesBrowser: antigravityAuthUsesBrowser(auth.authMethod),
       });
 
-      // Kick the TTL-gated manifest refresh alongside the health check, as
-      // Codex and Claude do. Without it an environment that only runs
-      // Antigravity would keep classifying against a stale disk cache.
       // The probe must not spawn. The agent is a PyInstaller one-file bundle
       // that unpacks about 1 GB per launch, and the health check runs every
-      // minute. Resolving the install on disk is enough to report installed
-      // and version. The response below is synthetic: only agentInfo.version
-      // is read from it. Sessions and manual refreshes still spawn.
+      // minute.
       const probe = Effect.gen(function* () {
         yield* modelCatalog.refreshInBackground;
         if (authConfigIssue !== null) {
@@ -384,9 +379,20 @@ export const AntigravityDriver: ProviderDriver<
         };
       });
 
+      const usage = yield* makeAntigravityUsageProbe({
+        profileDirectory,
+        authMethod: auth.authMethod,
+      }).pipe(
+        Effect.provideService(FileSystem.FileSystem, fileSystem),
+        Effect.provideService(Path.Path, path),
+        Effect.provideService(Crypto.Crypto, crypto),
+        Effect.provideService(HttpClient.HttpClient, httpClient),
+      );
       const provider = yield* makeAntigravityProvider(settings, {
         stampIdentity: classifyModels,
         probe,
+        probeUsage: usage.probe,
+        clearUsage: usage.clear,
         auth: { type: auth.authMethod, label: antigravityAuthLabel(auth.authMethod) },
         supportsTextGeneration: isAntigravityTextGenerationAvailable(profileDirectory).pipe(
           Effect.provideService(FileSystem.FileSystem, fileSystem),
@@ -429,6 +435,10 @@ export const AntigravityDriver: ProviderDriver<
           }),
       });
       const textGeneration = yield* makeAntigravityTextGeneration({
+        memoryRunnerContext: {
+          providerInstanceId: instanceId,
+          ...(host.environmentId === undefined ? {} : { environmentId: host.environmentId }),
+        },
         profileDirectory,
         defaultModel,
         withProcess: authFlow.withProcess,

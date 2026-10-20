@@ -1,14 +1,12 @@
-import { SSH_RUNTIME_PROTOCOL_VERSION } from "@t3tools/shared/sshRuntimeProtocol";
-import { ORCHESTRATION_PROTOCOL_VERSION } from "@t3tools/contracts";
+import { SSH_RUNTIME_PROTOCOL_VERSION } from "@goat/shared/sshRuntimeProtocol";
+import { ORCHESTRATION_PROTOCOL_VERSION } from "@goat/contracts";
 import { assert, describe, it } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import * as HostProcess from "@t3tools/shared/HostProcess";
+import * as HostProcess from "@goat/shared/HostProcess";
 import * as Effect from "effect/Effect";
 import * as Result from "effect/Result";
-import { ARCHIVE } from "./tunnel.fixture.ts";
 import { protocolExecutable, makeProtocolFixture } from "./tunnel.protocol.fixture.ts";
 
-/* eslint-disable no-useless-escape -- Preserve the original test body bytes during this split. */
 describe.skipIf(HostProcess.Platform.defaultValue() === "win32")(
   "SSH runtime protocol selection",
   () => {
@@ -32,7 +30,9 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")(
 
     it.live.each(
       (["launch", "pairing", "mcp"] as const).flatMap((entry) =>
-        [false, true].map((live) => ({ entry, live })),
+        // An owning launch on a stopped host installs its own release instead;
+        // tunnel.protocol-upgrade.test.ts covers that case.
+        (entry === "launch" ? [true] : [false, true]).map((live) => ({ entry, live })),
       ),
     )("reuses older compatible $entry; live=$live", ({ entry, live }) =>
       Effect.gen(function* () {
@@ -63,6 +63,57 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")(
         if (entry !== "launch")
           assert.equal(events.findLast((event) => event.type === "auth")?.version, "1.2.2");
       }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+    );
+
+    it.live.each(["launch", "pairing", "mcp"] as const)(
+      "reuses retained legacy declarations for %s without rewriting the runner",
+      (entry) =>
+        Effect.gen(function* () {
+          const f = yield* makeProtocolFixture({
+            live: false,
+            kind: "external",
+            oldVersion: "1.2.2",
+            ssh: SSH_RUNTIME_PROTOCOL_VERSION,
+            orchestration: ORCHESTRATION_PROTOCOL_VERSION,
+          });
+          const file = `${f.state}/run-t3.sh`;
+          const runner = (yield* f.fs.readFileString(file))
+            .replace(/^T3_(?:ARCHIVE_VERSION|NODE_SCRIPT_PATH)=.*\n/gm, "")
+            .replaceAll("GOAT_", "T3_");
+          yield* f.fs.writeFileString(file, runner);
+          // An owning launch on a stopped host upgrades instead (tunnel.protocol-upgrade.test.ts);
+          // a secondary launch still has to read the retained declarations to reuse them.
+          const result = yield* f.run(entry, entry === "launch");
+          assert.isTrue(Result.isSuccess(result));
+          if (Result.isSuccess(result)) assert.equal(result.success.version, "1.2.2");
+          assert.equal(yield* f.fs.readFileString(file), runner);
+          assert.deepEqual(f.counters(), { uploads: 0, gh: 0, cacheReads: 0 });
+        }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+    );
+
+    it.live(
+      "an owning launch falls back to retained legacy declarations when it cannot upgrade",
+      () =>
+        Effect.gen(function* () {
+          const f = yield* makeProtocolFixture({
+            live: false,
+            kind: "external",
+            oldVersion: "1.2.2",
+            ssh: SSH_RUNTIME_PROTOCOL_VERSION,
+            orchestration: ORCHESTRATION_PROTOCOL_VERSION,
+          });
+          const file = `${f.state}/run-t3.sh`;
+          const runner = (yield* f.fs.readFileString(file))
+            .replace(/^T3_(?:ARCHIVE_VERSION|NODE_SCRIPT_PATH)=.*\n/gm, "")
+            .replaceAll("GOAT_", "T3_");
+          yield* f.fs.writeFileString(file, runner);
+          // No archive directory and no mirror: the retained release, found only through its
+          // T3_ARCHIVE_VERSION declaration, is the one that starts.
+          const result = yield* f.run("launch", false, { archiveDirectory: "" });
+          assert.isTrue(Result.isSuccess(result));
+          if (Result.isSuccess(result)) assert.equal(result.success.version, "1.2.2");
+          assert.equal(f.counters().uploads, 0);
+        }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
     );
 
     it.live.each((["launch", "pairing", "mcp"] as const).map((entry) => ({ entry })))(
@@ -96,7 +147,7 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")(
         [true, false].map((descriptor404) => ({ mode, descriptor404 })),
       ),
     )(
-      "adopts only verified legacy archives; mode=$mode unknown=$descriptor404",
+      "preserves legacy runtimes without drain; mode=$mode unknown=$descriptor404",
       ({ mode, descriptor404 }) =>
         Effect.gen(function* () {
           const f = yield* makeProtocolFixture({
@@ -123,57 +174,18 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")(
                 f.state,
               ),
             );
-          const bin = `${f.test}/trace-bin`;
-          yield* f.fs.makeDirectory(bin);
-          const ps = mode === "node" ? "/bin/ps" : `${f.test}/identity-bin/ps`;
-          yield* f.fs.writeFileString(
-            `${bin}/ps`,
-            `#!${process.execPath}
-const fs=require('node:fs'),cp=require('node:child_process');
-const args=process.argv.slice(2);
-if(args[3]===${JSON.stringify(String(f.pid))}) fs.appendFileSync(${JSON.stringify(`${f.test}/events`)},JSON.stringify({type:'verify',identity:fs.existsSync(${JSON.stringify(`${f.state}/identity`)})?fs.readFileSync(${JSON.stringify(`${f.state}/identity`)},'utf8'):null})+'\\n');
-process.stdout.write(cp.execFileSync(${JSON.stringify(ps)},args));
-`,
-          );
-          yield* f.fs.chmod(`${bin}/ps`, 0o700);
-          f.setRemotePath(`${bin}:${process.env.PATH ?? ""}`);
           const before = yield* f.snapshot;
           const result = yield* f.run(
             "launch",
             false,
             mode === "node" && descriptor404 ? { nodeScriptPath: nextEntry } : {},
           );
-          if (mode === "node") {
-            assert.isTrue(Result.isFailure(result));
-            if (Result.isFailure(result)) assert.include(String(result.failure), `kill ${f.pid}`);
-            assert.deepEqual(yield* f.snapshot, before);
-            yield* Effect.sync(() => process.kill(f.pid, 0));
-            assert.notInclude(yield* f.fs.readFileString(`${f.test}/events`), '\"type\":\"stop\"');
-            return;
-          }
-          assert.isTrue(Result.isSuccess(result));
-          const events = (yield* f.fs.readFileString(`${f.test}/events`))
-            .trim()
-            .split("\n")
-            .map((line) => JSON.parse(line));
-          const stopped = events.findIndex((event) => event.type === "stop");
-          assert.isAbove(stopped, 0);
-          assert.isTrue(
-            events
-              .slice(0, stopped)
-              .some((event) => event.type === "verify" && event.identity !== null),
-          );
-          assert.isTrue(
-            events
-              .slice(0, stopped)
-              .some(
-                (event) => event.type === "version" && event.version === ARCHIVE.archiveVersion,
-              ),
-          );
-          assert.notEqual((yield* f.fs.readFileString(`${f.state}/pid`)).trim(), String(f.pid));
-          const identity = yield* f.fs.readFileString(`${f.state}/identity`);
-          assert.include(identity, `/versions/${ARCHIVE.archiveVersion}/goat`);
-          assert.include(identity, `--base-dir ${f.home}/.goat`);
+          assert.isTrue(Result.isFailure(result));
+          assert.deepEqual(yield* f.snapshot, before);
+          yield* Effect.sync(() => process.kill(f.pid, 0));
+          const events = yield* f.fs.readFileString(`${f.test}/events`);
+          for (const type of ["drain", "drain-request", "self-stop", "stop", "supervise"])
+            assert.notInclude(events, `"type":"${type}"`);
         }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
     );
 
@@ -213,10 +225,10 @@ process.stdout.write(cp.execFileSync(${JSON.stringify(ps)},args));
           yield* f.fs.writeFileString(
             `${f.state}/run-t3.sh`,
             failure === "wrong version"
-              ? runner.replace("T3_ARCHIVE_VERSION='1.2.2'", "T3_ARCHIVE_VERSION='1.2.1'")
+              ? runner.replace("GOAT_ARCHIVE_VERSION='1.2.2'", "GOAT_ARCHIVE_VERSION='1.2.1'")
               : failure === "malformed assignment"
-                ? runner.replace("T3_ARCHIVE_VERSION='1.2.2'", "T3_ARCHIVE_VERSION=1.2.2")
-                : runner + "\nT3_ARCHIVE_VERSION='1.2.2'\n",
+                ? runner.replace("GOAT_ARCHIVE_VERSION='1.2.2'", "GOAT_ARCHIVE_VERSION=1.2.2")
+                : runner + "\nGOAT_ARCHIVE_VERSION='1.2.2'\n",
           );
         }
         if (["wrong base dir", "prefix command", "suffix command"].includes(failure)) {

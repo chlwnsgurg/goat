@@ -1,4 +1,6 @@
 import {
+  readCatalogHub,
+  setCatalogHub,
   putRemoteDpopTokenInCatalog,
   registerConnectionInCatalog,
   removeConnectionFromCatalog,
@@ -7,21 +9,32 @@ import {
   removeCatalogValue,
   replaceCatalogValue,
   Persistence,
-} from "@t3tools/client-runtime/platform";
-import { TokenStore } from "@t3tools/client-runtime/authorization";
+} from "@goat/client-runtime/platform";
+import { TokenStore } from "@goat/client-runtime/authorization";
 import {
   ConnectionTransientError,
   CredentialStore,
   ProfileStore,
   GitHubRoutingPermissions,
   makeGitHubRoutingPermissions,
-} from "@t3tools/client-runtime/connection";
+} from "@goat/client-runtime/connection";
+import type { EnvironmentId } from "@goat/contracts";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 
 import * as CatalogStore from "./catalog-store";
+
+export class HubEnvironmentStore extends Context.Service<
+  HubEnvironmentStore,
+  {
+    readonly readHub: Effect.Effect<EnvironmentId | null, ConnectionTransientError>;
+    readonly setHub: (
+      environmentId: EnvironmentId | null,
+    ) => Effect.Effect<void, ConnectionTransientError>;
+  }
+>()("@goat/mobile/connection/HubEnvironmentStore") {}
 
 function targetPersistenceError(
   operation:
@@ -42,6 +55,11 @@ function targetPersistenceError(
 export const layer = Layer.effectContext(
   Effect.gen(function* () {
     const catalog = yield* CatalogStore.make();
+    const hubStore = HubEnvironmentStore.of({
+      readHub: catalog.read.pipe(Effect.map(readCatalogHub)),
+      setHub: (environmentId) =>
+        catalog.update((document) => setCatalogHub(document, environmentId)),
+    });
     const githubRoutingPermissions = yield* makeGitHubRoutingPermissions({
       read: catalog.read.pipe(Effect.map((document) => document.githubRoutingPermissions ?? [])),
       write: (githubRoutingPermissions) =>
@@ -150,6 +168,7 @@ export const layer = Layer.effectContext(
         })),
     });
     return Context.make(Persistence.ConnectionTargetStore, targetStore).pipe(
+      Context.add(HubEnvironmentStore, hubStore),
       Context.add(GitHubRoutingPermissions, githubRoutingPermissions),
       Context.add(Persistence.ConnectionRegistrationStore, registrationStore),
       Context.add(ProfileStore.ConnectionProfileStore, profileStore),

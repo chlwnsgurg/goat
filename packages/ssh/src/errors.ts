@@ -19,13 +19,23 @@ export class SshCommandError extends Data.TaggedError("SshCommandError")<{
 }> {}
 
 export class SshLaunchError extends Data.TaggedError("SshLaunchError")<{
-  readonly reason?: "runtime-newer";
+  /** `archive-unavailable`: no source supplied a usable runtime archive for this launch. */
+  readonly reason?: "runtime-newer" | "archive-unavailable";
+  readonly acquisition?: {
+    readonly requestedVersion: string;
+    readonly platformKey: string | null;
+    readonly sourcesTried: readonly string[];
+  };
+  /** For `archive-unavailable`: the one step that fixes it. */
+  readonly action?: string;
   readonly message: string;
   readonly stdout: string;
   readonly cause?: unknown;
 }> {}
 
 export class SshPairingError extends Data.TaggedError("SshPairingError")<{
+  /** `memory-scopes-unsupported`: the remote CLI cannot issue the memory grants a task asked for. */
+  readonly reason?: "memory-scopes-unsupported";
   readonly message: string;
   readonly stdout: string;
   readonly cause?: unknown;
@@ -38,11 +48,18 @@ export class SshHttpBridgeError extends Data.TaggedError("SshHttpBridgeError")<{
 }> {}
 
 export class SshReadinessError extends Data.TaggedError("SshReadinessError")<{
+  /** `slow`: requests reached the server but answered too late. `unreachable`: nothing answered. */
+  readonly reason?: "slow" | "unreachable";
   readonly message: string;
   readonly cause?: unknown;
 }> {}
 
 export class SshPasswordPromptError extends Data.TaggedError("SshPasswordPromptError")<{
+  readonly message: string;
+  readonly cause?: unknown;
+}> {}
+
+export class SshHostKeyProbeError extends Data.TaggedError("SshHostKeyProbeError")<{
   readonly message: string;
   readonly cause?: unknown;
 }> {}

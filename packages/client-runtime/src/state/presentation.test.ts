@@ -1,5 +1,5 @@
 import { describe, expect, it } from "@effect/vitest";
-import { EnvironmentId, type ServerConfig } from "@t3tools/contracts";
+import { EnvironmentId, type ServerConfig } from "@goat/contracts";
 import * as Option from "effect/Option";
 import { AsyncResult, Atom, AtomRegistry } from "effect/reactivity";
 
@@ -7,8 +7,78 @@ import { AVAILABLE_CONNECTION_STATE, PrimaryConnectionTarget } from "../connecti
 import {
   createEnvironmentPresentationAtoms,
   createEnvironmentSummaryAtoms,
+  createEnvironmentShellSyncAtom,
+  shellSyncMessage,
 } from "./presentation.ts";
 import type { EnvironmentCatalogState } from "./connections.ts";
+import type { EnvironmentShellState } from "./shell.ts";
+import { v2ShellSnapshot } from "./orchestrationV2TestFixtures.ts";
+
+describe("shell sync presentation", () => {
+  it.each([false, true])(
+    "exposes shell-only failure with cached snapshot=%s and clears it after recovery",
+    (cached) => {
+      const registry = AtomRegistry.make();
+      const shell = Atom.make<EnvironmentShellState>({
+        status: "synchronizing",
+        snapshot: cached ? Option.some(v2ShellSnapshot) : Option.none(),
+        error: Option.none(),
+      });
+      const sync = createEnvironmentShellSyncAtom(() => shell)(FIRST);
+      const stop = registry.subscribe(sync, () => {});
+      try {
+        expect(registry.get(sync)).toBe("synchronizing");
+        registry.set(shell, {
+          ...registry.get(shell),
+          status: cached ? "cached" : "empty",
+          error: Option.some("Permission denied: private-id"),
+        });
+        expect(registry.get(sync)).toBe(cached ? "stale" : "error");
+        expect(shellSyncMessage(registry.get(sync))).toContain("Could not sync environment data");
+        expect(shellSyncMessage(registry.get(sync))).not.toContain("private-id");
+        registry.set(shell, {
+          ...registry.get(shell),
+          status: "synchronizing",
+          error: Option.none(),
+        });
+        expect(registry.get(sync)).toBe("synchronizing");
+        registry.set(shell, {
+          snapshot: Option.some(v2ShellSnapshot),
+          status: "live",
+          error: Option.none(),
+        });
+        expect(shellSyncMessage(registry.get(sync))).toBeNull();
+      } finally {
+        stop();
+        registry.dispose();
+      }
+    },
+  );
+
+  it("does not notify sync consumers for live snapshot updates", () => {
+    const registry = AtomRegistry.make();
+    const shell = Atom.make<EnvironmentShellState>({
+      snapshot: Option.some(v2ShellSnapshot),
+      status: "live",
+      error: Option.none(),
+    });
+    const sync = createEnvironmentShellSyncAtom(() => shell)(FIRST);
+    registry.get(sync);
+    let notifications = 0;
+    const stop = registry.subscribe(sync, () => notifications++);
+    try {
+      registry.set(shell, {
+        ...registry.get(shell),
+        snapshot: Option.some({ ...v2ShellSnapshot, snapshotSequence: 2 }),
+      });
+      expect(registry.get(sync)).toBe("live");
+      expect(notifications).toBe(0);
+    } finally {
+      stop();
+      registry.dispose();
+    }
+  });
+});
 
 const FIRST = EnvironmentId.make("first");
 const SECOND = EnvironmentId.make("second");
@@ -76,7 +146,9 @@ describe("environment summary subscriptions", () => {
       for (let i = 0; i < 20; i++) {
         const next = config(false, `/workspace-${i}`);
         h.registry.set(h.configs(FIRST), next);
-        expect(h.registry.get(h.full.presentationsAtom).get(FIRST)?.serverConfig).toBe(next);
+        expect(h.registry.get(h.full.presentationsAtom).get(FIRST)?.serverConfig?.cwd).toBe(
+          next.cwd,
+        );
         expect(h.registry.get(h.environmentIdsAtom)).toBe(initialIds);
         expect(h.registry.get(h.identitiesAtom)).toBe(initialLabels);
         h.registry.get(h.environmentsAtom);
@@ -103,6 +175,43 @@ describe("environment summary subscriptions", () => {
       expect(h.registry.get(h.environmentsAtom)[0]?.environmentLabel).toBe("Renamed");
       expect(counts.labels).toBe(1);
       expect(counts.ids).toBe(0);
+    } finally {
+      stops.forEach((stop) => stop());
+      h.registry.dispose();
+    }
+  });
+
+  it("keeps presentations identical when only provider statuses change", () => {
+    const h = harness();
+    const pushes = { presentations: 0, providers: 0, configs: 0 };
+    const stops = [
+      h.registry.subscribe(h.full.presentationsAtom, () => pushes.presentations++),
+      h.registry.subscribe(h.full.providersByEnvironmentAtom, () => pushes.providers++),
+      h.registry.subscribe(h.full.serverConfigsAtom, () => pushes.configs++),
+    ];
+    try {
+      const base = config();
+      h.registry.set(h.configs(FIRST), { ...base, providers: [] } as ServerConfig);
+      const presentations = h.registry.get(h.full.presentationsAtom);
+      const configs = h.registry.get(h.full.serverConfigsAtom);
+      const before = { ...pushes };
+      const providers = [{ instanceId: "codex" }] as unknown as ServerConfig["providers"];
+      h.registry.set(h.configs(FIRST), { ...base, providers } as ServerConfig);
+
+      expect(h.registry.get(h.full.presentationsAtom)).toBe(presentations);
+      expect(h.registry.get(h.full.providersByEnvironmentAtom).get(FIRST)).toBe(providers);
+      expect(
+        h.registry.get(h.full.presentationsWithProvidersAtom).get(FIRST)?.serverConfig,
+      ).toEqual({ ...base, providers });
+      expect(h.registry.get(h.full.serverConfigsAtom)).toBe(configs);
+      expect(pushes.presentations).toBe(before.presentations);
+      expect(pushes.configs).toBe(before.configs);
+      expect(pushes.providers).toBe(before.providers + 1);
+
+      h.registry.set(h.configs(FIRST), { ...base, cwd: "/moved", providers } as ServerConfig);
+      expect(h.registry.get(h.full.presentationsAtom).get(FIRST)?.serverConfig?.cwd).toBe("/moved");
+      expect(h.registry.get(h.full.serverConfigsAtom).get(FIRST)?.cwd).toBe("/moved");
+      expect(h.registry.get(h.full.providersByEnvironmentAtom).get(FIRST)).toBe(providers);
     } finally {
       stops.forEach((stop) => stop());
       h.registry.dispose();
@@ -169,7 +278,6 @@ describe("environment summary subscriptions", () => {
       expect(h.registry.get(h.pullRequestsSupportedAtom)).toBe(false);
       h.registry.set(h.configs(FIRST), config(true));
       expect(h.registry.get(h.pullRequestsSupportedAtom)).toBe(true);
-      // The first true result short-circuits: the second must be read when the first stops supporting it.
       h.registry.set(h.configs(SECOND), config(true));
       h.registry.set(h.configs(FIRST), null);
       expect(h.registry.get(h.pullRequestsSupportedAtom)).toBe(true);

@@ -7,13 +7,15 @@ import {
   ProviderThreadId,
   ProviderSessionId,
   ProviderDriverKind,
+  ProviderTurnId,
+  RunAttemptId,
   RunId,
   ThreadId,
   type OrchestrationV2ExecutionNode,
   type OrchestrationV2RunStatus,
-} from "@t3tools/contracts";
+} from "@goat/contracts";
 import * as DateTime from "effect/DateTime";
-import { usageLimitBlockedRun } from "@t3tools/shared/orchestrationV2ThreadError";
+import { usageLimitBlockedRun } from "@goat/shared/orchestrationV2ThreadError";
 import { describe, expect, it } from "vite-plus/test";
 
 import { v2Projection } from "./orchestrationV2TestFixtures.ts";
@@ -193,6 +195,34 @@ describe("thread execution presentation", () => {
     expect(threadRuntimeHasInterruptibleRun(runtime)).toBe(true);
   });
 
+  it("marks an open run whose provider turn already ended", () => {
+    const attemptId = RunAttemptId.make("attempt-open");
+    const openRun = { ...run("run-open", 1, "running"), activeAttemptId: attemptId };
+    const providerTurn = (status: "running" | "failed") => ({
+      id: ProviderTurnId.make("provider-turn-open"),
+      providerThreadId: ProviderThreadId.make("provider-thread-open"),
+      nodeId: NodeId.make("node-open"),
+      runAttemptId: attemptId,
+      nativeTurnRef: null,
+      ordinal: 1,
+      status,
+      startedAt: now,
+      completedAt: status === "running" ? null : now,
+    });
+    const projection = (status: "running" | "failed") => ({
+      ...v2Projection,
+      runs: [openRun],
+      providerTurns: [providerTurn(status)],
+      updatedAt: now,
+    });
+
+    expect(deriveThreadActivityRun(projection("running"))?.turnEnded).toBeUndefined();
+    expect(deriveThreadActivityRun(projection("failed"))).toMatchObject({
+      status: "running",
+      turnEnded: true,
+    });
+  });
+
   it("presents a held queue as the stopped run instead of queued work", () => {
     const interrupted = { ...run("run-interrupted", 1, "interrupted"), completedAt: now };
     const held = { ...run("run-held", 2, "queued"), queueHeld: true };
@@ -205,11 +235,9 @@ describe("thread execution presentation", () => {
       activeRunId: null,
     });
 
-    // Resuming clears the hold, and the run reads as queued until it starts.
     const resumed = { ...projection, runs: [interrupted, { ...held, queueHeld: false }] };
     expect(deriveThreadRuntime(resumed)).toMatchObject({ status: "queued" });
 
-    // Recovery can hold a first message before any run executed; it is not work.
     const onlyHeld = {
       ...projection,
       runs: [held],
@@ -319,7 +347,6 @@ describe("deriveRunlessWorkStartedAt", () => {
   it("times a provider-native subagent from its runless root turn while it works", () => {
     const projection = { ...nativeChild, nodes: [rootTurn("running", later)] };
     expect(deriveRunlessWorkStartedAt(projection)).toBe("2026-07-28T10:05:00.000Z");
-    // The subagent has no run, so it stays unstoppable and unqueueable.
     expect(deriveThreadRuntime(projection)).toBeNull();
   });
 
@@ -439,20 +466,43 @@ describe("formatModelSelectionEffort", () => {
     },
   ];
 
-  it("shows the model's default effort when the user never picked one", () => {
-    expect(formatModelSelectionEffort(selection(), catalog({}))).toBe("High");
-  });
-
-  it("names a stored effort the way the catalog does", () => {
+  it("names stored and matching reported effort, preferring the stored choice", () => {
     expect(
       formatModelSelectionEffort(selection([{ id: "effort", value: "xhigh" }]), catalog({})),
     ).toBe("Extra High");
+    const reported = selection([{ id: "effort", value: "xhigh" }]);
+    expect(formatModelSelectionEffort(selection(), catalog({}), reported)).toBe("Extra High");
+    expect(
+      formatModelSelectionEffort(
+        selection([{ id: "effort", value: "medium" }]),
+        catalog({}),
+        reported,
+      ),
+    ).toBe("Medium");
+    expect(
+      formatModelSelectionEffort(
+        selection([{ id: "effort", value: "retired-effort" }]),
+        catalog({ currentValue: "medium" }),
+        reported,
+      ),
+    ).toBeNull();
   });
 
-  it("uses the descriptor's current value over the default", () => {
-    expect(formatModelSelectionEffort(selection(), catalog({ currentValue: "medium" }))).toBe(
-      "Medium",
-    );
+  it("shows nothing when neither the selection nor the provider states an effort", () => {
+    expect(formatModelSelectionEffort(selection(), catalog({}))).toBeNull();
+    expect(formatModelSelectionEffort(selection(), catalog({ currentValue: "medium" }))).toBeNull();
+    expect(
+      formatModelSelectionEffort(selection(), catalog({}), {
+        ...selection([{ id: "effort", value: "xhigh" }]),
+        model: "claude-opus-5-5",
+      }),
+    ).toBeNull();
+    expect(
+      formatModelSelectionEffort(selection(), catalog({}), {
+        ...selection([{ id: "effort", value: "xhigh" }]),
+        instanceId: ProviderInstanceId.make("claudeAgent-other"),
+      }),
+    ).toBeNull();
   });
 
   it("shows nothing for a model the catalog does not describe", () => {
@@ -554,7 +604,6 @@ describe("presentPendingBackgroundWork", () => {
     expect(presentPendingBackgroundWork([])).toBeNull();
   });
 
-  // A command left running, such as a dev server, does not wake the agent.
   it("says only commands are running, not waited on", () => {
     expect(
       presentPendingBackgroundWork([

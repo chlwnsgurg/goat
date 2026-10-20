@@ -1,11 +1,11 @@
-import { findErrorTraceId } from "@t3tools/client-runtime/errors";
+import { findErrorTraceId } from "@goat/client-runtime/errors";
 import {
   isAtomCommandInterrupted,
   squashAtomCommandFailure,
-} from "@t3tools/client-runtime/state/runtime";
-import type { EnvironmentId } from "@t3tools/contracts";
-import type { RelayClientEnvironmentRecord } from "@t3tools/contracts/relay";
-import { ServerIcon } from "lucide-react";
+} from "@goat/client-runtime/state/runtime";
+import type { EnvironmentId } from "@goat/contracts";
+import type { RelayClientEnvironmentRecord } from "@goat/contracts/relay";
+import { ServerIcon } from "~/components/solar";
 import { useRef, useState } from "react";
 
 import {
@@ -38,7 +38,7 @@ function endpointLabel(environment: RelayClientEnvironmentRecord): string {
     : "Activity publishing only";
 }
 
-export function T3ConnectEnvironmentRow(props: {
+function T3ConnectEnvironmentRow(props: {
   readonly environment: RelayClientEnvironmentRecord;
   readonly confirmationOpen: boolean;
   readonly mutationPending: boolean;

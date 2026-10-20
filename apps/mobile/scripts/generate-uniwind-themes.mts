@@ -3,7 +3,7 @@
 import * as NodeFS from "node:fs";
 import * as NodePath from "node:path";
 import tailwindColors from "tailwindcss/colors";
-import { BUILT_IN_THEME_IDS, type BuiltInThemeId } from "@t3tools/shared/themePalettes";
+import { BUILT_IN_THEME_IDS, type BuiltInThemeId } from "@goat/shared/themePalettes";
 
 import {
   createMobileThemeVariables,
@@ -51,10 +51,14 @@ const color = (family: TailwindColorFamily, shade?: TailwindColorShade, opacity 
   return `color-mix(in srgb, ${value} ${percentage}%, transparent)`;
 };
 
-// These replace the remaining dark:* utility pairs. A registered palette theme is
-// neither literally `light` nor `dark`, so appearance-sensitive values must also be
-// represented as semantic variables for custom themes.
+// A registered palette theme is neither literally `light` nor `dark`, so
+// appearance-sensitive values must also be represented as semantic variables for
+// custom themes.
 const ADAPTIVE_COLORS: Readonly<Record<string, readonly [light: string, dark: string]>> = {
+  "--color-channel-dev": [color("blue", 700), color("blue", 400)],
+  "--color-channel-dev-surface": [color("blue", 700, 0.1), color("blue", 400, 0.1)],
+  "--color-channel-nightly": [color("indigo", 600), color("indigo", 300)],
+  "--color-channel-nightly-surface": [color("indigo", 600, 0.1), color("indigo", 300, 0.1)],
   "--color-adaptive-amber-50-950-a40": [color("amber", 50), color("amber", 950, 0.4)],
   "--color-adaptive-amber-200-900-a60": [color("amber", 200), color("amber", 900, 0.6)],
   "--color-adaptive-amber-500-a12-a16": [color("amber", 500, 0.12), color("amber", 500, 0.16)],
@@ -175,7 +179,6 @@ const variablesFor = (themeId: BuiltInThemeId, appearance: MobileThemeAppearance
 // Clerk's native screens use one build-time palette per appearance. Custom
 // profile pages must match it even when the rest of the app uses a named theme.
 const clerkColorsFor = (appearance: MobileThemeAppearance) => {
-  // Native authentication uses plain cards, rather than tonal settings groups.
   const variables = createMobileThemeVariables(
     getMobileThemeColors(DEFAULT_MOBILE_THEME_ID, appearance),
     appearance,
@@ -287,7 +290,7 @@ if (import.meta.main) {
       const current = NodeFS.existsSync(filename) ? NodeFS.readFileSync(filename, "utf8") : null;
       if (current !== contents) {
         console.error(
-          `${NodePath.relative(process.cwd(), filename)} is stale. Run vp run --filter @t3tools/mobile generate.`,
+          `${NodePath.relative(process.cwd(), filename)} is stale. Run vp run --filter @goat/mobile generate.`,
         );
         process.exitCode = 1;
       }

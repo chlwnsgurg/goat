@@ -5,7 +5,7 @@ import {
   OrchestrationV2DomainEvent,
   OrchestrationV2StoredEvent,
   ThreadId,
-} from "@t3tools/contracts";
+} from "@goat/contracts";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -68,13 +68,12 @@ export interface EventStoreV2Shape {
   readonly latestSequence: (input?: {
     readonly threadId?: ThreadId;
   }) => Effect.Effect<number, EventStoreV2Error>;
-  /** Latest sequence across project and V2 thread events. */
   readonly latestApplicationSequence: Effect.Effect<number, EventStoreV2Error>;
   readonly publishCommitted: (events: ReadonlyArray<ApplicationStoredEvent>) => Effect.Effect<void>;
 }
 
 export class EventStoreV2 extends Context.Service<EventStoreV2, EventStoreV2Shape>()(
-  "t3/orchestration-v2/EventStore/EventStoreV2",
+  "goat/orchestration-v2/EventStore/EventStoreV2",
 ) {}
 
 const layerBase: Layer.Layer<EventStoreV2, never, OrchestrationEventStore.OrchestrationEventStore> =

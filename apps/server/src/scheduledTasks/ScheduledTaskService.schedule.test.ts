@@ -1,7 +1,7 @@
 import * as Scheduler from "../scheduling/Scheduler.ts";
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import { expect, it } from "@effect/vitest";
-import { ScheduledTaskUpsertInput } from "@t3tools/contracts";
+import { ScheduledTaskUpsertInput } from "@goat/contracts";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -11,6 +11,7 @@ import * as TestClock from "effect/testing/TestClock";
 import * as ThreadLaunchService from "../orchestration-v2/ThreadLaunchService.ts";
 import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
 import * as SecretRequests from "../secrets/SecretRequests.ts";
+import * as ManagedProjectFolders from "../project/ManagedProjectFolders.ts";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import * as ScheduledTaskService from "./ScheduledTaskService.ts";
 
@@ -22,6 +23,10 @@ it.effect("rejects a stale form save after deletion while preserving explicit-id
       NodeCrypto.layer,
       Scheduler.layer,
       Layer.mock(ThreadLaunchService.ThreadLaunchService)({}),
+      Layer.mock(ManagedProjectFolders.ManagedProjectFolders)({
+        namedProjectsRoot: "/projects",
+        isScratchProject: () => Effect.succeed(false),
+      }),
       Layer.mock(ThreadManagementService.ThreadManagementService)({}),
       Layer.mock(SecretRequests.SecretRequests)({}),
     );
@@ -65,6 +70,10 @@ it.effect("preserves a due run when a save only pads the scheduled hour", () =>
       NodeCrypto.layer,
       Scheduler.layer,
       Layer.mock(ThreadLaunchService.ThreadLaunchService)({}),
+      Layer.mock(ManagedProjectFolders.ManagedProjectFolders)({
+        namedProjectsRoot: "/projects",
+        isScratchProject: () => Effect.succeed(false),
+      }),
       Layer.mock(ThreadManagementService.ThreadManagementService)({}),
       Layer.mock(SecretRequests.SecretRequests)({}),
     );
@@ -87,7 +96,6 @@ it.effect("preserves a due run when a save only pads the scheduled hour", () =>
       const expectedDueAt = DateTime.formatIso(DateTime.toUtc(dueAt));
       expect(created.task.nextRunAt).toBe(expectedDueAt);
 
-      // Cross the due time before the scheduler's first five-second tick.
       yield* TestClock.setTime(DateTime.toEpochMillis(dueAt) + 1_000);
       const update = yield* decodeUpsertInput({
         ...input,

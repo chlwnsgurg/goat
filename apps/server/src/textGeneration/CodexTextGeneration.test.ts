@@ -1,3 +1,5 @@
+import { ChildProcessSpawner } from "effect/process";
+import * as M from "@goat/contracts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
@@ -8,15 +10,15 @@ import * as Path from "effect/Path";
 import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
-import { createModelSelection } from "@t3tools/shared/model";
+import { createModelSelection } from "@goat/shared/model";
 import { expect } from "vite-plus/test";
 
-import { CodexSettings, ProviderInstanceId, TextGenerationError } from "@t3tools/contracts";
+import { CodexSettings, ProviderInstanceId, TextGenerationError } from "@goat/contracts";
 
 import * as ServerConfig from "../config.ts";
 import * as TextGeneration from "./TextGeneration.ts";
 import { makeCodexTextGeneration } from "./CodexTextGeneration.ts";
-import { writeFakeCli } from "@t3tools/provider-testing/fakeCli";
+import { writeFakeCli } from "@goat/provider-testing/fakeCli";
 const decodeCodexSettings = Schema.decodeSync(CodexSettings);
 
 const DEFAULT_TEST_MODEL_SELECTION = createModelSelection(
@@ -25,10 +27,11 @@ const DEFAULT_TEST_MODEL_SELECTION = createModelSelection(
 );
 
 const layerCodexTextGenerationTest = ServerConfig.ServerConfig.layerTest(process.cwd(), {
-  prefix: "t3code-codex-text-generation-test-",
+  prefix: "goat-codex-text-generation-test-",
 }).pipe(Layer.provideMerge(NodeServices.layer));
 
 interface FakeCodexInput {
+  isolated?: boolean;
   output: string;
   exitCode?: number;
   stderr?: string;
@@ -40,14 +43,14 @@ interface FakeCodexInput {
   forbidArg?: string;
   stdinMustContain?: string;
   stdinMustNotContain?: string;
+  /** Fail if `CODEX_HOME` holds an AGENTS.md, then rotate its auth.json as a token refresh would. */
+  refreshAuth?: "in-place" | "replace";
+  mcpServers?: ReadonlyArray<{ name: string; enabled: boolean }> | number;
 }
 
-// The stub walks argv the way the shell script it replaced did: `--image`,
-// `--config key=value`, and `--output-last-message <path>` are consumed, the
-// prompt arrives on stdin, and each check exits with its own code so a
-// failing test names the assertion that tripped.
 function makeFakeCodexBinary(dir: string, input: FakeCodexInput) {
   const check = JSON.stringify({
+    isolated: input.isolated ?? false,
     requireImage: input.requireImage ?? false,
     requireServiceTier: input.requireServiceTier ?? null,
     requireReasoningEffort: input.requireReasoningEffort ?? null,
@@ -56,6 +59,8 @@ function makeFakeCodexBinary(dir: string, input: FakeCodexInput) {
     forbidArg: input.forbidArg ?? null,
     stdinMustContain: input.stdinMustContain ?? null,
     stdinMustNotContain: input.stdinMustNotContain ?? null,
+    refreshAuth: input.refreshAuth ?? null,
+    mcpServers: input.mcpServers ?? [],
     stderr: input.stderr ?? null,
     output: input.output,
     exitCode: input.exitCode ?? 0,
@@ -69,8 +74,21 @@ function makeFakeCodexBinary(dir: string, input: FakeCodexInput) {
         'import * as NodeFS from "node:fs";',
         `const check = ${check};`,
         "const args = process.argv.slice(2);",
+        "if (check.isolated) {",
+        "  const home = process.env.CODEX_HOME;",
+        '  if (!home || home.includes(".codex")) process.exit(31);',
+        "  if (NodeFS.readdirSync(process.cwd()).length !== 0) process.exit(32);",
+        '  if (NodeFS.readdirSync(home).some((name) => name !== "auth.json")) process.exit(33);',
+        "}",
+
+        'if (args.includes("mcp") && args.includes("list")) {',
+        '  if (typeof check.mcpServers === "number") process.exit(check.mcpServers);',
+        "  process.stdout.write(JSON.stringify(check.mcpServers));",
+        "  process.exit(0);",
+        "}",
         'const originalArgs = ` ${args.join(" ")} `;',
         "let outputPath = null;",
+        "let schemaPath = null;",
         "let seenImage = false;",
         'let seenServiceTier = "";',
         'let seenReasoningEffort = "";',
@@ -86,6 +104,9 @@ function makeFakeCodexBinary(dir: string, input: FakeCodexInput) {
         '  } else if (args[index] === "--output-last-message") {',
         "    index += 1;",
         "    outputPath = args[index] ?? null;",
+        '  } else if (args[index] === "--output-schema") {',
+        "    index += 1;",
+        "    schemaPath = args[index] ?? null;",
         "  }",
         "}",
         "const chunks = [];",
@@ -94,6 +115,15 @@ function makeFakeCodexBinary(dir: string, input: FakeCodexInput) {
         "function fail(message, code) {",
         '  process.stderr.write(message + "\\n");',
         "  process.exit(code);",
+        "}",
+        // Codex CLI 0.163.0 forwards the schema to the API, which rejects a non-object root.
+        "if (schemaPath !== null) {",
+        '  const schema = JSON.parse(NodeFS.readFileSync(schemaPath, "utf8"));',
+        '  if (schema.type !== "object")',
+        "    fail(",
+        "      `Invalid schema for response_format 'codex_output_schema': schema must be a JSON Schema of 'type: \"object\"', got 'type: \"${schema.type ?? \"None\"}\"'.`,",
+        "      1,",
+        "    );",
         "}",
         "if (check.requireArg !== null && !originalArgs.includes(` ${check.requireArg} `)) {",
         '  fail("missing arg: " + check.requireArg, 8);',
@@ -123,6 +153,17 @@ function makeFakeCodexBinary(dir: string, input: FakeCodexInput) {
         "if (check.stdinMustNotContain !== null && stdinContent.includes(check.stdinMustNotContain)) {",
         '  fail("stdin contained forbidden content", 4);',
         "}",
+        "if (check.refreshAuth !== null) {",
+        "  const home = process.env.CODEX_HOME;",
+        '  if (NodeFS.existsSync(home + "/AGENTS.md")) fail("user AGENTS.md is visible", 10);',
+        '  const auth = NodeFS.readFileSync(home + "/auth.json", "utf8");',
+        '  const rotated = auth.replace("refresh-1", "refresh-2");',
+        '  if (check.refreshAuth === "in-place") NodeFS.writeFileSync(home + "/auth.json", rotated);',
+        "  else {",
+        '    NodeFS.writeFileSync(home + "/auth.json.tmp", rotated);',
+        '    NodeFS.renameSync(home + "/auth.json.tmp", home + "/auth.json");',
+        "  }",
+        "}",
         'if (check.stderr !== null) process.stderr.write(check.stderr + "\\n");',
         'if (outputPath !== null) NodeFS.writeFileSync(outputPath, check.output + "\\n");',
         "process.exitCode = check.exitCode;",
@@ -138,17 +179,22 @@ function withFakeCodexEnv<A, E, R>(
     environment?: NodeJS.ProcessEnv;
     models?: ReadonlyArray<string>;
     managedRuntime?: boolean;
+    memoryRunnerContext?: import("@goat/provider-core/server/memoryGenerationRunner").MemoryGenerationRunnerContext;
   },
   effectFn: (textGeneration: TextGeneration.TextGeneration["Service"]) => Effect.Effect<A, E, R>,
 ) {
   return Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
-    const tempDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3code-codex-text-" });
+    const tempDir = yield* fs.makeTempDirectoryScoped({ prefix: "goat-codex-text-" });
     const codexPath = yield* makeFakeCodexBinary(tempDir, input);
     const config = decodeCodexSettings({ binaryPath: codexPath, launchArgs: input.launchArgs });
     const textGeneration = yield* makeCodexTextGeneration(
       config,
-      input.environment === undefined ? undefined : { ...process.env, ...input.environment },
+      input.memoryRunnerContext
+        ? { ...process.env, CODEX_HOME: tempDir, ...input.environment }
+        : input.environment === undefined
+          ? undefined
+          : { ...process.env, ...input.environment },
       Effect.succeed(
         (input.models ?? []).map((slug) => ({
           slug,
@@ -164,12 +210,186 @@ function withFakeCodexEnv<A, E, R>(
             revision: "test",
           })
         : undefined,
+      input.memoryRunnerContext,
     );
     return yield* effectFn(textGeneration);
   }).pipe(Effect.scoped);
 }
 
+const memorySelection = M.MemoryModelSelection.make({
+  instanceId: M.ProviderInstanceId.make("codex"),
+  model: "gpt-5.6-luna",
+  options: [],
+});
+const memoryContext = {
+  providerInstanceId: memorySelection.instanceId,
+  environmentId: M.EnvironmentId.make("memory-owner"),
+};
+const memoryId = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
+const memoryRevision = M.MemoryRevision.make({
+  memorySpaceId: M.MemorySpaceId.make(memoryId(1)),
+  memoryId: M.MemoryId.make(memoryId(2)),
+  revisionId: M.MemoryRevisionId.make(memoryId(3)),
+  payloadRef: M.MemoryRevisionId.make(memoryId(3)),
+  operationId: M.MemoryOperationId.make(memoryId(4)),
+  parents: [],
+  scope: { kind: "user" },
+  assertionKind: "inference",
+  provenance: { environmentId: memoryContext.environmentId },
+  createdAtUtc: "2026-10-14T00:00:00.000Z",
+});
+const memoryPayload = M.MemoryPayload.make({
+  text: "Synthetic input",
+  evidence: [],
+  derivedFromMemoryRevisions: [],
+});
+const memorySummary = M.GenerateMemorySummaryInput.make({
+  cwd: process.cwd(),
+  sourceThread: {
+    environmentId: memoryContext.environmentId,
+    threadId: M.ThreadId.make("synthetic-thread"),
+  },
+  sourceWatermark: {
+    fromEventId: M.EventId.make("e1"),
+    toEventId: M.EventId.make("e2"),
+    throughSequence: 2,
+  },
+  messages: [{ messageId: M.MessageId.make("m1"), text: "Synthetic input", completed: true }],
+  modelSelection: memorySelection,
+});
+const memoryConflict = M.ResolveMemoryConflictInput.make({
+  cwd: memorySummary.cwd,
+  memorySpaceId: memoryRevision.memorySpaceId,
+  memoryId: memoryRevision.memoryId,
+  conflictId: M.MemoryConflictId.make(memoryId(8)),
+  heads: [
+    { revision: memoryRevision, payload: memoryPayload },
+    {
+      revision: {
+        ...memoryRevision,
+        revisionId: M.MemoryRevisionId.make(memoryId(5)),
+        payloadRef: M.MemoryRevisionId.make(memoryId(5)),
+      },
+      payload: memoryPayload,
+    },
+  ],
+  modelSelection: memorySelection,
+});
+const memoryOutput = { text: "Synthetic result", assertionKind: "inference", evidence: [] };
+const memoryOperations = ["resolveMemoryConflict", "generateMemorySummary"] as const;
+
 it.layer(layerCodexTextGenerationTest)("CodexTextGeneration", (it) => {
+  it.effect.each(memoryOperations)("runs %s without tools or checkout configuration", (operation) =>
+    withFakeCodexEnv(
+      {
+        output: JSON.stringify(
+          operation === "resolveMemoryConflict"
+            ? { ...memoryOutput, judgment: "Synthetic judgment" }
+            : memoryOutput,
+        ),
+        memoryRunnerContext: memoryContext,
+        models: ["openai.gpt-5.6-luna"],
+        requireArg:
+          "--ignore-user-config --ignore-rules --disable shell_tool --disable unified_exec --disable apps --disable plugins --disable browser_use --disable computer_use --disable view_image --disable hooks",
+        isolated: true,
+      },
+      (generation) =>
+        Effect.gen(function* () {
+          const generated =
+            operation === "resolveMemoryConflict"
+              ? yield* generation.resolveMemoryConflict!(memoryConflict)
+              : yield* generation.generateMemorySummary!(memorySummary);
+          expect(generated.result.text).toBe(memoryOutput.text);
+          expect(generated.execution).toEqual({
+            requestedModelSelection: memorySelection,
+            effectiveModel: "openai.gpt-5.6-luna",
+            effectiveProvider: "codex",
+            providerInstanceId: memoryContext.providerInstanceId,
+            environmentId: memoryContext.environmentId,
+          });
+        }),
+    ),
+  );
+  it.effect.each(memoryOperations)("rejects forged execution JSON for %s", (operation) =>
+    withFakeCodexEnv(
+      {
+        output: JSON.stringify({
+          ...memoryOutput,
+          judgment: "Forged",
+          execution: { effectiveModel: "forged" },
+        }),
+        memoryRunnerContext: memoryContext,
+      },
+      (generation) =>
+        Effect.gen(function* () {
+          const exit = yield* Effect.exit(
+            operation === "resolveMemoryConflict"
+              ? generation.resolveMemoryConflict!(memoryConflict)
+              : generation.generateMemorySummary!(memorySummary),
+          );
+          expect(exit._tag).toBe("Failure");
+        }),
+    ),
+  );
+  it.effect.each(memoryOperations)(
+    "memory isolation failure never spawns or falls back for %s",
+    (operation) =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const home = yield* fs.makeTempDirectoryScoped({ prefix: "goat-codex-memory-auth-test-" });
+        yield* fs.writeFileString(path.join(home, "auth.json"), "{}");
+        let spawns = 0;
+        const generation = yield* makeCodexTextGeneration(
+          decodeCodexSettings({}),
+          { CODEX_HOME: home },
+          Effect.succeed([]),
+          undefined,
+          memoryContext,
+        ).pipe(
+          Effect.provideService(FileSystem.FileSystem, {
+            ...fs,
+            symlink: () => fs.readFile("/synthetic-missing-memory-auth-link").pipe(Effect.asVoid),
+          }),
+          Effect.provideService(
+            ChildProcessSpawner.ChildProcessSpawner,
+            ChildProcessSpawner.make(() => {
+              spawns++;
+              return Effect.die("Unexpected spawn");
+            }),
+          ),
+        );
+        const error = yield* (
+          operation === "resolveMemoryConflict"
+            ? generation.resolveMemoryConflict!(memoryConflict)
+            : generation.generateMemorySummary!(memorySummary)
+        ).pipe(Effect.flip);
+        expect(error.detail).toContain("could not isolate");
+        expect(spawns).toBe(0);
+      }).pipe(Effect.scoped),
+  );
+  it.effect.each(memoryOperations)(
+    "rejects mismatched bound instance before spawn for %s",
+    (operation) =>
+      withFakeCodexEnv(
+        {
+          output: "{}",
+          memoryRunnerContext: {
+            ...memoryContext,
+            providerInstanceId: M.ProviderInstanceId.make("other-instance"),
+          },
+        },
+        (generation) =>
+          Effect.gen(function* () {
+            const exit = yield* Effect.exit(
+              operation === "resolveMemoryConflict"
+                ? generation.resolveMemoryConflict!(memoryConflict)
+                : generation.generateMemorySummary!(memorySummary),
+            );
+            expect(exit._tag).toBe("Failure");
+          }),
+      ),
+  );
   it.effect.each(["gpt-5.6-luna", "openai.gpt-5.6-luna"])(
     "dispatches the qualified live model for %s",
     (selectedModel) =>
@@ -266,6 +486,70 @@ it.layer(layerCodexTextGenerationTest)("CodexTextGeneration", (it) => {
     ),
   );
 
+  it.effect("generates titles with the user's MCP servers and plugins off", () =>
+    withFakeCodexEnv(
+      {
+        output: JSON.stringify({ title: "Remove default shapes" }),
+        mcpServers: [
+          { name: "augmenter", enabled: true },
+          { name: "my.server", enabled: true },
+          { name: "already-off", enabled: false },
+        ],
+        requireArg:
+          '--config features.plugins=false --config features.apps=false --config mcp_servers={"augmenter"={enabled=false},"my.server"={enabled=false}}',
+      },
+      (textGeneration) =>
+        Effect.gen(function* () {
+          const result = yield* textGeneration.generateThreadTitle({
+            cwd: process.cwd(),
+            message: "Augmenter task 1. Use the Augmenter MCP: link_thread when you start.",
+            modelSelection: DEFAULT_TEST_MODEL_SELECTION,
+          });
+          expect(result.title).toBe("Remove default shapes");
+        }),
+    ),
+  );
+
+  it.effect("still generates when Codex cannot list its MCP servers", () =>
+    withFakeCodexEnv(
+      {
+        output: JSON.stringify({ branch: "remove-default-shapes" }),
+        mcpServers: 2,
+        requireArg: "--config features.plugins=false --config features.apps=false --ephemeral",
+        forbidArg: "mcp_servers=",
+      },
+      (textGeneration) =>
+        Effect.gen(function* () {
+          const result = yield* textGeneration.generateBranchName({
+            cwd: process.cwd(),
+            message: "Remove default shapes from characters",
+            modelSelection: DEFAULT_TEST_MODEL_SELECTION,
+          });
+          expect(result.branch).toBe("remove-default-shapes");
+        }),
+    ),
+  );
+
+  it.effect("keeps plugins and apps off over launch args that turn them on", () =>
+    withFakeCodexEnv(
+      {
+        output: JSON.stringify({ title: "Remove default shapes" }),
+        launchArgs: "--config features.plugins=true --config features.apps=true",
+        requireArg:
+          "--config features.plugins=true --config features.apps=true --config features.plugins=false --config features.apps=false --ephemeral",
+      },
+      (textGeneration) =>
+        Effect.gen(function* () {
+          const result = yield* textGeneration.generateThreadTitle({
+            cwd: process.cwd(),
+            message: "Remove default shapes from characters",
+            modelSelection: DEFAULT_TEST_MODEL_SELECTION,
+          });
+          expect(result.title).toBe("Remove default shapes");
+        }),
+    ),
+  );
+
   it.effect("passes exec-safe launch args into codex exec", () =>
     withFakeCodexEnv(
       {
@@ -288,7 +572,7 @@ it.layer(layerCodexTextGenerationTest)("CodexTextGeneration", (it) => {
     ),
   );
 
-  it.effect("uses T3CODE_CODEX_LAUNCH_ARGS for codex exec over settings", () =>
+  it.effect("uses GOAT_CODEX_LAUNCH_ARGS for codex exec over settings", () =>
     withFakeCodexEnv(
       {
         output: JSON.stringify({
@@ -296,7 +580,7 @@ it.layer(layerCodexTextGenerationTest)("CodexTextGeneration", (it) => {
           body: "",
         }),
         launchArgs: "--enable settings-feature",
-        environment: { ...process.env, T3CODE_CODEX_LAUNCH_ARGS: " --strict-config --listen off " },
+        environment: { ...process.env, GOAT_CODEX_LAUNCH_ARGS: " --strict-config --listen off " },
         requireArg: "--strict-config",
         forbidArg: "settings-feature",
       },
@@ -353,7 +637,7 @@ it.layer(layerCodexTextGenerationTest)("CodexTextGeneration", (it) => {
           });
 
           expect(generated.subject).toBe("Add important change");
-          expect(generated.branch).toBe("feature/fix/important-system-change");
+          expect(generated.branch).toBe("fix/important-system-change");
         }),
     ),
   );
@@ -778,6 +1062,12 @@ it.layer(layerCodexTextGenerationTest)("channel reception", (it) => {
     questionId: "",
     answer: "",
     question: "",
+    options: [],
+    reads: [],
+    remember: "",
+    rememberQuote: "",
+    notesChangeRequested: "",
+    clarifyAbout: "other",
   });
   const receptionInput = {
     mode: "input" as const,
@@ -861,5 +1151,34 @@ it.layer(layerCodexTextGenerationTest)("channel reception", (it) => {
           expect(error.operation).toBe("generateChannelReception");
         }),
     ),
+  );
+
+  it.effect.each(["in-place", "replace"] as const)(
+    "hides the user's AGENTS.md and keeps a %s token refresh in the user's auth.json",
+    (refreshAuth) =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const userHome = yield* fs.makeTempDirectoryScoped({ prefix: "goat-codex-user-home-" });
+        yield* fs.writeFileString(path.join(userHome, "AGENTS.md"), "Reply in Korean.");
+        yield* fs.writeFileString(path.join(userHome, "auth.json"), '{"refresh":"refresh-1"}');
+        yield* withFakeCodexEnv(
+          { output: receptionOutput, refreshAuth, environment: { CODEX_HOME: userHome } },
+          (textGeneration) =>
+            Effect.gen(function* () {
+              const generate = textGeneration.generateChannelReception;
+              if (generate === undefined) return yield* Effect.die("reception missing");
+              yield* generate({
+                cwd: process.cwd(),
+                input: receptionInput,
+                modelSelection: DEFAULT_TEST_MODEL_SELECTION,
+              });
+            }),
+        );
+        expect(yield* fs.readFileString(path.join(userHome, "auth.json"))).toBe(
+          '{"refresh":"refresh-2"}',
+        );
+        expect(yield* fs.readFileString(path.join(userHome, "AGENTS.md"))).toBe("Reply in Korean.");
+      }).pipe(Effect.scoped),
   );
 });

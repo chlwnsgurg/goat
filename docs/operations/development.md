@@ -15,6 +15,17 @@ a new browser.
 
 Prefer a container? See [Dev container](../internals/devcontainer.md) for VS Code and Codespaces setup.
 
+## Worktrees
+
+A new worktree sets itself up. When `git worktree add` creates a checkout, the
+`.vite-hooks/post-checkout` hook runs `node scripts/setup-worktree.ts` in it, whether GOAT, Codex,
+or an agent ran git. Setup installs dependencies, links the main checkout's env files, and warms the
+web dependency cache, so the command returns with a ready worktree, usually within a minute.
+
+Git reads the hook from the checkout that runs `git worktree add`, so that checkout needs one
+`vp i` first. Set `GOAT_WORKTREE_SETUP=0` to skip setup for a throwaway checkout. For a worktree
+created without the hook, run `node scripts/setup-worktree.ts` from its root.
+
 ## Choosing a dev process
 
 Use `vp run dev` for server and web, or `vp run dev:desktop` for the Electron client.
@@ -26,15 +37,15 @@ Add `--browser` to open a browser automatically.
 
 ### State and ports
 
-Linked worktrees default to their own `.t3/userdata`, even when `T3CODE_HOME` is set.
-The main checkout defaults to `~/.t3/dev/userdata`. An explicit `--home-dir` wins in both cases.
-Never run a development server against the live `~/.t3/userdata`.
-A data directory inside a Git checkout has no Scratch project, so the GOAT bot reports itself
-unavailable there; to try the bot from a worktree, pass a `--home-dir` outside the checkout.
+Linked worktrees default to their own `.goat/userdata` (one created earlier keeps `.t3`), even when `GOAT_HOME` is set.
+The main checkout defaults to `~/.goat/dev` (`~/.t3/dev` while only that exists). An explicit `--home-dir` wins in both cases.
+Never run a development server against the live `~/.goat/userdata` or `~/.t3/userdata`.
 See [test data](../../AGENTS.md#test-data) for copying a consistent database snapshot.
 
+When an unsigned `vp run dev:desktop` instance launched from a terminal or agent has no OS keyring access (`safeStorage` encryption unavailable) and cannot save connections, set `GOAT_DEV_INSECURE_SECRET_STORAGE=1` alongside an isolated home (such as a worktree default or `--home-dir <path>` outside `~/.goat` and `~/.t3`). Packaged builds and default homes ignore this flag and refuse to read its development-plaintext blobs.
+
 Read ports from the `[dev-runner]` output. Worktrees derive stable preferences from their paths,
-but occupied ports can shift them. `T3CODE_PORT_OFFSET` or `T3CODE_DEV_INSTANCE` can select a
+but occupied ports can shift them. `GOAT_PORT_OFFSET` or `GOAT_DEV_INSTANCE` can select a
 different preference when needed.
 
 ### Sharing and remote debugging
@@ -47,7 +58,7 @@ Leave `VITE_HTTP_URL` and `VITE_WS_URL` unset. Vite proxies the backend through 
 origin so the same build works over localhost and remote connections.
 
 Shared runs enable bundled dev to avoid a network round trip for each import level.
-`T3CODE_BUNDLED_DEV=0` opts out when debugging bundler differences. Two reload traps matter
+`GOAT_BUNDLED_DEV=0` opts out when debugging bundler differences. Two reload traps matter
 when changing this setup:
 
 - The web entry must dynamically import the app so React refresh initializes before application
@@ -62,7 +73,7 @@ The workarounds live in the [web entry](../../apps/web/src/bootstrap.ts) and
 
 Use this only on a hostname where you trust every service. Browsers send cookies to all ports
 on that hostname. Any service you visit there can receive the reusable admin credential,
-including services unrelated to T3 Code. If you run untrusted services on that hostname, keep
+including services unrelated to GOAT. If you run untrusted services on that hostname, keep
 normal per-environment pairing instead.
 
 To use one browser profile across web dev worktrees on the same hostname, generate one fixed
@@ -75,16 +86,16 @@ openssl rand -hex 32
 Put that value in the main checkout's gitignored `.env`:
 
 ```dotenv
-T3CODE_DEV_AUTH_TOKEN=<the value generated above>
+GOAT_DEV_AUTH_TOKEN=<the value generated above>
 ```
 
-The `t3.json` Setup Worktree action links that file to each worktree's `.env`. The dev runner reads repository env files at startup. `.env.local` and inherited process
+[Worktree setup](#worktrees) links that file to each worktree's `.env`. The dev runner reads repository env files at startup. `.env.local` and inherited process
 environment values override `.env`, so no per-worktree export is needed after setup.
 
 For a manual worktree or launcher without that link, export the same fixed value instead:
 
 ```sh
-export T3CODE_DEV_AUTH_TOKEN="<the value generated above>"
+export GOAT_DEV_AUTH_TOKEN="<the value generated above>"
 ```
 
 Do not generate a new value at startup. Start or restart `vp run dev --share` after configuration,
@@ -108,10 +119,37 @@ vp lint <files>
 vp run --filter <package> typecheck
 ```
 
+In `apps/web`, a test that renders React or touches the DOM is named `*.browser.test.{ts,tsx}`
+and runs in headless Chromium with the React Compiler on, like the app. There is no jsdom; other
+`*.test.ts` files run in Node.
+Install that browser once before running the browser suite locally, as CI does:
+`node apps/web/node_modules/playwright/cli.js install --only-shell chromium`.
+
+TypeScript workspaces typecheck with tsc-rs, which has Effect diagnostics built in.
+Keep `typescript`, `@effect/tsgo`, and the `effect-tsgo patch` prepare step: editors
+still use them for Effect quick fixes and refactors. Keep `@effect/tsgo` on the
+effect-tsgo version that tsc-rs ports (see the tsc-rs README), or the two disagree
+on rule names.
+Marketing keeps `astro check` for Astro files.
+
 Use `vp run lint:mobile` for native mobile changes. CI owns the full suite; see
 [ci.yml](../../.github/workflows/ci.yml) for its current jobs.
 The [manual Windows lane](../../.github/workflows/windows-tests.yml) is available for focused
 Windows investigation while that suite is not a required gate.
+
+### Windows hosts
+
+Use Git Bash for shell scripts and POSIX-shell test suites such as `packages/ssh`.
+In agent shells launched on Windows, plain `bash` on `PATH` can resolve to the WSL launcher in
+`System32`, which cannot read GOAT worktrees because their `.git` file points at a Windows
+`C:/...` `gitdir`. Put Git's `usr\bin` ahead of `System32` on `PATH`, or invoke
+`C:\Program Files\Git\bin\bash.exe` directly on a script file.
+
+On Windows, `vp i` logs `[WARN] Failed to create bin at ...\node_modules\.bin\vitest`.
+The warning is harmless; run tests through `vp test`.
+Run a package's tests from the repo root (`vp test run packages/ssh/src/<file>.test.ts`) or
+through its `test` script. A plain `vp test` inside a package without its own Vite config skips
+the root timeouts, and slow SSH fixtures then fail at vitest's 5 second default.
 
 ### Unused code
 

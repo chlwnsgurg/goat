@@ -39,7 +39,6 @@ function runGit(
   });
 }
 
-/** Workspace-relative path to file contents, committed with the initial README. */
 export type ReplayWorkspaceFiles = Readonly<Record<string, string>>;
 
 const makeCheckpointWorkspaceEffect = Effect.fn("makeCheckpointWorkspace")(function* (
@@ -49,7 +48,7 @@ const makeCheckpointWorkspaceEffect = Effect.fn("makeCheckpointWorkspace")(funct
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const cwd = yield* fs.makeTempDirectory({
-    prefix: `t3-orchestrator-v2-${fixtureName}-`,
+    prefix: `goat-orchestrator-v2-${fixtureName}-`,
   });
   yield* runGit(cwd, ["init"]);
   yield* runGit(cwd, ["config", "user.name", "T3 Code Test"]);

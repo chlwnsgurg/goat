@@ -2,12 +2,13 @@ import {
   type KeybindingCommand,
   type KeybindingShortcut,
   type KeybindingWhenNode,
+  type ResolvedKeybindingRule,
   MODEL_PICKER_JUMP_KEYBINDING_COMMANDS,
   type ResolvedKeybindingsConfig,
   THREAD_JUMP_KEYBINDING_COMMANDS,
   type ModelPickerJumpKeybindingCommand,
   type ThreadJumpKeybindingCommand,
-} from "@t3tools/contracts";
+} from "@goat/contracts";
 import {
   isMacPlatform,
   matchesKeybindingShortcut,
@@ -16,12 +17,12 @@ import {
   resolveEventKeys,
   type ShortcutEventLike,
   type ShortcutModifierStateLike,
-} from "@t3tools/shared/keybindings";
+} from "@goat/shared/keybindings";
 import { isElectron } from "./env";
 import { projectScriptIdFromCommand } from "./projectScripts";
 
-export type { ShortcutEventLike, ShortcutModifierStateLike } from "@t3tools/shared/keybindings";
-export { shortcutKeyFromEvent } from "@t3tools/shared/keybindings";
+export type { ShortcutEventLike, ShortcutModifierStateLike } from "@goat/shared/keybindings";
+export { shortcutKeyFromEvent } from "@goat/shared/keybindings";
 
 export interface ShortcutMatchContext {
   terminalFocus: boolean;
@@ -30,8 +31,6 @@ export interface ShortcutMatchContext {
   previewOpen: boolean;
   isWeb: boolean;
   isDesktop: boolean;
-  /** A text field, textarea, select or rich-text editor owns the keyboard.
-      Optional: only chords that collide with native editing consult it. */
   editableFocus?: boolean;
   [key: string]: boolean;
 }
@@ -106,6 +105,25 @@ export function shortcutConflictKey(
   ].join("|");
 }
 
+function shortcutForContext(binding: ResolvedKeybindingRule, context: ShortcutMatchContext) {
+  const shortcut = binding.shortcut;
+  // Existing installs persist Mod+Enter. Resolve its alternate chord against
+  // the send preference without rewriting saved or remapped shortcuts.
+  if (
+    context.composerRequiresModifier &&
+    binding.command === "composer.sendAlternate" &&
+    shortcut.key === "enter" &&
+    shortcut.modKey &&
+    !shortcut.metaKey &&
+    !shortcut.ctrlKey &&
+    !shortcut.altKey &&
+    !shortcut.shiftKey
+  ) {
+    return { ...shortcut, shiftKey: true };
+  }
+  return shortcut;
+}
+
 export function effectiveShortcutsForCommand(
   keybindings: ResolvedKeybindingsConfig,
   command: KeybindingCommand,
@@ -121,14 +139,15 @@ export function effectiveShortcutsForCommand(
     if (!binding) continue;
     if (!matchesWhenClause(binding.whenAst, context)) continue;
 
-    const conflictKey = shortcutConflictKey(binding.shortcut, platform);
+    const shortcut = shortcutForContext(binding, context);
+    const conflictKey = shortcutConflictKey(shortcut, platform);
     if (claimedShortcuts.has(conflictKey)) {
       continue;
     }
 
     claimedShortcuts.add(conflictKey);
     if (binding.command === command) {
-      effective.push(binding.shortcut);
+      effective.push(shortcut);
     }
   }
 
@@ -164,13 +183,12 @@ export function resolveShortcutCommand(
     const binding = keybindings[index];
     if (!binding) continue;
     if (!matchesWhenClause(binding.whenAst, context)) continue;
-    if (!matchesKeybindingShortcut(event, binding.shortcut, platform)) continue;
+    if (!matchesKeybindingShortcut(event, shortcutForContext(binding, context), platform)) continue;
     return binding.command;
   }
   return null;
 }
 
-/** App shortcuts use the primary environment; script shortcuts belong to the active project. */
 export function resolveChatShortcutCommand(
   event: ShortcutEventLike,
   primaryKeybindings: ResolvedKeybindingsConfig,
@@ -260,12 +278,9 @@ export function shouldShowThreadJumpHintsForModifiers(
   keybindings: ResolvedKeybindingsConfig,
   options?: ShortcutMatchOptions,
 ): boolean {
-  // The embedded terminal owns keystrokes while it has focus: the Ghostty
-  // surface encodes the keydown and can write the pressed key into the shell
-  // before our window-level shortcut handling ever runs, regardless of any
-  // configured `when` clause on the jump command. Advertising jump hints
-  // here would promise a shortcut that instead types into the terminal, so
-  // never show them while the terminal is focused.
+  // The embedded terminal owns keystrokes while it has focus: the Ghostty surface encodes the
+  // keydown and can write the pressed key into the shell before our window-level shortcut handling
+  // ever runs, regardless of any configured `when` clause on the jump command.
   if (resolveContext(options).terminalFocus) {
     return false;
   }

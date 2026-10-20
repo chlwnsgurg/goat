@@ -1,38 +1,46 @@
-import type { ProviderInteractionMode } from "@t3tools/contracts";
+import { MEMORY_DATA_BOUNDARY_REMINDER } from "@goat/provider-core/server/memoryContext";
+import type { ProviderInteractionMode } from "@goat/contracts";
 import type { V2TurnStartParams__AdditionalContextEntry } from "effect-codex-app-server/schema";
-import { buildRuntimeInstructions } from "@t3tools/provider-core/server/runtimeInstructions";
+import { buildRuntimeInstructions } from "@goat/provider-core/server/runtimeInstructions";
 
 import {
-  T3_CODE_BROWSER_TOOL_INSTRUCTIONS,
-  T3_CODE_ORCHESTRATION_INSTRUCTIONS,
-} from "@t3tools/provider-core/server/orchestrationInstructions";
+  GOAT_BROWSER_TOOL_INSTRUCTIONS,
+  GOAT_ORCHESTRATION_SECTIONS,
+} from "@goat/provider-core/server/orchestrationInstructions";
 
-const T3_CODE_DEVICE_TOOL_INSTRUCTIONS = `## GOAT devices
+/**
+ * Codex cuts the middle out of any `additionalContext` value over 1,000 tokens,
+ * which it counts as UTF-8 bytes divided by four. It does this silently, so
+ * every value built here has to fit.
+ */
+export const CODEX_ADDITIONAL_CONTEXT_VALUE_MAX_BYTES = 4_000;
+
+const GOAT_DEVICE_TOOL_INSTRUCTIONS = `## GOAT devices
 
 The \`goat\` MCP server also exposes \`device_*\` tools for iOS Simulators and Android Emulators on this environment. For mobile verification, call \`device_list\`, then \`device_open\` so the user can watch the device in their Device panel; its result explains how to drive the device. Driving happens through the \`agent-device\` CLI, using the exact launcher path returned by \`device_open\`. Keep the host config and session flags returned by \`device_open\` on every command so concurrent devices stay independent: prefer \`agent-device snapshot -i\` refs over coordinates, and use \`device_screenshot\` when you need to see the screen. Prefer these tools and \`agent-device\` for opening and driving devices. Platform tools such as \`xcrun simctl\` and \`adb\` remain available for anything they do not cover, such as builds, logs, or port forwarding. If \`device_list\` reports a platform as unavailable, say so.`;
 
-export interface T3CodeToolAvailability {
+export interface GoatToolAvailability {
   readonly browser: boolean;
   readonly device: boolean;
 }
 
 const normalizeAvailability = (
-  availability: boolean | T3CodeToolAvailability,
-): T3CodeToolAvailability =>
+  availability: boolean | GoatToolAvailability,
+): GoatToolAvailability =>
   typeof availability === "boolean" ? { browser: availability, device: false } : availability;
 
 /**
- * Each block is omitted entirely when its tools aren't attached. Describing
- * `preview_*` or `device_*` tools that aren't in the turn's tool list would be
- * worse than saying nothing: the instructions actively steer the model away
- * from Playwright, agent-browser, and raw simctl/adb, so leaving them in would
- * talk it out of the only automation it still has.
+ * Describing `preview_*` or `device_*` tools that aren't in the turn's tool list would be worse
+ * than saying nothing: the instructions actively steer the model away from Playwright,
+ * agent-browser, and raw simctl/adb, so leaving them in would talk it out of the only automation
+ * it still has.
  */
-const toolInstructions = (availability: boolean | T3CodeToolAvailability): string => {
+const toolInstructions = (availability: boolean | GoatToolAvailability): string => {
   const tools = normalizeAvailability(availability);
   return [
-    tools.browser ? T3_CODE_BROWSER_TOOL_INSTRUCTIONS : "",
-    tools.device ? T3_CODE_DEVICE_TOOL_INSTRUCTIONS : "",
+    tools.browser ? GOAT_BROWSER_TOOL_INSTRUCTIONS : "",
+    tools.device ? GOAT_DEVICE_TOOL_INSTRUCTIONS : "",
+    MEMORY_DATA_BOUNDARY_REMINDER,
   ]
     .filter(Boolean)
     .join("\n\n");
@@ -187,7 +195,6 @@ export interface CodexRuntimeInfo {
   readonly reasoningEffort: string;
 }
 
-/** Mode prompt for `turn/start.collaborationMode.settings.developer_instructions`. */
 export function buildCodexDeveloperInstructions(interactionMode: ProviderInteractionMode): string {
   return interactionMode === "plan"
     ? CODEX_PLAN_MODE_DEVELOPER_INSTRUCTIONS
@@ -195,27 +202,24 @@ export function buildCodexDeveloperInstructions(interactionMode: ProviderInterac
 }
 
 /**
- * T3 Code context for `turn/start.additionalContext`. Codex renders each entry
- * as a `<key>value</key>` developer message and resends it only when the value
- * changes.
- *
  * This must stay out of the collaboration mode: when the model catalog ships
  * its own text for a mode, as newer models do, Codex uses that text and drops
  * the client's `developer_instructions` entirely.
  */
 export function buildCodexAdditionalContext(
   runtime: CodexRuntimeInfo,
-  /**
-   * Whether the `goat` MCP server is attached to this turn. Callers derive
-   * it from the session's actual MCP configuration rather than re-reading the
-   * setting, so the prompt cannot claim tools the turn doesn't have.
-   */
-  toolsAvailable: boolean | T3CodeToolAvailability = true,
+  toolsAvailable: boolean | GoatToolAvailability = true,
 ): Record<string, V2TurnStartParams__AdditionalContextEntry> {
   const tools = toolInstructions(toolsAvailable);
-  // Separate keys keep each value under Codex's per-entry token cap.
+  // Separate keys keep each value under Codex's per-entry cap. Codex emits
+  // entries in key order, so the numbering preserves the authored order.
   return {
-    t3_code_orchestration: { kind: "application", value: T3_CODE_ORCHESTRATION_INSTRUCTIONS },
+    ...Object.fromEntries(
+      GOAT_ORCHESTRATION_SECTIONS.map((section, index) => [
+        `t3_code_orchestration_${String(index + 1).padStart(2, "0")}`,
+        { kind: "application" as const, value: section },
+      ]),
+    ),
     t3_code_runtime: {
       kind: "application",
       value: buildRuntimeInstructions({ harness: "Codex", ...runtime }),

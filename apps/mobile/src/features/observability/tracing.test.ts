@@ -4,8 +4,8 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import { vi } from "vite-plus/test";
 
-import { layerRemoteHttpClient } from "@t3tools/client-runtime/rpc";
-import { withRelayClientTracing } from "@t3tools/shared/relayTracing";
+import { layerRemoteHttpClient } from "@goat/client-runtime/rpc";
+import { withRelayClientTracing } from "@goat/shared/relayTracing";
 
 import * as Tracing from "./tracing";
 
@@ -95,3 +95,8 @@ it.effect("does not let OTLP serialization failures alter application effects", 
     ),
   );
 });
+
+vi.mock("@goat/shared/goatConnect", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@goat/shared/goatConnect")>()),
+  isGoatConnectEnabled: () => true,
+}));

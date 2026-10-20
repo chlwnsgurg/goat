@@ -1,10 +1,11 @@
+import { SourceControlProviderKind } from "@goat/contracts";
 import { vi } from "vite-plus/test";
 import {
   EnvironmentId,
   AuthSourceControlWriteScope,
   WS_METHODS,
   type SourceControlPublishRepositoryResult,
-} from "@t3tools/contracts";
+} from "@goat/contracts";
 import { describe, expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -36,7 +37,7 @@ const TARGET = new PrimaryConnectionTarget({
 
 const PUBLISH_RESULT: SourceControlPublishRepositoryResult = {
   repository: {
-    provider: "github",
+    provider: SourceControlProviderKind.make("github"),
     nameWithOwner: "t3tools/t3code",
     url: "https://github.com/t3tools/t3code",
     sshUrl: "git@github.com:t3tools/t3code.git",
@@ -140,7 +141,7 @@ describe("source control environment atoms", () => {
             environmentId: TARGET.environmentId,
             input: {
               cwd: "/repo",
-              provider: "github",
+              provider: SourceControlProviderKind.make("github"),
               repository: "t3tools/t3code",
               visibility: "private",
             },
@@ -156,7 +157,7 @@ describe("source control environment atoms", () => {
             environmentId: TARGET.environmentId,
             input: {
               cwd: "/repo",
-              provider: "github",
+              provider: SourceControlProviderKind.make("github"),
               repository: "t3tools/t3code",
               visibility: "private",
             },
@@ -171,8 +172,6 @@ describe("source control environment atoms", () => {
   );
 });
 
-// Transport fixtures have a source-control-only session; authorization edge cases
-// are exercised by commandPermissions.test.ts.
 vi.mock("./session.ts", () => ({
   createEnvironmentSessionAtoms: () => ({ sessionStateAtom: grantedSessions }),
 }));

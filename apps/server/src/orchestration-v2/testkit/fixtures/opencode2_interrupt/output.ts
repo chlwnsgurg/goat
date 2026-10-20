@@ -1,5 +1,5 @@
 import { assert } from "@effect/vitest";
-import type { ProviderReplayTranscript } from "@t3tools/contracts";
+import type { ProviderReplayTranscript } from "@goat/contracts";
 
 import type { OrchestratorV2ScenarioResult } from "../../OrchestratorScenario.ts";
 import {
@@ -12,10 +12,6 @@ import {
   projectionFor,
 } from "../shared.ts";
 
-/**
- * Stop during a running shell call: `session.interrupt`, then OpenCode fails the
- * tool as aborted and ends the execution with `interrupted`.
- */
 export function assertOpenCode2InterruptOutput(
   result: OrchestratorV2ScenarioResult,
   transcript: ProviderReplayTranscript,

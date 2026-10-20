@@ -9,9 +9,9 @@ import type {
   Todo as OpenCodeTodo,
   ToolPart,
 } from "@opencode-ai/sdk/v2";
-import * as HostProcess from "@t3tools/shared/HostProcess";
-import { getModelSelectionStringOptionValue } from "@t3tools/shared/model";
-import { causeErrorTag } from "@t3tools/shared/observability";
+import * as HostProcess from "@goat/shared/HostProcess";
+import { getModelSelectionStringOptionValue } from "@goat/shared/model";
+import { causeErrorTag } from "@goat/shared/observability";
 import {
   defaultInstanceIdForDriver,
   type ModelSelection,
@@ -35,7 +35,7 @@ import {
   type ProviderSessionId,
   type RuntimeRequestId,
   type ThreadId,
-} from "@t3tools/contracts";
+} from "@goat/contracts";
 import { OpenCodeSettings } from "../settings.ts";
 import * as Cause from "effect/Cause";
 import * as DateTime from "effect/DateTime";
@@ -54,32 +54,34 @@ import * as Semaphore from "effect/Semaphore";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 
-import * as ProviderHost from "@t3tools/provider-core/server/ProviderHost";
-import { mcpToolPresentation } from "@t3tools/provider-core/server/mcpToolPresentation";
-import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
-import * as ProviderEventLoggers from "@t3tools/provider-core/server/ProviderEventLoggers";
+import * as ProviderHost from "@goat/provider-core/server/ProviderHost";
+import { mcpToolPresentation } from "@goat/provider-core/server/mcpToolPresentation";
+import * as McpProviderSession from "@goat/provider-core/server/mcpSession";
+import * as MemoryContext from "@goat/provider-core/server/memoryContext";
+import * as McpProviderSessions from "@goat/provider-core/server/McpProviderSessions";
+import * as ProviderEventLoggers from "@goat/provider-core/server/ProviderEventLoggers";
 import {
   structuralProtocolMethod,
   summarizeNativeProtocolPayload,
-} from "@t3tools/provider-core/server/nativeProtocolLogging";
-import { mergeProviderInstanceEnvironment } from "@t3tools/provider-core/server/instanceEnvironment";
-import { t3OrchestrationSystemPrompt } from "@t3tools/provider-core/server/orchestrationInstructions";
-import { buildRuntimeInstructions } from "@t3tools/provider-core/server/runtimeInstructions";
+} from "@goat/provider-core/server/nativeProtocolLogging";
+import { mergeProviderInstanceEnvironment } from "@goat/provider-core/server/instanceEnvironment";
+import { goatOrchestrationSystemPrompt } from "@goat/provider-core/server/orchestrationInstructions";
+import { buildRuntimeInstructions } from "@goat/provider-core/server/runtimeInstructions";
 import * as OpenCodeRuntime from "./OpenCodeRuntime.ts";
-import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
-import { makeProviderFailure } from "@t3tools/provider-core/server/failure";
-import { turnScopedSelectionTransition } from "@t3tools/provider-core/server/selectionTransition";
-import { providerMessageTextWithAttachmentPaths } from "@t3tools/provider-core/server/attachmentPrompt";
-import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
+import * as IdAllocator from "@goat/provider-core/server/IdAllocator";
+import { makeProviderFailure } from "@goat/provider-core/server/failure";
+import { turnScopedSelectionTransition } from "@goat/provider-core/server/selectionTransition";
+import { providerMessageTextWithAttachmentPaths } from "@goat/provider-core/server/attachmentPrompt";
+import * as ProviderAdapter from "@goat/provider-core/server/ProviderAdapter";
 import {
   ProviderAdapterDriverCreateError,
   type ProviderAdapterDriver,
   type ProviderAdapterDriverCreateInput,
-} from "@t3tools/provider-core/server/adapterDriver";
+} from "@goat/provider-core/server/adapterDriver";
 import {
   makeSubagentChildThread,
   subagentThreadTitle,
-} from "@t3tools/provider-core/server/subagentProjection";
+} from "@goat/provider-core/server/subagentProjection";
 import { openCodeToolTurnItem } from "./toolItems.ts";
 
 export { openCodeToolProjectionKind } from "./toolItems.ts";
@@ -225,7 +227,6 @@ interface OpenCodeTurnTokenUsageAccumulator {
   readonly partIds: Set<string>;
   readonly promptMessageIds: Set<string>;
   readonly assistantOwnershipByMessageId: Map<string, "owned" | "other" | "unknown">;
-  // Native removal does not undo usage. Keep unresolved counts until this turn settles.
   readonly unresolvedStepsByMessageId: Map<string, Map<string, OpenCodeStepUsage>>;
   inputTokens: number;
   cachedInputTokens: number;
@@ -275,7 +276,6 @@ interface ActiveOpenCodeTurn {
   readonly modelSelection: ModelSelection;
   readonly runtimePolicy: ProviderAdapter.ProviderAdapterV2RuntimePolicy;
   readonly providerTurnId: OrchestrationV2ProviderTurn["id"];
-  /** The provider thread the turn started on, which its terminal names. */
   readonly providerThreadId: OrchestrationV2ProviderTurn["providerThreadId"];
   readonly providerTurnOrdinal: number;
   readonly runOrdinal: number;
@@ -384,7 +384,6 @@ interface OpenCodeThreadState {
   appThread: OrchestrationV2AppThread | null;
   activeTurn: ActiveOpenCodeTurn | null;
   readonly providerTurns: Map<string, OrchestrationV2ProviderTurn>;
-  readonly messages: Map<string, OrchestrationV2ConversationMessage>;
   readonly runtimeRequests: Map<string, OrchestrationV2RuntimeRequest>;
   readonly messageRoles: Map<string, "user" | "assistant">;
   readonly userMessageIds: Array<string>;
@@ -396,14 +395,9 @@ interface OpenCodeThreadState {
 interface OpenCodeRequestOwner {
   readonly state: OpenCodeThreadState;
   readonly turn: ActiveOpenCodeTurn;
-  /** The subagent on the owner's thread that leads to the asking session. */
   readonly subagent: OpenCodeSubagentContext | null;
 }
 
-/**
- * The top-level thread and active turn that own a session's requests, walking
- * up through (possibly nested) subagents.
- */
 function topLevelRequestOwner(state: OpenCodeThreadState): OpenCodeRequestOwner | undefined {
   let owner = state;
   let subagent: OpenCodeSubagentContext | null = null;
@@ -417,7 +411,6 @@ function topLevelRequestOwner(state: OpenCodeThreadState): OpenCodeRequestOwner 
 interface PendingOpenCodeRequest {
   readonly requestId: RuntimeRequestId;
   readonly nativeRequestId: string;
-  /** The session that asked, which may be a subagent's. */
   readonly nativeSessionId: string;
   readonly turn: ActiveOpenCodeTurn;
   readonly state: OpenCodeThreadState;
@@ -610,10 +603,7 @@ const OPENCODE_RESTRICTED_PERMISSIONS = [
 
 /**
  * OpenCode does not provide an OS sandbox, so permission rules are also the
- * enforcement boundary for non-interactive policies. Read/planning tools are
- * safe by default; edits are auto-approved only for workspace-write modes,
- * while shell/network/external access remains gated unless policy explicitly
- * allows it.
+ * enforcement boundary for non-interactive policies.
  */
 export function openCodePermissionRules(
   runtimePolicy: ProviderAdapter.ProviderAdapterV2RuntimePolicy,
@@ -970,9 +960,10 @@ export const makeOpenCodeAdapterV2 = Effect.fn("makeOpenCodeAdapterV2")(function
         });
 
         const mcpSession = yield* mcpSessions.read(input.threadId);
-        const hasT3Mcp = mcpSession !== undefined && !connection.external;
-        const orchestrationSystemPrompt = t3OrchestrationSystemPrompt(hasT3Mcp);
-        if (hasT3Mcp) {
+        const hasGoatMcp = mcpSession !== undefined && !connection.external;
+        let installedMcpSession = hasGoatMcp ? mcpSession : undefined;
+        const orchestrationSystemPrompt = goatOrchestrationSystemPrompt(hasGoatMcp);
+        if (hasGoatMcp) {
           yield* OpenCodeRuntime.runOpenCodeSdk("mcp.add", () =>
             client.mcp.add({
               name: "goat",
@@ -1008,10 +999,6 @@ export const makeOpenCodeAdapterV2 = Effect.fn("makeOpenCodeAdapterV2")(function
         const pendingRequestsByNativeId = new Map<string, PendingOpenCodeRequest>();
         const subagentsByNativeItemId = new Map<string, OpenCodeSubagentContext>();
         const subagentsByChildSessionId = new Map<string, OpenCodeSubagentContext>();
-        // Permission and question requests can originate from child sessions
-        // (task subagents and their descendants). Related sessions map back
-        // to the root thread state whose active turn owns the request; asks
-        // arriving before the relation is known resolve it via session.get.
         const relatedSessionOwners = new Map<string, OpenCodeThreadState>();
         // Sessions of this runtime that OpenCode reports busy. A background
         // task child keeps running after its parent turn settles, so idle
@@ -1257,7 +1244,6 @@ export const makeOpenCodeAdapterV2 = Effect.fn("makeOpenCodeAdapterV2")(function
               createdAt: startedAt,
               updatedAt: emittedAt,
             };
-            state.messages.set(String(message.id), message);
             yield* emitProviderEvent({
               type: "message.updated",
               driver: OPENCODE_PROVIDER,
@@ -1428,7 +1414,6 @@ export const makeOpenCodeAdapterV2 = Effect.fn("makeOpenCodeAdapterV2")(function
               appThread: childThread,
               activeTurn: null,
               providerTurns: new Map(),
-              messages: new Map(),
               runtimeRequests: new Map(),
               messageRoles: new Map(),
               userMessageIds: [],
@@ -1546,8 +1531,6 @@ export const makeOpenCodeAdapterV2 = Effect.fn("makeOpenCodeAdapterV2")(function
             yield* emitSubagent(state, turn, part);
             return;
           }
-          // question.asked carries the respondable semantic item. Projecting
-          // the implementation tool as well would duplicate it in the UI.
           if (normalizedTool === "question") return;
           const now = yield* DateTime.now;
           const status = toolStatus(part);
@@ -1762,6 +1745,8 @@ export const makeOpenCodeAdapterV2 = Effect.fn("makeOpenCodeAdapterV2")(function
             id: OpenCodeRuntime.openCodeQuestionId(index, question),
             header: question.header.trim() || `Question ${index + 1}`,
             question: question.question.trim() || question.header.trim() || `Question ${index + 1}`,
+            ...(question.multiple === undefined ? {} : { multiSelect: question.multiple }),
+            ...(question.custom === undefined ? {} : { allowCustomAnswer: question.custom }),
             options: question.options.map((option) => ({
               label: option.label.trim() || "Option",
               description: option.description.trim() || option.label.trim() || "Option",
@@ -1832,7 +1817,6 @@ export const makeOpenCodeAdapterV2 = Effect.fn("makeOpenCodeAdapterV2")(function
           });
           const nodeId = idAllocator.derive.approvalNode({ requestId });
           const turnItemId = idAllocator.derive.approvalTurnItem({ requestId });
-          // The tool call belongs to the asking session's turn, not the owner's.
           const permissionToolName =
             request.type === "permission" && request.value.tool !== undefined
               ? threads
@@ -1973,10 +1957,6 @@ export const makeOpenCodeAdapterV2 = Effect.fn("makeOpenCodeAdapterV2")(function
           if (!hasOtherPending) yield* updateProviderSession("running", null);
         });
 
-        /** Resolve the thread state a session belongs to: its own, or for a
-         *  child not registered yet, the nearest known ancestor found by walking
-         *  the native parent chain. Registers every hop so later requests from
-         *  the same child resolve without another lookup. */
         const resolveSessionOwner = Effect.fnUntraced(function* (sessionId: string) {
           const known = threads.get(sessionId) ?? relatedSessionOwners.get(sessionId);
           if (known !== undefined) return known;
@@ -2000,14 +1980,6 @@ export const makeOpenCodeAdapterV2 = Effect.fn("makeOpenCodeAdapterV2")(function
           return undefined;
         });
 
-        /** Every request is asked on the top-level thread and its active turn,
-         *  under the subagent that leads to the asking session, because native
-         *  subagent threads are hidden from the sidebar. A child's request can
-         *  arrive before the task part or session.created event that reveals
-         *  its relation to a thread. The first resolution attempt runs inline
-         *  (the replayable path); if the relation or the owning turn is not
-         *  established yet, a short forked backoff keeps trying instead of
-         *  dropping the request. */
         const routeRuntimeRequest = Effect.fnUntraced(function* (
           nativeRequestId: string,
           sessionId: string,
@@ -2336,7 +2308,6 @@ export const makeOpenCodeAdapterV2 = Effect.fn("makeOpenCodeAdapterV2")(function
             createdAt: turn.startedAt,
             updatedAt: now,
           };
-          state.messages.set(String(messageId), projected);
           yield* emitProviderEvent({
             type: "message.updated",
             driver: OPENCODE_PROVIDER,
@@ -2487,7 +2458,6 @@ export const makeOpenCodeAdapterV2 = Effect.fn("makeOpenCodeAdapterV2")(function
             return;
           }
           if (part.type === "tool") {
-            // Approval routing needs the tool name, without retaining its input and output.
             turn.toolNamesByCallId.set(part.callID, part.tool);
           } else {
             turn.parts.set(part.id, part);
@@ -2736,7 +2706,6 @@ export const makeOpenCodeAdapterV2 = Effect.fn("makeOpenCodeAdapterV2")(function
           Effect.exit,
           Effect.flatMap((exit) =>
             Effect.gen(function* () {
-              // No further status can clear a busy session once the stream ends.
               busySessionIds.clear();
               if (closing || abortController.signal.aborted) return;
               const detail = Exit.isSuccess(exit)
@@ -2834,7 +2803,6 @@ export const makeOpenCodeAdapterV2 = Effect.fn("makeOpenCodeAdapterV2")(function
             appThread,
             activeTurn: null,
             providerTurns: new Map(),
-            messages: new Map(),
             runtimeRequests: new Map(),
             messageRoles: new Map(),
             userMessageIds: [],
@@ -2945,6 +2913,7 @@ export const makeOpenCodeAdapterV2 = Effect.fn("makeOpenCodeAdapterV2")(function
             sessionID: string;
           },
           abortController: AbortController,
+          memoryInput?: ProviderAdapter.ProviderAdapterV2TurnInput,
         ) {
           const text = payload.parts
             ?.filter((part) => part.type === "text")
@@ -2958,9 +2927,83 @@ export const makeOpenCodeAdapterV2 = Effect.fn("makeOpenCodeAdapterV2")(function
                 Effect.orElseSucceed(() => []),
               )).find((entry) => entry.name === match[1])
             : undefined;
+          const currentMcp =
+            memoryInput === undefined ? undefined : yield* mcpSessions.read(memoryInput.threadId);
+          if (
+            memoryInput !== undefined &&
+            !connection.external &&
+            (currentMcp?.authorizationHeader !== installedMcpSession?.authorizationHeader ||
+              currentMcp?.endpoint !== installedMcpSession?.endpoint)
+          ) {
+            if (currentMcp === undefined) {
+              yield* sdkCall("mcp.disconnect", { name: "goat" }, (signal) =>
+                client.mcp.disconnect({ name: "goat" }, { signal }),
+              );
+            } else {
+              yield* sdkCall("mcp.add", { name: "goat" }, (signal) =>
+                client.mcp.add(
+                  {
+                    name: "goat",
+                    config: {
+                      type: "remote",
+                      url: currentMcp.endpoint,
+                      headers: { Authorization: currentMcp.authorizationHeader },
+                      oauth: false,
+                    },
+                  },
+                  { signal },
+                ),
+              );
+            }
+            installedMcpSession = currentMcp;
+          }
+          // Native workspace commands accept file parts only, so snapshots stay on prompts.
           if (!command) {
-            return yield* sdkCall("session.promptAsync", payload, (signal) =>
-              client.session.promptAsync(payload, {
+            const snapshot =
+              memoryInput === undefined
+                ? undefined
+                : memoryInput.refreshMemoryContext
+                  ? yield* memoryInput.refreshMemoryContext()
+                  : memoryInput.memoryContext;
+            const memory =
+              snapshot === undefined
+                ? undefined
+                : yield* Effect.try({
+                    try: () => MemoryContext.memoryContextText(snapshot),
+                    catch: () =>
+                      new ProviderAdapter.ProviderAdapterProtocolError({
+                        driver: OPENCODE_PROVIDER,
+                        detail: "Invalid memory context frame",
+                      }),
+                  });
+            const availability = McpProviderSession.memoryToolAvailability(
+              !connection.external &&
+                currentMcp?.authorizationHeader === installedMcpSession?.authorizationHeader &&
+                currentMcp?.endpoint === installedMcpSession?.endpoint
+                ? currentMcp
+                : undefined,
+            );
+            const hasMemoryTools = availability.read || availability.write || availability.source;
+            const prepared =
+              memory === undefined && !hasMemoryTools
+                ? payload
+                : {
+                    ...payload,
+                    system: [
+                      payload.system,
+                      memory === undefined
+                        ? undefined
+                        : MemoryContext.MEMORY_DATA_BOUNDARY_REMINDER,
+                      hasMemoryTools
+                        ? `GOAT memory tools: read=${availability.read}, write=${availability.write}, source=${availability.source}. Unavailable or denied tools must not be claimed.`
+                        : undefined,
+                      memory,
+                    ]
+                      .filter((part) => part !== undefined)
+                      .join("\n\n"),
+                  };
+            return yield* sdkCall("session.promptAsync", prepared, (signal) =>
+              client.session.promptAsync(prepared, {
                 signal: AbortSignal.any([signal, abortController.signal]),
               }),
             ).pipe(Effect.asVoid);
@@ -3035,8 +3078,6 @@ export const makeOpenCodeAdapterV2 = Effect.fn("makeOpenCodeAdapterV2")(function
           hasPendingBackgroundWork: Effect.sync(() => busySessionIds.size > 0),
           ensureThread: (threadInput) =>
             Effect.gen(function* () {
-              // Only a row that already carries a native session can be
-              // resumed; a placeholder without one still needs session.create.
               if (threadInput.existingProviderThread?.nativeThreadRef != null) {
                 return yield* runtimeSession.resumeThread({
                   providerThread: threadInput.existingProviderThread,
@@ -3063,9 +3104,6 @@ export const makeOpenCodeAdapterV2 = Effect.fn("makeOpenCodeAdapterV2")(function
                 now: createdAt,
               });
               const existing = threadInput.existingProviderThread;
-              // Bind the new native session to the caller's row when one was
-              // handed over: a second live row per app thread would make
-              // `activeProviderThreadId` flap between the two on every update.
               const providerThread =
                 existing === undefined
                   ? created
@@ -3134,9 +3172,11 @@ export const makeOpenCodeAdapterV2 = Effect.fn("makeOpenCodeAdapterV2")(function
                 return yield* protocolError(`OpenCode session ${sessionId} is not registered`);
               }
               if (state.activeTurn !== null) {
-                return yield* protocolError(
-                  `OpenCode provider thread ${turnInput.providerThread.id} already has an active turn`,
-                );
+                return yield* new ProviderAdapter.ProviderAdapterProtocolError({
+                  driver: OPENCODE_PROVIDER,
+                  detail: `OpenCode provider thread ${turnInput.providerThread.id} already has an active turn`,
+                  reason: "previous_turn_active",
+                });
               }
               const parsedModel = OpenCodeRuntime.parseOpenCodeModelSlug(
                 turnInput.modelSelection.model,
@@ -3178,9 +3218,11 @@ export const makeOpenCodeAdapterV2 = Effect.fn("makeOpenCodeAdapterV2")(function
                 );
               }
               if (state.activeTurn !== null) {
-                return yield* protocolError(
-                  `OpenCode provider thread ${turnInput.providerThread.id} already has an active turn`,
-                );
+                return yield* new ProviderAdapter.ProviderAdapterProtocolError({
+                  driver: OPENCODE_PROVIDER,
+                  detail: `OpenCode provider thread ${turnInput.providerThread.id} already has an active turn`,
+                  reason: "previous_turn_active",
+                });
               }
               const turn: ActiveOpenCodeTurn = {
                 isRoot: true,
@@ -3287,6 +3329,7 @@ export const makeOpenCodeAdapterV2 = Effect.fn("makeOpenCodeAdapterV2")(function
                   parts,
                 },
                 admissionAbortController!,
+                turnInput,
               ).pipe(
                 Effect.tapError((cause) =>
                   admissionAbortController!.signal.aborted
@@ -3421,8 +3464,6 @@ export const makeOpenCodeAdapterV2 = Effect.fn("makeOpenCodeAdapterV2")(function
               const sessionId = nativeThreadId(interruptInput.providerThread);
               const state = threads.get(sessionId);
               const turn = state?.activeTurn;
-              // Stop on a settled turn: a background task child can outlive
-              // it (busySessionIds), and aborting the descendants ends it.
               if (
                 (turn === undefined || turn === null) &&
                 interruptInput.requestRuntimeRestart === true
@@ -3447,7 +3488,6 @@ export const makeOpenCodeAdapterV2 = Effect.fn("makeOpenCodeAdapterV2")(function
               cancelOpenCodePromptAdmission(turn, state!.nextAdmissionGeneration++);
               turn.admissionAbortController?.abort();
               if (admissionWasPending) {
-                // Settle the cancelled request before sending the session abort.
                 // A timed-out local request must not prevent the definitive
                 // server-side abort below from running.
                 yield* Deferred.await(turn.admissionSettled).pipe(
@@ -3459,10 +3499,6 @@ export const makeOpenCodeAdapterV2 = Effect.fn("makeOpenCodeAdapterV2")(function
                 client.session.abort({ sessionID: sessionId }, { signal }),
               ).pipe(
                 Effect.timeout("10 seconds"),
-                // The turn can settle while the abort is in flight, and
-                // aborting an already-idle session fails. That stop still
-                // succeeded; only surface failures for a turn that is
-                // genuinely still running.
                 Effect.catch((cause) =>
                   turn.finalized
                     ? Effect.void

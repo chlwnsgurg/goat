@@ -1,14 +1,19 @@
-import type { EnvironmentId } from "@t3tools/contracts";
+import type { EnvironmentId } from "@goat/contracts";
+import { shellSyncMessage } from "@goat/client-runtime/state/presentation";
 
 import { cn } from "~/lib/utils";
 import { useEnvironment } from "../../state/environments";
-import { useEnvironmentConnectionPhase } from "../../state/presentation";
+import {
+  useEnvironmentConnectionPhase,
+  useEnvironmentConnectionUnreachable,
+  useEnvironmentShellSync,
+} from "../../state/presentation";
 import { connectionPhaseDotClassName } from "../ConnectionStatusDot";
 import { EnvironmentConnectionProgressLabel } from "../EnvironmentConnectionProgress";
 
 /**
  * A still dot beside a remote thread's machine glyph while its environment is
- * not connected, in the same colors as every other connection dot. The row
+ * not connected or its shell data is not current. The row
  * hover card says what the connection is doing.
  */
 export function SidebarEnvironmentConnectionDot({
@@ -17,23 +22,41 @@ export function SidebarEnvironmentConnectionDot({
   environmentId: EnvironmentId;
 }) {
   const phase = useEnvironmentConnectionPhase(environmentId);
-  if (phase === null || phase === "connected") return null;
+  const unreachable = useEnvironmentConnectionUnreachable(environmentId);
+  const syncMessage = shellSyncMessage(useEnvironmentShellSync(environmentId));
+  if (phase === null || (phase === "connected" && syncMessage === null)) return null;
   return (
-    <span className={cn("size-1.5 shrink-0 rounded-full", connectionPhaseDotClassName(phase))} />
+    <span
+      aria-label={phase === "connected" ? (syncMessage ?? undefined) : undefined}
+      className={cn(
+        "size-1.5 shrink-0 rounded-full",
+        connectionPhaseDotClassName(phase === "connected" ? "reconnecting" : phase, unreachable),
+      )}
+    />
   );
 }
 
-/** The thread view's connection label, for the row hover card; null when connected. */
+/** The row hover card reports transport progress or a shell synchronization warning. */
 export function SidebarEnvironmentConnectionStatus({
   environmentId,
 }: {
   environmentId: EnvironmentId;
 }) {
   const environment = useEnvironment(environmentId);
-  if (environment === null || environment.connection.phase === "connected") return null;
+  const syncMessage = shellSyncMessage(useEnvironmentShellSync(environmentId));
+  if (
+    environment === null ||
+    (environment.connection.phase === "connected" && syncMessage === null)
+  )
+    return null;
   return (
     <span className="shrink-0">
-      · <EnvironmentConnectionProgressLabel connection={environment.connection} />
+      ·{" "}
+      {environment.connection.phase === "connected" ? (
+        syncMessage
+      ) : (
+        <EnvironmentConnectionProgressLabel connection={environment.connection} />
+      )}
     </span>
   );
 }

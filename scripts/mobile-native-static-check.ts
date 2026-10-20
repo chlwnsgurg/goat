@@ -2,7 +2,7 @@
 
 import * as NodeRuntime from "@effect/platform-node/NodeRuntime";
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import { isCommandAvailable, resolveSpawnCommand } from "@t3tools/shared/shell";
+import { isCommandAvailable, resolveSpawnCommand } from "@goat/shared/shell";
 import * as Console from "effect/Console";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -127,7 +127,7 @@ export const runCommand = Effect.fn("runCommand")(function* (
   const spawnCommand = yield* resolveSpawnCommand(command, args);
   const processContext = {
     command,
-    argumentCount: spawnCommand.args.length,
+    argumentCount: args.length,
     cwd,
     shell: spawnCommand.shell,
   } as const;

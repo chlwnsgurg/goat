@@ -1,9 +1,9 @@
-import { SSH_RUNTIME_PROTOCOL_VERSION } from "@t3tools/shared/sshRuntimeProtocol";
-import { ORCHESTRATION_PROTOCOL_VERSION } from "@t3tools/contracts";
+import { SSH_RUNTIME_PROTOCOL_VERSION } from "@goat/shared/sshRuntimeProtocol";
+import { ORCHESTRATION_PROTOCOL_VERSION } from "@goat/contracts";
 import { assert, describe, it } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import * as NetService from "@t3tools/shared/Net";
-import * as HostProcess from "@t3tools/shared/HostProcess";
+import * as NetService from "@goat/shared/Net";
+import * as HostProcess from "@goat/shared/HostProcess";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
@@ -46,6 +46,7 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")(
               ssh: SSH_RUNTIME_PROTOCOL_VERSION,
               orchestration: ORCHESTRATION_PROTOCOL_VERSION,
               nodeReadiness: true,
+              drain: true,
             },
             f.state,
           );
@@ -119,7 +120,7 @@ process.stdout.write(cp.execFileSync('/bin/ps', args));
           assert.isAtLeast(inspections.length, 2);
           assert.include(inspections[0].runner, entry);
           assert.notInclude(inspections[0].runner, nextEntry);
-          // Publication follows confirmed termination, so every old-PID inspection
+          // Publication follows the confirmed drain, so every old-PID inspection
           // must still see the old runner.
           for (const inspection of inspections) {
             assert.include(inspection.runner, entry);
@@ -142,7 +143,19 @@ process.stdout.write(cp.execFileSync('/bin/ps', args));
           );
           assert.lengthOf(
             events.filter((event) => event.type === "stop"),
-            2,
+            1,
+          );
+          assert.lengthOf(
+            events.filter((event) => event.type === "drain"),
+            1,
+          );
+          assert.lengthOf(
+            events.filter((event) => event.type === "self-stop"),
+            1,
+          );
+          assert.lengthOf(
+            events.filter((event) => event.type === "supervise" && event.status === "replaced"),
+            1,
           );
           assert.include(events.filter((event) => event.type === "start")[1].runner, nextEntry);
           for (const file of ["pid", "port", "managed", "identity"])
@@ -244,9 +257,7 @@ process.stdout.write(cp.execFileSync('/bin/ps', args));
               },
               extendEnv: false,
               stdin: {
-                stream: Stream.make(
-                  new TextEncoder().encode(scripts[entry].split("711bc738002d72fd").join(key)),
-                ),
+                stream: Stream.make(new TextEncoder().encode(scripts[entry])),
                 endOnDone: true,
               },
             }),

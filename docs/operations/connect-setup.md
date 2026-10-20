@@ -1,13 +1,23 @@
 # T3 Connect setup
 
+> **Status:** T3 Connect (Clerk sign-in, hosted relay, and managed Cloudflare
+> tunnels) is disabled in every build by `GOAT_CONNECT_ENABLED=false` in
+> [`@goat/shared/goatConnect`](../../packages/shared/src/goatConnect.ts).
+> GOAT Connect is coming soon. Public configuration does not enable it. This
+> runbook retains setup details for the dormant implementation; use
+> [direct pairing, Tailscale, or SSH](../user/remote-access.md) for current access.
+> `goat connect` and its subcommands print the coming-soon message and exit 0.
+> Stored links are retained without tunnel restoration; previously linked servers
+> start normally.
+
 Deployment and client configuration for T3 Connect. The [architecture note](../internals/t3-connect.md)
 explains the trust boundaries; the [relay README](../../infra/relay/README.md#deployment) owns relay
 provisioning instructions.
 
 ## Public application configuration
 
-T3 Connect is disabled in a fresh clone. To build against the production deployment, copy the
-repository-root example:
+The following public settings are retained for future Connect work and do not
+activate Connect while the shared gate is off. The repository-root example is:
 
 ```sh
 cp .env.example .env
@@ -65,12 +75,15 @@ URL selects the deployment.
 Enable Clerk's Native API and add the desktop redirects to its SSO redirect allowlist:
 
 ```text
+goat-dev://app/
+goat://app/
 t3code-dev://app/
 t3code://app/
 ```
 
-Add the corresponding origin to the Clerk instance's Backend API `allowed_origins` array.
-Development uses `t3code-dev://app`; production uses `t3code://app`. Update the array with
+Add the corresponding origins to the Clerk instance's Backend API `allowed_origins` array.
+Development uses `goat-dev://app`; production uses `goat://app`. Keep the `t3code` entries for
+desktop builds from before the renderer moved to `goat://app`. Update the array with
 `PATCH https://api.clerk.com/v1/instance` using the Clerk secret key, preserving existing entries.
 The Clerk Electron integration handles token
 persistence and system-browser callback delivery.
@@ -102,8 +115,8 @@ For a production macOS app with bundle ID `com.t3tools.t3code`:
 Local signed builds additionally use:
 
 ```dotenv
-T3CODE_APPLE_TEAM_ID=ABC1234567
-T3CODE_MACOS_PROVISIONING_PROFILE=/absolute/path/to/t3code.provisionprofile
+GOAT_APPLE_TEAM_ID=ABC1234567
+GOAT_MACOS_PROVISIONING_PROFILE=/absolute/path/to/t3code.provisionprofile
 # Override only when the RP domain differs from the Clerk Frontend API hostname.
 T3CODE_CLERK_PASSKEY_RP_DOMAINS=example.clerk.accounts.dev,clerk.example.com
 ```
@@ -118,7 +131,7 @@ actual web and server ports. For example, with the default ports:
 
 ```sh
 VITE_DEV_SERVER_URL=http://127.0.0.1:5733 \
-T3CODE_PORT=13773 \
+GOAT_PORT=13773 \
   "/Applications/T3 Code (Alpha).app/Contents/MacOS/T3 Code (Alpha)"
 ```
 

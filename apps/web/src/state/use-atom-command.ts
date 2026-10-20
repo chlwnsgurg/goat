@@ -4,8 +4,8 @@ import {
   type AtomCommandOptions,
   type AtomCommandResult,
   runAtomCommand,
-} from "@t3tools/client-runtime/state/runtime";
-import { useCallback, useContext } from "react";
+} from "@goat/client-runtime/state/runtime";
+import { useContext } from "react";
 
 export function useAtomCommand<A, E, W>(
   command: AtomCommand<W, A, E>,
@@ -16,8 +16,6 @@ export function useAtomCommand<A, E, W>(
   const reportFailure = typeof options === "string" ? true : (options?.reportFailure ?? true);
   const reportDefect = typeof options === "string" ? true : (options?.reportDefect ?? true);
 
-  return useCallback(
-    (value: W) => runAtomCommand(registry, command, value, { label, reportFailure, reportDefect }),
-    [command, label, registry, reportDefect, reportFailure],
-  );
+  return (value: W) =>
+    runAtomCommand(registry, command, value, { label, reportFailure, reportDefect });
 }

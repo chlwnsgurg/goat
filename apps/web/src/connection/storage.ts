@@ -1,12 +1,17 @@
+import { goatStorageKey } from "@goat/contracts/legacyT3Names";
+import { createMigratingDatabaseOpener } from "../lib/indexedDbMigration";
+import { migratingStorage } from "@goat/client-runtime/storage-migration";
 import {
   ConnectionCatalogDocument,
   type ConnectionCatalogDocument as ConnectionCatalogDocumentType,
   EMPTY_CONNECTION_CATALOG_DOCUMENT,
   ORCHESTRATION_CACHE_SCHEMA_VERSION,
+  ORCHESTRATION_THREAD_CACHE_SCHEMA_VERSION,
   StoredOrchestrationShellSnapshot,
   StoredOrchestrationThreadSnapshot,
   decodeOrDiscardOrchestrationCache,
   putRemoteDpopTokenInCatalog,
+  putConnectionCredentialInCatalog,
   registerConnectionInCatalog,
   removeCatalogValue,
   removeConnectionFromCatalog,
@@ -14,8 +19,9 @@ import {
   setRoutesInCatalog,
   replaceCatalogValue,
   Persistence,
-} from "@t3tools/client-runtime/platform";
-import { TokenStore } from "@t3tools/client-runtime/authorization";
+  makeStoredShellSnapshotEncoder,
+} from "@goat/client-runtime/platform";
+import { TokenStore } from "@goat/client-runtime/authorization";
 import {
   ConnectionTransientError,
   ConnectionBlockedError,
@@ -25,8 +31,14 @@ import {
   StoredGitHubRoutingPermission,
   gitHubRoutingConnectionKey,
   gitHubRoutingPermissionFor,
-} from "@t3tools/client-runtime/connection";
-import { EnvironmentId, ServerConfig, ThreadId, VcsListRefsResult } from "@t3tools/contracts";
+} from "@goat/client-runtime/connection";
+import {
+  EnvironmentId,
+  ServerConfig,
+  ThreadId,
+  VcsListRefsResult,
+  type DesktopBridge,
+} from "@goat/contracts";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -38,7 +50,7 @@ import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
 import { projectFaviconCache } from "../assets/projectFaviconCache";
 
-const DATABASE_NAME = "t3code:connection-runtime";
+const DATABASE_NAME = "goat:connection-runtime";
 const DATABASE_VERSION = 4;
 const CATALOG_STORE_NAME = "catalog";
 const SHELL_STORE_NAME = "shell";
@@ -67,7 +79,6 @@ const ConnectionCatalogDocumentJson = Schema.fromJsonString(ConnectionCatalogDoc
 const decodeConnectionCatalogDocument = Schema.decodeUnknownEffect(ConnectionCatalogDocumentJson);
 const encodeConnectionCatalogDocument = Schema.encodeEffect(ConnectionCatalogDocumentJson);
 const decodeStoredShellSnapshot = Schema.decodeUnknownEffect(StoredShellSnapshotJson);
-const encodeStoredShellSnapshot = Schema.encodeEffect(StoredShellSnapshotJson);
 const decodeStoredThreadSnapshot = Schema.decodeUnknownEffect(StoredThreadSnapshotJson);
 const encodeStoredThreadSnapshot = Schema.encodeEffect(StoredThreadSnapshotJson);
 const decodeStoredServerConfig = Schema.decodeUnknownEffect(StoredServerConfigJson);
@@ -110,52 +121,30 @@ function persistenceError(
   });
 }
 
-const openDatabase = Effect.fn("web.connectionStorage.openDatabase")(function* () {
-  return yield* Effect.callback<IDBDatabase, ConnectionTransientError>((resume) => {
-    if (typeof indexedDB === "undefined") {
-      resume(
-        Effect.fail(catalogError("open", "IndexedDB is unavailable in this browser context.")),
-      );
-      return;
+const openMigratedDatabase = createMigratingDatabaseOpener(
+  DATABASE_NAME,
+  DATABASE_VERSION,
+  (database) => {
+    for (const name of [
+      CATALOG_STORE_NAME,
+      SHELL_STORE_NAME,
+      THREAD_STORE_NAME,
+      SERVER_CONFIG_STORE_NAME,
+      VCS_REFS_STORE_NAME,
+    ]) {
+      if (!database.objectStoreNames.contains(name)) database.createObjectStore(name);
     }
-    try {
-      const request = indexedDB.open(DATABASE_NAME, DATABASE_VERSION);
-      request.addEventListener("upgradeneeded", () => {
-        if (!request.result.objectStoreNames.contains(CATALOG_STORE_NAME)) {
-          request.result.createObjectStore(CATALOG_STORE_NAME);
-        }
-        if (!request.result.objectStoreNames.contains(SHELL_STORE_NAME)) {
-          request.result.createObjectStore(SHELL_STORE_NAME);
-        }
-        if (!request.result.objectStoreNames.contains(THREAD_STORE_NAME)) {
-          request.result.createObjectStore(THREAD_STORE_NAME);
-        }
-        if (!request.result.objectStoreNames.contains(SERVER_CONFIG_STORE_NAME)) {
-          request.result.createObjectStore(SERVER_CONFIG_STORE_NAME);
-        }
-        if (!request.result.objectStoreNames.contains(VCS_REFS_STORE_NAME)) {
-          request.result.createObjectStore(VCS_REFS_STORE_NAME);
-        }
-      });
-      request.addEventListener("error", () => {
-        resume(Effect.fail(catalogError("open", request.error ?? "Unknown IndexedDB error")));
-      });
-      request.addEventListener("success", () => {
-        resume(Effect.succeed(request.result));
-      });
-    } catch (cause) {
-      resume(Effect.fail(catalogError("open", cause)));
-    }
-  });
-});
+  },
+);
+const openDatabase = Effect.fn("web.connectionStorage.openDatabase")(() =>
+  Effect.tryPromise({ try: openMigratedDatabase, catch: (cause) => catalogError("open", cause) }),
+);
 
 interface DatabaseHandle {
   readonly get: Effect.Effect<IDBDatabase, ConnectionTransientError>;
-  /** Forget `database` if it is still the shared connection, so the next access reopens. */
   readonly invalidate: (database: IDBDatabase) => Effect.Effect<void>;
 }
 
-/** Share a connection until the browser closes it; the next access reopens it. */
 const makeDatabaseHandle = Effect.fn("web.connectionStorage.makeDatabaseHandle")(function* () {
   const lock = yield* Semaphore.make(1);
   let current: IDBDatabase | null = null;
@@ -194,16 +183,14 @@ const makeDatabaseHandle = Effect.fn("web.connectionStorage.makeDatabaseHandle")
 });
 
 /**
- * Runs `use` on the shared connection. A connection the browser already closed
- * throws InvalidStateError even when no close event reached this tab, so drop
- * it and retry once on a fresh one instead of failing every later operation.
+ * A connection the browser already closed throws InvalidStateError even when no
+ * close event reached this tab, so drop it and retry once on a fresh one
+ * instead of failing every later operation.
  */
 function withDatabase<A>(
   database: DatabaseHandle,
   use: (opened: IDBDatabase) => Effect.Effect<A, ConnectionTransientError>,
 ) {
-  // Only a connection that opened and then failed is stale; a failing open is
-  // storage being unavailable, which a retry would not fix.
   const closedConnection = Symbol("closedConnection");
   const attempt = Effect.flatMap(database.get, (opened) =>
     use(opened).pipe(
@@ -390,11 +377,16 @@ const encodeCatalog = Effect.fn("web.connectionStorage.encodeCatalog")(function*
 export interface CatalogBackend {
   readonly read: Effect.Effect<string | null, ConnectionTransientError>;
   readonly write: (raw: string) => Effect.Effect<void, ConnectionTransientError>;
+  readonly compareAndSet?: (
+    raw: string,
+    expected: string | null,
+  ) => Effect.Effect<boolean, ConnectionTransientError>;
   readonly quarantine?: (raw: string) => Effect.Effect<void, ConnectionTransientError>;
 }
 
-export function makeCatalogBackend(database: DatabaseHandle): CatalogBackend {
-  const bridge = window.desktopBridge;
+export function makeDesktopCatalogBackend(
+  bridge: DesktopBridge | undefined,
+): CatalogBackend | undefined {
   if (bridge?.getConnectionCatalog !== undefined && bridge.setConnectionCatalog !== undefined) {
     return {
       read: Effect.tryPromise({
@@ -403,11 +395,11 @@ export function makeCatalogBackend(database: DatabaseHandle): CatalogBackend {
       }),
       write: (raw) =>
         Effect.tryPromise({
-          try: () => bridge.setConnectionCatalog!(raw),
+          try: () => bridge.setConnectionCatalog!(raw, null),
           catch: (cause) => catalogError("save", cause),
         }).pipe(
           Effect.flatMap((stored) =>
-            stored
+            stored === true
               ? Effect.void
               : Effect.fail(
                   catalogError(
@@ -417,17 +409,44 @@ export function makeCatalogBackend(database: DatabaseHandle): CatalogBackend {
                 ),
           ),
         ),
+      compareAndSet: (raw, expected) =>
+        Effect.tryPromise({
+          try: () => bridge.setConnectionCatalog!(raw, expected),
+          catch: (cause) => catalogError("save", cause),
+        }).pipe(
+          Effect.flatMap((stored) =>
+            stored === false
+              ? Effect.fail(
+                  catalogError(
+                    "save",
+                    "Desktop secure storage is unavailable in this system context.",
+                  ),
+                )
+              : Effect.succeed(stored === true),
+          ),
+        ),
     };
   }
 
-  return {
-    read: readDatabaseValue(database, CATALOG_STORE_NAME, CATALOG_KEY).pipe(
-      Effect.map((value) => (typeof value === "string" ? value : null)),
-    ),
-    write: (raw) => writeDatabaseValue(database, CATALOG_STORE_NAME, CATALOG_KEY, raw),
-    quarantine: (raw) =>
-      writeDatabaseValue(database, CATALOG_STORE_NAME, `${CATALOG_KEY}:corrupt:${Date.now()}`, raw),
-  };
+  return undefined;
+}
+
+export function makeCatalogBackend(database: DatabaseHandle): CatalogBackend {
+  return (
+    makeDesktopCatalogBackend(window.desktopBridge) ?? {
+      read: readDatabaseValue(database, CATALOG_STORE_NAME, CATALOG_KEY).pipe(
+        Effect.map((value) => (typeof value === "string" ? value : null)),
+      ),
+      write: (raw) => writeDatabaseValue(database, CATALOG_STORE_NAME, CATALOG_KEY, raw),
+      quarantine: (raw) =>
+        writeDatabaseValue(
+          database,
+          CATALOG_STORE_NAME,
+          `${CATALOG_KEY}:corrupt:${Date.now()}`,
+          raw,
+        ),
+    }
+  );
 }
 
 interface CatalogStore {
@@ -443,42 +462,55 @@ export const makeCatalogStore = Effect.fn("web.connectionStorage.makeCatalogStor
   const state = yield* Ref.make<Option.Option<ConnectionCatalogDocumentType>>(Option.none());
   const lock = yield* Semaphore.make(1);
 
-  const loadUnlocked = Effect.fn("web.connectionStorage.loadCatalog")(function* () {
-    const cached = yield* Ref.get(state);
-    if (Option.isSome(cached)) {
-      return cached.value;
-    }
-    const raw = yield* backend.read;
-    let catalog = EMPTY_CONNECTION_CATALOG_DOCUMENT;
-    if (raw !== null && raw.trim() !== "") {
-      catalog = yield* decodeCatalog(raw).pipe(
-        Effect.catch((error) =>
-          Effect.gen(function* () {
-            yield* Effect.logWarning("Discarding a corrupt web connection catalog.", {
-              error: error.message,
-            });
-            if (backend.quarantine !== undefined) {
-              yield* backend.quarantine(raw).pipe(
-                Effect.catch((cause) =>
-                  Effect.logWarning("Could not quarantine the corrupt web connection catalog.", {
-                    error: cause.message,
-                  }),
-                ),
-              );
-            }
+  /** A corrupt document is quarantined and treated as empty, on reads and before a save. */
+  const decodeOrDiscard = Effect.fn("web.connectionStorage.decodeOrDiscard")(function* (
+    raw: string | null,
+    persistEmpty: boolean,
+  ) {
+    if (raw === null || raw.trim() === "") return EMPTY_CONNECTION_CATALOG_DOCUMENT;
+    return yield* decodeCatalog(raw).pipe(
+      Effect.catch((error) =>
+        Effect.gen(function* () {
+          yield* Effect.logWarning("Discarding a corrupt web connection catalog.", {
+            error: error.message,
+          });
+          if (backend.quarantine !== undefined) {
+            yield* backend.quarantine(raw).pipe(
+              Effect.catch((cause) =>
+                Effect.logWarning("Could not quarantine the corrupt web connection catalog.", {
+                  error: cause.message,
+                }),
+              ),
+            );
+          }
+          if (persistEmpty) {
             const encoded = yield* encodeCatalog(EMPTY_CONNECTION_CATALOG_DOCUMENT);
-            yield* backend.write(encoded).pipe(
+            // Replace exactly the corrupt bytes; a concurrent save from another channel wins.
+            const persist =
+              backend.compareAndSet !== undefined
+                ? backend.compareAndSet(encoded, raw).pipe(Effect.asVoid)
+                : backend.write(encoded);
+            yield* persist.pipe(
               Effect.catch((cause) =>
                 Effect.logWarning("Could not persist the recovered web connection catalog.", {
                   error: cause.message,
                 }),
               ),
             );
-            return EMPTY_CONNECTION_CATALOG_DOCUMENT;
-          }),
-        ),
-      );
+          }
+          return EMPTY_CONNECTION_CATALOG_DOCUMENT;
+        }),
+      ),
+    );
+  });
+
+  const loadUnlocked = Effect.fn("web.connectionStorage.loadCatalog")(function* () {
+    const cached = yield* Ref.get(state);
+    if (Option.isSome(cached)) {
+      return cached.value;
     }
+    const raw = yield* backend.read;
+    const catalog = yield* decodeOrDiscard(raw, true);
     yield* Ref.set(state, Option.some(catalog));
     return catalog;
   });
@@ -488,6 +520,22 @@ export const makeCatalogStore = Effect.fn("web.connectionStorage.makeCatalogStor
     function* (transform) {
       yield* lock.withPermits(1)(
         Effect.gen(function* () {
+          if (backend.compareAndSet !== undefined) {
+            // Another desktop channel can save even after a fresh read. Reapply the operation,
+            // rather than merging an obsolete full document (which can resurrect deletions).
+            for (let attempt = 0; attempt < 5; attempt++) {
+              const raw = yield* backend.read;
+              const current = yield* decodeOrDiscard(raw, false);
+              const next = transform(current);
+              if (yield* backend.compareAndSet(yield* encodeCatalog(next), raw)) {
+                yield* Ref.set(state, Option.some(next));
+                return;
+              }
+            }
+            return yield* Effect.fail(
+              catalogError("save", "The connection catalog kept changing. Try again."),
+            );
+          }
           const next = transform(yield* loadUnlocked());
           yield* backend.write(yield* encodeCatalog(next));
           yield* Ref.set(state, Option.some(next));
@@ -499,8 +547,8 @@ export const makeCatalogStore = Effect.fn("web.connectionStorage.makeCatalogStor
   return { read, update } satisfies CatalogStore;
 });
 
-const GITHUB_ROUTING_KEY_PREFIX = "t3code:github-routing:";
-const GITHUB_ROUTING_CHANGED = "t3code:github-routing-changed";
+const GITHUB_ROUTING_KEY_PREFIX = "goat:github-routing:";
+const GITHUB_ROUTING_CHANGED = "goat:github-routing-changed";
 const isStoredGitHubRoutingPermission = Schema.is(StoredGitHubRoutingPermission);
 const encodeStoredGitHubRoutingPermission = Schema.encodeSync(
   Schema.fromJsonString(StoredGitHubRoutingPermission),
@@ -512,7 +560,7 @@ export function makeBrowserGitHubRoutingPermissions(
 ) {
   const read = (key: string): StoredGitHubRoutingPermission | null => {
     try {
-      const raw = browser.localStorage.getItem(key);
+      const raw = migratingStorage(browser.localStorage).getItem(key);
       const value: unknown = raw === null ? null : JSON.parse(raw);
       return isStoredGitHubRoutingPermission(value) &&
         key === `${GITHUB_ROUTING_KEY_PREFIX}${value.environmentId}`
@@ -526,9 +574,14 @@ export function makeBrowserGitHubRoutingPermissions(
     try {
       const values: StoredGitHubRoutingPermission[] = [];
       const storage = browser.localStorage;
+      // Snapshot keys before reads adopt legacy values and change storage.length.
+      const keys = new Set<string>();
       for (let index = 0; index < storage.length; index++) {
         const key = storage.key(index);
-        if (key?.startsWith(GITHUB_ROUTING_KEY_PREFIX)) {
+        if (key !== null) keys.add(goatStorageKey(key));
+      }
+      for (const key of keys) {
+        if (key.startsWith(GITHUB_ROUTING_KEY_PREFIX)) {
           const value = read(key);
           if (value !== null) values.push(value);
         }
@@ -542,8 +595,12 @@ export function makeBrowserGitHubRoutingPermissions(
     Effect.try({
       try: () => {
         const key = `${GITHUB_ROUTING_KEY_PREFIX}${environmentId}`;
-        if (value === null) browser.localStorage.removeItem(key);
-        else browser.localStorage.setItem(key, encodeStoredGitHubRoutingPermission(value));
+        if (value === null) migratingStorage(browser.localStorage).removeItem(key);
+        else
+          migratingStorage(browser.localStorage).setItem(
+            key,
+            encodeStoredGitHubRoutingPermission(value),
+          );
         browser.dispatchEvent(new Event(GITHUB_ROUTING_CHANGED));
       },
       catch: (cause) => catalogError("save GitHub routing permissions in", cause),
@@ -600,6 +657,25 @@ export function makeBrowserGitHubRoutingPermissions(
   });
 }
 
+// A posted message resumes in a fresh task, so input and rendering get a turn between
+// encoding chunks. A zero-delay timer would not do: browsers clamp nested timers to
+// 4 ms and throttle them to once a second or less in a background tab.
+const yieldToBrowserTask = Effect.callback<void>((resume) => {
+  const { port1, port2 } = new MessageChannel();
+  port1.addEventListener(
+    "message",
+    () => {
+      port1.close();
+      resume(Effect.void);
+    },
+    { once: true },
+  );
+  port1.start();
+  port2.postMessage(null);
+  // A closed port delivers nothing, so interruption needs no listener bookkeeping.
+  return Effect.sync(() => port1.close());
+});
+
 export const layer = Layer.effectContext(
   Effect.gen(function* () {
     const { handle: database } = yield* Effect.acquireRelease(
@@ -608,6 +684,10 @@ export const layer = Layer.effectContext(
     );
     const catalog = yield* makeCatalogStore(makeCatalogBackend(database));
     const githubRoutingPermissions = makeBrowserGitHubRoutingPermissions();
+    // Remembers each thread row's encoding, so a save only encodes rows that changed.
+    const encodeStoredShellSnapshot = makeStoredShellSnapshotEncoder({
+      yieldToHost: yieldToBrowserTask,
+    });
 
     const targetStore = Persistence.ConnectionTargetStore.of({
       list: catalog.read.pipe(
@@ -670,14 +750,10 @@ export const layer = Layer.effectContext(
             ),
           ),
         ),
-      put: (connectionId, credential) =>
-        catalog.update((document) => ({
-          ...document,
-          credentials: replaceCatalogValue(document.credentials, (value) => value.connectionId, {
-            connectionId,
-            credential,
-          }),
-        })),
+      put: (connectionId, credential, expectedToken) =>
+        catalog.update((document) =>
+          putConnectionCredentialInCatalog(document, connectionId, credential, expectedToken),
+        ),
       remove: (connectionId) =>
         catalog.update((document) => ({
           ...document,
@@ -810,7 +886,7 @@ export const layer = Layer.effectContext(
       saveThread: (environmentId, snapshot) =>
         Effect.gen(function* () {
           const encoded = yield* encodeStoredThreadSnapshot({
-            schemaVersion: ORCHESTRATION_CACHE_SCHEMA_VERSION,
+            schemaVersion: ORCHESTRATION_THREAD_CACHE_SCHEMA_VERSION,
             environmentId,
             threadId: snapshot.projection.thread.id,
             snapshot,

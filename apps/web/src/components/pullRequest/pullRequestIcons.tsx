@@ -4,11 +4,11 @@ import {
   GitPullRequestClosedIcon,
   GitPullRequestDraftIcon,
   LayersIcon,
-  Link2Icon,
-  Unlink2Icon,
+  LinkIcon as Link2Icon,
+  UnlinkIcon as Unlink2Icon,
   TriangleAlertIcon,
-} from "lucide-react";
-import type { PullRequestState } from "@t3tools/contracts";
+} from "~/components/solar";
+import type { PullRequestState } from "@goat/contracts";
 
 export const PullRequestGlyph = {
   pullRequest: GitPullRequestArrowIcon,
@@ -33,22 +33,22 @@ export interface PullRequestStatePresentation {
 export const PULL_REQUEST_STATE_PRESENTATION = {
   open: {
     label: "Open",
-    toneClassName: "text-emerald-600 dark:text-emerald-300/90",
+    toneClassName: "text-pr-open",
     Icon: PullRequestGlyph.pullRequest,
   },
   draft: {
     label: "Draft",
-    toneClassName: "text-zinc-500 dark:text-zinc-400/80",
+    toneClassName: "text-muted-foreground",
     Icon: PullRequestGlyph.draft,
   },
   closed: {
     label: "Closed",
-    toneClassName: "text-red-600 dark:text-red-300/90",
+    toneClassName: "text-pr-closed",
     Icon: PullRequestGlyph.closed,
   },
   merged: {
     label: "Merged",
-    toneClassName: "text-violet-600 dark:text-violet-300/90",
+    toneClassName: "text-pr-merged",
     Icon: PullRequestGlyph.merged,
   },
 } as const satisfies Record<PullRequestState | "draft", PullRequestStatePresentation>;

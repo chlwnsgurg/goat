@@ -1,5 +1,5 @@
 import { assert } from "@effect/vitest";
-import type { ProviderReplayTranscript } from "@t3tools/contracts";
+import type { ProviderReplayTranscript } from "@goat/contracts";
 
 import type { OrchestratorV2ScenarioResult } from "../../OrchestratorScenario.ts";
 import {
@@ -103,7 +103,6 @@ export function assertClaudeSubagentOutput(
       ),
       `child thread ${subagent.childThreadId} must contain the subagent response`,
     );
-    // Progress stays on the subagent card; the child shows the work itself.
     assert.isFalse(
       childProjection.turnItems.some(
         (item) => item.type === "reasoning" && item.text === expectedProgress,

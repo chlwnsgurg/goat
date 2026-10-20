@@ -4,16 +4,26 @@ import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 import * as NodeURL from "node:url";
 
-import { describe, expect, it } from "vite-plus/test";
+import { afterEach, describe, expect, it } from "vite-plus/test";
 
 import { isEntrypoint } from "./entrypoint.ts";
-import { symlinksSupported } from "@t3tools/shared/testing/symlinks";
+import { symlinksSupported } from "@goat/shared/testing/symlinks";
 
-const makeTempDir = () => NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-entrypoint-test-"));
+const tempDirs: string[] = [];
+const makeTempDir = () => {
+  const directory = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "goat-entrypoint-test-"));
+  tempDirs.push(directory);
+  return directory;
+};
+
+afterEach(() => {
+  for (const directory of tempDirs.splice(0)) {
+    NodeFS.rmSync(directory, { recursive: true, force: true });
+  }
+});
 
 describe("isEntrypoint", () => {
   it("uses the runtime answer when Node provides one", () => {
-    // Node 22.18+ and 24.2+ populate `import.meta.main`; nothing else is consulted.
     expect(
       isEntrypoint({
         moduleUrl: "file:///somewhere/bin.mjs",
@@ -67,7 +77,6 @@ describe("isEntrypoint", () => {
   );
 
   it("stays false for an imported module that is not the entrypoint", () => {
-    // This is what keeps `bin.test.ts` from launching the CLI on import.
     const dir = makeTempDir();
     const entry = NodePath.join(dir, "bin.mjs");
     const imported = NodePath.join(dir, "cli.mjs");

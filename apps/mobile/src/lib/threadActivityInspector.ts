@@ -1,7 +1,8 @@
-import type { V2ItemSupport } from "@t3tools/client-runtime/state/item-support";
-import { toolItemForDisplay } from "@t3tools/client-runtime/work-log/presentation";
-import type { ThreadId } from "@t3tools/contracts";
-import { formatDuration } from "@t3tools/shared/orchestrationTiming";
+import type { V2ItemSupport } from "@goat/client-runtime/state/item-support";
+import { toolItemForDisplay } from "@goat/client-runtime/work-log/presentation";
+import { formatDiffCount } from "@goat/client-runtime/diff-count";
+import type { ThreadId } from "@goat/contracts";
+import { formatDuration } from "@goat/shared/orchestrationTiming";
 import * as DateTime from "effect/DateTime";
 
 import type { ThreadFeedActivity } from "./threadActivity";
@@ -160,7 +161,7 @@ export function buildThreadActivityInspector(
       if (item.additions !== undefined || item.deletions !== undefined) {
         fields.push({
           label: "Changes",
-          value: `+${item.additions ?? 0} −${item.deletions ?? 0}`,
+          value: `+${formatDiffCount(item.additions ?? 0)} −${formatDiffCount(item.deletions ?? 0)}`,
         });
       }
       break;
@@ -206,7 +207,10 @@ export function buildThreadActivityInspector(
         blocks,
         "Files",
         item.files
-          .map((file) => `${file.path}  +${file.additions} −${file.deletions}  ${file.kind}`)
+          .map(
+            (file) =>
+              `${file.path}  +${formatDiffCount(file.additions)} −${formatDiffCount(file.deletions)}  ${file.kind}`,
+          )
           .join("\n"),
       );
       break;

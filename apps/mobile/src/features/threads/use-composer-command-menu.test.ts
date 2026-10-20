@@ -4,7 +4,7 @@ import {
   ProviderDriverKind,
   ProviderInstanceId,
   type ServerProvider,
-} from "@t3tools/contracts";
+} from "@goat/contracts";
 import { act, createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
 
@@ -101,7 +101,6 @@ describe("mobile slash commands", () => {
       }),
     ).toEqual({ text: "", cursor: 0, interactionMode: "plan" });
 
-    // A provider switch can invalidate an open menu before a tap arrives.
     expect(
       resolveComposerCommandSelection({
         draftMessage: "/plan",

@@ -15,14 +15,19 @@ afterEach(async () => {
   root = undefined;
 });
 
-async function render(disabled = false) {
+async function render(disabled = false, initialText = "") {
   const onSend = vi.fn<(text: string) => void>();
   container = document.createElement("div");
   document.body.append(container);
   root = createRoot(container);
   await act(() => {
     root?.render(
-      <GoatBotComposer disabled={disabled} placeholder="Message GOAT Bot" onSend={onSend} />,
+      <GoatBotComposer
+        disabled={disabled}
+        placeholder="Message GOAT Bot"
+        initialText={initialText}
+        onSend={onSend}
+      />,
     );
   });
   const textarea = container.querySelector("textarea")!;
@@ -85,4 +90,10 @@ it("sends nothing when blank or unavailable", async () => {
   const off = await render(true);
   await press(off.textarea, {});
   expect(off.onSend).not.toHaveBeenCalled();
+});
+
+it("starts with suggested text without sending it", async () => {
+  const { onSend, textarea } = await render(false, "Review the latest changes");
+  expect(textarea.value).toBe("Review the latest changes");
+  expect(onSend).not.toHaveBeenCalled();
 });

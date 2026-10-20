@@ -1,7 +1,7 @@
 import * as NodeRuntime from "@effect/platform-node/NodeRuntime";
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import * as HostProcess from "@t3tools/shared/HostProcess";
-import { isCommandAvailable, resolveSpawnCommand } from "@t3tools/shared/shell";
+import * as HostProcess from "@goat/shared/HostProcess";
+import { isCommandAvailable, resolveSpawnCommand } from "@goat/shared/shell";
 import * as Console from "effect/Console";
 import * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
@@ -11,6 +11,8 @@ import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import { Argument, Command } from "effect/cli";
 import { ChildProcess, ChildProcessSpawner } from "effect/process";
+
+import { MOBILE_APP_IDENTITY } from "@goat/shared/mobileAppIdentity";
 
 export type NativePlatform = "ios" | "android";
 const NativeClientRecord = Schema.Struct({ fingerprint: Schema.String, binary: Schema.String });
@@ -135,7 +137,8 @@ export const hashBundle = Effect.fn("hashBundle")(function* (root: string) {
 });
 type FileSystemError = import("effect/PlatformError").PlatformError;
 
-const bundleId = "com.t3tools.t3code.dev";
+const devApp = MOBILE_APP_IDENTITY.development;
+const bundleId = devApp.iosBundleIdentifier;
 const roots = Effect.gen(function* () {
   const path = yield* Path.Path;
   const repo = yield* path.fromFileUrl(new URL("../", import.meta.url));
@@ -182,7 +185,7 @@ const command = Effect.fn("nativeClient.command")(function* (
         ...environment,
         APP_VARIANT: "development",
         MOBILE_VERSION_POLICY: "appVersion",
-        T3CODE_IOS_PERSONAL_TEAM: "0",
+        GOAT_IOS_PERSONAL_TEAM: "0",
         CI: "1",
         EXPO_NO_GIT_STATUS: "1",
       },
@@ -205,12 +208,12 @@ const command = Effect.fn("nativeClient.command")(function* (
 const fingerprint = Effect.fn("nativeClient.fingerprint")(function* (platform: NativePlatform) {
   const output = yield* command(yield* HostProcess.ExecutablePath, [
     "--eval",
-    `require('expo/fingerprint').createFingerprintAsync(process.cwd(), { platforms: [process.argv[1]], silent: true }).then(fp => console.log('T3_NATIVE_FINGERPRINT=' + fp.hash)).catch(e => { console.error(e); process.exitCode = 1; });`,
+    `require('expo/fingerprint').createFingerprintAsync(process.cwd(), { platforms: [process.argv[1]], silent: true }).then(fp => console.log('GOAT_NATIVE_FINGERPRINT=' + fp.hash)).catch(e => { console.error(e); process.exitCode = 1; });`,
     platform,
   ]);
   const hash = output
     .split("\n")
-    .find((line) => line.startsWith("T3_NATIVE_FINGERPRINT="))
+    .find((line) => line.startsWith("GOAT_NATIVE_FINGERPRINT="))
     ?.split("=")[1];
   if (!hash || !/^[a-f0-9]{40,64}$/.test(hash))
     return yield* new NativeClientError({ message: "Expo did not return a native fingerprint." });
@@ -284,6 +287,45 @@ export const installedBinary = Effect.fn("installedBinary")(function* (
   return yield* digest(hashes.sort().join("\n"));
 });
 
+/**
+ * Run `expo prebuild --clean` without losing `android/.gradle` (task history) and
+ * `android/app/.cxx` (native compile outputs). Both invalidate by input, so a clean
+ * rebuild only redoes changed work. `app/build` stays out: its autolinking and JS
+ * bundle tasks do not declare every input. Each step is best-effort, because a lost
+ * cache costs one slower build and must never cost the build.
+ */
+export const prebuildAndroid = Effect.fn("nativeClient.prebuildAndroid")(function* <E, R>(
+  mobile: string,
+  prebuild: Effect.Effect<void, E, R>,
+) {
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const android = path.join(mobile, "android");
+  // A sibling of android/ keeps the renames on one filesystem. It is gitignored, and a
+  // run killed mid-prebuild leaves it for the next run to clear.
+  const saved = path.join(mobile, ".android-cache");
+  const caches = [".gradle", "app/.cxx"];
+  const clear = fs.remove(saved, { recursive: true, force: true }).pipe(Effect.ignore);
+  const move = (from: string, to: string) =>
+    Effect.forEach(
+      caches,
+      (cache) =>
+        Effect.gen(function* () {
+          const source = path.join(from, cache);
+          const target = path.join(to, cache);
+          if (!(yield* fs.exists(source)) || (yield* fs.exists(target))) return;
+          yield* fs.makeDirectory(path.dirname(target), { recursive: true });
+          yield* fs.rename(source, target);
+        }).pipe(Effect.ignore),
+      { discard: true },
+    );
+  yield* Effect.acquireUseRelease(
+    clear.pipe(Effect.andThen(move(android, saved))),
+    () => prebuild,
+    () => move(saved, android).pipe(Effect.andThen(clear)),
+  );
+});
+
 const main = Command.make(
   "mobile-native-client",
   {
@@ -333,24 +375,24 @@ const main = Command.make(
             message:
               "Native directory contains tracked files; clean prebuild would overwrite them.",
           });
-        yield* command(
+        const prebuild = command(
           "vp",
           ["exec", "expo", "prebuild", "--clean", "--platform", platform, "--no-install"],
           true,
-        );
+        ).pipe(Effect.asVoid);
+        yield* platform === "android" ? prebuildAndroid((yield* roots).mobile, prebuild) : prebuild;
         if (platform === "ios") {
-          const output = yield* fs.makeTempDirectoryScoped({ prefix: "t3-native-client-" });
+          const output = yield* fs.makeTempDirectoryScoped({ prefix: "goat-native-client-" });
           const { mobile } = yield* roots;
           yield* command("pod", ["install"], true, path.join(mobile, "ios"));
-          // Target this simulator only, without Expo's desktop activation or log streaming.
           yield* command(
             "xcrun",
             [
               "xcodebuild",
               "-workspace",
-              path.join(mobile, "ios/T3CodeDev.xcworkspace"),
+              path.join(mobile, `ios/${devApp.xcodeName}.xcworkspace`),
               "-scheme",
-              "T3CodeDev",
+              devApp.xcodeName,
               "-configuration",
               "Debug",
               "-destination",
@@ -367,7 +409,7 @@ const main = Command.make(
               "simctl",
               "install",
               device,
-              path.join(output, "Build/Products/Debug-iphonesimulator/T3CodeDev.app"),
+              path.join(output, `Build/Products/Debug-iphonesimulator/${devApp.xcodeName}.app`),
             ],
             true,
           );

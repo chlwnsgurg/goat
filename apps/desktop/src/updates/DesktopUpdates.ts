@@ -7,7 +7,8 @@ import {
   type DesktopUpdateInstallPolicy,
   type DesktopUpdateCheckResult,
   type DesktopUpdateState,
-} from "@t3tools/contracts";
+} from "@goat/contracts";
+import { errorTag } from "@goat/shared/observability";
 import * as Cause from "effect/Cause";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
@@ -24,7 +25,7 @@ import * as Scope from "effect/Scope";
 import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
 import * as Queue from "effect/Queue";
-import { compareSemverVersions } from "@t3tools/shared/semver";
+import { compareSemverVersions } from "@goat/shared/semver";
 import * as DesktopBackendActivity from "./DesktopBackendActivity.ts";
 
 import * as DesktopBackendPool from "../backend/DesktopBackendPool.ts";
@@ -39,6 +40,10 @@ import * as DesktopAppSettings from "../settings/DesktopAppSettings.ts";
 import { normalizeDesktopUpdateReleaseNotes } from "./releaseNotes.ts";
 import { resolveDefaultDesktopUpdateChannel } from "./updateChannels.ts";
 import {
+  classifyDesktopUpdateInstallation,
+  getDesktopUpdateInstallationMessage,
+} from "./updateInstallation.ts";
+import {
   createInitialDesktopUpdateState,
   reduceDesktopUpdateStateOnCheckFailure,
   reduceDesktopUpdateStateOnCheckStart,
@@ -49,6 +54,7 @@ import {
   reduceDesktopUpdateStateOnInstallFailure,
   reduceDesktopUpdateStateOnNoUpdate,
   reduceDesktopUpdateStateOnUpdateAvailable,
+  resolveNotAppliedInstallVersion,
 } from "./updateMachine.ts";
 
 const AUTO_UPDATE_STARTUP_DELAY = "15 seconds";
@@ -75,6 +81,13 @@ const UpdateInfo = Schema.Struct({
 const DownloadProgressInfo = Schema.Struct({
   percent: Schema.Number,
 });
+export const DESKTOP_UPDATE_INSTALL_RECORD_FILE = "desktop-update-install.json";
+const DesktopUpdateInstallRecord = Schema.fromJsonString(
+  Schema.Struct({ fromVersion: Schema.String, targetVersion: Schema.String }),
+);
+const decodeInstallRecord = Schema.decodeUnknownEffect(DesktopUpdateInstallRecord);
+const encodeInstallRecord = Schema.encodeEffect(DesktopUpdateInstallRecord);
+
 const decodeAppUpdateYmlConfig = Schema.decodeUnknownEffect(AppUpdateYmlConfig);
 const decodeUpdateInfo = Schema.decodeUnknownEffect(UpdateInfo);
 const decodeDownloadProgressInfo = Schema.decodeUnknownEffect(DownloadProgressInfo);
@@ -165,12 +178,8 @@ export class DesktopUpdates extends Context.Service<
   DesktopUpdates,
   {
     readonly getState: Effect.Effect<DesktopUpdateState>;
-    /** True while a check, download, install, or channel change holds the
-        updater's single action reservation. */
     readonly isActionActive: Effect.Effect<boolean>;
-    /** True only while an install owns the updater action reservation. */
     readonly isInstallActive: Effect.Effect<boolean>;
-    /** Current state plus a stream of every later state change. */
     readonly subscribe: Effect.Effect<
       {
         readonly latest: DesktopUpdateState;
@@ -196,13 +205,68 @@ export class DesktopUpdates extends Context.Service<
       options?: { readonly waitForCheck: boolean },
     ) => Effect.Effect<DesktopPreparedUpdateInstallResult>;
   }
->()("@t3tools/desktop/updates/DesktopUpdates") {}
+>()("@goat/desktop/updates/DesktopUpdates") {}
 
 const {
   logInfo: logUpdaterInfo,
   logWarning: logUpdaterWarning,
   logError: logUpdaterError,
 } = DesktopObservability.makeComponentLogger("desktop-updater");
+
+function redactMessage(message: string): string {
+  return (message.split(/[\r\n]/, 1)[0] ?? "")
+    .replace(/\b(?:https?|file):\/\/[^\s"'<>]+/gi, "[redacted URL]")
+    .replace(/\b(?:Bearer|Basic)\s+[^\s,;]+/gi, "[redacted credential]")
+    .replace(
+      /\b(?:authorization|proxy-authorization|cookie|set-cookie)\s*[:=].*$/gi,
+      "[redacted header]",
+    )
+    .replace(
+      /\b[\w-]*(?:token|password|secret|credential|api[_-]?key)[\w-]*\s*[:=]\s*(?:"[^"]*"|'[^']*'|[^\s,;]+)/gi,
+      "[redacted credential]",
+    )
+    .slice(0, 512);
+}
+
+function summarizeCause(cause: unknown, depth: number): string {
+  if (depth >= 3) return "[truncated cause]";
+  if (Cause.isCause(cause)) {
+    return cause.reasons
+      .slice(0, 3)
+      .map((reason) =>
+        reason._tag === "Fail"
+          ? summarizeCause(reason.error, depth + 1)
+          : reason._tag === "Die"
+            ? summarizeCause(reason.defect, depth + 1)
+            : "Interrupted",
+      )
+      .join("; ");
+  }
+  if (typeof cause === "string") return redactMessage(cause);
+  if (typeof cause !== "object" || cause === null) return errorTag(cause);
+
+  const error = cause as {
+    readonly message?: unknown;
+    readonly code?: unknown;
+    readonly cause?: unknown;
+  };
+  const code =
+    typeof error.code === "string" && /^[A-Z][A-Z0-9_]{0,127}$/.test(error.code)
+      ? ` [${error.code}]`
+      : "";
+  const message = typeof error.message === "string" ? `: ${redactMessage(error.message)}` : "";
+  const nested =
+    error.cause === undefined ? "" : `; caused by ${summarizeCause(error.cause, depth + 1)}`;
+  return `${errorTag(cause)}${code}${message}${nested}`;
+}
+
+export function describeUpdateErrorCause(cause: unknown): string {
+  try {
+    return summarizeCause(cause, 0).slice(0, 1024);
+  } catch {
+    return "UnknownError";
+  }
+}
 
 function parseAppUpdateYml(raw: string): Effect.Effect<Option.Option<AppUpdateYmlConfig>> {
   const entries: Record<string, string> = {};
@@ -221,13 +285,15 @@ function parseAppUpdateYml(raw: string): Effect.Effect<Option.Option<AppUpdateYm
 
 function createBaseUpdateState(
   channel: DesktopUpdateChannel,
-  enabled: boolean,
+  disabledReason: Option.Option<string>,
   environment: DesktopEnvironment.DesktopEnvironment["Service"],
 ): DesktopUpdateState {
+  const enabled = Option.isNone(disabledReason);
   return {
     ...createInitialDesktopUpdateState(environment.appVersion, environment.runtimeInfo, channel),
     enabled,
     status: enabled ? "idle" : "disabled",
+    message: Option.getOrNull(disabledReason),
   };
 }
 
@@ -269,7 +335,7 @@ function getAutoUpdateDisabledReason(args: {
     return "Automatic updates are only available in packaged production builds.";
   }
   if (args.disabledByEnv) {
-    return "Automatic updates are disabled by the T3CODE_DISABLE_AUTO_UPDATE setting.";
+    return "Automatic updates are disabled by the GOAT_DISABLE_AUTO_UPDATE setting.";
   }
   if (args.platform === "linux" && !args.appImage && !args.isDebPackage) {
     return "Automatic updates on Linux require the AppImage or the .deb package.";
@@ -293,11 +359,48 @@ export const make = Effect.gen(function* () {
   const fileSystem = yield* FileSystem.FileSystem;
   const desktopSettings = yield* DesktopAppSettings.DesktopAppSettings;
 
+  const installationReason = yield* Effect.gen(function* () {
+    if (environment.platform !== "darwin" || !environment.isPackaged) return null;
+    // Electron's app path points inside the bundle (usually app.asar), not at the bundle.
+    const bundlePath = environment.appPath.match(/^(.*?\.app)(?:\/|$)/)?.[1];
+    if (!bundlePath) return null;
+    const writability = (path: string) =>
+      fileSystem.access(path, { writable: true }).pipe(
+        Effect.match({
+          onSuccess: () => "writable" as const,
+          // access(2) reports EROFS only for a read-only filesystem, such as a mounted disk
+          // image; a plain permission failure on a writable disk still allows an admin install.
+          onFailure: (error) =>
+            (error.reason as { cause?: { code?: unknown } }).cause?.code === "EROFS"
+              ? ("read-only" as const)
+              : ("denied" as const),
+        }),
+      );
+    const [bundle, parent] = yield* Effect.all([
+      writability(bundlePath),
+      writability(environment.path.dirname(bundlePath)),
+    ]);
+    return classifyDesktopUpdateInstallation({
+      platform: environment.platform,
+      appBundlePath: bundlePath,
+      bundleWritable: bundle === "writable",
+      parentWritable: parent === "writable",
+      readOnlyVolume: bundle === "read-only" || parent === "read-only",
+    });
+  });
+  const installationMessage = installationReason
+    ? getDesktopUpdateInstallationMessage(installationReason)
+    : null;
+
   const appUpdateYmlConfigRef = yield* Ref.make<Option.Option<AppUpdateYmlConfig>>(Option.none());
   const activeUpdateActionRef = yield* Ref.make<Option.Option<UpdateAction>>(Option.none());
+  const installRunningBackendsRef = yield* Ref.make<
+    ReadonlyArray<DesktopBackendPool.DesktopBackendInstance>
+  >([]);
   const finishedUpdateActions = yield* PubSub.unbounded<UpdateAction>();
   const updaterConfiguredRef = yield* Ref.make(false);
   const lastLoggedDownloadMilestoneRef = yield* Ref.make(-1);
+  const notAppliedVersionRef = yield* Ref.make(Option.none<string>());
   const updateStateRef = yield* Ref.make<DesktopUpdateState>(
     createInitialDesktopUpdateState(
       environment.appVersion,
@@ -395,7 +498,7 @@ export const make = Effect.gen(function* () {
         isDebPackage,
         disabledByEnv: config.disableAutoUpdate,
         hasUpdateFeedConfig: hasFeedConfig,
-      }),
+      }) ?? (installationReason !== "needs-admin" ? installationMessage : null),
     );
   });
 
@@ -443,8 +546,6 @@ export const make = Effect.gen(function* () {
       fullChangelog: allowsPrerelease,
     });
   });
-
-  const shouldEnableAutoUpdates = resolveDisabledReason.pipe(Effect.map(Option.isNone));
 
   const checkForUpdates = Effect.fn("desktop.updates.checkForUpdates")(function* (
     reason: string,
@@ -517,6 +618,7 @@ export const make = Effect.gen(function* () {
             }));
             yield* logUpdaterError(error.message, {
               errorTag: error._tag,
+              cause: describeUpdateErrorCause(error.cause),
               channel: error.channel,
             });
             return true;
@@ -590,6 +692,7 @@ export const make = Effect.gen(function* () {
             }));
             yield* logUpdaterError(error.message, {
               errorTag: error._tag,
+              cause: describeUpdateErrorCause(error.cause),
               channel: error.channel,
             });
             return { accepted: true, completed: false };
@@ -613,6 +716,7 @@ export const make = Effect.gen(function* () {
           }));
           yield* logUpdaterError(error.message, {
             errorTag: error._tag,
+            cause: describeUpdateErrorCause(error.cause),
             action: error.action,
           });
           return { accepted: true, completed: false };
@@ -622,9 +726,6 @@ export const make = Effect.gen(function* () {
     );
   });
 
-  // Tells the primary backend that the coming stop is an update restart, so it
-  // keeps its managed tunnel for the backend the updated app starts. Best
-  // effort: without the marker the backend only re-provisions its tunnel.
   const updateRestartMarkerDir = environment.path.join(environment.baseDir, "runtime");
   const updateRestartMarkerPath = environment.path.join(
     updateRestartMarkerDir,
@@ -645,11 +746,56 @@ export const make = Effect.gen(function* () {
     .remove(updateRestartMarkerPath, { force: true })
     .pipe(Effect.ignore);
 
+  const installRecordPath = environment.path.join(
+    updateRestartMarkerDir,
+    DESKTOP_UPDATE_INSTALL_RECORD_FILE,
+  );
+  const writeInstallRecord = (targetVersion: string) =>
+    encodeInstallRecord({ fromVersion: environment.appVersion, targetVersion }).pipe(
+      Effect.flatMap((text) => fileSystem.writeFileString(installRecordPath, text)),
+      Effect.catch((error) =>
+        logUpdaterWarning("Could not record the update install.", { errorTag: error._tag }),
+      ),
+    );
+  const removeInstallRecord = fileSystem
+    .remove(installRecordPath, { force: true })
+    .pipe(Effect.ignore);
+
+  const readNotAppliedInstallVersion = fileSystem.readFileString(installRecordPath).pipe(
+    Effect.flatMap(decodeInstallRecord),
+    Effect.option,
+    Effect.map((record) =>
+      Option.flatMap(record, (value) =>
+        Option.fromNullishOr(resolveNotAppliedInstallVersion(value, environment.appVersion)),
+      ),
+    ),
+    Effect.tap((notAppliedVersion) =>
+      Option.isNone(notAppliedVersion) ? removeInstallRecord : Effect.void,
+    ),
+  );
+
+  const baseUpdateState = (channel: DesktopUpdateChannel, disabledReason: Option.Option<string>) =>
+    Effect.gen(function* () {
+      const notAppliedVersion = yield* Ref.get(notAppliedVersionRef);
+      return {
+        ...createBaseUpdateState(channel, disabledReason, environment),
+        ...(installationReason === "needs-admin" && installationMessage
+          ? { installationNotice: installationMessage }
+          : {}),
+        ...Option.match(notAppliedVersion, {
+          onNone: () => ({}),
+          onSome: (version) => ({ notAppliedVersion: version }),
+        }),
+      };
+    });
+
   const resetInstallAction = Effect.all(
     [
       finishUpdateAction("install"),
       Ref.set(desktopState.quitting, false),
+      Ref.set(installRunningBackendsRef, []),
       removeUpdateRestartMarker,
+      removeInstallRecord,
     ],
     { discard: true },
   );
@@ -666,8 +812,12 @@ export const make = Effect.gen(function* () {
 
     yield* Ref.set(desktopState.quitting, false);
     yield* removeUpdateRestartMarker;
+    yield* removeInstallRecord;
     yield* Effect.gen(function* () {
-      const instances = yield* pool.list;
+      const runningInstances = yield* Ref.getAndSet(installRunningBackendsRef, []);
+      const instances = (yield* pool.list).filter((instance) =>
+        runningInstances.includes(instance),
+      );
       const restartExit = yield* Effect.forEach(instances, (instance) => instance.start, {
         concurrency: "unbounded",
         discard: true,
@@ -735,17 +885,23 @@ export const make = Effect.gen(function* () {
         if (admission === "refused") return { accepted: false, completed: false, failed: false };
 
         yield* Ref.set(desktopState.quitting, true);
+        yield* Ref.set(installRunningBackendsRef, []);
 
         return yield* Effect.gen(function* () {
           yield* writeUpdateRestartMarker;
-          // Stop every backend in the pool, not just the primary. With
-          // parallel WSL + Windows backends, leaving the WSL instance up
-          // means quitAndInstall's app.quit() exits before the pool's
-          // scope cascade has a chance to run its stop finalizer, so the
-          // WSL child gets hard-killed by the OS instead of receiving
-          // SIGTERM + grace. Stops run concurrently with the same 5s
-          // budget the primary had on its own.
+          const { downloadedVersion } = yield* Ref.get(updateStateRef);
+          if (downloadedVersion !== null) yield* writeInstallRecord(downloadedVersion);
+          // Stop every backend in the pool, not just the primary. With parallel
+          // WSL + Windows backends, leaving the WSL instance up means
+          // quitAndInstall's app.quit() exits before the pool's scope cascade
+          // has a chance to run its stop finalizer, so the WSL child gets
+          // hard-killed by the OS instead of receiving SIGTERM + grace.
           const instances = yield* pool.list;
+          // stop clears desiredRunning, so retain the recovery set beforehand.
+          const runningInstances = yield* Effect.filter(instances, (instance) =>
+            instance.snapshot.pipe(Effect.map((snapshot) => snapshot.desiredRunning)),
+          );
+          yield* Ref.set(installRunningBackendsRef, runningInstances);
           yield* Effect.forEach(
             instances,
             (instance) => instance.stop({ timeout: Duration.seconds(5) }),
@@ -763,6 +919,7 @@ export const make = Effect.gen(function* () {
                 yield* recoverFailedInstall(error.message);
                 yield* logUpdaterError(error.message, {
                   errorTag: error._tag,
+                  cause: describeUpdateErrorCause(error.cause),
                   channel: error.channel,
                   isSilent: error.isSilent,
                   isForceRunAfter: error.isForceRunAfter,
@@ -781,6 +938,7 @@ export const make = Effect.gen(function* () {
               yield* recoverFailedInstall(error.message);
               yield* logUpdaterError(error.message, {
                 errorTag: error._tag,
+                cause: describeUpdateErrorCause(error.cause),
                 action: error.action,
               });
               return { accepted: true, completed: false, failed: true };
@@ -916,6 +1074,7 @@ export const make = Effect.gen(function* () {
         const error = new DesktopUpdatePollerError({ poller: "startup", cause });
         return logUpdaterError(error.message, {
           errorTag: error._tag,
+          cause: describeUpdateErrorCause(error.cause),
           poller: error.poller,
         });
       }),
@@ -931,6 +1090,7 @@ export const make = Effect.gen(function* () {
         const error = new DesktopUpdatePollerError({ poller: "poll", cause });
         return logUpdaterError(error.message, {
           errorTag: error._tag,
+          cause: describeUpdateErrorCause(error.cause),
           poller: error.poller,
         });
       }),
@@ -1020,6 +1180,7 @@ export const make = Effect.gen(function* () {
         const error = new DesktopUpdateEventHandlingError({ event: "update-available", cause });
         return logUpdaterWarning(error.message, {
           errorTag: error._tag,
+          cause: describeUpdateErrorCause(error.cause),
           event: error.event,
         });
       }),
@@ -1048,6 +1209,7 @@ export const make = Effect.gen(function* () {
       yield* recoverFailedInstall(error.message);
       yield* logUpdaterError(error.message, {
         errorTag: error._tag,
+        cause: describeUpdateErrorCause(error.cause),
         operation: error.operation,
       });
       return;
@@ -1072,6 +1234,7 @@ export const make = Effect.gen(function* () {
 
     yield* logUpdaterError(error.message, {
       errorTag: error._tag,
+      cause: describeUpdateErrorCause(error.cause),
       operation: error.operation,
     });
   });
@@ -1103,6 +1266,7 @@ export const make = Effect.gen(function* () {
         const error = new DesktopUpdateEventHandlingError({ event: "download-progress", cause });
         return logUpdaterWarning(error.message, {
           errorTag: error._tag,
+          cause: describeUpdateErrorCause(error.cause),
           event: error.event,
         });
       }),
@@ -1164,6 +1328,7 @@ export const make = Effect.gen(function* () {
         const error = new DesktopUpdateEventHandlingError({ event: "update-downloaded", cause });
         return logUpdaterWarning(error.message, {
           errorTag: error._tag,
+          cause: describeUpdateErrorCause(error.cause),
           event: error.event,
         });
       }),
@@ -1194,6 +1359,15 @@ export const make = Effect.gen(function* () {
       const appUpdateYmlConfig = yield* readAppUpdateYml;
       yield* Ref.set(appUpdateYmlConfigRef, appUpdateYmlConfig);
 
+      const notAppliedVersion = yield* readNotAppliedInstallVersion;
+      yield* Ref.set(notAppliedVersionRef, notAppliedVersion);
+      if (Option.isSome(notAppliedVersion)) {
+        yield* logUpdaterWarning("the last update install did not apply", {
+          version: environment.appVersion,
+          targetVersion: notAppliedVersion.value,
+        });
+      }
+
       if (config.mockUpdates) {
         yield* electronUpdater.setFeedURL({
           provider: "generic",
@@ -1215,9 +1389,10 @@ export const make = Effect.gen(function* () {
         if (Exit.isSuccess(cleared)) settings = cleared.value.settings;
         else pendingPersistenceFailed = true;
       }
-      const enabled = yield* shouldEnableAutoUpdates;
+      const disabledReason = yield* resolveDisabledReason;
+      const enabled = Option.isNone(disabledReason);
       yield* setState({
-        ...createBaseUpdateState(settings.updateChannel, enabled, environment),
+        ...(yield* baseUpdateState(settings.updateChannel, disabledReason)),
         installPolicy: settings.updateInstallPolicy,
         pendingUpdate: settings.pendingUpdate,
         pendingRestartReason:
@@ -1330,13 +1505,13 @@ export const make = Effect.gen(function* () {
           );
 
         const settings = yield* desktopSettings.get;
-        const enabled = yield* shouldEnableAutoUpdates;
+        const disabledReason = yield* resolveDisabledReason;
         yield* setState({
-          ...createBaseUpdateState(nextChannel, enabled, environment),
+          ...(yield* baseUpdateState(nextChannel, disabledReason)),
           installPolicy: settings.updateInstallPolicy,
         });
 
-        if (!enabled || !(yield* Ref.get(updaterConfiguredRef))) {
+        if (Option.isSome(disabledReason) || !(yield* Ref.get(updaterConfiguredRef))) {
           return yield* Ref.get(updateStateRef);
         }
 

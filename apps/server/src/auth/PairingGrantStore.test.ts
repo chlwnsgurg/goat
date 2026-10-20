@@ -1,4 +1,4 @@
-import { AuthAdministrativeScopes, AuthStandardClientScopes } from "@t3tools/contracts";
+import { AuthStandardClientScopes } from "@goat/contracts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { expect, it } from "@effect/vitest";
 import * as Duration from "effect/Duration";
@@ -10,7 +10,7 @@ import * as TestClock from "effect/testing/TestClock";
 import {
   DESKTOP_BOOTSTRAP_TOKEN_WINDOW_MS,
   currentDesktopBootstrapToken,
-} from "@t3tools/shared/desktopBootstrapToken";
+} from "@goat/shared/desktopBootstrapToken";
 
 import * as ServerConfig from "../config.ts";
 import * as AuthPairingLinks from "../persistence/AuthPairingLinks.ts";
@@ -33,7 +33,7 @@ const layerServerConfig = (
       } satisfies ServerConfig.ServerConfig["Service"];
     }),
   ).pipe(
-    Layer.provide(ServerConfig.layerTest(process.cwd(), { prefix: "t3-auth-bootstrap-test-" })),
+    Layer.provide(ServerConfig.layerTest(process.cwd(), { prefix: "goat-auth-bootstrap-test-" })),
   );
 
 const layerPairingGrantStore = (
@@ -73,7 +73,7 @@ it.layer(NodeServices.layer)("PairingGrantStore.layer", (it) => {
       const error = yield* Effect.flip(
         store.issueOneTimeToken({
           subject: PairingGrantStore.DESKTOP_BOOTSTRAP_SUBJECT,
-          scopes: AuthAdministrativeScopes,
+          scopes: AuthStandardClientScopes,
         }),
       );
       expect(error._tag).toBe("ReservedAuthSubjectError");
@@ -178,7 +178,7 @@ it.layer(NodeServices.layer)("PairingGrantStore.layer", (it) => {
       const third = yield* bootstrapCredentials.consume("desktop-bootstrap-token");
 
       expect(first.method).toBe("desktop-bootstrap");
-      expect(first.scopes).toEqual(AuthAdministrativeScopes);
+      expect(first.scopes).toEqual(AuthStandardClientScopes);
       expect(first.subject).toBe("desktop-bootstrap");
       expect(second.method).toBe("desktop-bootstrap");
       expect(third.method).toBe("desktop-bootstrap");
@@ -195,8 +195,6 @@ it.layer(NodeServices.layer)("PairingGrantStore.layer", (it) => {
     Effect.gen(function* () {
       const bootstrapCredentials = yield* PairingGrantStore.PairingGrantStore;
 
-      // The desktop-bootstrap grant lives for 24h. Within that window
-      // it stays reusable.
       yield* TestClock.adjust(Duration.hours(12));
       const stillValid = yield* bootstrapCredentials.consume("desktop-bootstrap-token");
       expect(stillValid.method).toBe("desktop-bootstrap");
@@ -223,7 +221,6 @@ it.layer(NodeServices.layer)("PairingGrantStore.layer", (it) => {
       const bootstrapCredentials = yield* PairingGrantStore.PairingGrantStore;
       const window = DESKTOP_BOOTSTRAP_TOKEN_WINDOW_MS;
 
-      // A desktop open for days hands the renderer a fresh token each window.
       yield* TestClock.adjust(Duration.days(5));
       const now = 5 * 24 * 60 * 60 * 1000;
       const current = yield* bootstrapCredentials.consume(
@@ -238,7 +235,6 @@ it.layer(NodeServices.layer)("PairingGrantStore.layer", (it) => {
       );
       expect(stale._tag).toBe("UnknownBootstrapCredentialError");
 
-      // The launch token is not accepted on its own once a secret is present.
       const launch = yield* Effect.flip(bootstrapCredentials.consume("desktop-bootstrap-token"));
       expect(launch._tag).toBe("UnknownBootstrapCredentialError");
     }).pipe(

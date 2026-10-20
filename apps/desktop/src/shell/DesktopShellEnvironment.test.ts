@@ -25,11 +25,7 @@ const isDesktopShellEnvironmentCommandError = Schema.is(
 
 function envOutput(values: Readonly<Record<string, string>>): string {
   return Object.entries(values)
-    .flatMap(([name, value]) => [
-      `__T3CODE_ENV_${name}_START__`,
-      value,
-      `__T3CODE_ENV_${name}_END__`,
-    ])
+    .flatMap(([name, value]) => [`__GOAT_ENV_${name}_START__`, value, `__GOAT_ENV_${name}_END__`])
     .join("\n");
 }
 
@@ -98,7 +94,9 @@ function runShellEnvironment(input: {
 
   const program = Effect.gen(function* () {
     const shellEnvironment = yield* DesktopShellEnvironment.DesktopShellEnvironment;
-    yield* shellEnvironment.installIntoProcess;
+    const prepared = yield* shellEnvironment.installIntoProcess;
+    assert.equal(yield* shellEnvironment.installIntoProcess, prepared);
+    return prepared;
   }).pipe(
     Effect.provide(
       DesktopShellEnvironment.layer.pipe(
@@ -357,13 +355,60 @@ describe("DesktopShellEnvironment", () => {
           envOutput({
             PATH: "/home/linuxbrew/.linuxbrew/bin:/usr/bin",
             SSH_AUTH_SOCK: "/tmp/secretive.sock",
-            T3CODE_TELEMETRY_ENABLED: "false",
+            GOAT_TELEMETRY_ENABLED: "false",
           }),
       });
 
       assert.equal(env.PATH, "/home/linuxbrew/.linuxbrew/bin:/usr/bin");
       assert.equal(env.SSH_AUTH_SOCK, "/tmp/secretive.sock");
-      assert.equal(env.T3CODE_TELEMETRY_ENABLED, "false");
+      assert.equal(env.GOAT_TELEMETRY_ENABLED, "false");
+    }),
+  );
+
+  it.effect("hydrates missing CA trust variables from the login shell", () =>
+    Effect.gen(function* () {
+      const env: NodeJS.ProcessEnv = {
+        SHELL: "/bin/zsh",
+        PATH: "/usr/bin",
+        SSL_CERT_DIR: "/etc/ssl/certs",
+      };
+
+      yield* runShellEnvironment({
+        env,
+        platform: "darwin",
+        handler: () =>
+          envOutput({
+            PATH: "/opt/zerobrew/bin:/usr/bin",
+            SSL_CERT_FILE: "/opt/zerobrew/etc/ca-certificates/cacert.pem",
+            SSL_CERT_DIR: "/opt/zerobrew/etc/ca-certificates",
+            NODE_EXTRA_CA_CERTS: "/Users/me/corp-root.pem",
+          }),
+      });
+
+      assert.equal(env.SSL_CERT_FILE, "/opt/zerobrew/etc/ca-certificates/cacert.pem");
+      assert.equal(env.SSL_CERT_DIR, "/etc/ssl/certs");
+      assert.equal(env.NODE_EXTRA_CA_CERTS, "/Users/me/corp-root.pem");
+    }),
+  );
+
+  it.effect("keeps mise's PATH record with the login shell PATH", () =>
+    Effect.gen(function* () {
+      const env: NodeJS.ProcessEnv = {
+        SHELL: "/bin/bash",
+        PATH: "/usr/bin",
+      };
+
+      yield* runShellEnvironment({
+        env,
+        platform: "linux",
+        handler: () =>
+          envOutput({
+            PATH: "/home/me/.local/bin:/mise/installs/claude/latest:/mise/shims",
+            __MISE_DIFF: "mise-diff",
+          }),
+      });
+
+      assert.equal(env.__MISE_DIFF, "mise-diff");
     }),
   );
 
@@ -399,7 +444,7 @@ describe("DesktopShellEnvironment", () => {
         USERPROFILE: "C:\\Users\\testuser",
       };
 
-      yield* runShellEnvironment({
+      const prepared = yield* runShellEnvironment({
         env,
         platform: "win32",
         handler: (command) => {
@@ -415,6 +460,7 @@ describe("DesktopShellEnvironment", () => {
         },
       });
 
+      assert.isTrue(prepared);
       assert.equal(
         env.PATH,
         [
@@ -436,6 +482,47 @@ describe("DesktopShellEnvironment", () => {
         env.FNM_MULTISHELL_PATH,
         "C:\\Users\\testuser\\AppData\\Local\\fnm_multishells\\123",
       );
+    }),
+  );
+
+  it.effect.each([false, true])(
+    "leaves Windows preparation incomplete when loadProfile=%s fails",
+    (loadProfile) =>
+      Effect.gen(function* () {
+        const env: NodeJS.ProcessEnv = { PATH: "C:\\Windows\\System32" };
+        let calls = 0;
+        const prepared = yield* runShellEnvironment({
+          env,
+          platform: "win32",
+          handler: (command) => {
+            calls++;
+            if (command._tag !== "StandardCommand") return "";
+            return !command.args.includes("-NoProfile") === loadProfile
+              ? { output: "", exitCode: 1 }
+              : envOutput({ PATH: "C:\\Working" });
+          },
+        }).pipe(Effect.provide(Logger.layer([])));
+        assert.isFalse(prepared);
+        assert.equal(calls, 3);
+        assert.include(env.PATH, "C:\\Working");
+        assert.include(env.PATH, "C:\\Windows\\System32");
+      }),
+  );
+
+  it.effect("replaces a Path-spelled Windows PATH instead of adding a second key", () =>
+    Effect.gen(function* () {
+      const env: NodeJS.ProcessEnv = { Path: "C:\\Windows\\System32" };
+
+      yield* runShellEnvironment({
+        env,
+        platform: "win32",
+        handler: (command) =>
+          command._tag === "StandardCommand" && command.args.includes("-NoProfile")
+            ? envOutput({ PATH: "C:\\Shell\\Bin" })
+            : "",
+      });
+
+      assert.deepEqual(env, { PATH: "C:\\Shell\\Bin;C:\\Windows\\System32" });
     }),
   );
 

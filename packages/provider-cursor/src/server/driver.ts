@@ -1,12 +1,4 @@
-/**
- * CursorDriver — `ProviderDriver` for the Cursor Agent SDK runtime.
- *
- * Provider status, model discovery, orchestration, and text generation use the
- * official Cursor SDK with an instance browser login or CURSOR_API_KEY.
- *
- * @module provider/Drivers/CursorDriver
- */
-import { ProviderDriverKind, ProviderSetupError } from "@t3tools/contracts";
+import { ProviderDriverKind, ProviderSetupError, type ServerProviderModel } from "@goat/contracts";
 import { CursorSettings } from "../settings.ts";
 import * as Effect from "effect/Effect";
 import * as Crypto from "effect/Crypto";
@@ -16,26 +8,26 @@ import * as Schema from "effect/Schema";
 import * as HttpClient from "effect/http/HttpClient";
 import { readCursorUsageLimits } from "./usageLimits.ts";
 
-import * as ProviderHost from "@t3tools/provider-core/server/ProviderHost";
+import * as ProviderHost from "@goat/provider-core/server/ProviderHost";
 import { makeCursorTextGeneration } from "./textGeneration.ts";
-import { CursorAdapterV2Driver, type CursorAdapterV2DriverEnv } from "./adapter.ts";
-import { ProviderDriverError } from "@t3tools/provider-core/server/errors";
+import { makeCursorAdapterV2, type CursorAdapterV2DriverEnv } from "./adapter.ts";
+import { ProviderDriverError } from "@goat/provider-core/server/errors";
 import { buildInitialCursorProviderSnapshot, checkCursorProviderStatus } from "./status.ts";
 import * as CursorSdkCatalog from "./CursorSdkCatalog.ts";
-import { makeManagedServerProvider } from "@t3tools/provider-core/server/managedProvider";
+import { makeManagedServerProvider } from "@goat/provider-core/server/managedProvider";
 import {
   defaultProviderContinuationIdentity,
   type ProviderDriver,
   type ProviderInstance,
-} from "@t3tools/provider-core/server/driver";
-import { withInstanceIdentity } from "@t3tools/provider-core/server/instanceIdentity";
-import { mergeProviderInstanceEnvironment } from "@t3tools/provider-core/server/instanceEnvironment";
-import { makeManualOnlyProviderMaintenanceCapabilities } from "@t3tools/provider-core/server/maintenanceResolver";
+} from "@goat/provider-core/server/driver";
+import { withInstanceIdentity } from "@goat/provider-core/server/instanceIdentity";
+import { mergeProviderInstanceEnvironment } from "@goat/provider-core/server/instanceEnvironment";
+import { makeManualOnlyProviderMaintenanceCapabilities } from "@goat/provider-core/server/maintenanceResolver";
 import {
   haveProviderSnapshotSettingsChanged,
   makeProviderSnapshotSettingsSource,
   type ProviderSnapshotSettings,
-} from "@t3tools/provider-core/server/snapshotSettings";
+} from "@goat/provider-core/server/snapshotSettings";
 import { probeCursorSkills } from "./skills.ts";
 import { makeCursorAuth } from "./auth.ts";
 import * as CursorCredentialStore from "./credentialStore.ts";
@@ -75,7 +67,6 @@ export const CursorDriver: ProviderDriver<
   },
   configSchema: CursorSettings,
   defaultConfig: (): CursorSettings => decodeCursorSettings({}),
-  // One account source per environment: the host's Cursor CLI login.
   usage: {
     kind: "scan",
     provider: "cursor",
@@ -163,13 +154,12 @@ export const CursorDriver: ProviderDriver<
           },
         });
 
-      const orchestrationAdapter = yield* CursorAdapterV2Driver.create({
+      let catalogModels: ReadonlyArray<ServerProviderModel> = [];
+      const orchestrationAdapter = yield* makeCursorAdapterV2({
         instanceId,
-        displayName,
-        accentColor,
-        environment,
-        enabled,
-        config,
+        settings: effectiveConfig,
+        environment: processEnv,
+        getModels: () => catalogModels,
       }).pipe(
         Effect.provideService(CursorAgentSdk.CursorAgentSdkRunner, {
           ...sdkRunner,
@@ -212,6 +202,10 @@ export const CursorDriver: ProviderDriver<
         processEnv,
         auth.requireApiKey,
         auth.withAccess,
+        {
+          providerInstanceId: instanceId,
+          ...(host.environmentId === undefined ? {} : { environmentId: host.environmentId }),
+        },
       );
 
       const checkProvider = auth.readApiKey.pipe(
@@ -248,6 +242,14 @@ export const CursorDriver: ProviderDriver<
         Effect.provideService(Path.Path, path),
         Effect.provideService(CursorKeychain.CursorKeychain, keychain),
         Effect.map(stampSnapshot),
+        Effect.tap((provider) =>
+          Effect.sync(() => {
+            // A failed check lists only custom models, so keep the last loaded catalog.
+            if (provider.models.some((model) => !model.isCustom)) {
+              catalogModels = provider.models;
+            }
+          }),
+        ),
         Effect.provide(CursorSdkCatalog.layer),
       );
 

@@ -1,16 +1,15 @@
-import type { DeviceSummary, EnvironmentId } from "@t3tools/contracts";
+import type { DeviceSummary, EnvironmentId } from "@goat/contracts";
 import { useEffect, useRef, useState } from "react";
 import {
   captureDeviceScreenshot,
   DeviceScreenshotError,
-} from "@t3tools/client-runtime/device/screenshot";
+} from "@goat/client-runtime/device/screenshot";
 import { refreshDeviceHubAccess, useDeviceHubAccess } from "~/state/device";
 import { DeviceControlsRail } from "./DeviceControlsRail";
 import { DeviceStreamView, type DeviceStreamHandle } from "./DeviceStreamView";
 import { DeviceToolsPanel } from "./DeviceToolsPanel";
 import { useDeviceControls } from "./useDeviceControls";
 
-/** Keyed by environment and device; the screen, quick controls and drawer share the same session. */
 export function DeviceWorkspace(props: {
   environmentId: EnvironmentId;
   device: DeviceSummary;

@@ -3,7 +3,7 @@ import {
   type EnvironmentId,
   type ProjectId,
   type ServerSettings,
-} from "@t3tools/contracts";
+} from "@goat/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
 import type { SettingsTarget } from "./settings-environment-filter";
@@ -160,5 +160,11 @@ describe("mobile project settings scope", () => {
     expect(
       planMobileScopedSettingsPatch(targets, true, { enableProviderUpdateChecks: false }),
     ).toEqual([]);
+    expect(planMobileScopedSettingsPatch(targets, true, { automaticServerUpdates: false })).toEqual(
+      [],
+    );
+    expect(
+      planMobileScopedSettingsPatch(targets, false, { automaticServerUpdates: false }),
+    ).toEqual([{ environmentId: firstId, patch: { automaticServerUpdates: false } }]);
   });
 });

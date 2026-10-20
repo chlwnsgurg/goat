@@ -1,28 +1,37 @@
 // @effect-diagnostics nodeBuiltinImport:off - runs before `vp i`, so only Node built-ins exist.
-/**
- * Worktree setup, run by the t3.json "Setup Worktree" action as
- * `node scripts/setup-worktree.ts`. Plain Node keeps one command working in
- * every shell T3 Code spawns (zsh, bash, fish, PowerShell): it installs
- * dependencies, links the main checkout's gitignored env files into this
- * worktree, then warms the web dependency cache.
- */
 import * as NodeChildProcess from "node:child_process";
 import * as NodeFS from "node:fs";
 import * as NodePath from "node:path";
 
 const ENV_FILES = [".env", NodePath.join("infra", "relay", ".env")];
 
-const projectRoot = process.env.T3CODE_PROJECT_ROOT;
-if (!projectRoot) {
-  throw new Error("T3CODE_PROJECT_ROOT is not set. Run this through the t3.json setup action.");
-}
 const worktree = NodePath.dirname(import.meta.dirname);
 
+// GOAT passes the project root, older builds under its legacy T3 name. The git
+// hook passes neither; the main worktree is the first `git worktree list` entry.
+function mainWorktree(): string {
+  const list = NodeChildProcess.execFileSync("git", ["worktree", "list", "--porcelain"], {
+    cwd: worktree,
+    encoding: "utf8",
+  });
+  const first = list.split("\n", 1)[0] ?? "";
+  if (!first.startsWith("worktree ")) {
+    throw new Error("Could not find the main worktree in `git worktree list --porcelain`.");
+  }
+  return first.slice("worktree ".length);
+}
+const projectRoot =
+  process.env.GOAT_PROJECT_ROOT || process.env.T3CODE_PROJECT_ROOT || mainWorktree(); // goat-rename: legacy
+
 // `shell` resolves `vp` through PATH, including Windows command shims.
-const install = NodeChildProcess.spawnSync("vp i", {
+// Setup has no one answering install prompts. Pass pnpm's confirmation flag
+// through vp and leave stdin closed so other prompts fail instead of hanging.
+// Install exactly the locked dependencies so setup never rewrites the lockfile.
+// A stale lockfile must fail setup rather than silently resolving a new one.
+const install = NodeChildProcess.spawnSync("vp i --frozen-lockfile -- --yes", {
   cwd: worktree,
   shell: true,
-  stdio: "inherit",
+  stdio: ["ignore", "inherit", "inherit"],
 });
 if (install.status !== 0) process.exit(install.status ?? 1);
 

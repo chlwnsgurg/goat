@@ -1,3 +1,5 @@
+// Adopts legacy T3 env names before anything reads the environment.
+import "@goat/contracts/adoptLegacyEnv";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Console from "effect/Console";
 import * as Effect from "effect/Effect";
@@ -10,9 +12,9 @@ import {
   CLAUDE_AGENT_SDK_REPLAY_PROTOCOL,
 } from "../src/orchestration-v2/Adapters/ClaudeAdapterV2.testkit.ts";
 import { claudeRuntimeQueryPolicyForRuntimePolicy } from "../src/orchestration-v2/Adapters/ClaudeAdapterV2.ts";
-import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
+import * as ProviderAdapter from "@goat/provider-core/server/ProviderAdapter";
 import type { RuntimePolicyV2Override } from "../src/orchestration-v2/RuntimePolicy.ts";
-import { makeCheckpointWorkspace } from "@t3tools/provider-testing/replayWorkspace";
+import { makeCheckpointWorkspace } from "@goat/provider-testing/replayWorkspace";
 import { CLAUDE_MODEL_SELECTION } from "../src/orchestration-v2/testkit/fixtures/shared.ts";
 import {
   MESSAGE_STEERING_INITIAL_PROMPT,
@@ -52,6 +54,7 @@ import {
   TOOL_CALL_READ_ONLY_WORKSPACE_ROOT,
   TOOL_CALL_WRITE_PROMPT,
   TURN_INTERRUPT_MID_TOOL_PROMPT,
+  COMMAND_OUTPUT_STREAMING_PROMPT,
   TURN_INTERRUPT_PROMPT,
   TURN_INTERRUPT_RECOVERY_PROMPT,
   WORKSPACE_NEVER_POLICY,
@@ -113,6 +116,12 @@ const CLAUDE_RECORDINGS = {
     prompts: [MESSAGE_STEERING_INITIAL_PROMPT, MESSAGE_STEERING_STEER_PROMPT],
     defaultTranscriptFile: "fixtures/message_steering/claude_transcript.ndjson",
     queryMode: "active_steering",
+    enableTools: true,
+  },
+  command_output_streaming: {
+    prompts: [COMMAND_OUTPUT_STREAMING_PROMPT],
+    defaultTranscriptFile: "fixtures/command_output_streaming/claude_transcript.ndjson",
+    queryMode: "streaming",
     enableTools: true,
   },
   turn_interrupt_mid_tool: {
@@ -212,9 +221,6 @@ const CLAUDE_RECORDINGS = {
     enableTools: true,
     backgroundWakeCounts: [1, 0, 1, 0],
   },
-  // Each prompt is offered as soon as its turn and the wakes counted here
-  // settle, so a wake queued during a turn (Agent B's "stopped" notice) is
-  // still pending in the CLI when the next prompt arrives, and runs first.
   claude_background_wake_before_queued_prompt: {
     prompts: [
       CLAUDE_BACKGROUND_WAKE_BEFORE_QUEUED_PROMPT_LAUNCH_PROMPT,
@@ -344,7 +350,7 @@ function readArgValue(name: string): string | undefined {
 }
 
 function selectedQueryMode(defaultMode: ClaudeRecordingQueryMode): ClaudeRecordingQueryMode {
-  const raw = readArgValue("--query-mode") ?? process.env.T3_CLAUDE_REPLAY_QUERY_MODE;
+  const raw = readArgValue("--query-mode") ?? process.env.GOAT_CLAUDE_REPLAY_QUERY_MODE;
   if (raw === undefined) {
     return defaultMode;
   }
@@ -369,7 +375,7 @@ function selectedQueryMode(defaultMode: ClaudeRecordingQueryMode): ClaudeRecordi
   );
 }
 
-const scenario = readArgValue("--scenario") ?? process.env.T3_CLAUDE_REPLAY_SCENARIO ?? "simple";
+const scenario = readArgValue("--scenario") ?? process.env.GOAT_CLAUDE_REPLAY_SCENARIO ?? "simple";
 const recording = CLAUDE_RECORDINGS[scenario as keyof typeof CLAUDE_RECORDINGS];
 const encodeUnknownJsonString = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
 
@@ -413,13 +419,13 @@ function runFileSystem<A, E>(effect: Effect.Effect<A, E, FileSystem.FileSystem>)
 }
 
 function selectedPrompts(): ReadonlyArray<string> {
-  if (process.env.T3_CLAUDE_REPLAY_PROMPTS !== undefined) {
-    return process.env.T3_CLAUDE_REPLAY_PROMPTS.split("\n---\n").filter(
+  if (process.env.GOAT_CLAUDE_REPLAY_PROMPTS !== undefined) {
+    return process.env.GOAT_CLAUDE_REPLAY_PROMPTS.split("\n---\n").filter(
       (prompt) => prompt.length > 0,
     );
   }
-  if (process.env.T3_CLAUDE_REPLAY_PROMPT !== undefined) {
-    return [process.env.T3_CLAUDE_REPLAY_PROMPT];
+  if (process.env.GOAT_CLAUDE_REPLAY_PROMPT !== undefined) {
+    return [process.env.GOAT_CLAUDE_REPLAY_PROMPT];
   }
   return recording.prompts;
 }
@@ -466,19 +472,15 @@ async function makeToolCallReadOnlyRecordingWorkspace(): Promise<string> {
 }
 
 const cwd =
-  process.env.T3_CLAUDE_REPLAY_CWD ??
+  process.env.GOAT_CLAUDE_REPLAY_CWD ??
   (scenario === "tool_call_read_only"
     ? await makeToolCallReadOnlyRecordingWorkspace()
     : await makeCheckpointWorkspace(`claude-agent-sdk-record-${scenario}`));
-const shouldRemoveCwd = process.env.T3_CLAUDE_REPLAY_CWD === undefined;
+const shouldRemoveCwd = process.env.GOAT_CLAUDE_REPLAY_CWD === undefined;
 
 const expectedAbsentWorkspacePaths =
   "expectedAbsentWorkspacePaths" in recording ? recording.expectedAbsentWorkspacePaths : [];
 
-// Scenarios that deny a tool call prove the denial by checking the real
-// recording workspace, not just the transcript: the target must be absent
-// before and after the turn, and the verified paths are preserved in the
-// transcript metadata before the temporary workspace is removed.
 async function assertWorkspacePathsAbsent(phase: "before" | "after"): Promise<void> {
   const presentPaths = await runFileSystem(
     Effect.gen(function* () {
@@ -542,12 +544,12 @@ try {
     prompts,
     modelSelection: {
       ...CLAUDE_MODEL_SELECTION,
-      model: process.env.T3_CLAUDE_REPLAY_MODEL ?? CLAUDE_MODEL_SELECTION.model,
+      model: process.env.GOAT_CLAUDE_REPLAY_MODEL ?? CLAUDE_MODEL_SELECTION.model,
     },
     cwd,
-    ...(process.env.T3_CLAUDE_REPLAY_SESSION_ID === undefined
+    ...(process.env.GOAT_CLAUDE_REPLAY_SESSION_ID === undefined
       ? {}
-      : { sessionId: process.env.T3_CLAUDE_REPLAY_SESSION_ID }),
+      : { sessionId: process.env.GOAT_CLAUDE_REPLAY_SESSION_ID }),
     queryMode,
     ...("enableTools" in recording && recording.enableTools === true ? { enableTools: true } : {}),
     ...(queryPolicy.tools === undefined ? {} : { tools: queryPolicy.tools }),

@@ -1,19 +1,22 @@
-import { projectComposerContextForProvider } from "@t3tools/shared/composerContextReferences";
+import { projectComposerContextForProvider } from "@goat/shared/composerContextReferences";
 import {
   MessageId,
+  type NodeId,
   ProviderSessionId,
   ProviderThreadId,
   ProviderTurnId,
   RunAttemptId,
   ThreadId,
-} from "@t3tools/contracts";
+} from "@goat/contracts";
 import * as Clock from "effect/Clock";
+import type * as DateTime from "effect/DateTime";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 
+import type * as ProviderAdapter from "@goat/provider-core/server/ProviderAdapter";
 import * as ProjectionStore from "./ProjectionStore.ts";
 import * as ProviderSessionManager from "./ProviderSessionManager.ts";
 
@@ -35,6 +38,7 @@ export class ProviderTurnControlError extends Schema.TaggedError<ProviderTurnCon
     operation: Schema.Literals(["interrupt", "restart", "steer"]),
     providerTurnId: ProviderTurnId,
     turnCompleted: Schema.optional(Schema.Boolean),
+    reason: Schema.optional(Schema.Literal("tracking-unavailable")),
     cause: Schema.optional(Schema.Defect()),
   },
 ) {}
@@ -43,11 +47,19 @@ const isProviderTurnControlError = Schema.is(ProviderTurnControlError);
 
 export interface ProviderTurnControlServiceV2Shape {
   readonly interrupt: (input: {
+    readonly subagent?: {
+      readonly id: NodeId;
+      readonly nativeTaskId: string;
+      readonly requestedAt?: DateTime.Utc;
+    };
     readonly threadId: ThreadId;
     readonly providerSessionId: ProviderSessionId;
     readonly providerThreadId: ProviderThreadId;
     readonly providerTurnId: ProviderTurnId;
-  }) => Effect.Effect<void, ProviderTurnControlError>;
+  }) => Effect.Effect<
+    void | ProviderAdapter.ProviderAdapterV2SubagentOutcome,
+    ProviderTurnControlError
+  >;
   readonly steer: (input: {
     readonly threadId: ThreadId;
     readonly providerSessionId: ProviderSessionId;
@@ -68,7 +80,7 @@ export interface ProviderTurnControlServiceV2Shape {
 export class ProviderTurnControlServiceV2 extends Context.Service<
   ProviderTurnControlServiceV2,
   ProviderTurnControlServiceV2Shape
->()("t3/orchestration-v2/ProviderTurnControlService/ProviderTurnControlServiceV2") {}
+>()("goat/orchestration-v2/ProviderTurnControlService/ProviderTurnControlServiceV2") {}
 
 export const layer: Layer.Layer<
   ProviderTurnControlServiceV2,
@@ -137,6 +149,16 @@ export const layer: Layer.Layer<
         }
         const session = yield* sessions.get(input.providerSessionId);
         if (Option.isNone(session)) {
+          if (input.operation === "interrupt" && providerThread.cloudTask !== undefined) {
+            return yield* new ProviderTurnControlError({
+              threadId: input.threadId,
+              operation: "interrupt",
+              providerTurnId: input.providerTurnId,
+              reason: "tracking-unavailable",
+              cause:
+                "Cloud tracking is unavailable. Remote work may continue; retry after tracking attaches.",
+            });
+          }
           // Interrupt/restart against a already-released session must not fail
           // the durable effect (and retry 5x). The turn may still look running
           // in projection until recovery/finalization; there is no live adapter
@@ -176,18 +198,54 @@ export const layer: Layer.Layer<
           const session = Option.isSome(loaded.session)
             ? loaded.session
             : yield* sessions.get(input.providerSessionId);
-          if (Option.isNone(session)) return;
+          if (Option.isNone(session)) {
+            if (loaded.providerThread.cloudTask !== undefined) {
+              return yield* new ProviderTurnControlError({
+                threadId: input.threadId,
+                operation: "interrupt",
+                providerTurnId: input.providerTurnId,
+                reason: "tracking-unavailable",
+                cause:
+                  "Cloud tracking is unavailable. Remote work may continue; retry after tracking attaches.",
+              });
+            }
+            if (input.subagent !== undefined) {
+              return yield* new ProviderTurnControlError({
+                threadId: input.threadId,
+                operation: "interrupt",
+                providerTurnId: input.providerTurnId,
+                cause: "No live provider session can confirm this subagent's outcome.",
+              });
+            }
+            return;
+          }
+          if (input.subagent !== undefined) {
+            if (session.value.stopSubagent === undefined) {
+              return yield* new ProviderTurnControlError({
+                threadId: input.threadId,
+                operation: "interrupt",
+                providerTurnId: input.providerTurnId,
+                cause: "The provider does not support stopping a native subagent.",
+              });
+            }
+            return yield* session.value.stopSubagent({
+              providerThread: loaded.providerThread,
+              nativeTaskId: input.subagent.nativeTaskId,
+              ...(input.subagent.requestedAt === undefined
+                ? {}
+                : { requestedAt: input.subagent.requestedAt }),
+            });
+          }
           // A settled turn reaches its adapter too: only the adapter knows
           // whether it still runs work for the thread, and each one either
-          // stops it or reports there is nothing left to stop. Background work
-          // the projection still shows is settled by the orchestrator after.
+          // stops it or reports there is nothing left to stop.
           yield* session.value.interruptTurn({
             providerThread: loaded.providerThread,
             providerTurnId: loaded.providerTurn.id,
             requestRuntimeRestart: true,
           });
-          // Give native terminal ingestion time to finish before the Stop
-          // follow-up repairs a run whose provider no longer reports on it.
+          // Cloud acknowledgement requests cancellation; its observer owns terminal settlement.
+          if (loaded.providerThread.cloudTask !== undefined) return;
           // The wait is real time: ingestion runs on other fibers and never
           // advances a test clock, so a test clock would hold Stop forever.
           yield* Effect.gen(function* () {

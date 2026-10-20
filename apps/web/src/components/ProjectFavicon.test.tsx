@@ -1,7 +1,7 @@
 import type { ComponentType, Dispatch, ReactElement, SetStateAction } from "react";
 import { beforeEach, describe, expect, it, vi } from "vite-plus/test";
-import type { EnvironmentId } from "@t3tools/contracts";
-import { PROJECT_FAVICON_FALLBACK_MARKER } from "@t3tools/shared/projectFavicon";
+import type { EnvironmentId } from "@goat/contracts";
+import { PROJECT_FAVICON_FALLBACK_MARKER } from "@goat/shared/projectFavicon";
 
 const testState = vi.hoisted(() => ({
   faviconUrl: "https://environment.test/api/assets/token-a/v1-20-favicon.svg",
@@ -53,10 +53,6 @@ vi.mock("react", async (importOriginal) => {
 });
 
 vi.mock("react/compiler-runtime", () => ({ c: hooks.useMemoCache }));
-vi.mock("lucide-react/dynamic", () => ({
-  DynamicIcon: "dynamic-icon",
-  iconNames: ["alarm-clock", "folder-code"],
-}));
 vi.mock("@effect/atom-react", () => ({
   useAtomValue: () => testState.faviconUrl,
 }));

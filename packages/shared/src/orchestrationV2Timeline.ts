@@ -3,7 +3,7 @@ import type {
   OrchestrationV2RunAttempt,
   OrchestrationV2TurnItem,
   OrchestrationV2UserMessageInputIntent,
-} from "@t3tools/contracts";
+} from "@goat/contracts";
 
 type TimelineRun = Pick<OrchestrationV2Run, "id" | "status">;
 type TimelineRunAttempt = Pick<OrchestrationV2RunAttempt, "runId" | "rootNodeId" | "status">;
@@ -72,7 +72,6 @@ export function isOrchestrationV2TurnItemVisible(input: {
   });
 }
 
-/** Index once when reconciling a whole timeline after run/attempt state changes. */
 export function createOrchestrationV2TurnItemVisibility(input: {
   readonly runs: ReadonlyArray<TimelineRun>;
   readonly attempts: ReadonlyArray<TimelineRunAttempt>;

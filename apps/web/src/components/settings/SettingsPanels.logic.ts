@@ -1,3 +1,4 @@
+import { migratingStorage } from "@goat/client-runtime/storage-migration";
 import type {
   BackgroundActivityProfile,
   BackgroundActivitySettings,
@@ -7,14 +8,14 @@ import type {
   ServerSettings,
   SidebarProjectGroupingMode,
   UnifiedSettings,
-} from "@t3tools/contracts";
-import { DEFAULT_UNIFIED_SETTINGS } from "@t3tools/contracts/settings";
+} from "@goat/contracts";
+import { DEFAULT_UNIFIED_SETTINGS } from "@goat/contracts/settings";
 import {
   getBackgroundActivityBaseProfile,
   normalizeBackgroundActivitySettings,
   normalizeServerBackgroundActivitySettings,
   resolveServerBackgroundActivitySettings,
-} from "@t3tools/shared/backgroundActivitySettings";
+} from "@goat/shared/backgroundActivitySettings";
 import * as Duration from "effect/Duration";
 import * as Equal from "effect/Equal";
 
@@ -30,11 +31,12 @@ export function projectGroupingModeFromToggle(
   return lastEnabledMode === "repository_path" ? "repository_path" : "repository";
 }
 
-const LAST_ENABLED_PROJECT_GROUPING_MODE_KEY = "t3code:last-enabled-project-grouping-mode";
+const LAST_ENABLED_PROJECT_GROUPING_MODE_KEY = "goat:last-enabled-project-grouping-mode";
 
 export function readLastEnabledProjectGroupingMode(): SidebarProjectGroupingMode {
   try {
-    return localStorage.getItem(LAST_ENABLED_PROJECT_GROUPING_MODE_KEY) === "repository_path"
+    return migratingStorage(localStorage).getItem(LAST_ENABLED_PROJECT_GROUPING_MODE_KEY) ===
+      "repository_path"
       ? "repository_path"
       : "repository";
   } catch {
@@ -45,7 +47,7 @@ export function readLastEnabledProjectGroupingMode(): SidebarProjectGroupingMode
 export function rememberEnabledProjectGroupingMode(mode: SidebarProjectGroupingMode): void {
   if (mode === "separate") return;
   try {
-    localStorage.setItem(LAST_ENABLED_PROJECT_GROUPING_MODE_KEY, mode);
+    migratingStorage(localStorage).setItem(LAST_ENABLED_PROJECT_GROUPING_MODE_KEY, mode);
   } catch {
     // Storage can be unavailable in restricted browser contexts.
   }
@@ -86,7 +88,6 @@ type TypographySettings = Pick<
   | "fontSizeTerminal"
 >;
 
-/** Labels the font rows whose family or size differs from the defaults. */
 export function getChangedTypographySettingLabels(settings: TypographySettings): string[] {
   return [
     ...(settings.fontFamilySans !== DEFAULT_UNIFIED_SETTINGS.fontFamilySans ||
@@ -117,16 +118,12 @@ export type BrowserDefaultSettings = Pick<
   | "browserRecordingShowKeyPresses"
   | "browserRecordingShowMousePresses"
   | "browserLinkTarget"
+  | "browserSearchEngine"
+  | "browserCustomSearchUrl"
   | "browserAutoShowFloatingPreview"
+  | "pullRequestLinksOpenInApp"
 >;
 
-/**
- * True when two viewport settings describe the same viewport.
- *
- * The setting is a tagged union rather than a scalar, so identity comparison
- * reports every stored viewport as changed — including one that matches the
- * default.
- */
 function isSamePreviewViewport(
   left: PreviewViewportSetting,
   right: PreviewViewportSetting,
@@ -139,7 +136,6 @@ function isSamePreviewViewport(
     : true;
 }
 
-/** Labels the browser-default rows that differ from the defaults. */
 export function getChangedBrowserSettingLabels(settings: BrowserDefaultSettings): string[] {
   return [
     ...(isSamePreviewViewport(
@@ -162,9 +158,16 @@ export function getChangedBrowserSettingLabels(settings: BrowserDefaultSettings)
     ...(settings.browserLinkTarget !== DEFAULT_UNIFIED_SETTINGS.browserLinkTarget
       ? ["Open links in"]
       : []),
+    ...(settings.browserSearchEngine !== DEFAULT_UNIFIED_SETTINGS.browserSearchEngine ||
+    settings.browserCustomSearchUrl !== DEFAULT_UNIFIED_SETTINGS.browserCustomSearchUrl
+      ? ["Search engine"]
+      : []),
     ...(settings.browserAutoShowFloatingPreview !==
     DEFAULT_UNIFIED_SETTINGS.browserAutoShowFloatingPreview
       ? ["Floating preview"]
+      : []),
+    ...(settings.pullRequestLinksOpenInApp !== DEFAULT_UNIFIED_SETTINGS.pullRequestLinksOpenInApp
+      ? ["Open pull requests in GOAT"]
       : []),
   ];
 }
@@ -260,7 +263,8 @@ export function buildProviderInstanceUpdatePatch(input: {
   readonly textGenerationModelSelection?:
     | ServerSettings["textGenerationModelSelection"]
     | undefined;
-}): Partial<UnifiedSettings> {
+  // goatBotHome has no null patch, so it stays out of provider patches.
+}): Partial<Omit<UnifiedSettings, "goatBotHome">> {
   return {
     providerInstances: {
       ...input.settings.providerInstances,
@@ -271,10 +275,6 @@ export function buildProviderInstanceUpdatePatch(input: {
       : {}),
   };
 }
-
-// ── Background-activity interval helpers ─────────────────────────────
-// Shared by the General panel's interval rows and the Providers panel's
-// health-check row.
 
 export const PROVIDER_HEALTH_INTERVAL_STEP_SECONDS = 30;
 

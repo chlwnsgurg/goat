@@ -11,6 +11,8 @@ import * as NodeURL from "node:url";
 
 import { PNG } from "pngjs";
 
+import { MOBILE_APP_IDENTITY } from "@goat/shared/mobileAppIdentity";
+
 import showcaseConfig, {
   type ShowcaseAppearance,
   type ShowcaseAndroidDevice,
@@ -32,8 +34,10 @@ import {
 
 const REPO_ROOT = NodePath.resolve(NodePath.dirname(NodeURL.fileURLToPath(import.meta.url)), "..");
 const MOBILE_ROOT = NodePath.join(REPO_ROOT, "apps/mobile");
-const ANDROID_PACKAGE = "com.t3tools.t3code";
-const APP_SCHEME = "t3code";
+const SHOWCASE_APP = MOBILE_APP_IDENTITY.production;
+// The iOS bundle id and Android package are the same, so simctl and adb both use this.
+const ANDROID_PACKAGE = SHOWCASE_APP.androidPackage;
+const APP_SCHEME = SHOWCASE_APP.scheme;
 // expo-dev-launcher reads these off the manifest URL and updates the dev menu
 // preferences before the app loads, keeping captures free of dev chrome.
 const DEV_CLIENT_LAUNCH_FLAGS = "disableOnboarding=1&disableFab=1&disableAutoLaunch=1";
@@ -42,7 +46,7 @@ const SERVER_HOST = "0.0.0.0";
 const IOS_SIMULATOR_ARCH = NodeProcess.arch === "arm64" ? "arm64" : "x86_64";
 const IOS_APP_PATH = NodePath.join(
   MOBILE_ROOT,
-  ".showcase/ios-derived-data/Build/Products/Debug-iphonesimulator/T3Code.app",
+  `.showcase/ios-derived-data/Build/Products/Debug-iphonesimulator/${SHOWCASE_APP.xcodeName}.app`,
 );
 const ANDROID_APK_PATH = NodePath.join(
   MOBILE_ROOT,
@@ -67,7 +71,7 @@ const MOBILE_BUILD_ENV = {
   EXPO_NO_GIT_STATUS: "1",
   // Lets the capture build require full screen on iPad so the app can rotate
   // itself to landscape (see app.config.ts).
-  T3_SHOWCASE_CAPTURE_BUILD: "1",
+  GOAT_SHOWCASE_CAPTURE_BUILD: "1",
   JAVA_HOME:
     NodeProcess.env.JAVA_HOME ??
     (NodeProcess.platform === "darwin"
@@ -232,8 +236,6 @@ export function showcaseCaptureDirectory(
   outputDirectory: string,
   capture: Pick<ShowcaseCapture, "device" | "appearance" | "theme">,
 ): string {
-  // Each palette owns a leaf folder so one upload slot never mixes themes and
-  // every folder keeps a store-legal screenshot count of its own.
   return NodePath.join(
     outputDirectory,
     capture.device.storeAsset.directory,
@@ -417,7 +419,7 @@ function printUsage(config: ShowcaseConfig): void {
   NodeProcess.stdout.write(`App screenshot showcase
 
 Usage:
-  pnpm --filter @t3tools/mobile screenshots [options]
+  pnpm --filter @goat/mobile screenshots [options]
 
 Options:
   --platform ios|android|all  Capture one platform (repeatable)
@@ -707,9 +709,9 @@ async function buildIos(): Promise<string> {
     "xcodebuild",
     [
       "-workspace",
-      NodePath.join(MOBILE_ROOT, "ios/T3Code.xcworkspace"),
+      NodePath.join(MOBILE_ROOT, `ios/${SHOWCASE_APP.xcodeName}.xcworkspace`),
       "-scheme",
-      "T3Code",
+      SHOWCASE_APP.xcodeName,
       "-configuration",
       "Debug",
       "-sdk",
@@ -812,11 +814,10 @@ async function iosSimulatorDataPath(udid: string): Promise<string> {
 }
 
 // generativeexperiencesd posts a "Ready for Apple Intelligence" follow-up
-// banner on an eligible device's first boot, and CoreFollowUp re-surfaces it
-// on every boot until the user dismisses it. Stamping the readiness marker
-// before boot makes the daemon skip the post, and dropping the CoreFollowUp
-// store clears a banner that a previous boot already queued. Runs while the
-// device is shut down so the files are read fresh on the next boot.
+// banner on an eligible device's first boot, and CoreFollowUp re-surfaces it on
+// every boot until the user dismisses it. Stamping the readiness marker before
+// boot makes the daemon skip the post, and dropping the CoreFollowUp store
+// clears a banner that a previous boot already queued.
 async function suppressIosSystemFollowUps(udid: string): Promise<void> {
   const dataPath = await iosSimulatorDataPath(udid);
   const preferences = NodePath.join(dataPath, "Library/Preferences");
@@ -875,8 +876,7 @@ async function normalizeIosSimulator(appearance: ShowcaseAppearance, udid: strin
 
 // iPadOS 26 windowing ("Chamois") runs UIRequiresFullScreen apps in a fixed
 // portrait compatibility window, which defeats the in-app landscape rotation
-// the capture build relies on. Switch the device to Full Screen Apps mode
-// (Settings > Multitasking & Gestures) and restart SpringBoard to apply it.
+// the capture build relies on.
 async function ensureIosFullScreenAppsMode(udid: string): Promise<void> {
   const current = await commandOutput("xcrun", [
     "simctl",
@@ -1002,10 +1002,6 @@ async function allowIosNotificationsUntilReady(udid: string, ready: Promise<void
   }
 }
 
-/**
- * Locks the simulator over the staged Live Activity and delivers the alert a
- * relay push would, so the lock screen shows both.
- */
 async function presentIosLockScreen(udid: string): Promise<void> {
   await runAxe(udid, ["button", "lock"]);
   const deadline = Date.now() + 15_000;
@@ -1039,7 +1035,7 @@ async function presentIosLockScreen(udid: string): Promise<void> {
  * pressing on a lit lock screen would unlock the device instead.
  */
 async function wakeIosLockScreen(udid: string): Promise<void> {
-  const probe = NodePath.join(NodeOS.tmpdir(), `t3-showcase-wake-${udid}.png`);
+  const probe = NodePath.join(NodeOS.tmpdir(), `goat-showcase-wake-${udid}.png`);
   try {
     for (let attempt = 0; attempt < 5; attempt += 1) {
       await delay(2_000);
@@ -1055,7 +1051,6 @@ async function wakeIosLockScreen(udid: string): Promise<void> {
 
 function pngIsBlack(bytes: Uint8Array): boolean {
   const { data } = PNG.sync.read(Buffer.from(bytes));
-  // Sample a sparse grid; a sleeping display is uniformly black.
   for (let offset = 0; offset < data.length; offset += 4 * 997) {
     if ((data[offset] ?? 0) > 8 || (data[offset + 1] ?? 0) > 8 || (data[offset + 2] ?? 0) > 8) {
       return false;
@@ -1065,13 +1060,11 @@ function pngIsBlack(bytes: Uint8Array): boolean {
 }
 
 async function unlockIosSimulator(udid: string): Promise<void> {
-  // The first press wakes the display, the second dismisses the lock screen.
   await runAxe(udid, ["button", "home"]);
   await delay(2_000);
   await runAxe(udid, ["button", "home"]);
 }
 
-/** Mirrors the app's staged hero row (showcaseAgentActivity.ts). */
 function showcaseAgentAlert(): { readonly title: string; readonly body: string } {
   const thread = SHOWCASE_THREADS.find((candidate) => candidate.id === "pocket-command-center");
   const project = SHOWCASE_PROJECTS.find((candidate) => candidate.id === thread?.projectId);
@@ -1092,8 +1085,6 @@ async function captureIos(
   const startedByRunner = simulator.state !== "Booted";
   registerCleanup({ udid: simulator.udid, startedByRunner, createdByRunner });
   if (!startedByRunner) {
-    // Clear transient SpringBoard state (permission prompts, stale URL-open
-    // confirmations, keyboards) without erasing the developer's simulator.
     await runCommand("xcrun", ["simctl", "shutdown", simulator.udid]);
   }
   await suppressIosSystemFollowUps(simulator.udid);
@@ -1110,8 +1101,6 @@ async function captureIos(
     await runCommand("xcrun", ["simctl", "install", simulator.udid, appPath]);
   }
 
-  // The dev-client launch URL carries the dev menu preferences (SDK 58), so
-  // nothing is written into the app container ahead of launch.
   const metroUrl = `http://${metroHost}:${config.metroPort}?${DEV_CLIENT_LAUNCH_FLAGS}`;
   const scenePath = NodePath.join(
     await iosAppContainer(simulator.udid),
@@ -1401,8 +1390,6 @@ async function captureAndroid(
     await runAdb(serial, ["install", "-r", apkPath]);
   }
   await runAdb(serial, ["shell", "pm", "clear", ANDROID_PACKAGE]);
-  // The agent-activity scene posts notifications; granting up front keeps the
-  // runtime prompt off every capture.
   await runAdb(serial, [
     "shell",
     "pm",
@@ -1663,9 +1650,6 @@ async function main(): Promise<void> {
 
 if (import.meta.main) {
   void main().catch((error: unknown) => {
-    // Stack over message: the harness only fails in CI, where the line that
-    // threw is the whole diagnosis and there is nobody at a terminal to
-    // re-run it with more output.
     NodeProcess.stderr.write(
       `${error instanceof Error ? (error.stack ?? error.message) : String(error)}\n`,
     );

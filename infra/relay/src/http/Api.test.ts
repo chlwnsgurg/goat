@@ -3,7 +3,7 @@ import {
   RelayClientAuth,
   RelayClientPrincipal,
   type RelayClientDeviceRecord,
-} from "@t3tools/contracts/relay";
+} from "@goat/contracts/relay";
 import * as EnvironmentLinker from "../environments/EnvironmentLinker.ts";
 import * as RelayTokens from "../auth/RelayTokens.ts";
 import * as Devices from "../agentActivity/Devices.ts";
@@ -36,13 +36,9 @@ import * as HttpServerRequest from "effect/http/HttpServerRequest";
 import * as HttpServerResponse from "effect/http/HttpServerResponse";
 import * as HttpApi from "effect/http-api/HttpApi";
 import * as HttpApiBuilder from "effect/http-api/HttpApiBuilder";
-import { EnvironmentId } from "@t3tools/contracts";
-import {
-  RelayEnvironmentAuth,
-  RelayEnvironmentPrincipal,
-  RelayApi,
-} from "@t3tools/contracts/relay";
-import { RELAY_MANAGED_TUNNEL_RECOVERY_TYP, signRelayJwt } from "@t3tools/shared/relayJwt";
+import { EnvironmentId } from "@goat/contracts";
+import { RelayEnvironmentAuth, RelayEnvironmentPrincipal, RelayApi } from "@goat/contracts/relay";
+import { RELAY_MANAGED_TUNNEL_RECOVERY_TYP, signRelayJwt } from "@goat/shared/relayJwt";
 
 import {
   RELAY_HTTP_ROUTER_CONFIG,
@@ -951,7 +947,6 @@ describe("relay environment unlink", () => {
     return Effect.gen(function* () {
       expect(yield* unlink(false)).toBe(true);
       expect(cleared).toEqual([endpointKey]);
-      // The link is already revoked; a failed clear must not fail the unlink.
       expect(yield* unlink(true)).toBe(true);
     });
   });
@@ -1190,7 +1185,6 @@ describe("relay request tracing", () => {
         expect(spans[0]?.kind).toBe("server");
         expect(spans[0]?.attributes.get("url.path")).toBe("/v1/mobile/devices");
         expect(spans[0]?.attributes.get("http.response.status_code")).toBe(204);
-        // Headers are not captured at all, so credentials never reach the span.
         expect(spans[0]?.attributes.get("http.request.header.authorization")).toBeUndefined();
         expect(spans[0]?.attributes.get("http.request.header.dpop")).toBeUndefined();
         expect(Option.isNone(spans[0]!.parent)).toBe(true);
@@ -1212,7 +1206,6 @@ describe("relay request tracing", () => {
         new Request("https://relay.test/v1/mobile/devices", { method: "POST" }),
       );
 
-      // As the worker runtime runs it: its own tracer around ours, turned off.
       yield* HttpMiddleware.tracer(
         traceRelayHttpRequestWith(
           Effect.succeed(HttpServerResponse.empty({ status: 204 })),
@@ -1484,7 +1477,6 @@ const sendRelayRequest = Effect.fnUntraced(function* <E, R>(
     Deferred.succeed(sent, response),
   ).pipe(
     Effect.provideService(HttpServerRequest.HttpServerRequest, HttpServerRequest.fromWeb(request)),
-    // A handler failure still fails this effect after its 500 has been sent.
     Effect.exit,
   );
   return yield* Deferred.await(sent);

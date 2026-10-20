@@ -2,7 +2,7 @@
 
 import * as NodePath from "node:path";
 
-import * as HostProcess from "@t3tools/shared/HostProcess";
+import * as HostProcess from "@goat/shared/HostProcess";
 import type * as Cause from "effect/Cause";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
@@ -125,7 +125,7 @@ export class ElectronWindow extends Context.Service<
       sync: (window: Electron.BrowserWindow) => Effect.Effect<void, E, R>,
     ) => Effect.Effect<void, E, R>;
   }
->()("@t3tools/desktop/electron/ElectronWindow") {}
+>()("@goat/desktop/electron/ElectronWindow") {}
 
 /** @public Service construction is part of the canonical Effect module API. */
 export const make = Effect.gen(function* () {
@@ -139,7 +139,6 @@ export const make = Effect.gen(function* () {
     );
     return windowsForegroundFocus;
   };
-  // Tracks a capture reveal in flight. Ordinary reveals keep Electron's native path.
   const captureRevealWindows = new Set<number>();
   yield* Effect.addFinalizer(() => Effect.sync(() => windowsForegroundFocus?.close()));
   const mainWindowRef = yield* Ref.make<Option.Option<Electron.BrowserWindow>>(Option.none());
@@ -269,8 +268,6 @@ export const make = Effect.gen(function* () {
             return;
           }
 
-          // Only a capture reveal fights another process for the foreground, which
-          // needs Win32 calls that load native modules. Everything else stays native.
           const captureReveal = platform === "win32" && captureRevealWindows.delete(window.id);
           const shellHostedForeground =
             captureReveal && (await isWindowsShellHostedForeground().catch(() => false));

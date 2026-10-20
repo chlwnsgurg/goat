@@ -1,15 +1,11 @@
 /**
- * CursorSkills — workspace-aware discovery and native invocation for Cursor.
- *
  * Cursor discovers Agent Skills recursively from user and project roots but
  * its ACP command catalog only appears after opening a real session. Scanning
  * the same roots avoids starting an agent and its MCP servers just to populate
  * a composer menu.
- *
- * @module provider/Drivers/CursorSkills
  */
 
-import type { ServerProviderSkill } from "@t3tools/contracts";
+import type { ServerProviderSkill } from "@goat/contracts";
 import * as ByteSize from "effect/ByteSize";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -17,7 +13,7 @@ import * as Path from "effect/Path";
 import * as PlatformError from "effect/PlatformError";
 import * as Schema from "effect/Schema";
 import { parse as parseYamlDocument } from "yaml";
-import * as HostProcess from "@t3tools/shared/HostProcess";
+import * as HostProcess from "@goat/shared/HostProcess";
 
 const FRONTMATTER_PATTERN = /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/;
 const SKILL_MENTION_PATTERN =
@@ -131,6 +127,8 @@ const discoverSkillsInRoot = Effect.fn("discoverCursorSkillsInRoot")(function* (
   readonly directory: string;
   readonly scope: "user" | "project";
   readonly budget: CursorSkillScanBudget;
+  /** Real paths of the roots already walked in this scan. */
+  readonly scannedRoots: Set<string>;
 }): Effect.fn.Return<ReadonlyArray<ServerProviderSkill>, never, FileSystem.FileSystem | Path.Path> {
   const fileSystem = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
@@ -138,6 +136,10 @@ const discoverSkillsInRoot = Effect.fn("discoverCursorSkillsInRoot")(function* (
   if (input.budget.exhausted) return skills;
   const rootDirectory = yield* orUndefined(fileSystem.realPath(input.directory), input.budget);
   if (!rootDirectory) return skills;
+  // A root linked to another one, such as `~/.agents/skills` pointing at `~/.claude/skills`,
+  // is the same tree: walking it again would charge the scan budget twice for nothing new.
+  if (input.scannedRoots.has(rootDirectory)) return skills;
+  input.scannedRoots.add(rootDirectory);
   const visitedDirectories = new Set<string>();
 
   const visit = Effect.fn("visitCursorSkillDirectory")(function* (
@@ -201,13 +203,12 @@ const discoverSkillsInRoot = Effect.fn("discoverCursorSkillsInRoot")(function* (
         return;
       }
       input.budget.remainingEntries -= 1;
+      // Installed dependencies can exhaust the shared budget and hide unrelated skills.
+      if (entry === "node_modules") continue;
       const child = path.join(directory, entry);
       const info = yield* orUndefined(fileSystem.stat(child), input.budget);
       if (info?.type !== "Directory") continue;
-      if (depth >= MAX_SKILL_DEPTH) {
-        input.budget.exhausted = true;
-        return;
-      }
+      if (depth >= MAX_SKILL_DEPTH) continue;
       yield* visit(child, depth + 1);
     }
   });
@@ -240,9 +241,10 @@ const inspectCursorSkills = Effect.fn("inspectCursorSkills")(function* (
     exhausted: false,
     incomplete: false,
   };
+  const scannedRoots = new Set<string>();
   for (const root of roots) {
     if (budget.exhausted) break;
-    const skills = yield* discoverSkillsInRoot({ ...root, budget });
+    const skills = yield* discoverSkillsInRoot({ ...root, budget, scannedRoots });
     for (const skill of skills) {
       if (!skillsByName.has(skill.name)) skillsByName.set(skill.name, skill);
     }

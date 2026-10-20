@@ -3,9 +3,8 @@ import {
   type ArchivedSnapshotEntry,
   createArchivedThreadSnapshotsAtomFamily,
   makeArchivedThreadsEnvironmentKey,
-} from "@t3tools/client-runtime/state/threads";
-import type { EnvironmentId } from "@t3tools/contracts";
-import { useCallback, useMemo } from "react";
+} from "@goat/client-runtime/state/threads";
+import type { EnvironmentId } from "@goat/contracts";
 
 import { orchestrationEnvironment } from "../state/orchestration";
 import { appAtomRegistry } from "../rpc/atomRegistry";
@@ -32,16 +31,13 @@ export function useArchivedThreadSnapshots(environmentIds: ReadonlyArray<Environ
   readonly isLoading: boolean;
   readonly refresh: () => void;
 } {
-  const environmentKey = useMemo(
-    () => makeArchivedThreadsEnvironmentKey(environmentIds),
-    [environmentIds],
-  );
+  const environmentKey = makeArchivedThreadsEnvironmentKey(environmentIds);
   const result = useAtomValue(archivedSnapshotsAtom(environmentKey));
-  const refresh = useCallback(() => {
+  const refresh = () => {
     for (const environmentId of environmentIds) {
       appAtomRegistry.refresh(archivedSnapshotAtom(environmentId));
     }
-  }, [environmentIds]);
+  };
 
   return {
     ...result,

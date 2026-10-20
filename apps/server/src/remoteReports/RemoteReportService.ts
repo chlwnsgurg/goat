@@ -1,16 +1,24 @@
 // @effect-diagnostics nodeBuiltinImport:off - read-key hashing needs a constant-time compare.
 import * as NodeCrypto from "node:crypto";
 import {
+  channelWorkerObservationEquals,
   NonNegativeInt,
+  type OrchestrationV2DomainEvent,
+  type OrchestrationV2Run,
+  type OrchestrationV2ThreadShell,
   ThreadId,
   RemoteReportBindingInput,
   RemoteReport,
+  RemoteRelaySend,
+  type RemoteKnownRun,
+  type RemoteObservedRun,
+  type RemoteReportedOutcome,
   RemoteOriginReportInput,
   RemoteOriginReportResult,
   RemoteOriginReportsWaitInput,
   RemoteOriginReportsWaitResult,
   REMOTE_REPORT_SUMMARY_MAX_CHARS,
-} from "@t3tools/contracts";
+} from "@goat/contracts";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
@@ -21,7 +29,19 @@ import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import * as SqlClient from "effect/sql/SqlClient";
 import * as Orchestrator from "../orchestration-v2/Orchestrator.ts";
-import { isTerminalRunStatus } from "../orchestration-v2/ThreadManagementService.ts";
+import {
+  isTerminalRunStatus,
+  pendingUserInputRequestIdsForRun,
+} from "../orchestration-v2/ThreadManagementService.ts";
+import { readStoredThreadResultReport } from "../threadResults/ThreadResultService.ts";
+import {
+  completionHoldCount,
+  needsYouFromRuntimeRequests,
+  subagentRequests,
+  observeWorker,
+  pullRequestsFromLinks,
+  usageLimitWait,
+} from "../channels/channelWorkerObservation.ts";
 
 export class RemoteReportError extends Schema.TaggedError<RemoteReportError>()(
   "RemoteReportError",
@@ -32,6 +52,8 @@ export class RemoteReportError extends Schema.TaggedError<RemoteReportError>()(
       "access_denied",
       "run_not_found",
       "thread_deleted",
+      "relay_unsupported",
+      "relay_queue_full",
       "unavailable",
       "storage",
     ]),
@@ -45,14 +67,59 @@ export class RemoteReportError extends Schema.TaggedError<RemoteReportError>()(
 const BindingRow = Schema.Struct({
   threadId: ThreadId,
   ...RemoteReportBindingInput.fields,
+  relaySend: Schema.Number,
   lastSequence: NonNegativeInt,
 });
 const decodeBindingRows = Schema.decodeUnknownEffect(Schema.Array(BindingRow));
 const decodeBindingInput = Schema.decodeUnknownEffect(RemoteReportBindingInput);
 const decodeReportInput = Schema.decodeUnknownEffect(RemoteOriginReportInput);
+const decodeRelayInput = Schema.decodeUnknownEffect(RemoteRelaySend);
 const decodeWaitInput = Schema.decodeUnknownEffect(RemoteOriginReportsWaitInput);
-const decodeReports = Schema.decodeUnknownEffect(Schema.Array(RemoteReport));
+const RelayJson = Schema.fromJsonString(RemoteRelaySend);
+const encodeRelay = Schema.encodeSync(RelayJson);
+const decodeReportRows = Schema.decodeUnknownEffect(
+  Schema.Array(Schema.Struct({ ...RemoteReport.fields, relay: Schema.NullOr(RelayJson) })),
+);
+const decodeReports = (rows: unknown) =>
+  decodeReportRows(rows).pipe(
+    Effect.map((values) =>
+      values.map(({ relay, ...report }): RemoteReport =>
+        relay === null ? report : { ...report, relay },
+      ),
+    ),
+  );
 const isRemoteReportError = Schema.is(RemoteReportError);
+/** Relays the origin has not collected yet. They are never pruned, so they are capped. */
+export const MAX_PENDING_RELAYS = 50;
+
+const sameRequestIds = (
+  known: ReadonlyArray<string> | undefined,
+  observed: ReadonlyArray<string> | undefined,
+) => known === undefined || known.join("\n") === (observed ?? []).join("\n");
+const sameHolds = (known: RemoteKnownRun["holds"], observed: RemoteObservedRun["holds"]) =>
+  known === undefined ||
+  (known.backgroundTasks === (observed?.backgroundTasks ?? 0) &&
+    known.continuationPending === (observed?.continuationPending ?? false));
+const sameObservation = (
+  known: RemoteKnownRun["observation"],
+  observed: RemoteObservedRun["observation"],
+) => known === undefined || channelWorkerObservationEquals(known, observed);
+/**
+ * Whether a read differs from the caller's last view. Questions, holds and the
+ * observation count only when the caller sent them, so an older origin that cannot
+ * echo them back is not released on every call while a question is open.
+ */
+export const observedRunChanged = (
+  known: RemoteKnownRun | null,
+  observed: RemoteObservedRun | null,
+) =>
+  (observed?.runId ?? null) !== (known?.runId ?? null) ||
+  (observed?.status ?? null) !== (known?.status ?? null) ||
+  (known !== null &&
+    observed !== null &&
+    (!sameRequestIds(known.pendingRequestIds, observed.pendingRequestIds) ||
+      !sameHolds(known.holds, observed.holds) ||
+      !sameObservation(known.observation, observed.observation)));
 
 export class RemoteReportService extends Context.Service<
   RemoteReportService,
@@ -62,15 +129,38 @@ export class RemoteReportService extends Context.Service<
       input: RemoteReportBindingInput,
     ) => Effect.Effect<void, RemoteReportError>;
     readonly unbind: (threadId: ThreadId) => Effect.Effect<void, RemoteReportError>;
+    /** The machine and thread this thread was launched from, when it reports to one. */
+    readonly origin: (threadId: ThreadId) => Effect.Effect<
+      {
+        readonly originLabel: string;
+        readonly originThreadId: ThreadId;
+        /** The origin delivers this thread's sends to hosts it cannot reach. */
+        readonly relaySend: boolean;
+      } | null,
+      RemoteReportError
+    >;
     readonly report: (
       threadId: ThreadId,
       input: RemoteOriginReportInput,
+    ) => Effect.Effect<RemoteOriginReportResult, RemoteReportError>;
+    /** Asks the origin to deliver a goat_thread_send; only for a binding with relaySend. */
+    /** A relay request's durable sequence, retained after its report is collected. */
+    readonly relayReceipt: (
+      threadId: ThreadId,
+      clientRequestId: string,
+    ) => Effect.Effect<
+      { readonly sequence: number; readonly originLabel: string } | null,
+      RemoteReportError
+    >;
+    readonly relay: (
+      threadId: ThreadId,
+      input: RemoteRelaySend,
     ) => Effect.Effect<RemoteOriginReportResult, RemoteReportError>;
     readonly wait: (
       input: RemoteOriginReportsWaitInput,
     ) => Effect.Effect<RemoteOriginReportsWaitResult, RemoteReportError>;
   }
->()("t3/remoteReports/RemoteReportService") {}
+>()("goat/remoteReports/RemoteReportService") {}
 const make = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
   const orchestrator = yield* Orchestrator.OrchestratorV2;
@@ -83,14 +173,14 @@ const make = Effect.gen(function* () {
     sql`
     SELECT thread_id AS "threadId", correlation_id AS "correlationId",
       origin_label AS "originLabel", origin_thread_id AS "originThreadId",
-      read_key_hash AS "readKeyHash", last_sequence AS "lastSequence"
+      read_key_hash AS "readKeyHash", relay_send AS "relaySend", last_sequence AS "lastSequence"
     FROM remote_report_bindings WHERE thread_id = ${threadId}
   `.pipe(Effect.mapError(storage), Effect.flatMap(decodeRows), Effect.mapError(storage));
   const bindingForCorrelation = (correlationId: string) =>
     sql`
     SELECT thread_id AS "threadId", correlation_id AS "correlationId",
       origin_label AS "originLabel", origin_thread_id AS "originThreadId",
-      read_key_hash AS "readKeyHash", last_sequence AS "lastSequence"
+      read_key_hash AS "readKeyHash", relay_send AS "relaySend", last_sequence AS "lastSequence"
     FROM remote_report_bindings WHERE correlation_id = ${correlationId}
   `.pipe(Effect.mapError(storage), Effect.flatMap(decodeRows), Effect.mapError(storage));
   const bind = Effect.fn("RemoteReportService.bind")(function* (
@@ -101,8 +191,8 @@ const make = Effect.gen(function* () {
     const createdAt = DateTime.formatIso(yield* DateTime.now);
     yield* sql`
       INSERT INTO remote_report_bindings
-        (thread_id, correlation_id, origin_label, origin_thread_id, read_key_hash, created_at)
-      VALUES (${threadId}, ${value.correlationId}, ${value.originLabel}, ${value.originThreadId}, ${value.readKeyHash}, ${createdAt})
+        (thread_id, correlation_id, origin_label, origin_thread_id, read_key_hash, relay_send, created_at)
+      VALUES (${threadId}, ${value.correlationId}, ${value.originLabel}, ${value.originThreadId}, ${value.readKeyHash}, ${value.relaySend === true ? 1 : 0}, ${createdAt})
     `.pipe(Effect.mapError(storage));
   });
   const unbind = Effect.fn("RemoteReportService.unbind")(function* (threadId: ThreadId) {
@@ -111,17 +201,19 @@ const make = Effect.gen(function* () {
         Effect.gen(function* () {
           yield* sql`DELETE FROM remote_reports WHERE correlation_id IN
         (SELECT correlation_id FROM remote_report_bindings WHERE thread_id = ${threadId})`;
+          yield* sql`DELETE FROM remote_relay_requests WHERE correlation_id IN
+        (SELECT correlation_id FROM remote_report_bindings WHERE thread_id = ${threadId})`;
           yield* sql`DELETE FROM remote_report_bindings WHERE thread_id = ${threadId}`;
         }),
       )
       .pipe(Effect.mapError(storage));
     yield* PubSub.publish(signals, undefined);
   });
-  const report = Effect.fn("RemoteReportService.report")(function* (
+  const append = Effect.fn("RemoteReportService.append")(function* (
     threadId: ThreadId,
-    input: RemoteOriginReportInput,
+    value: RemoteOriginReportInput,
+    relay: RemoteRelaySend | null,
   ) {
-    const value = yield* decodeReportInput(input).pipe(Effect.mapError(invalid));
     const shell = yield* orchestrator.getThreadShell(threadId).pipe(Effect.mapError(unavailable));
     if (shell === null || shell.deletedAt !== null)
       return yield* new RemoteReportError({ reason: "thread_deleted" });
@@ -132,17 +224,41 @@ const make = Effect.gen(function* () {
         Effect.gen(function* () {
           const binding = (yield* bindingForThread(threadId))[0];
           if (binding === undefined) return yield* new RemoteReportError({ reason: "not_bound" });
+          if (relay !== null && binding.relaySend !== 1)
+            return yield* new RemoteReportError({ reason: "relay_unsupported" });
+          // A retried relay is the same request, even after the origin collected it.
+          if (relay?.clientRequestId !== undefined) {
+            const earlier = yield* sql<{
+              sequence: number;
+            }>`SELECT sequence FROM remote_relay_requests
+              WHERE correlation_id = ${binding.correlationId}
+              AND client_request_id = ${relay.clientRequestId}`;
+            if (earlier[0] !== undefined) return { sequence: earlier[0].sequence };
+          }
+          if (relay !== null) {
+            const pending = yield* sql<{
+              count: number;
+            }>`SELECT COUNT(*) AS count FROM remote_reports
+              WHERE correlation_id = ${binding.correlationId} AND relay IS NOT NULL`;
+            if ((pending[0]?.count ?? 0) >= MAX_PENDING_RELAYS)
+              return yield* new RemoteReportError({ reason: "relay_queue_full" });
+          }
           const sequence = binding.lastSequence + 1;
           yield* sql`UPDATE remote_report_bindings SET last_sequence = ${sequence} WHERE thread_id = ${threadId}`;
           yield* sql`
-        INSERT INTO remote_reports (correlation_id, sequence, run_id, kind, summary, created_at)
-        VALUES (${binding.correlationId}, ${sequence}, ${runId}, ${value.status}, ${value.summary}, ${createdAt})
+        INSERT INTO remote_reports (correlation_id, sequence, run_id, kind, summary, relay, created_at)
+        VALUES (${binding.correlationId}, ${sequence}, ${runId}, ${value.status}, ${value.summary}, ${relay === null ? null : encodeRelay(relay)}, ${createdAt})
       `;
-          // Keep the newest 200, preferring substantive reports over progress.
+          if (relay?.clientRequestId !== undefined)
+            yield* sql`INSERT INTO remote_relay_requests (correlation_id, client_request_id, sequence)
+              VALUES (${binding.correlationId}, ${relay.clientRequestId}, ${sequence})`;
+          // Keep the newest 200 reports, preferring substantive ones over progress. A relay
+          // stays until the origin collects it, because a pruned one would never be sent.
           yield* sql`
         DELETE FROM remote_reports WHERE correlation_id = ${binding.correlationId}
           AND sequence IN (
-            SELECT sequence FROM remote_reports WHERE correlation_id = ${binding.correlationId}
+            SELECT sequence FROM remote_reports
+            WHERE correlation_id = ${binding.correlationId} AND relay IS NULL
             ORDER BY CASE WHEN kind = 'progress' THEN 1 ELSE 0 END, sequence DESC
             LIMIT -1 OFFSET 200
           )
@@ -153,6 +269,27 @@ const make = Effect.gen(function* () {
       .pipe(Effect.mapError((cause) => (isRemoteReportError(cause) ? cause : storage(cause))));
     yield* PubSub.publish(signals, undefined);
     return result;
+  });
+  const report = Effect.fn("RemoteReportService.report")(function* (
+    threadId: ThreadId,
+    input: RemoteOriginReportInput,
+  ) {
+    const value = yield* decodeReportInput(input).pipe(Effect.mapError(invalid));
+    return yield* append(threadId, value, null);
+  });
+  const relay = Effect.fn("RemoteReportService.relay")(function* (
+    threadId: ThreadId,
+    input: RemoteRelaySend,
+  ) {
+    const value = yield* decodeRelayInput(input).pipe(Effect.mapError(invalid));
+    return yield* append(
+      threadId,
+      {
+        status: "progress",
+        summary: `Asked to relay goat_thread_send to thread ${value.threadId} on ${value.host}.`,
+      },
+      value,
+    );
   });
   const wait = Effect.fn("RemoteReportService.wait")(function* (
     input: RemoteOriginReportsWaitInput,
@@ -177,6 +314,75 @@ const make = Effect.gen(function* () {
         const afterSequence = yield* orchestrator
           .getThreadEventSequence(binding.threadId)
           .pipe(Effect.mapError(unavailable));
+        // A live run's open questions; what still holds a finished run's thread open; and what
+        // the thread shows besides its run status, read as the origin reads a local worker.
+        const runState = (run: OrchestrationV2Run, shell: OrchestrationV2ThreadShell) =>
+          Effect.gen(function* () {
+            const requests = yield* orchestrator
+              .getThreadRecords(binding.threadId, ["runtimeRequests", "subagents"])
+              .pipe(Effect.mapError(unavailable));
+            const pullRequests = pullRequestsFromLinks(shell.pullRequests);
+            // A subagent on this machine waiting on a person blocks the work as much as the
+            // worker, so the origin hears about it the same way.
+            const needsYou = needsYouFromRuntimeRequests([
+              ...requests.runtimeRequests,
+              ...(yield* subagentRequests(requests.subagents, (threadId) =>
+                orchestrator.getThreadRecords(threadId, ["runtimeRequests", "subagents"]),
+              )),
+            ]);
+            if (!isTerminalRunStatus(run.status)) {
+              const items = yield* orchestrator
+                .getThreadRecords(binding.threadId, ["turnItems"], {
+                  turnItemTypes: ["user_input_request"],
+                  turnItemRunIds: [run.id],
+                })
+                .pipe(Effect.mapError(unavailable));
+              const requestIds = items.turnItems.flatMap((item) =>
+                item.type === "user_input_request" && item.runId === run.id ? [item.requestId] : [],
+              );
+              const requested = new Set<string>(requestIds);
+              return {
+                pendingRequestIds:
+                  requestIds.length === 0
+                    ? []
+                    : pendingUserInputRequestIdsForRun(
+                        {
+                          ...items,
+                          runtimeRequests: requests.runtimeRequests.filter((request) =>
+                            requested.has(request.id),
+                          ),
+                        },
+                        run.id,
+                      ),
+                observation: observeWorker({ pullRequests, needsYou }),
+              };
+            }
+            const records = yield* orchestrator
+              .getThreadRecords(binding.threadId, ["providerThreads"])
+              .pipe(Effect.mapError(unavailable));
+            const continuationPending = yield* orchestrator
+              .delegatedTaskResultPending(binding.threadId)
+              .pipe(Effect.mapError(unavailable));
+            // This machine cannot arm recovery for the origin, so a limit nothing resumes needs a person.
+            const limit =
+              run.status === "failed" ? usageLimitWait(shell, run, yield* DateTime.now) : undefined;
+            return {
+              holds: {
+                backgroundTasks: completionHoldCount({
+                  current: run,
+                  runs: [run],
+                  providerThreads: records.providerThreads,
+                  pullRequests: shell.pullRequests,
+                }),
+                continuationPending,
+              },
+              observation: observeWorker({
+                pullRequests,
+                needsYou: [...needsYou, ...(limit?.needsYou === undefined ? [] : [limit.needsYou])],
+                usageLimitResetAt: limit?.resetAt,
+              }),
+            };
+          });
         const read = Effect.gen(function* () {
           const reports = yield* sql
             .withTransaction(
@@ -184,7 +390,7 @@ const make = Effect.gen(function* () {
                 yield* authorize;
                 yield* sql`DELETE FROM remote_reports WHERE correlation_id = ${value.correlationId} AND sequence <= ${value.afterSequence}`;
                 const rows = yield* sql`
-            SELECT sequence, run_id AS "runId", kind, summary, created_at AS "createdAt"
+            SELECT sequence, run_id AS "runId", kind, summary, relay, created_at AS "createdAt"
             FROM remote_reports WHERE correlation_id = ${value.correlationId} AND sequence > ${value.afterSequence}
             ORDER BY sequence LIMIT 51
           `;
@@ -208,6 +414,7 @@ const make = Effect.gen(function* () {
             const run = records.runs.find((candidate) => candidate.id === runId);
             if (run === undefined) return yield* new RemoteReportError({ reason: "run_not_found" });
             let summary: string | null = null;
+            let reported: RemoteReportedOutcome | undefined;
             if (isTerminalRunStatus(run.status)) {
               const messages = yield* orchestrator
                 .getThreadRecords(binding.threadId, ["messages"], {
@@ -225,8 +432,28 @@ const make = Effect.gen(function* () {
                   )
                   .at(-1)
                   ?.text.slice(0, REMOTE_REPORT_SUMMARY_MAX_CHARS) ?? null;
+              // The origin settles a completed run from the worker's own report.
+              const stored = yield* readStoredThreadResultReport(binding.threadId, runId).pipe(
+                Effect.provideService(SqlClient.SqlClient, sql),
+                Effect.mapError(unavailable),
+              );
+              if (stored !== null) {
+                const reportedSummary = stored.report.summary?.trim();
+                reported = {
+                  outcome: stored.report.outcome,
+                  ...(reportedSummary === undefined || reportedSummary === ""
+                    ? {}
+                    : { summary: reportedSummary.slice(0, REMOTE_REPORT_SUMMARY_MAX_CHARS) }),
+                };
+              }
             }
-            observedRun = { runId, status: run.status, summary };
+            observedRun = {
+              runId,
+              status: run.status,
+              summary,
+              ...(yield* runState(run, shell)),
+              ...(reported === undefined ? {} : { reported }),
+            };
           }
           return {
             threadId: binding.threadId,
@@ -238,20 +465,19 @@ const make = Effect.gen(function* () {
           } satisfies RemoteOriginReportsWaitResult;
         });
         const changed = (result: RemoteOriginReportsWaitResult) =>
-          result.reports.length > 0 ||
-          (result.observedRun?.runId ?? null) !== (value.knownRun?.runId ?? null) ||
-          (result.observedRun?.status ?? null) !== (value.knownRun?.status ?? null);
+          result.reports.length > 0 || observedRunChanged(value.knownRun, result.observedRun);
         const first = yield* read;
         if (changed(first)) return first;
         if (value.timeoutMs === 0) return { ...first, timedOut: true };
-        const events = Stream.merge(
-          orchestrator
-            .streamStoredEventsFrom({
-              threadId: binding.threadId,
-              afterSequence,
-              eventType: "run.updated",
-            })
-            .pipe(
+        const stream = (eventType: OrchestrationV2DomainEvent["type"]) =>
+          orchestrator.streamStoredEventsFrom({
+            threadId: binding.threadId,
+            afterSequence,
+            eventType,
+          });
+        const events = Stream.mergeAll(
+          [
+            stream("run.updated").pipe(
               Stream.filter(
                 (stored) =>
                   value.watchRunId === null ||
@@ -259,21 +485,26 @@ const make = Effect.gen(function* () {
                     stored.event.payload.id === value.watchRunId),
               ),
             ),
-          Stream.merge(
-            orchestrator.streamStoredEventsFrom({
-              threadId: binding.threadId,
-              afterSequence,
-              eventType: "thread.deleted",
-            }),
+            stream("thread.deleted"),
             // Following the latest run means a newly created run is a change too.
-            value.watchRunId === null
-              ? orchestrator.streamStoredEventsFrom({
-                  threadId: binding.threadId,
-                  afterSequence,
-                  eventType: "run.created",
-                })
-              : Stream.empty,
-          ),
+            value.watchRunId === null ? stream("run.created") : Stream.empty,
+            // Questions open and close; background work starts and ends.
+            stream("runtime-request.updated"),
+            // The question item can commit after its request; other items need no read.
+            stream("turn-item.updated").pipe(
+              Stream.filter(
+                (stored) =>
+                  stored.event.type === "turn-item.updated" &&
+                  stored.event.payload.type === "user_input_request",
+              ),
+            ),
+            stream("provider-thread.updated"),
+            // Pull request links, watches and usage-limit recovery choices change the observation.
+            stream("thread.pull-request-link-updated"),
+            stream("thread.pull-request-synced"),
+            stream("thread.metadata-updated"),
+          ],
+          { concurrency: "unbounded" },
         ).pipe(
           Stream.mapError(unavailable),
           Stream.map(() => undefined),
@@ -291,6 +522,28 @@ const make = Effect.gen(function* () {
       }),
     );
   });
-  return RemoteReportService.of({ bind, unbind, report, wait });
+  const origin = Effect.fn("RemoteReportService.origin")(function* (threadId: ThreadId) {
+    const binding = (yield* bindingForThread(threadId))[0];
+    return binding === undefined
+      ? null
+      : {
+          originLabel: binding.originLabel,
+          originThreadId: binding.originThreadId,
+          relaySend: binding.relaySend === 1,
+        };
+  });
+  const relayReceipt = Effect.fn("RemoteReportService.relayReceipt")(function* (
+    threadId: ThreadId,
+    clientRequestId: string,
+  ) {
+    const rows = yield* sql<{ sequence: number; originLabel: string }>`
+      SELECT request.sequence, binding.origin_label AS "originLabel"
+      FROM remote_report_bindings AS binding
+      JOIN remote_relay_requests AS request ON request.correlation_id = binding.correlation_id
+      WHERE binding.thread_id = ${threadId} AND request.client_request_id = ${clientRequestId}
+    `.pipe(Effect.mapError(storage));
+    return rows[0] ?? null;
+  });
+  return RemoteReportService.of({ bind, unbind, origin, report, relay, relayReceipt, wait });
 });
 export const layer = Layer.effect(RemoteReportService, make);

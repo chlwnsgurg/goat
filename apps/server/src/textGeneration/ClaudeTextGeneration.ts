@@ -1,31 +1,31 @@
-/**
- * ClaudeTextGeneration – Text generation layer using the Claude CLI.
- *
- * Implements the same TextGeneration service contract as CodexTextGeneration but
- * delegates to the `claude` CLI (`claude -p`) with structured JSON output
- * instead of the `codex exec` CLI.
- *
- * @module ClaudeTextGeneration
- */
+import { ProviderDriverKind } from "@goat/contracts";
+import {
+  MemoryGenerationRunnerError,
+  withMemoryExecution,
+  type MemoryGenerationRunnerContext,
+} from "@goat/provider-core/server/memoryGenerationRunner";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
+import * as Path from "effect/Path";
+import * as HostProcess from "@goat/shared/HostProcess";
+import { verifyClaudeMemoryHooks } from "./ClaudeMemoryIsolation.ts";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import { ChildProcess, ChildProcessSpawner } from "effect/process";
 
-import { type ClaudeSettings, TextGenerationError } from "@t3tools/contracts";
-import { resolveSpawnCommand } from "@t3tools/shared/shell";
+import { type ClaudeSettings, TextGenerationError } from "@goat/contracts";
+import { resolveSpawnCommand } from "@goat/shared/shell";
 
-import * as TextGenerationOperations from "@t3tools/provider-core/server/textGenerationOperations";
+import * as TextGenerationOperations from "@goat/provider-core/server/textGenerationOperations";
 import {
   normalizeCliError,
-  toJsonSchemaObject,
-} from "@t3tools/provider-core/server/textGenerationUtils";
+  toStrictJsonSchemaObject,
+} from "@goat/provider-core/server/textGenerationUtils";
 import {
   getModelSelectionStringOptionValue,
   getProviderOptionDescriptors,
-} from "@t3tools/shared/model";
+} from "@goat/shared/model";
 import {
   BUNDLED_CLAUDE_MODEL_CATALOG,
   type ClaudeModelCatalog,
@@ -37,21 +37,93 @@ import {
   resolveClaudeModelSlug,
   scopeClaudeModelCatalog,
 } from "../provider/ClaudeModelCatalog.ts";
-import { makeClaudeEnvironment } from "../provider/Drivers/ClaudeHome.ts";
+import {
+  hasClaudeManagedMcpConfig,
+  makeClaudeEnvironment,
+} from "../provider/Drivers/ClaudeHome.ts";
 
 const CLAUDE_TIMEOUT_MS = 180_000;
-
+/** The tools an investigation can see. `--tools` takes bare names; patterns go in the allow list. */
+const CLAUDE_INVESTIGATION_TOOLS = "Read,Grep,Glob,Bash";
+/** What it may run without asking. In dontAsk mode every other call, Bash included, is refused. */
+const CLAUDE_INVESTIGATION_ALLOWED = [
+  "Read",
+  "Grep",
+  "Glob",
+  "Bash(git diff:*)",
+  "Bash(git log:*)",
+  "Bash(git show:*)",
+].join(",");
 /**
- * Schema for the wrapper JSON returned by `claude -p --output-format json`.
- * Verbose mode wraps the result in an array of conversation messages.
+ * The allowed git commands accept any trailing arguments, and `--output` makes each of them write
+ * a file anywhere. Deny rules win over allow rules, so this keeps the investigation read-only.
  */
+const CLAUDE_INVESTIGATION_DENIED = ["Bash(git * --output*)", "Bash(git * -o *)"].join(",");
+
+const claudeOutputDiagnostics = {
+  permission_denials: Schema.optionalKey(Schema.Array(Schema.Unknown)),
+  subtype: Schema.optionalKey(Schema.String),
+  content: Schema.optionalKey(Schema.Array(Schema.Unknown)),
+  message: Schema.optionalKey(
+    Schema.Struct({
+      content: Schema.optionalKey(Schema.Array(Schema.Unknown)),
+    }),
+  ),
+};
 const ClaudeOutputEnvelope = Schema.Struct({
+  ...claudeOutputDiagnostics,
+  type: Schema.optionalKey(Schema.String),
   structured_output: Schema.Unknown,
 });
 const ClaudeOutputMessage = Schema.Struct({
+  ...claudeOutputDiagnostics,
   type: Schema.String,
   structured_output: Schema.optionalKey(Schema.Unknown),
 });
+
+const hasClaudeToolAttempt = (
+  messages: ReadonlyArray<typeof ClaudeOutputMessage.Type | typeof ClaudeOutputEnvelope.Type>,
+) => {
+  const structuredCalls = new Set<string>();
+  for (const message of messages) {
+    if (
+      (message.permission_denials?.length ?? 0) > 0 ||
+      message.type === "tool_use" ||
+      message.type === "tool_result" ||
+      message.type === "permission_request" ||
+      message.subtype === "permission_denied" ||
+      message.subtype === "permission_denial"
+    )
+      return true;
+    for (const block of [...(message.content ?? []), ...(message.message?.content ?? [])]) {
+      if (block === null || typeof block !== "object" || !("type" in block)) continue;
+      if (block.type === "tool_use") {
+        // Claude delivers --json-schema results through this built-in, non-executable tool.
+        if (
+          message.type !== "assistant" ||
+          !("name" in block) ||
+          block.name !== "StructuredOutput" ||
+          !("id" in block) ||
+          typeof block.id !== "string" ||
+          block.id.length === 0 ||
+          structuredCalls.has(block.id)
+        )
+          return true;
+        structuredCalls.add(block.id);
+      } else if (block.type === "tool_result") {
+        if (
+          message.type !== "user" ||
+          !("tool_use_id" in block) ||
+          typeof block.tool_use_id !== "string" ||
+          ("is_error" in block && block.is_error !== false) ||
+          !structuredCalls.delete(block.tool_use_id)
+        )
+          return true;
+      }
+    }
+  }
+  return structuredCalls.size > 0;
+};
 const isClaudeOutputEnvelope = Schema.is(ClaudeOutputEnvelope);
 
 const encodeJsonString = Schema.encodeEffect(Schema.fromJsonString(Schema.Unknown));
@@ -59,13 +131,34 @@ const decodeClaudeOutput = Schema.decodeEffect(
   Schema.fromJsonString(Schema.Union([ClaudeOutputEnvelope, Schema.Array(ClaudeOutputMessage)])),
 );
 
+const ClaudeErrorResult = Schema.Struct({ is_error: Schema.Literal(true), result: Schema.String });
+const isClaudeErrorResult = Schema.is(ClaudeErrorResult);
+const decodeJsonOption = Schema.decodeUnknownOption(Schema.fromJsonString(Schema.Unknown));
+
+/**
+ * The error a failed `claude -p --output-format json` run reports on stdout. Stderr may only
+ * hold notices from a wrapper around the binary, so the caller prefers this when present.
+ */
+function claudeErrorResult(stdout: string): string | undefined {
+  const output = Option.getOrUndefined(decodeJsonOption(stdout));
+  const messages: ReadonlyArray<unknown> = Array.isArray(output) ? output : [output];
+  return messages
+    .filter(isClaudeErrorResult)
+    .map((message) => message.result.trim())
+    .findLast((result) => result.length > 0);
+}
+
 export const makeClaudeTextGeneration = Effect.fn("makeClaudeTextGeneration")(function* (
   claudeSettings: ClaudeSettings,
   environment?: NodeJS.ProcessEnv,
   modelCatalog: Effect.Effect<ClaudeModelCatalog> = Effect.succeed(BUNDLED_CLAUDE_MODEL_CATALOG),
+  memoryRunnerContext?: MemoryGenerationRunnerContext,
 ) {
   const commandSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
   const fileSystem = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const platform = yield* HostProcess.Platform;
+  const home = yield* HostProcess.HomeDirectory;
   const claudeEnvironment = yield* makeClaudeEnvironment(claudeSettings, environment);
   const scopedModelCatalog = modelCatalog.pipe(
     Effect.map((catalog) => scopeClaudeModelCatalog(catalog, claudeSettings.customModels)),
@@ -102,21 +195,23 @@ export const makeClaudeTextGeneration = Effect.fn("makeClaudeTextGeneration")(fu
       ),
     );
 
-  /**
-   * Spawn the Claude CLI with structured JSON output and return the parsed,
-   * schema-validated result.
-   */
   const runClaudeJson = Effect.fn("runClaudeJson")(function* <S extends Schema.Top>({
     operation,
     cwd,
     prompt,
     outputSchema: outputSchemaJson,
     modelSelection,
+    investigate,
   }: TextGenerationOperations.Request<S>): Effect.fn.Return<
-    S["Type"],
+    { readonly result: S["Type"]; readonly effectiveModel: string },
     TextGenerationError,
     S["DecodingServices"]
   > {
+    if (TextGenerationOperations.isMemoryOperation(operation) && !claudeSettings.enabled)
+      return yield* new TextGenerationError({
+        operation,
+        detail: "Claude is disabled in GOAT settings.",
+      });
     const catalog = yield* scopedModelCatalog;
     const resolvedModelSelection = {
       ...modelSelection,
@@ -124,9 +219,10 @@ export const makeClaudeTextGeneration = Effect.fn("makeClaudeTextGeneration")(fu
     };
     const jsonSchemaStr = yield* encodeJsonForOperation(
       operation,
-      toJsonSchemaObject(outputSchemaJson),
+      yield* toStrictJsonSchemaObject(operation, outputSchemaJson),
       "Failed to encode structured output schema.",
     );
+    const effectiveModel = resolveClaudeCatalogApiModelId(catalog, resolvedModelSelection);
     const caps = getClaudeCatalogModelCapabilities(catalog, resolvedModelSelection.model);
     const descriptors = getProviderOptionDescriptors({
       caps,
@@ -164,36 +260,57 @@ export const makeClaudeTextGeneration = Effect.fn("makeClaudeTextGeneration")(fu
     );
 
     const runClaudeCommand = Effect.fn("runClaudeJson.runClaudeCommand")(function* () {
-      // Titles and channel reception need only the supplied prompt, not configuration from
-      // the checkout.
+      if (TextGenerationOperations.isMemoryOperation(operation))
+        yield* verifyClaudeMemoryHooks(operation, claudeEnvironment).pipe(
+          Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, commandSpawner),
+          Effect.provideService(FileSystem.FileSystem, fileSystem),
+          Effect.provideService(Path.Path, path),
+          Effect.provideService(HostProcess.Platform, platform),
+          Effect.provideService(HostProcess.HomeDirectory, home),
+        );
       const workingDirectory =
-        operation === "generateThreadTitle" || operation === "generateChannelReception"
+        operation === "generateThreadTitle" ||
+        operation === "generateChannelReception" ||
+        TextGenerationOperations.isMemoryOperation(operation)
           ? yield* fileSystem
-              .makeTempDirectoryScoped({ prefix: "t3code-claude-title-" })
+              .makeTempDirectoryScoped({ prefix: "goat-claude-title-" })
               .pipe(
                 Effect.mapError((cause) =>
                   normalizeCliError("claude", operation, cause, "Failed to create title directory"),
                 ),
               )
           : cwd;
+      const managedMcpConfig = yield* hasClaudeManagedMcpConfig();
       const spawnCommand = yield* resolveSpawnCommand(
         claudeSettings.binaryPath || "claude",
         [
           "-p",
           "--output-format",
           "json",
+          ...(TextGenerationOperations.isMemoryOperation(operation)
+            ? ["--verbose", "--setting-sources", ""]
+            : []),
           "--json-schema",
           jsonSchemaStr,
           "--model",
-          resolveClaudeCatalogApiModelId(catalog, resolvedModelSelection),
+          effectiveModel,
           ...(cliEffort ? ["--effort", cliEffort] : []),
           "--settings",
           settingsJson,
-          // Metadata prompts need no executable capabilities, even when they contain a skill name.
-          "--tools",
-          "",
+          ...(investigate
+            ? [
+                "--tools",
+                CLAUDE_INVESTIGATION_TOOLS,
+                "--allowedTools",
+                CLAUDE_INVESTIGATION_ALLOWED,
+                "--disallowedTools",
+                CLAUDE_INVESTIGATION_DENIED,
+              ]
+            : ["--tools", ""]),
           "--disable-slash-commands",
-          "--strict-mcp-config",
+          // Claude refuses this flag next to a managed-mcp.json, which already keeps the
+          // user's own MCP servers out.
+          ...(managedMcpConfig ? [] : ["--strict-mcp-config"]),
           "--permission-mode",
           "dontAsk",
         ],
@@ -232,7 +349,9 @@ export const makeClaudeTextGeneration = Effect.fn("makeClaudeTextGeneration")(fu
       if (exitCode !== 0) {
         const stderrDetail = stderr.trim();
         const stdoutDetail = stdout.trim();
-        const detail = stderrDetail.length > 0 ? stderrDetail : stdoutDetail;
+        const detail =
+          claudeErrorResult(stdoutDetail) ??
+          (stderrDetail.length > 0 ? stderrDetail : stdoutDetail);
         return yield* new TextGenerationError({
           operation,
           detail:
@@ -247,7 +366,7 @@ export const makeClaudeTextGeneration = Effect.fn("makeClaudeTextGeneration")(fu
 
     const rawStdout = yield* runClaudeCommand().pipe(
       Effect.scoped,
-      Effect.timeoutOption(CLAUDE_TIMEOUT_MS),
+      Effect.timeoutOption(investigate?.timeoutMs ?? CLAUDE_TIMEOUT_MS),
       Effect.flatMap(
         Option.match({
           onNone: () =>
@@ -271,12 +390,21 @@ export const makeClaudeTextGeneration = Effect.fn("makeClaudeTextGeneration")(fu
           ),
       }),
     );
+    const messages = isClaudeOutputEnvelope(output) ? [output] : output;
+    if (TextGenerationOperations.isMemoryOperation(operation) && hasClaudeToolAttempt(messages))
+      return yield* new TextGenerationError({
+        operation,
+        detail: "Claude attempted a tool or permission request during memory generation.",
+        cause: new MemoryGenerationRunnerError({ code: "invalid_output" }),
+      });
     const envelope = isClaudeOutputEnvelope(output)
       ? output
       : output.findLast((message) => message.type === "result");
 
-    const decodeOutput = Schema.decodeEffect(outputSchemaJson);
-    return yield* decodeOutput(envelope?.structured_output).pipe(
+    const result = yield* Schema.decodeEffect(outputSchemaJson)(
+      envelope?.structured_output,
+      TextGenerationOperations.outputDecodeOptions(operation),
+    ).pipe(
       Effect.catchTags({
         SchemaError: (cause) =>
           Effect.fail(
@@ -288,9 +416,19 @@ export const makeClaudeTextGeneration = Effect.fn("makeClaudeTextGeneration")(fu
           ),
       }),
     );
+    return { result, effectiveModel };
   });
 
-  return TextGenerationOperations.fromRunner("ClaudeTextGeneration", runClaudeJson, {
-    channelReception: true,
-  });
+  return TextGenerationOperations.fromRunner(
+    "ClaudeTextGeneration",
+    (request) => runClaudeJson(request).pipe(Effect.map((selected) => selected.result)),
+    {
+      memoryRunner: withMemoryExecution(
+        memoryRunnerContext,
+        ProviderDriverKind.make("claudeAgent"),
+        runClaudeJson,
+      ),
+      channelReception: true,
+    },
+  );
 });

@@ -1,13 +1,13 @@
-import { sanitizeFeatureBranchName } from "@t3tools/shared/git";
+import { sanitizeFeatureBranchName } from "@goat/shared/git";
 import { useNavigation, type StaticScreenProps } from "@react-navigation/native";
 import { useState } from "react";
 import { Platform, Pressable, ScrollView, useWindowDimensions, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
-import { AndroidSheetHeader } from "../../../components/AndroidScreenHeader";
-import { MaterialScreenContent } from "../../../components/MaterialScreenContent";
+import { AndroidSheetHeader } from "../../../components/ui/AndroidScreenHeader";
+import { ScreenContent } from "../../../components/ui/ScreenContent";
 import { NativeStackScreenOptions } from "../../../native/StackHeader";
-import { AppText as Text, AppTextInput as TextInput } from "../../../components/AppText";
+import { AppText as Text, AppTextInput as TextInput } from "../../../components/ui/AppText";
 import { cn } from "../../../lib/cn";
 import { useEnvironmentQuery } from "../../../state/query";
 import { useThreadSelection } from "../../../state/use-thread-selection";
@@ -82,8 +82,9 @@ export function GitBranchesSheet(_props: GitBranchesSheetProps) {
           hideBottomBorder
         />
       ) : null}
-      <MaterialScreenContent fitToContents>
+      <ScreenContent fitToContents>
         <ScrollView
+          nestedScrollEnabled
           className="android:shrink android:grow-0 ios:flex-1"
           keyboardShouldPersistTaps="handled"
           showsVerticalScrollIndicator={false}
@@ -96,7 +97,7 @@ export function GitBranchesSheet(_props: GitBranchesSheetProps) {
           }
         >
           <View className="bg-card android:gap-3 android:rounded-[20px] android:p-4 ios:gap-2 ios:rounded-[18px] ios:border ios:border-border ios:px-4 ios:py-4">
-            <Text className="android:text-foreground android:text-base android:font-t3-medium ios:text-foreground-secondary ios:text-2xs ios:font-t3-bold ios:tracking-[1px] ios:uppercase">
+            <Text className="android:text-foreground android:text-base android:font-goat-medium ios:text-foreground-secondary ios:text-2xs ios:font-goat-bold ios:tracking-[1px] ios:uppercase">
               New branch
             </Text>
             <TextInput
@@ -124,7 +125,7 @@ export function GitBranchesSheet(_props: GitBranchesSheetProps) {
           </View>
 
           <View className="bg-card android:gap-3 android:rounded-[20px] android:p-4 ios:gap-2 ios:rounded-[18px] ios:border ios:border-border ios:px-4 ios:py-4">
-            <Text className="android:text-foreground android:text-base android:font-t3-medium ios:text-foreground-secondary ios:text-2xs ios:font-t3-bold ios:tracking-[1px] ios:uppercase">
+            <Text className="android:text-foreground android:text-base android:font-goat-medium ios:text-foreground-secondary ios:text-2xs ios:font-goat-bold ios:tracking-[1px] ios:uppercase">
               New worktree
             </Text>
             {Platform.OS === "android" ? (
@@ -173,7 +174,7 @@ export function GitBranchesSheet(_props: GitBranchesSheetProps) {
           </View>
 
           <View className="gap-2">
-            <Text className="text-foreground-secondary android:px-4 android:pb-1 android:pt-3 android:text-sm android:font-t3-medium ios:text-2xs ios:font-t3-bold ios:tracking-[1px] ios:uppercase">
+            <Text className="text-foreground-secondary android:px-4 android:pb-1 android:pt-3 android:text-sm android:font-goat-medium ios:text-2xs ios:font-goat-bold ios:tracking-[1px] ios:uppercase">
               Existing branches
             </Text>
             {branchesLoading ? (
@@ -218,7 +219,7 @@ export function GitBranchesSheet(_props: GitBranchesSheetProps) {
                   {Platform.OS !== "android" ? (
                     <View className="absolute inset-0 rounded-[18px] bg-card" />
                   ) : null}
-                  <Text className="text-foreground text-base android:font-t3-medium ios:font-t3-bold">
+                  <Text className="text-foreground text-base android:font-goat-medium ios:font-goat-bold">
                     {branch.name}
                   </Text>
                   <Text className="text-foreground-secondary text-xs font-medium">{subtitle}</Text>
@@ -227,7 +228,7 @@ export function GitBranchesSheet(_props: GitBranchesSheetProps) {
             })}
           </View>
         </ScrollView>
-      </MaterialScreenContent>
+      </ScreenContent>
     </View>
   );
 }

@@ -1,4 +1,4 @@
-import { CommandId } from "@t3tools/contracts";
+import { CommandId } from "@goat/contracts";
 import * as Cause from "effect/Cause";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
@@ -39,9 +39,6 @@ export class OrchestrationEffectExecutionError extends Schema.TaggedError<Orches
 ) {}
 
 /**
- * Pure interrupt races with hard process teardown or a dead session produce
- * "not active" protocol errors. Retrying those only delays recovery.
- *
  * Do not apply this to `provider-turn.restart`: that compound effect also runs
  * detach and start. Swallowing a start failure that happens to mention
  * "is not active" would drop the outbox item without ever starting the
@@ -62,11 +59,36 @@ export function isNonRetryableProviderTurnControlFailure(
   );
 }
 
+const isOrchestrationEffectExecutionError = Schema.is(OrchestrationEffectExecutionError);
+const isProviderTurnControlError = Schema.is(ProviderTurnControlService.ProviderTurnControlError);
+
+function hasCloudTrackingFailure(cause: Cause.Cause<unknown>): boolean {
+  return cause.reasons.some((reason) => {
+    if (!Cause.isFailReason(reason)) return false;
+    const error = isOrchestrationEffectExecutionError(reason.error)
+      ? reason.error.cause
+      : reason.error;
+    return isProviderTurnControlError(error) && error.reason === "tracking-unavailable";
+  });
+}
+
+const isProviderTurnStartError = Schema.is(ProviderTurnStartService.ProviderTurnStartError);
+const isWorkspaceLeaseBusyError = Schema.is(ProviderTurnStartService.WorkspaceLeaseBusyError);
+
+function workspaceLeaseBusy(cause: Cause.Cause<unknown>) {
+  for (const reason of cause.reasons) {
+    if (!Cause.isFailReason(reason)) continue;
+    const startError = isOrchestrationEffectExecutionError(reason.error)
+      ? reason.error.cause
+      : reason.error;
+    if (isProviderTurnStartError(startError) && isWorkspaceLeaseBusyError(startError.cause)) {
+      return startError.cause;
+    }
+  }
+  return undefined;
+}
+
 export interface OrchestrationEffectExecutorV2Shape {
-  /**
-   * Runs one claimed effect. `willRetry` is true when the worker will retry a
-   * failure, so a step can fail and try again instead of settling the run.
-   */
   readonly execute: (
     effect: EffectOutbox.OrchestrationEffectV2,
     options?: { readonly willRetry: boolean },
@@ -76,7 +98,12 @@ export interface OrchestrationEffectExecutorV2Shape {
 export class OrchestrationEffectExecutorV2 extends Context.Service<
   OrchestrationEffectExecutorV2,
   OrchestrationEffectExecutorV2Shape
->()("t3/orchestration-v2/EffectWorker/OrchestrationEffectExecutorV2") {}
+>()("goat/orchestration-v2/EffectWorker/OrchestrationEffectExecutorV2") {}
+
+// Persist the deadline through the outbox's enqueue time: ten minutes gives
+// the five-minute git removal timeout headroom without resetting on reclaims.
+const WORKSPACE_LEASE_WAIT_MS = 10 * 60_000;
+const WORKSPACE_LEASE_RETRY_MS = 1_000;
 
 export const layerExecutor: Layer.Layer<
   OrchestrationEffectExecutorV2,
@@ -113,7 +140,6 @@ export const layerExecutor: Layer.Layer<
             return continueRestartedRun({ threadId: effect.threadId, sourceRunId }).pipe(
               Effect.provideService(ThreadManagementService.ThreadManagementService, threads),
               Effect.provideService(ServerSettings.ServerSettingsService, settings),
-              // A continuation that will never run still owes a delegated parent a result.
               Effect.tapError(() =>
                 willRetry
                   ? Effect.void
@@ -149,9 +175,14 @@ export const layerExecutor: Layer.Layer<
                     }),
                 ),
               );
-          case "provider-turn.start":
+          case "provider-turn.reattach":
             return providerTurnStart
-              .start({ threadId: effect.threadId, runId: effect.request.runId, willRetry })
+              .start({
+                threadId: effect.threadId,
+                runId: effect.request.runId,
+                reattach: true,
+                willRetry,
+              })
               .pipe(
                 Effect.mapError(
                   (cause) =>
@@ -162,46 +193,92 @@ export const layerExecutor: Layer.Layer<
                     }),
                 ),
               );
-          case "provider-turn.interrupt":
+          case "provider-turn.start":
+            return providerTurnStart
+              .start({
+                threadId: effect.threadId,
+                runId: effect.request.runId,
+                willRetry,
+                workspaceLeaseDeadline: DateTime.add(DateTime.makeUnsafe(effect.createdAt), {
+                  milliseconds: WORKSPACE_LEASE_WAIT_MS,
+                }),
+              })
+              .pipe(
+                Effect.mapError(
+                  (cause) =>
+                    new OrchestrationEffectExecutionError({
+                      effectId: effect.id,
+                      effectType: effect.request.type,
+                      cause,
+                    }),
+                ),
+              );
+          case "provider-turn.interrupt": {
+            const request = effect.request;
             return providerTurnControl
               .interrupt({
                 threadId: effect.threadId,
-                providerSessionId: effect.request.providerSessionId,
-                providerThreadId: effect.request.providerThreadId,
-                providerTurnId: effect.request.providerTurnId,
+                providerSessionId: request.providerSessionId,
+                providerThreadId: request.providerThreadId,
+                providerTurnId: request.providerTurnId,
+                ...(request.subagent === undefined
+                  ? {}
+                  : {
+                      subagent: {
+                        ...request.subagent,
+                        requestedAt: DateTime.makeUnsafe(effect.createdAt),
+                      },
+                    }),
               })
               .pipe(
+                Effect.tapError((cause) =>
+                  request.subagent === undefined
+                    ? Effect.void
+                    : Effect.logWarning("orchestration-v2.subagent-stop-failed", {
+                        effectId: effect.id,
+                        cause,
+                      }),
+                ),
                 Effect.catch((cause) =>
+                  cause.reason !== "tracking-unavailable" &&
+                  request.subagent === undefined &&
                   isNonRetryableProviderTurnControlFailure(
-                    effect.request.type,
+                    request.type,
                     Cause.pretty(Cause.fail(cause)),
                   )
                     ? Effect.void
                     : Effect.fail(cause),
                 ),
-                // The provider has stopped what it still ran and reported it.
-                // Whatever the thread still shows on that provider thread is
-                // work no process will report on, so the Stop ends it too.
-                // One Stop can interrupt several provider threads, so the
-                // settle is keyed by effect, not by the Stop command.
-                Effect.andThen(
-                  threads.dispatch({
-                    type: "thread.background-work.settle",
-                    commandId: CommandId.make(`${effect.id}:background-work-settled`),
-                    threadId: effect.threadId,
-                    providerThreadId: effect.request.providerThreadId,
-                    providerTurnId: effect.request.providerTurnId,
-                  }),
+                Effect.andThen((outcome) =>
+                  request.subagent !== undefined && outcome === undefined
+                    ? Effect.void
+                    : threads.dispatch({
+                        type: "thread.background-work.settle",
+                        commandId: CommandId.make(`${effect.id}:background-work-settled`),
+                        ...(request.subagent === undefined || outcome === undefined
+                          ? {}
+                          : {
+                              subagent: {
+                                id: request.subagent.id,
+                                stoppedAt: DateTime.makeUnsafe(effect.createdAt),
+                                outcome,
+                              },
+                            }),
+                        threadId: effect.threadId,
+                        providerThreadId: request.providerThreadId,
+                        providerTurnId: request.providerTurnId,
+                      }),
                 ),
                 Effect.mapError(
                   (cause) =>
                     new OrchestrationEffectExecutionError({
                       effectId: effect.id,
-                      effectType: effect.request.type,
+                      effectType: request.type,
                       cause,
                     }),
                 ),
               );
+          }
           case "provider-turn.steer":
             return providerTurnControl
               .steer({
@@ -251,41 +328,59 @@ export const layerExecutor: Layer.Layer<
                     if (message === undefined || run === undefined) return yield* error;
                     // Reuse the message identity and a stable command receipt so an outbox
                     // retry cannot append a duplicate message or start a second follow-up.
-                    yield* threads.dispatch({
-                      type: "message.dispatch",
-                      commandId: CommandId.make(`command:steer-follow-up:${effect.id}`),
-                      threadId: effect.threadId,
-                      messageId: message.id,
-                      text: message.text,
-                      ...(message.context ? { context: message.context } : {}),
-                      attachments: message.attachments,
-                      // A user's follow-up starts on the thread's saved selection,
-                      // which already holds the steer's choice. A delegated
-                      // completion stays pinned to the run it reports to.
-                      ...(message.delegatedCompletion === undefined
-                        ? {}
-                        : { modelSelection: run.modelSelection }),
-                      dispatchMode: {
-                        type:
-                          message.delegatedCompletion === undefined
-                            ? "start_immediately"
-                            : "queue_after_active",
-                      },
-                      createdBy: message.createdBy,
-                      creationSource: message.creationSource,
-                      ...(message.delegatedCompletion === undefined
-                        ? {}
-                        : { delegatedCompletion: message.delegatedCompletion }),
-                      ...(message.notification === undefined
-                        ? {}
-                        : { notification: message.notification }),
-                      ...(message.scheduledTaskId === undefined
-                        ? {}
-                        : { scheduledTaskId: message.scheduledTaskId }),
-                      ...(message.senderThreadId === undefined
-                        ? {}
-                        : { senderThreadId: message.senderThreadId }),
-                    });
+                    yield* threads
+                      .dispatch({
+                        type: "message.dispatch",
+                        commandId: CommandId.make(`command:steer-follow-up:${effect.id}`),
+                        threadId: effect.threadId,
+                        messageId: message.id,
+                        memoryGrantCeiling: run.memoryGrantCeiling ?? "none",
+                        text: message.text,
+                        ...(message.context ? { context: message.context } : {}),
+                        attachments: message.attachments,
+                        ...(message.delegatedCompletion === undefined
+                          ? {}
+                          : { modelSelection: run.modelSelection }),
+                        dispatchMode: {
+                          type:
+                            message.delegatedCompletion === undefined
+                              ? "start_immediately"
+                              : "queue_after_active",
+                        },
+                        createdBy: message.createdBy,
+                        creationSource: message.creationSource,
+                        ...(message.delegatedCompletion === undefined
+                          ? {}
+                          : { delegatedCompletion: message.delegatedCompletion }),
+                        ...(message.notification === undefined
+                          ? {}
+                          : { notification: message.notification }),
+                        ...(message.scheduledTaskId === undefined
+                          ? {}
+                          : { scheduledTaskId: message.scheduledTaskId }),
+                        ...(message.senderThreadId === undefined
+                          ? {}
+                          : { senderThreadId: message.senderThreadId }),
+                      })
+                      .pipe(
+                        // The turn that just completed leaves no further retry
+                        // target once the instance is off: the completed turn
+                        // stands as the thread's result instead of going
+                        // through the outbox's bounded retry on a refusal that
+                        // retrying cannot change.
+                        Effect.catchTags({
+                          ThreadManagementProviderInstanceDisabledError: (disabledError) =>
+                            Effect.logInfo(
+                              "orchestration-v2.effect-worker.steer-follow-up-disabled",
+                              {
+                                threadId: effect.threadId,
+                                messageId: message.id,
+                                projectId: disabledError.projectId,
+                                instanceId: disabledError.instanceId,
+                              },
+                            ),
+                        }),
+                      );
                   }),
                 ),
                 Effect.mapError(
@@ -333,6 +428,9 @@ export const layerExecutor: Layer.Layer<
                     threadId: effect.threadId,
                     runId: effect.request.runId,
                     willRetry,
+                    workspaceLeaseDeadline: DateTime.add(DateTime.makeUnsafe(effect.createdAt), {
+                      milliseconds: WORKSPACE_LEASE_WAIT_MS,
+                    }),
                   }),
                 ),
                 Effect.mapError(
@@ -379,9 +477,6 @@ export const layerExecutor: Layer.Layer<
                   : { restoreFiles: effect.request.restoreFiles }),
               })
               .pipe(
-                // The last failed attempt tells waiting clients it failed,
-                // instead of leaving them to time out. Clients get a fixed
-                // message; the worker logs the full cause for each attempt.
                 Effect.tapCause((cause) =>
                   willRetry || Cause.hasInterruptsOnly(cause)
                     ? Effect.void
@@ -391,7 +486,10 @@ export const layerExecutor: Layer.Layer<
                           commandId: CommandId.make(`${effect.commandId}:rollback-failed`),
                           threadId: effect.threadId,
                           requestId: effect.commandId,
-                          message: CheckpointRollbackService.ROLLBACK_FAILED_MESSAGE,
+                          message: Option.match(Cause.findErrorOption(cause), {
+                            onNone: () => CheckpointRollbackService.ROLLBACK_FAILED_MESSAGE,
+                            onSome: CheckpointRollbackService.rollbackFailureClientMessage,
+                          }),
                         })
                         .pipe(
                           Effect.catchCause((recordCause) =>
@@ -527,7 +625,7 @@ export interface OrchestrationEffectWorkerV2Shape {
 export class OrchestrationEffectWorkerV2 extends Context.Service<
   OrchestrationEffectWorkerV2,
   OrchestrationEffectWorkerV2Shape
->()("t3/orchestration-v2/EffectWorker/OrchestrationEffectWorkerV2") {}
+>()("goat/orchestration-v2/EffectWorker/OrchestrationEffectWorkerV2") {}
 
 export interface OrchestrationEffectWorkerOptions {
   readonly workerId?: string;
@@ -714,8 +812,38 @@ export const layerWithOptions = (
             }).pipe(Effect.onError((cause) => recoverPostSuccessSettlement(effect, cause)));
           }
 
+          // Lease admission did no provider work. Return its claim to the
+          // durable schedule and refund only that claim, preserving earlier
+          // real failures and leaving all other effect retry policies alone.
+          const busy =
+            effect.request.type === "provider-turn.start" ||
+            effect.request.type === "provider-turn.restart"
+              ? workspaceLeaseBusy(exit.cause)
+              : undefined;
+          if (busy !== undefined) {
+            const updated = yield* outbox
+              .retry({
+                effectId: effect.id,
+                workerId,
+                error: busy.message,
+                delayMs: WORKSPACE_LEASE_RETRY_MS,
+                undoAttempt: true,
+              })
+              .pipe(Effect.onError((cause) => requeueClaim(effect, cause)));
+            if (!updated && !(yield* wasCancelled(effect.id))) {
+              return yield* new OrchestrationEffectWorkerError({
+                operation: "defer-workspace-lease",
+                effectId: effect.id,
+                cause: "The worker no longer owns the effect lease.",
+              });
+            }
+            return true;
+          }
+
           const error = Cause.pretty(exit.cause);
-          const nonRetryable = isNonRetryableProviderTurnControlFailure(effect.request.type, error);
+          const nonRetryable =
+            !hasCloudTrackingFailure(exit.cause) &&
+            isNonRetryableProviderTurnControlFailure(effect.request.type, error);
           yield* Effect.logWarning("Orchestration effect execution failed", {
             effectId: effect.id,
             effectType: effect.request.type,
@@ -723,8 +851,6 @@ export const layerWithOptions = (
             nonRetryable,
             error,
           });
-          // Prefer succeed for terminal interrupt races so the outbox does not
-          // keep a failed interrupt around; fail only when we must not retry.
           const updated = nonRetryable
             ? yield* outbox
                 .succeed({ effectId: effect.id, workerId })

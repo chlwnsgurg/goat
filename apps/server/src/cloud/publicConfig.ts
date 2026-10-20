@@ -1,22 +1,23 @@
+import { isGoatConnectEnabled } from "@goat/shared/goatConnect";
 import {
   connectLoopbackRedirectUri,
   CONNECT_OAUTH_SCOPES,
   DEFAULT_HOSTED_APP_URL,
-} from "@t3tools/shared/connectAuth";
-import { clerkFrontendApiUrlFromPublishableKey } from "@t3tools/shared/relayAuth";
-import { normalizeSecureRelayUrl } from "@t3tools/shared/relayUrl";
+} from "@goat/shared/connectAuth";
+import { clerkFrontendApiUrlFromPublishableKey } from "@goat/shared/relayAuth";
+import { normalizeSecureRelayUrl } from "@goat/shared/relayUrl";
 import * as Config from "effect/Config";
 import * as ConfigProvider from "effect/ConfigProvider";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import * as SchemaIssue from "effect/SchemaIssue";
 
-declare const __T3CODE_BUILD_RELAY_URL__: string | undefined;
-declare const __T3CODE_BUILD_CLERK_PUBLISHABLE_KEY__: string | undefined;
-declare const __T3CODE_BUILD_CLERK_CLI_OAUTH_CLIENT_ID__: string | undefined;
-declare const __T3CODE_BUILD_RELAY_CLIENT_OTLP_TRACES_URL__: string | undefined;
-declare const __T3CODE_BUILD_RELAY_CLIENT_OTLP_TRACES_DATASET__: string | undefined;
-declare const __T3CODE_BUILD_RELAY_CLIENT_OTLP_TRACES_TOKEN__: string | undefined;
+declare const __GOAT_BUILD_RELAY_URL__: string | undefined;
+declare const __GOAT_BUILD_CLERK_PUBLISHABLE_KEY__: string | undefined;
+declare const __GOAT_BUILD_CLERK_CLI_OAUTH_CLIENT_ID__: string | undefined;
+declare const __GOAT_BUILD_RELAY_CLIENT_OTLP_TRACES_URL__: string | undefined;
+declare const __GOAT_BUILD_RELAY_CLIENT_OTLP_TRACES_DATASET__: string | undefined;
+declare const __GOAT_BUILD_RELAY_CLIENT_OTLP_TRACES_TOKEN__: string | undefined;
 
 const CLOUD_CLI_OAUTH_LOOPBACK_PORT = 34338;
 const CLOUD_CLI_OAUTH_SCOPES = CONNECT_OAUTH_SCOPES;
@@ -50,34 +51,34 @@ function normalizeSecureUrl(value: string): string | null {
 }
 
 const buildTimeRelayUrl =
-  typeof __T3CODE_BUILD_RELAY_URL__ === "undefined"
+  typeof __GOAT_BUILD_RELAY_URL__ === "undefined"
     ? ""
-    : (normalizeSecureRelayUrl(__T3CODE_BUILD_RELAY_URL__) ?? "");
+    : (normalizeSecureRelayUrl(__GOAT_BUILD_RELAY_URL__) ?? "");
 const buildTimeClerkPublishableKey = readBuildTimeValue(
-  typeof __T3CODE_BUILD_CLERK_PUBLISHABLE_KEY__ === "undefined"
+  typeof __GOAT_BUILD_CLERK_PUBLISHABLE_KEY__ === "undefined"
     ? undefined
-    : __T3CODE_BUILD_CLERK_PUBLISHABLE_KEY__,
+    : __GOAT_BUILD_CLERK_PUBLISHABLE_KEY__,
 );
 const buildTimeClerkCliOAuthClientId = readBuildTimeValue(
-  typeof __T3CODE_BUILD_CLERK_CLI_OAUTH_CLIENT_ID__ === "undefined"
+  typeof __GOAT_BUILD_CLERK_CLI_OAUTH_CLIENT_ID__ === "undefined"
     ? undefined
-    : __T3CODE_BUILD_CLERK_CLI_OAUTH_CLIENT_ID__,
+    : __GOAT_BUILD_CLERK_CLI_OAUTH_CLIENT_ID__,
 );
 const buildTimeRelayClientTracing = {
   tracesUrl: readBuildTimeValue(
-    typeof __T3CODE_BUILD_RELAY_CLIENT_OTLP_TRACES_URL__ === "undefined"
+    typeof __GOAT_BUILD_RELAY_CLIENT_OTLP_TRACES_URL__ === "undefined"
       ? undefined
-      : __T3CODE_BUILD_RELAY_CLIENT_OTLP_TRACES_URL__,
+      : __GOAT_BUILD_RELAY_CLIENT_OTLP_TRACES_URL__,
   ),
   tracesDataset: readBuildTimeValue(
-    typeof __T3CODE_BUILD_RELAY_CLIENT_OTLP_TRACES_DATASET__ === "undefined"
+    typeof __GOAT_BUILD_RELAY_CLIENT_OTLP_TRACES_DATASET__ === "undefined"
       ? undefined
-      : __T3CODE_BUILD_RELAY_CLIENT_OTLP_TRACES_DATASET__,
+      : __GOAT_BUILD_RELAY_CLIENT_OTLP_TRACES_DATASET__,
   ),
   tracesToken: readBuildTimeValue(
-    typeof __T3CODE_BUILD_RELAY_CLIENT_OTLP_TRACES_TOKEN__ === "undefined"
+    typeof __GOAT_BUILD_RELAY_CLIENT_OTLP_TRACES_TOKEN__ === "undefined"
       ? undefined
-      : __T3CODE_BUILD_RELAY_CLIENT_OTLP_TRACES_TOKEN__,
+      : __GOAT_BUILD_RELAY_CLIENT_OTLP_TRACES_TOKEN__,
   ),
 } as const;
 
@@ -104,11 +105,6 @@ export function makeRelayUrlConfig(fallback = buildTimeRelayUrl) {
 
 export const relayUrlConfig = makeRelayUrlConfig();
 
-/**
- * Hosted app origin used for out-of-band OAuth on headless
- * machines. Overridable so staging/nightly builds can point their CLIs at a
- * matching hosted deployment.
- */
 export const hostedAppUrlConfig = makePublicValueConfig(
   "T3CODE_HOSTED_APP_URL",
   DEFAULT_HOSTED_APP_URL,
@@ -149,13 +145,6 @@ function makePublicValueConfig(name: string, fallback: string) {
   );
 }
 
-/**
- * The CLI never calls Clerk's /oauth/authorize itself: the browser leg goes
- * through the hosted /connect page, which builds the authorize URL after a
- * Clerk session exists (see CliTokenManager.login). The token endpoint and,
- * for headless hosts, the device authorization endpoint are contacted
- * directly.
- */
 export interface CloudCliOAuthConfig {
   readonly tokenEndpoint: string;
   readonly deviceAuthorizationEndpoint: string;
@@ -211,8 +200,10 @@ export function makeCloudCliOAuthConfig({
 
 export const cloudCliOAuthConfig = makeCloudCliOAuthConfig();
 
-export const hasCloudPublicConfig = Boolean(
-  (normalizeSecureRelayUrl(process.env.T3CODE_RELAY_URL ?? "") ?? buildTimeRelayUrl) &&
-  (process.env.T3CODE_CLERK_PUBLISHABLE_KEY?.trim() || buildTimeClerkPublishableKey) &&
-  (process.env.T3CODE_CLERK_CLI_OAUTH_CLIENT_ID?.trim() || buildTimeClerkCliOAuthClientId),
-);
+export const hasCloudPublicConfig =
+  isGoatConnectEnabled() &&
+  Boolean(
+    (normalizeSecureRelayUrl(process.env.T3CODE_RELAY_URL ?? "") ?? buildTimeRelayUrl) &&
+    (process.env.T3CODE_CLERK_PUBLISHABLE_KEY?.trim() || buildTimeClerkPublishableKey) &&
+    (process.env.T3CODE_CLERK_CLI_OAUTH_CLIENT_ID?.trim() || buildTimeClerkCliOAuthClientId),
+  );

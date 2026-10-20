@@ -2,8 +2,9 @@ import type {
   ConnectionCatalogEntry,
   EnvironmentConnectionPhase,
   EnvironmentPresentation,
-} from "@t3tools/client-runtime/connection";
-import type { EnvironmentId } from "@t3tools/contracts";
+} from "@goat/client-runtime/connection";
+import type { EnvironmentId } from "@goat/contracts";
+import { isSideChatThread } from "@goat/contracts";
 import * as Option from "effect/Option";
 import { Atom } from "effect/reactivity";
 import { isDesktopLocalConnectionTarget, isWslConnectionTarget } from "../connection/desktopLocal";
@@ -69,28 +70,35 @@ export function createProjectsViewEnvironmentAtoms(input: {
 
 /** Forks are standalone chats; subagents belong to their parent's Agents surface. */
 export function isProjectsViewPinnedThread(
-  thread: Pick<SidebarThreadSummary, "pinnedAt" | "archivedAt" | "deletedAt" | "lineage">,
+  thread: Pick<
+    SidebarThreadSummary,
+    "pinnedAt" | "archivedAt" | "deletedAt" | "lineage" | "sideChatOf"
+  >,
 ) {
   return (
     thread.pinnedAt != null &&
     thread.archivedAt === null &&
     thread.deletedAt === null &&
-    thread.lineage.relationshipToParent !== "subagent"
+    thread.lineage.relationshipToParent !== "subagent" &&
+    !isSideChatThread(thread)
   );
 }
 
 /**
  * Rows under a project: live, unpinned, and never a subagent in any state. An open
- * subagent shows beneath its owner row instead.
+ * subagent shows beneath its owner row instead. An archived owner stays when it
+ * still carries a child's request or the open subagent.
  */
 export function isProjectsViewListedThread(
-  thread: Pick<SidebarThreadSummary, "pinnedAt" | "archivedAt" | "deletedAt" | "lineage">,
+  thread: Pick<
+    SidebarThreadSummary,
+    "pinnedAt" | "archivedAt" | "deletedAt" | "lineage" | "sideChatOf"
+  >,
+  retainArchived = false,
 ) {
-  return (
-    thread.archivedAt === null &&
-    thread.lineage.relationshipToParent !== "subagent" &&
-    !isProjectsViewPinnedThread(thread)
-  );
+  if (thread.lineage.relationshipToParent === "subagent" || isSideChatThread(thread)) return false;
+  if (thread.archivedAt !== null) return retainArchived && thread.deletedAt === null;
+  return !isProjectsViewPinnedThread(thread);
 }
 
 /**

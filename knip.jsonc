@@ -20,6 +20,8 @@
       // Knip loads its preprocessor through a CLI option; native verification and
       // worktree setup (from t3.json) run directly.
       "entry": ["knip-schemas.ts", "mobile-native-client.ts", "setup-worktree.ts"],
+      // The `t3` npm package's files: copied into the package, never imported.
+      "ignore": ["npm-launcher/**"],
     },
     "apps/server": {
       // Vite+ pack entries and the launcher used by installed background services.
@@ -38,7 +40,7 @@
       // The Vite+ web build prerequisite.
       // Native and disk-loaded provider packages stay external to the bundle; the
       // CLI archive and desktop sidecar stage them from this manifest.
-      "ignoreDependencies": ["@effect/platform-node-shared", "@t3tools/web", "@napi-rs/keyring"],
+      "ignoreDependencies": ["@effect/platform-node-shared", "@goat/web", "@napi-rs/keyring"],
     },
     "apps/desktop": {
       // Electron loads these bundles by filename rather than importing them.
@@ -64,12 +66,17 @@
     "apps/web": {
       // Vitest loads this through the per-file @vitest-environment directive.
       "ignoreDependencies": ["jsdom"],
-      // Worktree setup (scripts/setup-worktree.ts) runs this directly.
-      "entry": ["scripts/warm-dep-cache.ts"],
+      // Worktree setup (scripts/setup-worktree.ts) runs warm-dep-cache directly; maintainers run
+      // generate-solar-icons after adding an icon.
+      "entry": ["scripts/warm-dep-cache.ts", "scripts/generate-solar-icons.ts"],
       // UI component modules are copied and adapted as cohesive sets. Keep their
       // named subcomponents even before they have callers; the file audit still
       // reports an entire component module when nothing imports it.
-      "ignoreIssues": { "src/components/ui/*.tsx": ["exports", "nsExports", "duplicates"] },
+      "ignoreIssues": {
+        "src/components/ui/*.tsx": ["exports", "nsExports", "duplicates"],
+        // Generated from the solar.<name> references in the icon modules, so nothing in it is unused.
+        "src/components/solar/solar.generated.ts": ["exports", "nsExports"],
+      },
     },
     "apps/mobile": {
       // Expo loads plugins and the fingerprint config by string; Metro embeds the browser entry in the native WebView.
@@ -84,11 +91,11 @@
       // Fonts are configured as asset paths; Expo autolinks the native packages.
       "ignoreDependencies": [
         "@expo-google-fonts/dm-sans",
-        "@t3tools/mobile-review-diff-native",
-        "@t3tools/mobile-terminal-native",
+        "@goat/mobile-review-diff-native",
+        "@goat/mobile-terminal-native",
       ],
     },
-    "apps/mobile/modules/t3-markdown-text": {
+    "apps/mobile/modules/t3-source-text": {
       // React Native codegen discovers component specifications by filename.
       "entry": ["src/*NativeComponent.ts!"],
     },
@@ -109,6 +116,11 @@
       "includeEntryExports": true,
       "entry": ["test/fixtures/*.ts"],
       "ignoreIssues": { "src/_generated/**": ["exports", "types"] },
+    },
+    "packages/source-control-github": {
+      // graphqlgen reads its config; the generated operations export every selection's class.
+      "entry": ["graphql.config.ts"],
+      "ignoreIssues": { "**/*.graphql.ts": ["exports", "types", "namespaceMembers"] },
     },
   },
 }

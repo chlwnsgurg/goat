@@ -20,11 +20,6 @@ export function normalizeSemverVersion(version: string): string {
     }
   }
 
-  // Pad shorthand versions ("20" or "20.1") up to three segments so major-only
-  // and minor-only inputs parse and compare numerically. This matches
-  // satisfiesSemverRange, which already treats a missing minor/patch as 0. The
-  // length > 0 guard keeps empty/garbage input empty (parseSemver still
-  // rejects it), and inputs with more than three segments are left untouched.
   while (segments.length > 0 && segments.length < 3) {
     segments.push("0");
   }
@@ -150,16 +145,64 @@ export function compareSemverVersions(left: string, right: string): number {
   return 0;
 }
 
+/** A GOAT runtime build: its exact version and, when the build recorded it, its commit time. */
+export interface RuntimeBuild {
+  readonly version: string;
+  /** Unix seconds of the commit the build was made from. */
+  readonly commitTime?: number | undefined;
+}
+
+// A dev build's identifier is a commit sha, and a sha can be all digits, so dev is never numbered.
+const isNumberedTrain = (prerelease: ReadonlyArray<string>) =>
+  prerelease.length > 1 &&
+  prerelease[0] !== "dev" &&
+  prerelease.slice(1).every((part) => SEMVER_NUMBER_SEGMENT.test(part));
+
+// `<base>-dev.<commit unix time>.g<sha>` (scripts/lib/release-version.ts) carries its own commit time.
+const devVersionCommitTime = (prerelease: ReadonlyArray<string>) => {
+  const [train, time, sha] = prerelease;
+  return prerelease.length === 3 &&
+    train === "dev" &&
+    time !== undefined &&
+    /^[1-9]\d{0,15}$/.test(time) &&
+    sha !== undefined &&
+    /^g[0-9a-f]{7,40}$/.test(sha)
+    ? Number(time)
+    : undefined;
+};
+
 /**
- * Small semver range checker for CLI/runtime gates.
+ * Orders two runtime builds, or returns `undefined` when nothing proves an order.
  *
- * Keep the function body valid plain JavaScript: SSH startup stringifies this
- * function and runs it on remote Node versions before TypeScript support is known.
- *
- * @param rawVersion Version string, with or without a leading `v`.
- * @param range Space-separated comparators, with `||` range groups.
- * @returns Whether `rawVersion` satisfies the supported range syntax.
+ * A different core version orders by SemVer. Numbered builds of one train
+ * (`0.1.0-nightly.20261012.2`) order by SemVer too. Every other pair of one
+ * core, such as `0.1.0-dev.<sha>` builds or a dev build against a nightly,
+ * orders only by commit time, because SemVer would compare the sha or train
+ * name alphabetically. A `<base>-dev.<time>.g<sha>` version supplies its own
+ * commit time when the build did not report one. Without both commit times
+ * such a pair has no order.
  */
+export function compareRuntimeBuilds(left: RuntimeBuild, right: RuntimeBuild): number | undefined {
+  if (left.version === right.version) return 0;
+  const a = parseSemver(left.version);
+  const b = parseSemver(right.version);
+  if (a === null || b === null) return undefined;
+  const core = a.major - b.major || a.minor - b.minor || a.patch - b.patch;
+  if (core !== 0) return core;
+  if (a.prerelease.length === 0 && b.prerelease.length === 0) return 0;
+  if (
+    isNumberedTrain(a.prerelease) &&
+    isNumberedTrain(b.prerelease) &&
+    a.prerelease[0] === b.prerelease[0]
+  )
+    return compareSemverVersions(left.version, right.version);
+  const leftTime = left.commitTime ?? devVersionCommitTime(a.prerelease);
+  const rightTime = right.commitTime ?? devVersionCommitTime(b.prerelease);
+  if (leftTime === undefined || rightTime === undefined) return undefined;
+  return leftTime - rightTime;
+}
+
+/** The SSH remote engine check in `@goat/ssh` carries a source copy of this; keep them in step. */
 export const satisfiesSemverRange: (rawVersion: string, range: string) => boolean =
   function satisfiesSemverRange(rawVersion, range) {
     const normalizedVersion = String(rawVersion).trim().replace(/^v/, "");

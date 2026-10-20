@@ -1,6 +1,6 @@
-import { remapComposerContextAttachments } from "@t3tools/shared/composerContextReferences";
+import { remapComposerContextAttachments } from "@goat/shared/composerContextReferences";
 import { appendUserInputAttachmentPaths } from "../provider/userInputAttachments.ts";
-import type { ChatAttachment, OrchestrationV2Command } from "@t3tools/contracts";
+import type { ChatAttachment, OrchestrationV2Command } from "@goat/contracts";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
@@ -12,7 +12,7 @@ import * as ChannelBotDirectory from "../channels/ChannelBotDirectory.ts";
 import * as ChannelGateway from "../channels/ChannelGateway.ts";
 import type { ChannelConnectionOwner } from "../channels/ChannelIngressContext.ts";
 import * as ChannelLedger from "../channels/ChannelLedger.ts";
-import { ChannelGatewayError } from "@t3tools/contracts";
+import { ChannelGatewayError } from "@goat/contracts";
 import * as DateTime from "effect/DateTime";
 import * as AttachmentClaims from "./AttachmentClaims.ts";
 import * as ThreadLaunch from "./ThreadLaunchService.ts";
@@ -26,18 +26,21 @@ function dispatchWasNotAccepted(
   switch (error._tag) {
     case "OrchestratorCommandRejectedError":
     case "OrchestratorQuestionAlreadyAnsweredError":
+    case "OrchestratorThreadAlreadyExistsError":
     case "OrchestratorProjectionError":
     case "OrchestratorProviderAdapterError":
     case "OrchestratorCommandPreviouslyRejectedError":
     case "OrchestratorCommandIdConflictError":
     case "OrchestratorSubagentThreadReadOnlyError":
     case "OrchestratorThreadAboveModeLimitError":
+    case "ThreadManagementProviderInstanceDisabledError":
       return true;
     default:
       return false;
   }
 }
 const isOrchestratorError = Schema.is(Orchestrator.OrchestratorV2Error);
+const isThreadManagementError = Schema.is(ThreadManagement.ThreadManagementError);
 
 const releaseUnusedClaims = Effect.fn("ThreadMessageIntake.releaseUnusedClaims")(function* (
   claimedPaths: ReadonlyArray<string>,
@@ -124,11 +127,9 @@ export const dispatchCommand = Effect.fn("ThreadMessageIntake.dispatchCommand")(
     const config = yield* ServerConfig.ServerConfig;
     const incomingByQuestionId = command.attachmentsByQuestionId;
     yield* AttachmentClaims.validateAttachmentLimits(Object.values(incomingByQuestionId).flat());
-    // Claims accumulate across questions, so all of preparation shares one
-    // rollback boundary: any failure before dispatch removes every new copy.
     const claimedPaths: string[] = [];
     const prepared = yield* Effect.gen(function* () {
-      const attachmentsByQuestionId: import("@t3tools/contracts").UserInputAttachments = {};
+      const attachmentsByQuestionId: import("@goat/contracts").UserInputAttachments = {};
       for (const [questionId, attachments] of Object.entries(incomingByQuestionId)) {
         const claimed = yield* AttachmentClaims.claimPendingAttachments({
           threadId: command.threadId,
@@ -287,13 +288,20 @@ export const launchThread = Effect.fn("ThreadMessageIntake.launchThread")(functi
         ),
       ),
       Effect.tapError((error) => {
+        if (error._tag === "ThreadManagementProviderInstanceDisabledError") {
+          return AttachmentClaims.releaseClaimedAttachments(claimed.claimedPaths);
+        }
+        // Refused before any thread existed.
+        if (error._tag === "ThreadLaunchWorkspaceMissingError") {
+          return AttachmentClaims.releaseClaimedAttachments(claimed.claimedPaths);
+        }
         // Project/receipt reads precede message dispatch. The create-thread error
         // also wraps post-message projection reads, so its tag alone is not proof.
         const notAccepted =
           error.operation === "resolve-project" ||
           error.operation === "read-receipt" ||
           ((error.operation === "create-thread" || error.operation === "dispatch-message") &&
-            isOrchestratorError(error.cause) &&
+            (isOrchestratorError(error.cause) || isThreadManagementError(error.cause)) &&
             // Projection errors under create-thread can occur after the message commit.
             (error.operation !== "create-thread" ||
               error.cause._tag !== "OrchestratorProjectionError") &&

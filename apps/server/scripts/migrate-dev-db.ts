@@ -1,38 +1,12 @@
 #!/usr/bin/env node
 
-/**
- * Rebuild an isolated dev database from a pruned snapshot of the real
- * ~/.t3 database, then run this checkout's migrations against it.
- *
- * `vp run migrate-dev-db` from a worktree:
- *   1. Nukes `<worktree>/.t3/userdata/statev2.sqlite`.
- *   2. Copies a slice of the real db (`~/.t3/userdata/statev2.sqlite`,
- *      attached read-only): the schema, and every row except those of
- *      deleted, archived, and settled threads, which are nearly all of a
- *      long-lived database. It then prunes that to the most recently updated
- *      projects and, per project, the most recent threads that have fully
- *      stopped, with
- *      their forks and subagents. Working, settled, and archived threads, and
- *      threads with pending recovery, are skipped, and scheduled tasks and
- *      queued effects are dropped, so the dev server never adopts live work.
- *      Auth sessions, pairing links, command receipts, and provider
- *      runtime rows are dropped — pair a fresh browser against dev.
- *   3. Runs migrations on the result. Because the clone carries the real
- *      `effect_sql_migrations` table, this proves a new migration applies
- *      on top of the real applied set, and the slot check below catches
- *      the silent failure where two branches claim the same
- *      `Migrations/NNN_` id (the second one's CREATE TABLE is skipped).
- *
- * The event log (`orchestration_events`) is pruned per stream while
- * `sqlite_sequence` and the projection cursors carry over untouched, so new events keep appending
- * after the old high-water mark and projection cursors never rewind.
- */
-
 import * as NodeRuntime from "@effect/platform-node/NodeRuntime";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as NodeOS from "node:os";
 import * as NodeURL from "node:url";
-import { resolveWorktreeT3Home } from "@t3tools/shared/devHome";
+import { resolveWorktreeHome } from "@goat/shared/devHome";
+import { GOAT_HOME_DIR_NAME } from "@goat/shared/goatHome";
+import { LEGACY_HOME_DIR_NAME } from "@goat/contracts/legacyT3Names";
 import * as Console from "effect/Console";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -45,7 +19,7 @@ import { Command, Flag } from "effect/cli";
 
 import * as ProjectionStore from "../src/orchestration-v2/ProjectionStore.ts";
 import { migrationManifest, runMigrations } from "../src/persistence/Migrations.ts";
-import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
+import * as NodeSqliteClient from "@goat/shared/nodeSqliteClient";
 
 export class MigrateDevDbNotInWorktreeError extends Schema.TaggedError<MigrateDevDbNotInWorktreeError>()(
   "MigrateDevDbNotInWorktreeError",
@@ -61,7 +35,7 @@ export class MigrateDevDbSharedHomeError extends Schema.TaggedError<MigrateDevDb
   {},
 ) {
   override get message(): string {
-    return "Refusing to rebuild the shared ~/.t3 database. Use an isolated --base-dir.";
+    return "Refusing to rebuild a shared ~/.goat or ~/.t3 database. Use an isolated --base-dir.";
   }
 }
 
@@ -95,7 +69,7 @@ export class MigrateDevDbServerRunningError extends Schema.TaggedError<MigrateDe
   },
 ) {
   override get message(): string {
-    return `Dev database at '${this.databasePath}' is open by a running server (pid ${this.pid} per server-runtime.json). Stop that server first; if that pid is not actually a T3 server (stale descriptor, reused pid), delete the server-runtime.json next to the database and retry.`;
+    return `Dev database at '${this.databasePath}' is open by a running server (pid ${this.pid} per server-runtime.json). Stop that server first; if that pid is not actually a GOAT server (stale descriptor, reused pid), delete the server-runtime.json next to the database and retry.`;
   }
 }
 
@@ -116,11 +90,6 @@ export class MigrateDevDbDestinationBusyError extends Schema.TaggedError<Migrate
   }
 }
 
-/**
- * Two branches claimed the same Migrations/NNN_ slot: the id was already
- * recorded under a different name, so this checkout's migration was
- * silently skipped and its schema changes never applied.
- */
 export class MigrateDevDbSlotCollisionError extends Schema.TaggedError<MigrateDevDbSlotCollisionError>()(
   "MigrateDevDbSlotCollisionError",
   {
@@ -148,9 +117,7 @@ export class MigrateDevDbPhaseError extends Schema.TaggedError<MigrateDevDbPhase
 }
 
 export interface RunMigrateDevDbInput {
-  /** Isolated .t3 directory. Defaults to `<worktree>/.t3` of the cwd. */
   readonly baseDir?: string | undefined;
-  /** Source database. Defaults to `~/.t3/userdata/statev2.sqlite`. */
   readonly source?: string | undefined;
   readonly projects: number;
   readonly threadsPerProject: number;
@@ -159,12 +126,103 @@ export interface RunMigrateDevDbInput {
 export interface RunMigrateDevDbOptions {
   /** Overridable for tests; the directory writes must never target. */
   readonly sharedHome?: string | undefined;
+  /**
+   * Homes checked in order for `userdata/statev2.sqlite` when `source` is
+   * omitted. Defaults to `~/.goat`, then `~/.t3`. Writes to these homes are
+   * refused either way.
+   */
+  readonly sourceHomes?: ReadonlyArray<string> | undefined;
 }
 
 interface KeptProject {
   readonly title: string;
   readonly threads: number;
 }
+
+interface ForeignKeyRow {
+  readonly child_table: string;
+  readonly id: number;
+  readonly parent_table: string;
+  readonly from: string;
+  readonly to: string | null;
+}
+
+interface ForeignKeyConstraint {
+  readonly parentTable: string;
+  readonly columns: ReadonlyArray<{ readonly from: string; readonly to: string | null }>;
+}
+
+const quoteIdent = (identifier: string) => `"${identifier.replaceAll('"', '""')}"`;
+
+const groupForeignKeys = (rows: ReadonlyArray<ForeignKeyRow>) => {
+  const byTable = new Map<string, Map<number, ForeignKeyConstraint>>();
+  for (const row of rows) {
+    let constraints = byTable.get(row.child_table);
+    if (constraints === undefined) {
+      constraints = new Map();
+      byTable.set(row.child_table, constraints);
+    }
+    const existing = constraints.get(row.id);
+    const column = { from: row.from, to: row.to };
+    constraints.set(
+      row.id,
+      existing === undefined
+        ? { parentTable: row.parent_table, columns: [column] }
+        : { ...existing, columns: [...existing.columns, column] },
+    );
+  }
+  return new Map(
+    Array.from(byTable, ([table, constraints]) => [table, Array.from(constraints.values())]),
+  );
+};
+
+const orderTablesParentsFirst = <T extends { readonly name: string }>(
+  tables: ReadonlyArray<T>,
+  foreignKeys: ReadonlyMap<string, ReadonlyArray<ForeignKeyConstraint>>,
+): Array<T> => {
+  const byName = new Map(tables.map((table) => [table.name, table]));
+  const visited = new Set<string>();
+  const ordered: Array<T> = [];
+  const visit = (table: T) => {
+    if (visited.has(table.name)) return;
+    visited.add(table.name);
+    for (const fk of foreignKeys.get(table.name) ?? []) {
+      if (fk.parentTable === table.name) continue;
+      const parent = byName.get(fk.parentTable);
+      if (parent !== undefined) visit(parent);
+    }
+    ordered.push(table);
+  };
+  for (const table of tables) visit(table);
+  return ordered;
+};
+
+const parentExistsPredicates = (
+  childTable: string,
+  constraints: ReadonlyArray<ForeignKeyConstraint>,
+  primaryKeys: ReadonlyMap<string, ReadonlyArray<string>>,
+): Array<string> => {
+  const childRef = quoteIdent(childTable);
+  return constraints.flatMap((fk) => {
+    if (fk.parentTable === childTable) return [];
+    const parentPks = primaryKeys.get(fk.parentTable) ?? [];
+    const resolved = fk.columns.map((col, idx) => ({
+      from: col.from,
+      to: col.to ?? parentPks[idx],
+    }));
+    if (resolved.some((col) => col.to === undefined)) return [];
+    const nullable = resolved.map((col) => `${childRef}.${quoteIdent(col.from)} IS NULL`);
+    const matches = resolved.map(
+      (col) => `parent.${quoteIdent(col.to!)} = ${childRef}.${quoteIdent(col.from)}`,
+    );
+    return [
+      `(${[
+        ...nullable,
+        `EXISTS (SELECT 1 FROM main.${quoteIdent(fk.parentTable)} AS parent WHERE ${matches.join(" AND ")})`,
+      ].join(" OR ")})`,
+    ];
+  });
+};
 
 const removeDatabaseFiles = Effect.fn("removeDatabaseFiles")(function* (databasePath: string) {
   const fs = yield* FileSystem.FileSystem;
@@ -173,7 +231,6 @@ const removeDatabaseFiles = Effect.fn("removeDatabaseFiles")(function* (database
   }
 });
 
-/** The slice of server-runtime.json this script cares about. */
 const ServerRuntimeState = Schema.fromJsonString(Schema.Struct({ pid: Schema.Number }));
 const decodeServerRuntimeState = Schema.decodeEffect(ServerRuntimeState);
 
@@ -187,23 +244,18 @@ const isProcessAlive = (pid: number): boolean => {
   }
 };
 
-/** Liveness probe for a running dev server. The server writes its pid to
- * server-runtime.json next to the database, which also catches an idle
- * server holding an open-but-inactive connection. The SQL probes below back
- * that up: BEGIN IMMEDIATE fails while a writer is active, and
- * wal_checkpoint(TRUNCATE) reports busy while another connection holds the
- * WAL. A leftover -shm alone is not a signal — read-only connections cannot
- * clean it up on close. */
+/**
+ * The server writes its pid to server-runtime.json next to the database, which also catches an idle server holding an open-but-inactive
+ * connection. A leftover -shm alone is not a signal — read-only connections cannot clean it up on close.
+ */
 const ensureNotInUse = Effect.fn("ensureDevDbNotInUse")(function* (databasePath: string) {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
 
   const runtimeStatePath = path.join(path.dirname(databasePath), "server-runtime.json");
-  const runtimeState = yield* fs.readFileString(runtimeStatePath).pipe(
-    Effect.flatMap(decodeServerRuntimeState),
-    // A missing or malformed descriptor is not a liveness signal.
-    Effect.option,
-  );
+  const runtimeState = yield* fs
+    .readFileString(runtimeStatePath)
+    .pipe(Effect.flatMap(decodeServerRuntimeState), Effect.option);
   if (Option.isSome(runtimeState) && isProcessAlive(runtimeState.value.pid)) {
     return yield* new MigrateDevDbServerRunningError({
       databasePath,
@@ -246,9 +298,7 @@ const RECOVERY_KINDS: ReadonlyArray<ProjectionStore.ProjectionRecoveryKind> = [
   "delegated-completions",
 ];
 
-/** Tables the prune empties. The copy skips their rows. */
 const CLEARED_TABLES: ReadonlyArray<string> = [
-  // Pending work the dev server would otherwise pick up and run.
   "scheduled_tasks",
   "orchestration_v2_effect_outbox",
   "orchestration_v2_thread_launch_workflows",
@@ -258,10 +308,8 @@ const CLEARED_TABLES: ReadonlyArray<string> = [
   "auth_pairing_links",
 ];
 
-/** Shared between threads; the prune keeps the ones a kept thread is bound to. */
 const PROVIDER_SESSIONS_TABLE = "orchestration_v2_projection_provider_sessions";
 
-/** Whether the thread aliased `root` is shown: not deleted, archived, or settled. */
 const rootIsVisible = (sql: SqlClient.SqlClient) => sql`
   root.deleted_at IS NULL
   AND json_extract(root.payload_json, '$.deletedAt') IS NULL
@@ -270,11 +318,7 @@ const rootIsVisible = (sql: SqlClient.SqlClient) => sql`
   AND json_extract(root.payload_json, '$.settledOverride') IS NOT 'settled'`;
 
 /**
- * Copies the source into the empty snapshot, without the rows of thread families whose root is
- * hidden. The prune drops those anyway, and they hold nearly all of a long-lived database's
- * events, so copying them is what used to make this take a full-size copy of the real db.
- * A source from before the V2 thread tables has no visibility to filter on, so it is copied
- * whole. One transaction reads the source, so the copy is consistent while the real server writes.
+ * One transaction reads the source, so the copy is consistent while the real server writes.
  */
 const copySourceSlice = Effect.fn("copyDevDbSourceSlice")(function* (sourcePath: string) {
   const sql = yield* SqlClient.SqlClient;
@@ -282,11 +326,61 @@ const copySourceSlice = Effect.fn("copyDevDbSourceSlice")(function* (sourcePath:
   const schema = yield* sql<{ type: string; name: string; sql: string }>`
     SELECT type, name, sql FROM src.sqlite_master
     WHERE sql IS NOT NULL AND name NOT LIKE 'sqlite_%'`;
+  const tableKinds = yield* sql<{ name: string; type: string }>`PRAGMA src.table_list`;
+  const shadowTables = new Set(
+    tableKinds.filter((row) => row.type === "shadow").map((row) => row.name),
+  );
+  const virtualTables = new Set(
+    tableKinds.filter((row) => row.type === "virtual").map((row) => row.name),
+  );
   const threadColumns = yield* sql<{ name: string; notnull: number }>`
     SELECT m.name, c."notnull" FROM src.sqlite_master m, pragma_table_info(m.name, 'src') c
     WHERE m.type = 'table' AND c.name = 'thread_id'`;
   const threadIdNullable = new Map(threadColumns.map((row) => [row.name, row.notnull === 0]));
-  const tables = schema.filter((entry) => entry.type === "table");
+  // `hidden` 2 and 3 are VIRTUAL and STORED generated columns. INSERT refuses
+  // them (`cannot INSERT into generated column`), so SELECT * cannot copy a
+  // table that has one — including an empty provider-thread roster.
+  const columnRows = yield* sql<{ table_name: string; name: string; hidden: number; pk: number }>`
+    SELECT m.name AS table_name, c.name AS name, c.hidden AS hidden, c.pk AS pk
+    FROM src.sqlite_master m, pragma_table_xinfo(m.name, 'src') c
+    WHERE m.type = 'table' AND m.name NOT LIKE 'sqlite_%'
+    ORDER BY m.name, c.cid`;
+  const writableColumns = new Map<string, Array<string>>();
+  const primaryKeyRows = new Map<string, Array<{ readonly pk: number; readonly name: string }>>();
+  for (const column of columnRows) {
+    if (Number(column.pk) > 0) {
+      const pks = primaryKeyRows.get(column.table_name) ?? [];
+      pks.push({ pk: Number(column.pk), name: column.name });
+      primaryKeyRows.set(column.table_name, pks);
+    }
+    if (Number(column.hidden) !== 0) continue;
+    const names = writableColumns.get(column.table_name) ?? [];
+    names.push(column.name);
+    writableColumns.set(column.table_name, names);
+  }
+  const primaryKeys = new Map(
+    Array.from(primaryKeyRows, ([table, cols]) => [
+      table,
+      cols.toSorted((a, b) => a.pk - b.pk).map((col) => col.name),
+    ]),
+  );
+  const foreignKeyRows = yield* sql<ForeignKeyRow>`
+    SELECT
+      m.name AS child_table,
+      fk.id AS id,
+      fk."table" AS parent_table,
+      fk."from" AS "from",
+      fk."to" AS "to"
+    FROM src.sqlite_master m, pragma_foreign_key_list(m.name, 'src') fk
+    WHERE m.type = 'table' AND m.name NOT LIKE 'sqlite_%'
+    ORDER BY m.name, fk.id, fk.seq`;
+  const foreignKeys = groupForeignKeys(foreignKeyRows);
+  // Creating a virtual table creates its shadow storage. Copy its logical rows once,
+  // preserving rowids used by the memory index, rather than replaying shadow DDL.
+  const tables = orderTablesParentsFirst(
+    schema.filter((entry) => entry.type === "table" && !shadowTables.has(entry.name)),
+    foreignKeys,
+  );
   const filtered = tables.some((table) => table.name === "orchestration_v2_projection_threads");
 
   yield* sql.withTransaction(
@@ -303,24 +397,38 @@ const copySourceSlice = Effect.fn("copyDevDbSourceSlice")(function* (sourcePath:
       for (const { name } of tables) {
         if (CLEARED_TABLES.includes(name)) continue;
         const nullable = threadIdNullable.get(name);
-        const filter = !filtered
-          ? ""
-          : name === "orchestration_events"
-            ? // Two ranges rather than `<>`, so SQLite seeks the (aggregate_kind, stream_id)
-              // index instead of scanning every event.
-              `WHERE (aggregate_kind = 'thread' AND stream_id IN (SELECT thread_id FROM copied_threads))
-                OR aggregate_kind < 'thread' OR aggregate_kind > 'thread'`
-            : nullable === undefined || name === PROVIDER_SESSIONS_TABLE
-              ? ""
-              : `WHERE thread_id IN (SELECT thread_id FROM copied_threads)${nullable ? " OR thread_id IS NULL" : ""}`;
-        yield* sql.unsafe(`INSERT INTO main."${name}" SELECT * FROM src."${name}" ${filter}`)
-          .unprepared;
+        const predicates: Array<string> = [];
+        if (filtered) {
+          if (name === "orchestration_events") {
+            // Two ranges rather than `<>`, so SQLite seeks the (aggregate_kind, stream_id)
+            // index instead of scanning every event.
+            predicates.push(
+              `((aggregate_kind = 'thread' AND stream_id IN (SELECT thread_id FROM copied_threads))
+                OR aggregate_kind < 'thread' OR aggregate_kind > 'thread')`,
+            );
+          } else if (nullable !== undefined && name !== PROVIDER_SESSIONS_TABLE) {
+            predicates.push(
+              `(${quoteIdent("thread_id")} IN (SELECT thread_id FROM copied_threads)${nullable ? ` OR ${quoteIdent("thread_id")} IS NULL` : ""})`,
+            );
+          }
+        }
+        predicates.push(...parentExistsPredicates(name, foreignKeys.get(name) ?? [], primaryKeys));
+        const filter = predicates.length === 0 ? "" : `WHERE ${predicates.join(" AND ")}`;
+        const columns = writableColumns.get(name) ?? [];
+        if (columns.length === 0) continue;
+        const columnList = (virtualTables.has(name) ? ["rowid", ...columns] : columns)
+          .map(quoteIdent)
+          .join(", ");
+        const quoted = quoteIdent(name);
+        yield* sql.unsafe(
+          `INSERT INTO main.${quoted} (${columnList}) SELECT ${columnList} FROM src.${quoted} ${filter}`,
+        ).unprepared;
       }
-      // The source's AUTOINCREMENT high-water marks, so new events append after them.
       yield* sql`DELETE FROM main.sqlite_sequence`;
       yield* sql`INSERT INTO main.sqlite_sequence SELECT name, seq FROM src.sqlite_sequence`;
       for (const entry of schema) {
-        if (entry.type !== "table") yield* sql.unsafe(entry.sql).unprepared;
+        if (entry.type !== "table" && !shadowTables.has(entry.name))
+          yield* sql.unsafe(entry.sql).unprepared;
       }
     }),
   );
@@ -351,9 +459,8 @@ const pruneSnapshot = Effect.fn("pruneDevDbSnapshot")(function* (input: RunMigra
     SELECT thread_id FROM orchestration_v2_projection_threads
     WHERE json_extract(payload_json, '$.limitRecovery') IS NOT NULL`;
 
-  // Forks and subagents read history and results through their lineage, so
-  // a thread family is cloned or dropped as a whole. A family is stopped when
-  // its root is visible and unsettled and none of its threads is live.
+  // Forks and subagents read history and results through their lineage, so a
+  // thread family is cloned or dropped as a whole.
   yield* sql`CREATE TEMP TABLE thread_families AS
     SELECT thread_id, updated_at,
       COALESCE(json_extract(payload_json, '$.lineage.rootThreadId'), thread_id) AS root_id
@@ -367,8 +474,6 @@ const pruneSnapshot = Effect.fn("pruneDevDbSnapshot")(function* (input: RunMigra
     GROUP BY f.root_id, root.project_id
     HAVING SUM(f.thread_id IN (SELECT thread_id FROM live_threads)) = 0`;
 
-  // Projects with clonable threads outrank empty-but-recent ones: the point
-  // of the exercise is thread data, not the project list.
   yield* sql`CREATE TEMP TABLE kept_projects AS
     SELECT p.project_id
     FROM projection_projects p
@@ -398,16 +503,45 @@ const pruneSnapshot = Effect.fn("pruneDevDbSnapshot")(function* (input: RunMigra
       WHERE recency_rank <= ${input.threadsPerProject}
     )`;
 
-  // Every V2 table and every V1 table the lazy importer reads is keyed by
-  // thread_id, so one sweep covers both and new tables need no change here.
-  // Provider sessions are shared between threads and pruned by binding below.
   const threadTables = yield* sql<{ name: string }>`
     SELECT m.name FROM sqlite_master m, pragma_table_info(m.name) c
     WHERE m.type = 'table' AND c.name = 'thread_id'
       AND m.name <> ${PROVIDER_SESSIONS_TABLE}`;
+  const pkRows = yield* sql<{ table_name: string; name: string; pk: number }>`
+    SELECT m.name AS table_name, c.name AS name, c.pk AS pk
+    FROM sqlite_master m, pragma_table_info(m.name) c
+    WHERE m.type = 'table' AND m.name NOT LIKE 'sqlite_%' AND c.pk > 0
+    ORDER BY m.name, c.pk`;
+  const primaryKeys = new Map<string, Array<string>>();
+  for (const row of pkRows) {
+    const names = primaryKeys.get(row.table_name) ?? [];
+    names.push(row.name);
+    primaryKeys.set(row.table_name, names);
+  }
+  const foreignKeyRows = yield* sql<ForeignKeyRow>`
+    SELECT
+      m.name AS child_table,
+      fk.id AS id,
+      fk."table" AS parent_table,
+      fk."from" AS "from",
+      fk."to" AS "to"
+    FROM sqlite_master m, pragma_foreign_key_list(m.name) fk
+    WHERE m.type = 'table' AND m.name NOT LIKE 'sqlite_%'
+    ORDER BY m.name, fk.id, fk.seq`;
+  const foreignKeys = groupForeignKeys(foreignKeyRows);
+  const orderedThreadTables = orderTablesParentsFirst(threadTables, foreignKeys).toReversed();
+  const orderedClearedTables = orderTablesParentsFirst(
+    CLEARED_TABLES.map((name) => ({ name })),
+    foreignKeys,
+  ).toReversed();
+  const orderedChildTables = orderTablesParentsFirst(
+    Array.from(foreignKeys.keys(), (name) => ({ name })),
+    foreignKeys,
+  );
 
   yield* sql.withTransaction(
     Effect.gen(function* () {
+      yield* sql.unsafe("PRAGMA defer_foreign_keys = ON").unprepared;
       yield* sql`DELETE FROM projection_projects
         WHERE project_id NOT IN (SELECT project_id FROM kept_projects)`;
       yield* sql`DELETE FROM ${sql(PROVIDER_SESSIONS_TABLE)}
@@ -416,9 +550,9 @@ const pruneSnapshot = Effect.fn("pruneDevDbSnapshot")(function* (input: RunMigra
             SELECT provider_session_id FROM orchestration_v2_projection_provider_session_bindings
             WHERE thread_id IN (SELECT thread_id FROM kept_threads)
           )`;
-      for (const { name } of threadTables) {
+      for (const { name } of orderedThreadTables) {
         yield* sql.unsafe(
-          `DELETE FROM "${name}" WHERE thread_id NOT IN (SELECT thread_id FROM kept_threads)`,
+          `DELETE FROM ${quoteIdent(name)} WHERE thread_id NOT IN (SELECT thread_id FROM kept_threads)`,
         ).unprepared;
       }
       yield* sql`DELETE FROM orchestration_v2_projection_context_transfers
@@ -429,8 +563,15 @@ const pruneSnapshot = Effect.fn("pruneDevDbSnapshot")(function* (input: RunMigra
             AND stream_id NOT IN (SELECT thread_id FROM kept_threads))
            OR (aggregate_kind = 'project'
             AND stream_id NOT IN (SELECT project_id FROM kept_projects))`;
-      for (const table of CLEARED_TABLES) {
-        yield* sql`DELETE FROM ${sql(table)}`;
+      for (const { name } of orderedClearedTables) {
+        yield* sql`DELETE FROM ${sql(name)}`;
+      }
+      for (const { name } of orderedChildTables) {
+        const predicates = parentExistsPredicates(name, foreignKeys.get(name) ?? [], primaryKeys);
+        if (predicates.length === 0) continue;
+        yield* sql.unsafe(
+          `DELETE FROM main.${quoteIdent(name)} WHERE NOT (${predicates.join(" AND ")})`,
+        ).unprepared;
       }
     }),
   );
@@ -451,9 +592,6 @@ const pruneSnapshot = Effect.fn("pruneDevDbSnapshot")(function* (input: RunMigra
   };
 });
 
-/** Compare this checkout's migration registry against what the cloned
- * database recorded: same slot under a different name means the migration
- * was skipped, not applied. */
 const verifyMigrationSlots = Effect.fn("verifyMigrationSlots")(function* () {
   const sql = yield* SqlClient.SqlClient;
   const applied = yield* sql<{ migration_id: number; name: string }>`
@@ -479,15 +617,30 @@ export const runMigrateDevDb = Effect.fn("runMigrateDevDb")(function* (
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
 
-  const sharedHome = path.resolve(options.sharedHome ?? path.join(NodeOS.homedir(), ".t3"));
-  const sourcePath = path.resolve(
-    input.source ?? path.join(sharedHome, "userdata", "statev2.sqlite"),
-  );
+  const homeDirectory = NodeOS.homedir();
+  const sourceHomes = (
+    options.sourceHomes ??
+    [GOAT_HOME_DIR_NAME, LEGACY_HOME_DIR_NAME].map((name) => path.join(homeDirectory, name))
+  ).map((home) => path.resolve(home));
+  const protectedHomes = [
+    ...sourceHomes,
+    ...(options.sharedHome === undefined ? [] : [path.resolve(options.sharedHome)]),
+  ];
+  const sourceCandidates = sourceHomes.map((home) => path.join(home, "userdata", "statev2.sqlite"));
+  let sourcePath = path.resolve(input.source ?? sourceCandidates[0] ?? "");
+  if (input.source === undefined) {
+    for (const candidate of sourceCandidates) {
+      if (yield* fs.exists(candidate)) {
+        sourcePath = candidate;
+        break;
+      }
+    }
+  }
 
   const baseDir =
     input.baseDir !== undefined
       ? path.resolve(input.baseDir)
-      : yield* resolveWorktreeT3Home(process.cwd());
+      : yield* resolveWorktreeHome(process.cwd());
   if (baseDir === undefined) {
     return yield* new MigrateDevDbNotInWorktreeError();
   }
@@ -498,12 +651,12 @@ export const runMigrateDevDb = Effect.fn("runMigrateDevDb")(function* (
   if (!(yield* fs.exists(sourcePath))) {
     return yield* new MigrateDevDbSourceMissingError({ sourcePath });
   }
-  const [canonicalBaseDir, canonicalSharedHome] = yield* Effect.all([
-    fs.realPath(baseDir).pipe(Effect.orElseSucceed(() => baseDir)),
-    fs.realPath(sharedHome).pipe(Effect.orElseSucceed(() => sharedHome)),
-  ]);
-  if (canonicalBaseDir === canonicalSharedHome) {
-    return yield* new MigrateDevDbSharedHomeError();
+  const canonicalBaseDir = yield* fs.realPath(baseDir).pipe(Effect.orElseSucceed(() => baseDir));
+  for (const home of protectedHomes) {
+    const canonicalHome = yield* fs.realPath(home).pipe(Effect.orElseSucceed(() => home));
+    if (canonicalBaseDir === canonicalHome) {
+      return yield* new MigrateDevDbSharedHomeError();
+    }
   }
   // The destination db and snapshot both get deleted below; a --source that
   // resolves to either (e.g. a leftover snapshot file) would be destroyed
@@ -533,7 +686,6 @@ export const runMigrateDevDb = Effect.fn("runMigrateDevDb")(function* (
       );
 
   yield* removeDatabaseFiles(snapshotPath);
-  // Make sure the snapshot is removed even when a phase fails partway through.
   const { executedMigrations, pruned } = yield* Effect.gen(function* () {
     yield* Console.log(`Copying visible threads from ${sourcePath} (read-only)...`);
     yield* copySourceSlice(sourcePath).pipe(
@@ -639,7 +791,9 @@ export const migrateDevDbCommand = Command.make(
     ),
     source: Flag.String("source").pipe(
       Flag.optional,
-      Flag.withDescription("Source database. Defaults to ~/.t3/userdata/statev2.sqlite."),
+      Flag.withDescription(
+        "Source database. Defaults to ~/.goat/userdata/statev2.sqlite, or ~/.t3/userdata/statev2.sqlite when that file is absent.",
+      ),
     ),
   },
   ({ projects, threadsPerProject, baseDir, source }) =>
@@ -666,7 +820,7 @@ export const migrateDevDbCommand = Command.make(
     }),
 ).pipe(
   Command.withDescription(
-    "Rebuild the worktree dev database from a pruned snapshot of the real ~/.t3 data, then run migrations.",
+    "Rebuild the worktree dev database from a pruned snapshot of the real ~/.goat data (or ~/.t3 when that database is absent), then run migrations.",
   ),
 );
 

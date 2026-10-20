@@ -1,4 +1,4 @@
-import { EnvironmentId } from "@t3tools/contracts";
+import { EnvironmentId } from "@goat/contracts";
 import * as Schema from "effect/Schema";
 
 const ConnectionTargetBase = {
@@ -64,6 +64,10 @@ export const ConnectionTransientReason = Schema.Literals([
   "endpoint-unavailable",
   "relay-unavailable",
   "remote-unavailable",
+  // The host itself could not be reached (asleep, off the network). Expected
+  // for laptops, so surfaces show it quietly instead of as a failure.
+  "host-unreachable",
+  "session-pending",
 ]);
 export type ConnectionTransientReason = typeof ConnectionTransientReason.Type;
 
@@ -94,8 +98,9 @@ export class ConnectionBlockedError extends Schema.TaggedError<ConnectionBlocked
     reason: ConnectionBlockedReason,
     detail: Schema.String,
     traceId: Schema.optionalKey(Schema.String),
-    /** The host speaks an older orchestration protocol; updating it restores the connection. */
+
     serverUpdateRequired: Schema.optionalKey(Schema.Boolean),
+    localProxyUnavailable: Schema.optionalKey(Schema.Boolean),
   },
 ) {
   override get message(): string {

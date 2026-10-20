@@ -1,5 +1,5 @@
-// This file mostly exists because we want dev mode to say "T3 Code (Dev)" instead of "electron"
-
+// Adopts legacy T3 env names before anything reads the environment.
+import "@goat/contracts/adoptLegacyEnv";
 import * as NodeChildProcess from "node:child_process";
 import * as NodeFS from "node:fs";
 import * as NodeModule from "node:module";
@@ -19,8 +19,9 @@ const APP_DISPLAY_NAME = isDevelopment ? "T3 Code (Dev)" : "T3 Code (Alpha)";
 const APP_BUNDLE_ID = isDevelopment
   ? `com.t3tools.t3code.dev.${devBundleIdSuffix || "local"}`
   : "com.t3tools.t3code";
-const APP_PROTOCOL_SCHEMES = isDevelopment ? ["t3code-dev"] : ["t3code"];
-const LAUNCHER_VERSION = 19;
+// The renderer scheme, plus the pre-D13 one that existing links use.
+const APP_PROTOCOL_SCHEMES = isDevelopment ? ["goat-dev", "t3code-dev"] : ["goat", "t3code"];
+const LAUNCHER_VERSION = 21;
 const developmentMacIconPngPath = NodePath.join(
   repoRoot,
   "assets",
@@ -28,7 +29,7 @@ const developmentMacIconPngPath = NodePath.join(
   "blueprint-macos-1024.png",
 );
 const productionMacIconPngPath = NodePath.join(repoRoot, "assets", "prod", "black-macos-1024.png");
-// oxlint-disable-next-line t3code/no-global-process-runtime -- Standalone launcher script has no Effect runtime.
+// oxlint-disable-next-line goat/no-global-process-runtime -- Standalone launcher script has no Effect runtime.
 const hostPlatform = NodeOS.platform();
 
 function setPlistString(plistPath, key, value) {
@@ -111,14 +112,14 @@ function shellSingleQuote(value) {
 export function makeDevelopmentEnvironmentScript(environment) {
   const envEntries = [
     ["VITE_DEV_SERVER_URL", environment.VITE_DEV_SERVER_URL],
-    ["T3CODE_PORT", environment.T3CODE_PORT],
-    ["T3CODE_HOME", environment.T3CODE_HOME],
-    ["T3CODE_COMMIT_HASH", environment.T3CODE_COMMIT_HASH],
-    ["T3CODE_OTLP_TRACES_URL", environment.T3CODE_OTLP_TRACES_URL],
-    ["T3CODE_OTLP_EXPORT_INTERVAL_MS", environment.T3CODE_OTLP_EXPORT_INTERVAL_MS],
-    ["T3CODE_OTLP_HEADERS", environment.T3CODE_OTLP_HEADERS],
-    ["T3CODE_OTLP_PROTOCOL", environment.T3CODE_OTLP_PROTOCOL],
-    ["T3CODE_DESKTOP_APP_USER_MODEL_ID", APP_BUNDLE_ID],
+    ["GOAT_PORT", environment.GOAT_PORT],
+    ["GOAT_HOME", environment.GOAT_HOME],
+    ["GOAT_COMMIT_HASH", environment.GOAT_COMMIT_HASH],
+    ["GOAT_OTLP_TRACES_URL", environment.GOAT_OTLP_TRACES_URL],
+    ["GOAT_OTLP_EXPORT_INTERVAL_MS", environment.GOAT_OTLP_EXPORT_INTERVAL_MS],
+    ["GOAT_OTLP_HEADERS", environment.GOAT_OTLP_HEADERS],
+    ["GOAT_OTLP_PROTOCOL", environment.GOAT_OTLP_PROTOCOL],
+    ["GOAT_DESKTOP_APP_USER_MODEL_ID", APP_BUNDLE_ID],
   ].filter((entry) => typeof entry[1] === "string" && entry[1].trim().length > 0);
   return [
     ...envEntries.map(
@@ -270,8 +271,8 @@ export function resolveMacBundleInfoPlistStrings(executableName) {
     CFBundleExecutable: executableName,
     CFBundleIconFile: "icon.icns",
     NSScreenCaptureUsageDescription:
-      "T3 Code captures the active window when you use the snapshot shortcut.",
-    NSDocumentsFolderUsageDescription: "T3 Code reads project files you open in the desktop app.",
+      "GOAT captures the active window when you use the snapshot shortcut.",
+    NSDocumentsFolderUsageDescription: "GOAT reads project files you open in the desktop app.",
   };
 }
 
@@ -280,6 +281,8 @@ function patchMainBundleInfoPlist(appBundlePath, iconPath, executableName) {
   for (const [key, value] of Object.entries(resolveMacBundleInfoPlistStrings(executableName))) {
     setPlistString(infoPlistPath, key, value);
   }
+  // macOS 26 offers Messages/Mail codes in every text field unless opted out.
+  setPlistJson(infoPlistPath, "NSAutoFillRequiresTextContentTypeForOneTimeCodeOnMac", true);
   setPlistJson(infoPlistPath, "CFBundleURLTypes", [
     {
       CFBundleURLName: APP_BUNDLE_ID,
@@ -400,11 +403,10 @@ function buildMacLauncher(electronBinaryPath) {
   );
   patchHelperBundleInfoPlists(targetAppBundlePath);
   if (isDevelopment) {
-    // Keep Electron's native executable inside the branded bundle. Launching the
-    // node_modules copy makes macOS associate the process (and Dock label) with
-    // Electron.app even though this bundle's Info.plist has the T3 Code name.
-    // Its conventional executable name also keeps Electron's default-app runtime
-    // in development mode instead of making app.isPackaged report true.
+    // Launching the node_modules copy makes macOS associate the process (and Dock label) with
+    // Electron.app even though this bundle's Info.plist has the T3 Code name. Its conventional
+    // executable name also keeps Electron's default-app runtime in development mode instead of
+    // making app.isPackaged report true.
     writeDevelopmentEnvironmentScript();
     writeDevelopmentLauncherScript(launcherBinaryPath, runtimeElectronBinaryPath);
   }

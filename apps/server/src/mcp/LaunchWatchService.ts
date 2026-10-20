@@ -7,8 +7,8 @@ import {
   type RuntimeMode,
   RuntimeRequestId,
   ThreadId,
-} from "@t3tools/contracts";
-import { writeFileStringAtomically } from "@t3tools/shared/atomicWrite";
+} from "@goat/contracts";
+import { writeFileStringAtomically } from "@goat/shared/atomicWrite";
 import * as Cause from "effect/Cause";
 import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
@@ -28,6 +28,7 @@ import * as ThreadManagementService from "../orchestration-v2/ThreadManagementSe
 import { localQuestionLauncher } from "../orchestration-v2/QuestionEscalationService.ts";
 import { forkParked } from "../serverActivation.ts";
 import * as SshRemoteDispatch from "../sshRemote/SshRemoteDispatch.ts";
+import * as CompletionWebhook from "./completionWebhook.ts";
 import {
   addPendingRun,
   clearAttempts,
@@ -40,6 +41,7 @@ import {
   launchWatchId,
   type LaunchWatchTerminalStatus,
   type LaunchWatchWake,
+  type LaunchWatchWebhookTarget,
   newLaunchWatch,
   normalizeHost,
   outageWake,
@@ -62,6 +64,18 @@ import {
  * waits on, and a host that stays unreachable each queue one message on the
  * launcher. Watches live in a JSON file under the state directory, so they
  * survive restarts without a database migration.
+ *
+ * A launch from outside any thread may opt into a launcherless watch. It is
+ * followed the same way, at the runtime mode its caller was approved for, but
+ * its reports go only to the completion webhook. It belongs to the outside
+ * caller that launched (its MCP request namespace), and only that caller sees
+ * it in goat_thread_status. Once its run is reported it stays dormant, like a
+ * launcher's watch, so a later goat_thread_send from the same caller re-arms
+ * it and that run reaches the webhook too.
+ *
+ * Dormant watches expire: a launcher's after a week without changes, a
+ * launcherless one a week after it was last armed. An expired watch is treated
+ * as gone, and a periodic sweep drops it and releases any inline secret.
  */
 
 /** How long one local wait lasts before the follower looks for pending questions. */
@@ -75,6 +89,14 @@ const REMOTE_STEP_LIMIT_MS = REMOTE_TICK_MS + 3 * 60_000;
 const REMOTE_READ_TIMEOUT_MS = 60_000;
 /** A watch with nothing left to report is dropped this long after its last change. */
 const DORMANT_RETENTION_MS = 7 * 24 * 60 * 60_000;
+/**
+ * A launcherless watch has no thread that could unwatch it, so it is dropped
+ * this long after it was last armed even while its run is still owed, for
+ * example when the host never comes back or a question is never answered.
+ */
+const LAUNCHERLESS_RETENTION_MS = DORMANT_RETENTION_MS;
+/** How often dormant watches past their retention are dropped while the server runs. */
+const SWEEP_MS = 60 * 60_000;
 /** Pause before retrying after a changed caller, an unqueued wake or an unsaved state. */
 const RETRY_MS = 30_000;
 const TAIL_WINDOW = 40;
@@ -92,6 +114,30 @@ export interface LaunchWatchTarget {
   readonly threadId: ThreadId;
 }
 
+/**
+ * A watch's key. A null launcher names the launcherless watch of one outside
+ * caller, identified by its MCP request namespace.
+ */
+export type LaunchWatchKey = Omit<LaunchWatchTarget, "launcherThreadId"> &
+  (
+    | { readonly launcherThreadId: ThreadId }
+    | { readonly launcherThreadId: null; readonly owner: string }
+  );
+
+interface ExternalLaunchWatchInput {
+  /** The outside caller's MCP request namespace; only it can see and re-arm the watch. */
+  readonly owner: string;
+  readonly host: string | null | undefined;
+  readonly threadId: ThreadId;
+  readonly projectId: ProjectId | null;
+  readonly title: string | null;
+  readonly runId: RunId;
+  /** The outside caller's runtime mode ceiling; the watch's remote reads never exceed it. */
+  readonly ceiling: RuntimeMode;
+  /** The launch's webhook choice, from CompletionWebhook.resolveRoute. */
+  readonly route: CompletionWebhook.WebhookRoute;
+}
+
 export interface LaunchWatchServiceShape {
   /**
    * Starts watching, or adds a run to an existing watch. A null run leaves a
@@ -102,28 +148,69 @@ export interface LaunchWatchServiceShape {
       readonly projectId: ProjectId | null;
       readonly title: string | null;
       readonly runId: RunId | null;
+      /** Also post reports to the completion webhook. Omitted keeps an existing watch's choice. */
+      readonly notifyWebhook?: boolean;
+      /** The launch's chosen webhook receiver. Omitted keeps an existing watch's choice. */
+      readonly webhookTarget?: LaunchWatchWebhookTarget | null;
     },
   ) => Effect.Effect<LaunchWatch, LaunchWatchStoreError>;
-  /** Adds a run to an existing watch; without a watch it does nothing. */
+  /**
+   * Adds a run to an existing watch; without a watch it does nothing. A null
+   * launcher re-arms the launcherless watch an outside caller's launch made.
+   */
   readonly rearm: (
-    input: LaunchWatchTarget & { readonly runId: RunId },
+    input: LaunchWatchKey & { readonly runId: RunId },
   ) => Effect.Effect<void, LaunchWatchStoreError>;
+  /** The watch under this key, if any. */
+  readonly find: (
+    input: LaunchWatchKey,
+  ) => Effect.Effect<LaunchWatch | null, LaunchWatchStoreError>;
   readonly unwatch: (input: LaunchWatchTarget) => Effect.Effect<boolean, LaunchWatchStoreError>;
   readonly list: (
     launcherThreadId: ThreadId,
   ) => Effect.Effect<ReadonlyArray<LaunchWatch>, LaunchWatchStoreError>;
+  /** Up to `limit` watches of threads on other machines, from every launcher, most recently updated first. */
+  readonly listRemote: (
+    limit: number,
+  ) => Effect.Effect<ReadonlyArray<LaunchWatch>, LaunchWatchStoreError>;
+  /**
+   * Watches a launch from outside any thread when the completion webhook takes
+   * it (a notifyTarget or notifyWebhook on the launch, or `completionWebhook.externalLaunches`).
+   * Returns null, touching nothing, otherwise.
+   */
+  readonly watchExternal: (
+    input: ExternalLaunchWatchInput,
+  ) => Effect.Effect<LaunchWatch | null, LaunchWatchStoreError>;
+  /** Checks a launch's notifyWebhook/notifyTarget before the launch starts; see CompletionWebhook. */
+  readonly resolveRoute: CompletionWebhook.CompletionWebhookShape["resolveRoute"];
+  /** Frees what resolveRoute kept, for a launch that recorded no watch. */
+  readonly releaseRoute: (route: CompletionWebhook.WebhookRoute) => Effect.Effect<void>;
 }
 
 export class LaunchWatchService extends Context.Service<
   LaunchWatchService,
   LaunchWatchServiceShape
->()("t3/mcp/LaunchWatchService") {}
+>()("goat/mcp/LaunchWatchService") {}
 
 export const LAUNCH_WATCH_FILE = "thread-launch-watches.json";
+/**
+ * Launcherless watches live in their own file. Servers from before they existed
+ * require a launcher thread and would set the whole shared file aside, losing
+ * every ordinary watch; this way they keep reading LAUNCH_WATCH_FILE.
+ */
+export const LAUNCHERLESS_WATCH_FILE = "thread-launch-watches-launcherless.json";
 
 /** What one follower step learned about the run it follows. */
 type StepResult =
-  | { readonly _tag: "Terminal"; readonly status: LaunchWatchTerminalStatus }
+  | {
+      readonly _tag: "Terminal";
+      readonly status: LaunchWatchTerminalStatus;
+      /**
+       * The run that ended: the followed one, or the running turn a queued
+       * message was promoted into, which carries on its work.
+       */
+      readonly runId: RunId;
+    }
   | {
       readonly _tag: "Running";
       readonly questions: ReadonlyArray<{ readonly id: string; readonly kind: string | null }>;
@@ -141,9 +228,22 @@ interface Details {
   readonly branch: string | null;
   readonly worktreePath: string | null;
   readonly excerpt: string | null;
+  readonly prUrl: string | null;
+  /**
+   * A registered cloud run GOAT could only link: its attach run ends without a result, so
+   * the completion webhook is not told it completed. The launching thread still hears why.
+   */
+  readonly linkOnlyRegistration: boolean;
 }
 
-const noDetails: Details = { title: null, branch: null, worktreePath: null, excerpt: null };
+const noDetails: Details = {
+  title: null,
+  branch: null,
+  worktreePath: null,
+  excerpt: null,
+  prUrl: null,
+  linkOnlyRegistration: false,
+};
 
 class LauncherGone extends Data.TaggedError("LauncherGone")<{}> {}
 
@@ -169,6 +269,7 @@ const isPermanentDispatchFailure = (cause: Cause.Cause<unknown>) =>
   });
 
 const decodeDocument = Schema.decodeUnknownEffect(Schema.fromJsonString(LaunchWatchDocument));
+const encodeDocument = Schema.encodeEffect(Schema.fromJsonString(LaunchWatchDocument));
 const decodeWait = Schema.decodeUnknownEffect(OrchestratorMcpThreadWaitResult);
 const decodeRead = Schema.decodeUnknownEffect(OrchestratorMcpThreadReadResult);
 const decodeRequestIds = Schema.decodeUnknownEffect(
@@ -187,14 +288,18 @@ export const make = Effect.gen(function* () {
   const threads = yield* ThreadManagementService.ThreadManagementService;
   const ssh = yield* SshRemoteDispatch.SshRemoteDispatch;
   const config = yield* ServerConfig.ServerConfig;
+  const webhook = yield* CompletionWebhook.CompletionWebhook;
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const crypto = yield* Crypto.Crypto;
   const layerScope = yield* Effect.scope;
   const lock = yield* Semaphore.make(1);
   const statePath = path.join(config.stateDir, LAUNCH_WATCH_FILE);
+  const launcherlessPath = path.join(config.stateDir, LAUNCHERLESS_WATCH_FILE);
 
   let watches = new Map<string, LaunchWatch>();
+  /** What each state file holds on disk, so a save rewrites only the file that changed. */
+  const onDisk = new Map<string, string>();
   /** First sightings of local questions whose escalation message has not landed yet. */
   const missingEscalations = new Map<string, Map<string, number>>();
   /** One follower per watch with runs to report; only touched while holding the lock. */
@@ -205,13 +310,31 @@ export const make = Effect.gen(function* () {
 
   const locked = lock.withPermits(1);
 
+  const writeFile = (filePath: string, list: ReadonlyArray<LaunchWatch>) =>
+    Effect.gen(function* () {
+      const contents = `${yield* encodeDocument({ version: 1, watches: list })}\n`;
+      // A file that never existed is only created once it has a watch to hold.
+      if (onDisk.get(filePath) === contents || (list.length === 0 && !onDisk.has(filePath))) return;
+      yield* writeFileStringAtomically({ filePath, contents }).pipe(
+        Effect.provideService(FileSystem.FileSystem, fs),
+        Effect.provideService(Path.Path, path),
+      );
+      onDisk.set(filePath, contents);
+    });
+
   const persist = (next: Map<string, LaunchWatch>) =>
-    writeFileStringAtomically({
-      filePath: statePath,
-      contents: `${JSON.stringify({ version: 1, watches: [...next.values()] })}\n`,
+    Effect.gen(function* () {
+      const all = [...next.values()];
+      // Launcherless first: moving them out of the shared file must not lose them.
+      yield* writeFile(
+        launcherlessPath,
+        all.filter((watch) => watch.launcherThreadId === null),
+      );
+      yield* writeFile(
+        statePath,
+        all.filter((watch) => watch.launcherThreadId !== null),
+      );
     }).pipe(
-      Effect.provideService(FileSystem.FileSystem, fs),
-      Effect.provideService(Path.Path, path),
       Effect.mapError(
         (cause) =>
           new LaunchWatchStoreError({
@@ -220,57 +343,112 @@ export const make = Effect.gen(function* () {
           }),
       ),
       Effect.tap(() =>
-        Effect.sync(() => {
+        Effect.suspend(() => {
+          const previous = watches;
           watches = next;
           for (const watchId of missingEscalations.keys()) {
             if (!next.has(watchId)) missingEscalations.delete(watchId);
           }
+          return releaseDroppedTargets(previous, next);
         }),
       ),
     );
 
-  /** Applies one change to the map and saves it; memory moves only after the write lands. */
-  const save = (change: (current: Map<string, LaunchWatch>) => void) => {
-    const next = new Map(watches);
-    change(next);
-    return persist(next);
-  };
-
-  const load = Effect.gen(function* () {
-    const raw = yield* fs.readFileString(statePath).pipe(
-      Effect.map(Option.some),
-      Effect.catch((error) =>
-        error.reason._tag === "NotFound"
-          ? Effect.succeed(Option.none<string>())
-          : Effect.fail(error),
+  /** An inline target's secret goes once the last saved watch that used it does. */
+  const releaseDroppedTargets = (
+    previous: Map<string, LaunchWatch>,
+    next: Map<string, LaunchWatch>,
+  ) => {
+    const kept = new Set(
+      [...next.values()].flatMap((watch) =>
+        watch.webhookTarget?.type === "inline" && watch.webhookTarget.secretName !== null
+          ? [watch.webhookTarget.secretName]
+          : [],
       ),
     );
-    if (Option.isNone(raw) || raw.value.trim().length === 0) return [];
-    const decoded = yield* Effect.result(decodeDocument(raw.value));
-    if (decoded._tag === "Success") return decoded.success.watches;
-    // Keep the unreadable file for inspection instead of overwriting it.
-    const aside = `${statePath}.corrupt-${yield* Clock.currentTimeMillis}`;
-    yield* fs.rename(statePath, aside);
-    yield* Effect.logWarning("launch watches: unreadable state file moved aside", {
-      path: aside,
-      cause: decoded.failure,
+    return Effect.forEach(
+      [...previous.values()],
+      (watch) =>
+        watch.webhookTarget?.type === "inline" &&
+        watch.webhookTarget.secretName !== null &&
+        !kept.has(watch.webhookTarget.secretName)
+          ? webhook.release(watch.webhookTarget)
+          : Effect.void,
+      { discard: true },
+    );
+  };
+
+  /**
+   * Applies one change to the map and saves it; memory moves only after the
+   * write lands. Dormant watches past their retention are dropped on the way.
+   */
+  const save = (change: (current: Map<string, LaunchWatch>) => void) =>
+    Effect.gen(function* () {
+      const now = yield* Clock.currentTimeMillis;
+      const next = new Map(watches);
+      change(next);
+      for (const [watchId, watch] of next) {
+        if (dormantExpired(watch, now)) next.delete(watchId);
+      }
+      // Deleting a watch and releasing its inline secret finish together, or a
+      // shutdown in between leaves a secret that no saved watch refers to.
+      return yield* Effect.uninterruptible(persist(next));
     });
-    return [];
+
+  const loadFile = (filePath: string) =>
+    Effect.gen(function* () {
+      const raw = yield* fs.readFileString(filePath).pipe(
+        Effect.map(Option.some),
+        Effect.catch((error) =>
+          error.reason._tag === "NotFound"
+            ? Effect.succeed(Option.none<string>())
+            : Effect.fail(error),
+        ),
+      );
+      if (Option.isNone(raw)) return [];
+      onDisk.set(filePath, raw.value);
+      if (raw.value.trim().length === 0) return [];
+      const decoded = yield* Effect.result(decodeDocument(raw.value));
+      if (decoded._tag === "Success") return decoded.success.watches;
+      // Keep the unreadable file for inspection instead of overwriting it.
+      const aside = `${filePath}.corrupt-${yield* Clock.currentTimeMillis}`;
+      yield* fs.rename(filePath, aside);
+      onDisk.delete(filePath);
+      yield* Effect.logWarning("launch watches: unreadable state file moved aside", {
+        path: aside,
+        cause: decoded.failure,
+      });
+      return [];
+    });
+
+  const load = Effect.gen(function* () {
+    const ordinary = yield* loadFile(statePath);
+    const launcherless = yield* loadFile(launcherlessPath);
+    return {
+      watches: [...ordinary, ...launcherless],
+      // Earlier builds kept launcherless watches in the shared file.
+      misplaced: ordinary.some((watch) => watch.launcherThreadId === null),
+    };
   });
 
   // ── following ────────────────────────────────────────────────────────
 
-  /** The launcher's runtime mode; a remote call never asks for more. */
+  /**
+   * The launcher's runtime mode; a remote call never asks for more. A
+   * launcherless watch uses the mode its outside caller was approved for.
+   */
   const launcherCeiling = (watch: LaunchWatch) =>
-    threads
-      .getThreadShell(watch.launcherThreadId)
-      .pipe(
-        Effect.flatMap((shell): Effect.Effect<RuntimeMode, LauncherGone> =>
-          shell === null || shell.deletedAt !== null || shell.archivedAt !== null
-            ? Effect.fail(new LauncherGone())
-            : Effect.succeed(shell.runtimeMode),
-        ),
-      );
+    watch.launcherThreadId === null
+      ? Effect.succeed<RuntimeMode>(watch.ceiling ?? "approval-required")
+      : threads
+          .getThreadShell(watch.launcherThreadId)
+          .pipe(
+            Effect.flatMap((shell): Effect.Effect<RuntimeMode, LauncherGone> =>
+              shell === null || shell.deletedAt !== null || shell.archivedAt !== null
+                ? Effect.fail(new LauncherGone())
+                : Effect.succeed(shell.runtimeMode),
+            ),
+          );
 
   const callHost = (
     watch: LaunchWatch,
@@ -316,22 +494,29 @@ export const make = Effect.gen(function* () {
       }
       const status = waited.result.run?.status;
       if (status !== undefined && isTerminalStatus(status)) {
-        return { _tag: "Terminal", status } satisfies StepResult;
+        // The wait follows a promoted queued message into the run it joined.
+        return {
+          _tag: "Terminal",
+          status,
+          runId: waited.result.run?.id ?? runId,
+        } satisfies StepResult;
       }
       const records = yield* threads.getThreadRecords(watch.threadId, ["runtimeRequests"]);
       const questions = records.runtimeRequests
         .filter((request) => request.status === "pending" && request.kind !== "dynamic_tool_call")
         .map((request) => ({ id: request.id as string, kind: request.kind as string }));
+      const launcherThreadId = watch.launcherThreadId;
+      if (launcherThreadId === null) return { _tag: "Running", questions } satisfies StepResult;
       const subagents =
         shell.launchedBy === undefined &&
-        shell.lineage.parentThreadId === watch.launcherThreadId &&
+        shell.lineage.parentThreadId === launcherThreadId &&
         shell.lineage.relationshipToParent === "subagent"
-          ? (yield* threads.getThreadRecords(watch.launcherThreadId, ["subagents"])).subagents
+          ? (yield* threads.getThreadRecords(launcherThreadId, ["subagents"])).subagents
           : [];
       return {
         _tag: "Running",
         questions,
-        escalatesUserInput: localQuestionLauncher(shell, subagents) === watch.launcherThreadId,
+        escalatesUserInput: localQuestionLauncher(shell, subagents) === launcherThreadId,
       } satisfies StepResult;
     }).pipe(
       Effect.catchTags({
@@ -402,7 +587,11 @@ export const make = Effect.gen(function* () {
         Effect.flatMap(decodeWait),
       );
       if (!waited.timedOut && isTerminalStatus(waited.status)) {
-        return { _tag: "Terminal", status: waited.status } satisfies StepResult;
+        return {
+          _tag: "Terminal",
+          status: waited.status,
+          runId: waited.runId ?? runId,
+        } satisfies StepResult;
       }
       // Only user questions are listed remotely; approvals show up when the run ends.
       const listedQuestions = yield* callHost(
@@ -450,15 +639,21 @@ export const make = Effect.gen(function* () {
   const localDetails = (watch: LaunchWatch, runId: RunId) =>
     Effect.gen(function* () {
       const shell = yield* threads.getThreadShell(watch.threadId);
-      const records = yield* threads.getThreadRecords(watch.threadId, ["messages"], {
-        messageRoles: ["assistant"],
-        messageRunIds: [runId],
-      });
+      const records = yield* threads.getThreadRecords(
+        watch.threadId,
+        ["messages", "providerThreads"],
+        { messageRoles: ["assistant"], messageRunIds: [runId] },
+      );
       return {
         title: shell?.title ?? null,
         branch: shell?.branch ?? null,
         worktreePath: shell?.worktreePath ?? null,
         excerpt: lastText(records.messages.map((message) => message.text)),
+        prUrl: shell?.linkedPullRequest?.url ?? null,
+        linkOnlyRegistration: (records.providerThreads ?? []).some(
+          (thread) =>
+            thread.cloudTask?.attach === "registered" && thread.cloudTask.tracking === "link-only",
+        ),
       } satisfies Details;
     });
 
@@ -499,6 +694,9 @@ export const make = Effect.gen(function* () {
         branch: head.thread.branch,
         worktreePath: head.thread.worktreePath,
         excerpt: lastText(texts),
+        prUrl: head.thread.linkedPullRequest?.url ?? null,
+        // Registered runs live on their holder, whose own watch reads them locally.
+        linkOnlyRegistration: false,
       } satisfies Details;
     });
 
@@ -518,11 +716,11 @@ export const make = Effect.gen(function* () {
       ),
     );
 
-  const wake = (watch: LaunchWatch, message: LaunchWatchWake) =>
+  const wake = (launcherThreadId: ThreadId, message: LaunchWatchWake) =>
     threads.dispatch({
       type: "message.dispatch",
       commandId: message.commandId,
-      threadId: watch.launcherThreadId,
+      threadId: launcherThreadId,
       messageId: message.messageId,
       text: message.text,
       notification: message.notification,
@@ -536,13 +734,40 @@ export const make = Effect.gen(function* () {
    * Sends a wake. A refusal the orchestrator will repeat settles it, with a
    * warning; any other failure (a storage failure, or a command id the
    * orchestrator recorded as rejected) leaves it owed, with the attempt
-   * counted so the retry uses a fresh id.
+   * counted so the retry uses a fresh id. A settled wake that carries a
+   * report also goes to the completion webhook, which never holds it back. A
+   * launcherless watch has no wake: its report goes straight to the webhook.
    */
   const deliver = (
     watch: LaunchWatch,
     message: LaunchWatchWake,
+    report?: Pick<
+      CompletionWebhook.CompletionWebhookReport,
+      "event" | "runId" | "requestId" | "status" | "title" | "prUrl"
+    >,
   ): Effect.Effect<{ readonly delivered: boolean; readonly watch: LaunchWatch }> =>
-    wake(watch, wakeAttempt(watch, message)).pipe(
+    (watch.launcherThreadId === null
+      ? Effect.succeed({ delivered: true, watch })
+      : settleWake(watch, watch.launcherThreadId, message)
+    ).pipe(
+      Effect.tap((sent) =>
+        sent.delivered && report !== undefined
+          ? webhook.notify(watch, {
+              ...report,
+              id: message.commandId,
+              summary: message.notification.summary,
+              excerpt: message.notification.detail ?? null,
+            })
+          : Effect.void,
+      ),
+    );
+
+  const settleWake = (
+    watch: LaunchWatch,
+    launcherThreadId: ThreadId,
+    message: LaunchWatchWake,
+  ): Effect.Effect<{ readonly delivered: boolean; readonly watch: LaunchWatch }> =>
+    wake(launcherThreadId, wakeAttempt(watch, message)).pipe(
       Effect.as({ delivered: true, watch: clearAttempts(watch, message) }),
       Effect.catchCause((cause) =>
         Cause.hasInterruptsOnly(cause)
@@ -590,6 +815,32 @@ export const make = Effect.gen(function* () {
     return watch?.incarnation === incarnation ? watch : undefined;
   };
 
+  const launcherlessExpired = (watch: LaunchWatch, now: number) =>
+    watch.launcherThreadId === null &&
+    now - (watch.armedAt ?? watch.createdAt) >= LAUNCHERLESS_RETENTION_MS;
+
+  /** A watch past its retention, which every operation treats as gone. */
+  const expired = (watch: LaunchWatch, now: number) =>
+    launcherlessExpired(watch, now) ||
+    (watch.pendingRuns.length === 0 &&
+      watch.outage === null &&
+      now - watch.updatedAt >= DORMANT_RETENTION_MS);
+
+  /** An expired watch with nothing owed. One still owed is left to its follower to drop. */
+  const dormantExpired = (watch: LaunchWatch, now: number) =>
+    watch.pendingRuns.length === 0 && watch.outage === null && expired(watch, now);
+
+  /**
+   * Whether a launcherless watch can no longer report: the completion webhook,
+   * its only destination, stopped taking it, or it outlived its retention.
+   */
+  const launcherlessStranded = (watch: LaunchWatch, now: number) =>
+    watch.launcherThreadId !== null
+      ? Effect.succeed(false)
+      : webhook
+          .wants(watch)
+          .pipe(Effect.map((wanted) => !wanted || launcherlessExpired(watch, now)));
+
   /**
    * Applies a step result under the lock. Returns how long to pause before the
    * next step. A wake and the state recording it are not split by a shutdown:
@@ -608,6 +859,7 @@ export const make = Effect.gen(function* () {
           const watch = current(watchId, incarnation);
           if (watch === undefined || !watch.pendingRuns.includes(runId)) return 0;
           const now = yield* Clock.currentTimeMillis;
+          // Kept dormant once nothing is owed, so a later send can re-arm it.
           const keep = (next: LaunchWatch) => save((map) => map.set(watchId, next));
           if (result._tag !== "LauncherGone" && result._tag !== "CallerChanged") {
             // The launcher may have been archived while the step waited; a wake
@@ -624,16 +876,35 @@ export const make = Effect.gen(function* () {
           switch (result._tag) {
             case "Terminal": {
               missingEscalations.delete(watchId);
+              const endedRunId = result.runId;
+              // A promoted message ends with the run it joined; that run is reported once.
+              if (endedRunId !== runId && watch.reportedRuns.includes(endedRunId)) {
+                yield* keep(settleRun(recordContact(watch, now), runId, now));
+                return 0;
+              }
+              const title = details.title ?? watch.title;
               const sent = yield* deliver(
                 watch,
-                finishedWake({ watch, runId, status: result.status, ...details }),
+                finishedWake({ watch, runId: endedRunId, status: result.status, ...details }),
+                details.linkOnlyRegistration
+                  ? undefined
+                  : {
+                      event: "run.completed",
+                      runId: endedRunId,
+                      status: result.status,
+                      title,
+                      prUrl: details.prUrl,
+                    },
               );
               if (!sent.delivered) {
                 yield* keep(sent.watch);
                 return RETRY_MS;
               }
-              const title = details.title ?? watch.title;
-              yield* keep({ ...settleRun(recordContact(sent.watch, now), runId, now), title });
+              const settled = settleRun(recordContact(sent.watch, now), runId, now);
+              yield* keep({
+                ...(endedRunId === runId ? settled : settleRun(settled, endedRunId, now)),
+                title,
+              });
               return 0;
             }
             case "Running": {
@@ -659,23 +930,26 @@ export const make = Effect.gen(function* () {
                   continue;
                 }
                 if (result.escalatesUserInput && question.kind === "user_input") {
+                  const launcherThreadId = watch.launcherThreadId;
                   const messageId = MessageId.make(
                     `question-escalation:${watch.threadId}:${question.id}`,
                   );
-                  const escalated = yield* threads
-                    .getThreadRecords(watch.launcherThreadId, ["messages"], {
-                      messageIds: [messageId],
-                    })
-                    .pipe(
-                      Effect.map((records) =>
-                        records.messages.some((message) => message.id === messageId),
-                      ),
-                      Effect.catch((error) =>
-                        Effect.logDebug("launch watch: escalation message unreadable", {
-                          cause: error,
-                        }).pipe(Effect.as(false)),
-                      ),
-                    );
+                  const escalated =
+                    launcherThreadId !== null &&
+                    (yield* threads
+                      .getThreadRecords(launcherThreadId, ["messages"], {
+                        messageIds: [messageId],
+                      })
+                      .pipe(
+                        Effect.map((records) =>
+                          records.messages.some((message) => message.id === messageId),
+                        ),
+                        Effect.catch((error) =>
+                          Effect.logDebug("launch watch: escalation message unreadable", {
+                            cause: error,
+                          }).pipe(Effect.as(false)),
+                        ),
+                      ));
                   if (escalated) {
                     next = recordQuestion(next, key, now);
                     missing.delete(key);
@@ -697,6 +971,14 @@ export const make = Effect.gen(function* () {
                     kind: question.kind,
                     title: null,
                   }),
+                  {
+                    event: "question",
+                    runId,
+                    requestId: question.id,
+                    status: "waiting",
+                    title: next.title,
+                    prUrl: null,
+                  },
                 );
                 next = sent.delivered ? recordQuestion(sent.watch, key, now) : sent.watch;
                 if (sent.delivered) missing.delete(key);
@@ -730,20 +1012,26 @@ export const make = Effect.gen(function* () {
             case "CallerChanged":
               return RETRY_MS;
             case "Unreachable":
-              return yield* retryLater(watch, result.error);
+              return yield* retryLater(watch, runId, result.error);
           }
         }),
       ),
     );
 
   /** Records a failed contact, telling the launcher once per outage. Call with the lock held. */
-  const retryLater = (watch: LaunchWatch, error: string) =>
+  const retryLater = (watch: LaunchWatch, runId: RunId, error: string) =>
     Effect.gen(function* () {
       const now = yield* Clock.currentTimeMillis;
       const { next, notify } = recordFailure(watch, now, error);
       let saved = next;
       if (notify && next.outage !== null) {
-        const sent = yield* deliver(next, outageWake({ watch: next, outage: next.outage }));
+        const sent = yield* deliver(next, outageWake({ watch: next, outage: next.outage }), {
+          event: "host.unavailable",
+          runId,
+          status: "unreachable",
+          title: next.title,
+          prUrl: null,
+        });
         saved = sent.delivered
           ? sent.watch
           : { ...sent.watch, outage: { ...next.outage, notified: false } };
@@ -762,6 +1050,28 @@ export const make = Effect.gen(function* () {
           return { _tag: "Exit" } satisfies Plan;
         }
         const now = yield* Clock.currentTimeMillis;
+        if (yield* launcherlessStranded(watch, now)) {
+          const dropped = yield* save((map) => map.delete(watchId)).pipe(
+            Effect.as(true),
+            Effect.catch((error) =>
+              Effect.logWarning("launch watch: stranded launcherless watch not dropped", {
+                watchId,
+                cause: error,
+              }).pipe(Effect.as(false)),
+            ),
+          );
+          if (dropped) {
+            yield* Effect.logInfo(
+              "launch watch: dropped a launcherless watch nothing can receive",
+              {
+                watchId,
+              },
+            );
+            releaseSlot(watchId, incarnation);
+            return { _tag: "Exit" } satisfies Plan;
+          }
+          return { _tag: "Sleep", ms: RETRY_MS } satisfies Plan;
+        }
         if (watch.outage !== null && watch.outage.nextRetryAt > now) {
           return { _tag: "Sleep", ms: watch.outage.nextRetryAt - now } satisfies Plan;
         }
@@ -785,7 +1095,8 @@ export const make = Effect.gen(function* () {
           watch.host === null
             ? yield* localStep(watch, runId)
             : yield* remoteStep(watch, watch.host, runId, capability);
-        const details = result._tag === "Terminal" ? yield* detailsFor(watch, runId) : noDetails;
+        const details =
+          result._tag === "Terminal" ? yield* detailsFor(watch, result.runId) : noDetails;
         const pause = yield* apply(watchId, incarnation, runId, result, details).pipe(
           Effect.catch((error) =>
             Effect.logWarning("launch watch: state not saved, will retry", {
@@ -808,9 +1119,41 @@ export const make = Effect.gen(function* () {
 
   // ── public operations ────────────────────────────────────────────────
 
-  const keyOf = (input: LaunchWatchTarget) => {
+  const keyOf = (input: LaunchWatchKey) => {
     const host = normalizeHost(input.host);
-    return { host, id: launchWatchId({ ...input, host }) };
+    const owner = input.launcherThreadId === null ? input.owner : null;
+    return {
+      host,
+      id: launchWatchId({
+        launcherThreadId: input.launcherThreadId,
+        owner,
+        host,
+        threadId: input.threadId,
+      }),
+    };
+  };
+
+  /** The watch under an id unless it outlived its retention. Call with the lock held. */
+  const live = (id: string, now: number) => {
+    const watch = watches.get(id);
+    return watch === undefined || expired(watch, now) ? undefined : watch;
+  };
+
+  /**
+   * A new watch's incarnation. One replacing an expired watch keeps its
+   * incarnation, so a follower still winding down follows the replacement.
+   */
+  const incarnationFor = (id: string) => {
+    const previous = watches.get(id)?.incarnation;
+    return previous === undefined
+      ? crypto
+          .randomUUIDv4()
+          .pipe(
+            Effect.mapError(
+              (cause) => new LaunchWatchStoreError({ message: "Could not start a watch.", cause }),
+            ),
+          )
+      : Effect.succeed(previous);
   };
 
   let loaded = false;
@@ -834,16 +1177,22 @@ export const make = Effect.gen(function* () {
     const now = yield* Clock.currentTimeMillis;
     // Keep only watches that still owe a report or changed recently.
     watches = new Map(
-      stored
-        .filter(
-          (watch) =>
-            watch.pendingRuns.length > 0 ||
-            watch.outage !== null ||
-            now - watch.updatedAt < DORMANT_RETENTION_MS,
-        )
-        .map((watch) => [watch.id, watch]),
+      stored.watches.filter((watch) => !expired(watch, now)).map((watch) => [watch.id, watch]),
     );
     loaded = true;
+    yield* releaseDroppedTargets(
+      new Map(stored.watches.map((watch) => [watch.id, watch])),
+      watches,
+    );
+    if (stored.misplaced) {
+      yield* persist(watches).pipe(
+        Effect.catch((error) =>
+          Effect.logWarning("launch watches: launcherless watches not moved to their own file", {
+            cause: error,
+          }),
+        ),
+      );
+    }
     yield* Effect.forEach([...watches.values()], ensureFollower, { discard: true });
   });
 
@@ -853,7 +1202,7 @@ export const make = Effect.gen(function* () {
         yield* ensureLoaded;
         const { host, id } = keyOf(input);
         const now = yield* Clock.currentTimeMillis;
-        const existing = watches.get(id);
+        const existing = live(id, now);
         const base =
           existing ??
           newLaunchWatch({
@@ -862,18 +1211,18 @@ export const make = Effect.gen(function* () {
             threadId: input.threadId,
             projectId: input.projectId,
             title: input.title,
-            incarnation: yield* crypto.randomUUIDv4.pipe(
-              Effect.mapError(
-                (cause) =>
-                  new LaunchWatchStoreError({ message: "Could not start a watch.", cause }),
-              ),
-            ),
+            incarnation: yield* incarnationFor(id),
+            notifyWebhook: input.notifyWebhook ?? false,
+            webhookTarget: input.webhookTarget ?? null,
             now,
           });
         const withMeta = {
           ...base,
           projectId: base.projectId ?? input.projectId,
           title: input.title ?? base.title,
+          notifyWebhook: input.notifyWebhook ?? base.notifyWebhook,
+          webhookTarget:
+            input.webhookTarget === undefined ? base.webhookTarget : input.webhookTarget,
         };
         const watch = input.runId === null ? withMeta : addPendingRun(withMeta, input.runId, now);
         yield* save((map) => map.set(id, watch));
@@ -889,10 +1238,24 @@ export const make = Effect.gen(function* () {
         const { id } = keyOf(input);
         const existing = watches.get(id);
         if (existing === undefined) return;
-        const watch = addPendingRun(existing, input.runId, yield* Clock.currentTimeMillis);
+        const now = yield* Clock.currentTimeMillis;
+        if (expired(existing, now)) {
+          // Past its retention it is gone; re-arming must not revive its webhook.
+          yield* save((map) => map.delete(id));
+          return;
+        }
+        const watch = addPendingRun(existing, input.runId, now);
         if (watch === existing) return;
         yield* save((map) => map.set(id, watch));
         yield* ensureFollower(watch);
+      }),
+    );
+
+  const find: LaunchWatchServiceShape["find"] = (input) =>
+    locked(
+      Effect.gen(function* () {
+        yield* ensureLoaded;
+        return live(keyOf(input).id, yield* Clock.currentTimeMillis) ?? null;
       }),
     );
 
@@ -922,6 +1285,61 @@ export const make = Effect.gen(function* () {
       ),
     );
 
+  const listRemote: LaunchWatchServiceShape["listRemote"] = (limit) =>
+    locked(ensureLoaded).pipe(
+      Effect.map(() =>
+        [...watches.values()]
+          // A launcherless watch has no thread to show as its launcher.
+          .filter((watch) => watch.host !== null && watch.launcherThreadId !== null)
+          .toSorted((left, right) => right.updatedAt - left.updatedAt)
+          .slice(0, limit),
+      ),
+    );
+
+  const watchExternal: LaunchWatchServiceShape["watchExternal"] = (input) =>
+    Effect.gen(function* () {
+      if (!(yield* webhook.watchesExternal(input.route))) return null;
+      return yield* locked(
+        Effect.gen(function* () {
+          yield* ensureLoaded;
+          const host = normalizeHost(input.host);
+          const id = launchWatchId({
+            launcherThreadId: null,
+            owner: input.owner,
+            host,
+            threadId: input.threadId,
+          });
+          const now = yield* Clock.currentTimeMillis;
+          const existing = live(id, now);
+          const base =
+            existing === undefined
+              ? newLaunchWatch({
+                  launcherThreadId: null,
+                  owner: input.owner,
+                  ceiling: input.ceiling,
+                  host,
+                  threadId: input.threadId,
+                  projectId: input.projectId,
+                  title: input.title,
+                  incarnation: yield* incarnationFor(id),
+                  notifyWebhook: input.route.notifyWebhook,
+                  webhookTarget: input.route.webhookTarget,
+                  now,
+                })
+              : // The latest launch's choice wins, as it does for register.
+                {
+                  ...existing,
+                  notifyWebhook: input.route.notifyWebhook,
+                  webhookTarget: input.route.webhookTarget,
+                };
+          const watch = addPendingRun(base, input.runId, now);
+          yield* save((map) => map.set(id, watch));
+          yield* ensureFollower(watch);
+          return watch;
+        }),
+      );
+    });
+
   // ── start ────────────────────────────────────────────────────────────
 
   yield* forkParked(
@@ -935,7 +1353,34 @@ export const make = Effect.gen(function* () {
     ),
   );
 
-  return LaunchWatchService.of({ register, rearm, unwatch, list });
+  // A dormant watch has no follower to notice that it expired, so sweep them.
+  const sweep = locked(
+    Effect.gen(function* () {
+      if (!loaded) return;
+      const now = yield* Clock.currentTimeMillis;
+      if (![...watches.values()].some((watch) => dormantExpired(watch, now))) return;
+      yield* save(() => {});
+    }),
+  ).pipe(
+    Effect.catch((error) =>
+      Effect.logWarning("launch watches: expired watches not dropped", { cause: error }),
+    ),
+  );
+  yield* forkParked(Effect.forever(Effect.sleep(SWEEP_MS).pipe(Effect.andThen(sweep))));
+
+  return LaunchWatchService.of({
+    register,
+    rearm,
+    find,
+    unwatch,
+    list,
+    listRemote,
+    watchExternal,
+    resolveRoute: webhook.resolveRoute,
+    releaseRoute: (route) => webhook.release(route.webhookTarget),
+  });
 });
 
-export const layer = Layer.effect(LaunchWatchService, make);
+export const layerWithoutDependencies = Layer.effect(LaunchWatchService, make);
+
+export const layer = layerWithoutDependencies.pipe(Layer.provide(CompletionWebhook.layer));

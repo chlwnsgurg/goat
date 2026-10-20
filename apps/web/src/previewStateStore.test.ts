@@ -1,10 +1,10 @@
-import { scopedThreadKey, scopeThreadRef } from "@t3tools/client-runtime/environment";
+import { scopedThreadKey, scopeThreadRef } from "@goat/client-runtime/environment";
 import {
   type EnvironmentId,
   type PreviewEvent,
   type PreviewSessionSnapshot,
   ThreadId,
-} from "@t3tools/contracts";
+} from "@goat/contracts";
 import { beforeEach, describe, expect, it } from "vite-plus/test";
 
 import {
@@ -451,6 +451,18 @@ describe("previewStateStore (single-tab)", () => {
     expect(state.sessions).toEqual({});
     expect(state.activeTabId).toBeNull();
     expect(state.snapshot).toBeNull();
+  });
+
+  it("keeps the state object when a refetched list changes nothing", () => {
+    reconcilePreviewServerSessions(ref, { sessions: [], serverEpoch, revision: 1 });
+    const loaded = readThreadPreviewState(ref);
+
+    reconcilePreviewServerSessions(ref, { sessions: [], serverEpoch, revision: 1 });
+    expect(readThreadPreviewState(ref)).toBe(loaded);
+
+    const snapshot = makeSnapshot();
+    reconcilePreviewServerSessions(ref, { sessions: [snapshot], serverEpoch, revision: 2 });
+    expect(readThreadPreviewState(ref).sessions).toEqual({ [snapshot.tabId]: snapshot });
   });
 
   it("ignores a list response older than the latest server event", () => {

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "@effect/vitest";
-import { EnvironmentId } from "@t3tools/contracts";
+import { EnvironmentId } from "@goat/contracts";
 import * as Effect from "effect/Effect";
 
 import {
@@ -53,7 +53,6 @@ describe("loadPreviewWebviewConfig", () => {
         },
       });
 
-      // The partition is derived in main from both, so both have to arrive.
       expect(requested).toEqual({ environmentId, profileId: "work" });
       expect(result).toEqual(config);
     }),

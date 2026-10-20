@@ -4,6 +4,38 @@ GOAT uses Claude Code's login and configuration. Start with the default provider
 for one account; [provider setup](./install.md#providers) covers installation and
 shared provider settings.
 
+## Claude Cloud
+
+Claude Cloud appears automatically in **Settings > Providers**. Sign in to Claude with a
+claude.ai account, either from the Claude Cloud card or the Claude provider card. The cloud
+provider uses that account and executable; API keys and router connections are not supported.
+Turn Claude Cloud off with its toggle. Reset the cloud card to follow Claude's enabled state
+again. For another account, add a custom Claude Cloud instance and choose its Claude source.
+
+Claude Cloud starts from your project folder and its current GitHub branch.
+Local changes and commits that have not been pushed may be included. You do not
+need to publish the branch before starting. New files that Git does not track yet
+may be left out; add them to Git first if the task needs them.
+
+If Claude Code has not trusted the project folder, open it once with `claude` on
+the environment's machine, using the same account and config as your selected
+Claude instance, and accept the trust prompt. Then try the cloud task again.
+GOAT does not accept trust prompts or change your trust settings.
+
+The thread keeps the session link and looks for a GitHub pull request linked to
+that session for up to two hours. **Result PR found** means a PR was located; it
+does not confirm that Claude stopped or that checks passed. If observation cannot
+confirm a result, open the session to inspect it before continuing.
+
+Follow-up messages go to the same cloud session. An accepted follow-up confirms
+message delivery, not completed work. Stop the session on Claude's website;
+Claude Cloud has no supported CLI cancellation command. Your local files and
+checkpoints are not changed by cloud work.
+
+If Claude Cloud is not ready, run `goat provider diagnose --driver claudeCloud` on the
+environment's machine. It lists what blocks it, such as a missing claude.ai login or an
+API-key variable in the environment, and the next step for each.
+
 ## Separate accounts or configurations
 
 Use a separate Claude config directory for each account. This also works for named
@@ -50,10 +82,11 @@ window. Leave it empty for Claude Code's default.
 
 You can also send `/compact` in an existing conversation. Web and desktop offer
 **Compact context** from the context meter. When you return to a large thread
-after more than an hour, a **Compact** chip with the thread's token count shows
+after Claude's prompt cache expires, a **Compact** chip with the thread's token count shows
 next to the send button. While it is on, Enter summarizes the history first, then
 sends your message. Click the chip to switch it to **Full** and keep the full
-history for that message. See [commands and skills](./composer.md#commands-and-skills) for using
+history for that message. The cache lasts about an hour on a Claude
+subscription and 5 minutes with an API key, Bedrock, or Vertex. See [commands and skills](./composer.md#commands-and-skills) for using
 composer commands.
 
 ## Usage limits

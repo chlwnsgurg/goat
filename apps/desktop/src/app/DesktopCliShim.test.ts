@@ -32,10 +32,9 @@ const writeExecutable = (path: string, content: string) => {
   NodeFS.writeFileSync(path, content, { mode: 0o755 });
 };
 
-/** Writes the launcher for `target` at `<root>/bin/goat`, with `<root>/home` as its T3 home. */
 const writeShim = (root: string, target: CliShimTarget) => {
   const shim = NodePath.join(root, "bin", "goat");
-  writeExecutable(shim, renderCliShim({ target, shimPath: shim, t3Home: `${root}/home` }));
+  writeExecutable(shim, renderCliShim({ target, shimPath: shim, goatHome: `${root}/home` }));
   return shim;
 };
 
@@ -45,16 +44,9 @@ const run = (shim: string, args: ReadonlyArray<string>, env: NodeJS.ProcessEnv =
     env: { PATH: process.env.PATH, ...env },
   });
 
-/** An app executable that reports its environment and arguments. */
 const REPORTER =
-  '#!/bin/sh\necho "node=$ELECTRON_RUN_AS_NODE cli=$T3CODE_CLI_PATH home=$T3CODE_HOME"\nprintf "%s\\n" "$@"\nexit 3\n';
+  '#!/bin/sh\necho "node=$ELECTRON_RUN_AS_NODE cli=$GOAT_CLI_PATH home=$GOAT_HOME"\nprintf "%s\\n" "$@"\nexit 3\n';
 
-/**
- * A stand-in AppImage whose image holds the reporter. `--appimage-mount`
- * prints the mount and stays up until killed, recording that it was; with
- * `canMount` false it fails like a host without FUSE. `--appimage-extract`
- * unpacks into ./squashfs-root.
- */
 const fakeAppImage = (canMount = true) => {
   const root = tempRoot();
   const image = NodePath.join(root, "image");
@@ -105,7 +97,7 @@ describe("renderCliShim", () => {
                 Layer.provide(
                   Layer.mergeAll(
                     NodeServices.layer,
-                    DesktopConfig.layerTest({ T3CODE_HOME: override }),
+                    DesktopConfig.layerTest({ GOAT_HOME: override }),
                   ),
                 ),
               ),
@@ -117,7 +109,7 @@ describe("renderCliShim", () => {
           const content = renderCliShim({
             target: { kind: "direct", executable, entry: "/bin.mjs" },
             shimPath: shim,
-            t3Home: environment.baseDir,
+            goatHome: environment.baseDir,
           });
           expect(content).toContain(selected);
           expect(content).not.toContain(".t3");
@@ -126,7 +118,7 @@ describe("renderCliShim", () => {
           expect(result.status).toBe(3);
           expect(result.stdout).toContain(`home=${selected}`);
           expect(
-            run(shim, [], { HOME: root, T3CODE_HOME: `${root}/runtime-override` }).stdout,
+            run(shim, [], { HOME: root, GOAT_HOME: `${root}/runtime-override` }).stdout,
           ).toContain(`home=${root}/runtime-override`);
         }
         expect(NodeFS.readFileSync(old, "utf8")).toBe("upstream data");
@@ -145,7 +137,6 @@ describe("renderCliShim", () => {
       "a b",
       "",
     ]);
-    // The trap kills the mount helper as the launcher exits.
     NodeChildProcess.spawnSync("sh", [
       "-c",
       `i=0; while [ ! -e '${root}/unmounted' ] && [ $i -lt 40 ]; do sleep 0.05; i=$((i+1)); done`,
@@ -155,7 +146,6 @@ describe("renderCliShim", () => {
 
   it("extracts the AppImage where it cannot be mounted", () => {
     const { shim } = fakeAppImage(false);
-    // Extract-and-run is ignored too, so the runtime never starts the app.
     const result = run(shim, ["--version"], { APPIMAGE_EXTRACT_AND_RUN: "1" });
     expect(result.status).toBe(3);
     expect(result.stdout).toMatch(
@@ -173,8 +163,7 @@ describe("renderCliShim", () => {
     });
     // sudo clears the environment, so the launcher supplies its own.
     expect(run(shim, []).stdout).toContain(`home=${root}/home`);
-    expect(run(shim, [], { T3CODE_HOME: "/elsewhere" }).stdout).toContain("home=/elsewhere");
-    // Run by a relative path, it still names itself absolutely.
+    expect(run(shim, [], { GOAT_HOME: "/elsewhere" }).stdout).toContain("home=/elsewhere");
     const relative = NodeChildProcess.spawnSync("./bin/goat", [], { cwd: root, encoding: "utf8" });
     expect(relative.stdout).toContain(`cli=${shim}`);
   });
@@ -213,7 +202,7 @@ describe("renderCliShim", () => {
     const script = renderCliShim({
       target: { kind: "windows", executable, entry: "C:\\Apps\\server.asar\\bin.mjs" },
       shimPath: "C:\\Users\\José\\.t3\\bin\\goat.cmd",
-      t3Home: "C:\\Users\\José\\.t3",
+      goatHome: "C:\\Users\\José\\.t3",
     });
     const lines = script.split("\r\n");
     expect(lines).toContain("setlocal EnableExtensions DisableDelayedExpansion");
@@ -221,22 +210,20 @@ describe("renderCliShim", () => {
     expect(lines).toContain(
       'if exist "C:\\Apps\\R&whoami&X 100%%\\!CHANNEL!\\T3 Code.exe" goto run',
     );
-    // Paths only ever appear quoted or inside `set "..."`, never bare where `&` would split them.
     const bare = lines.filter(
       (line) => line.includes("whoami") && !/"[^"]*whoami[^"]*"/.test(line),
     );
     expect(bare).toEqual([]);
-    expect(lines).toContain('set "T3CODE_CLI_PATH=C:\\Users\\José\\.t3\\bin\\goat.cmd"');
+    expect(lines).toContain('set "GOAT_CLI_PATH=C:\\Users\\José\\.t3\\bin\\goat.cmd"');
   });
 
   it("switches the Windows console to UTF-8 only when a path needs it", () => {
     const ascii = renderCliShim({
       target: { kind: "windows", executable: "C:\\T3\\T3 Code.exe", entry: "C:\\T3\\bin.mjs" },
       shimPath: "C:\\Users\\me\\.t3\\bin\\goat.cmd",
-      t3Home: "C:\\Users\\me\\.t3",
+      goatHome: "C:\\Users\\me\\.t3",
     });
-    // A Ctrl-C that ends the batch would leave the console switched.
     expect(ascii).not.toContain("chcp");
-    expect(ascii.split("\r\n")).toContain("exit /b %t3_exit%");
+    expect(ascii.split("\r\n")).toContain("exit /b %goat_exit%");
   });
 });

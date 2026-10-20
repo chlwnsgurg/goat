@@ -1,18 +1,16 @@
 /**
- * Whether a webhook request really came through this environment's relay.
- *
  * The relay's delivery id, receive time and trace context arrive as plain
  * headers, and the webhook URL can also be called directly, so they are only
  * trusted alongside a proof the relay signed with its mint key. A request
  * without a valid proof is handled as a direct request.
  */
-import { RelayHookDeliveryProofPayload } from "@t3tools/contracts/relay";
+import { RelayHookDeliveryProofPayload } from "@goat/contracts/relay";
 import {
   normalizeRelayIssuer,
   RELAY_HOOK_DELIVERY_HEADER,
   RELAY_HOOK_DELIVERY_TYP,
   verifyRelayJwt,
-} from "@t3tools/shared/relayJwt";
+} from "@goat/shared/relayJwt";
 import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
@@ -34,7 +32,6 @@ const text = (bytes: Option.Option<Uint8Array>) =>
 export class RelayDeliveryProof extends Context.Service<
   RelayDeliveryProof,
   {
-    /** The relay's own delivery id and receive time, when the request proves it came from the relay. */
     readonly verify: (input: {
       readonly headers: Readonly<Record<string, string>>;
       readonly hookId: string;
@@ -42,7 +39,7 @@ export class RelayDeliveryProof extends Context.Service<
       Option.Option<{ readonly deliveryId: string; readonly receivedAt: string }>
     >;
   }
->()("t3/scheduledTasks/RelayDeliveryProof") {}
+>()("goat/scheduledTasks/RelayDeliveryProof") {}
 
 const make = Effect.gen(function* () {
   const secrets = yield* ServerSecretStore.ServerSecretStore;
@@ -61,7 +58,6 @@ const make = Effect.gen(function* () {
       );
       const relayUrl = text(yield* secrets.get(RELAY_URL_SECRET));
       const relayIssuer = Option.isSome(issuer) ? issuer : relayUrl;
-      // Not linked to T3 Connect: no relay can be delivering to us.
       if (Option.isNone(publicKey) || Option.isNone(relayIssuer)) return Option.none();
       const environmentId = yield* environment.getEnvironmentId;
       const payload = yield* verifyRelayJwt({

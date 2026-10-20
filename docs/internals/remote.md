@@ -47,9 +47,11 @@ A connected server reports the LAN and tailnet addresses it is bound to, and the
 client saves them as learned routes. A learned route reuses the credential of
 the route it was learned over: the T3 Connect access token, which is not bound
 to an origin because each DPoP proof names the URL it signs, or the paired
-bearer token. Learned routes the server stops reporting are dropped, which is
-how a changed LAN address replaces the old one; routes the user saved are never
-touched. The reported addresses are hints like any advertised endpoint, so a
+bearer token. A paired token only learns a plain HTTP address off the tailnet
+when it was itself paired over plain HTTP, so a token paired over HTTPS never
+starts travelling unencrypted. Learned routes the server stops reporting are
+dropped, which is how a changed LAN address replaces the old one; routes the
+user saved are never touched. The reported addresses are hints like any advertised endpoint, so a
 learned route still has to answer as this environment before it is used.
 
 GitHub routing trust covers the whole route list. Adding or changing a route
@@ -78,16 +80,22 @@ every route. See [environment authentication](./environment-auth.md) and the
 SSH can launch a server as well as forward a port. Desktop main owns that
 lifecycle because it can spawn SSH and handle authentication prompts. The
 renderer uses the forwarded endpoint through the shared connection runtime.
-[SSH cleanup](../../packages/ssh/src/tunnel.ts) stops a remote server only if the
-launcher owns it; a server it discovered already running must survive a client
-disconnect. Reconnection restores the forward before opening the application
-transport.
+One SSH-managed server per host user is shared by every client, and it owns
+threads other clients started. Closing a desktop or agent-dispatch connection
+therefore closes only the local forward and leaves the server running. The
+[SSH stop script](../../packages/ssh/src/tunnel.ts) additionally refuses to signal
+a server that does not report itself idle. Reconnection restores the forward
+before opening the application transport.
 
 Remote servers can outlive several client releases. Clients must use advertised
 capabilities and handle their absence, rather than assume their own version
 describes the server. Process replacement belongs to the launcher's
 [update protocol](./server-updates.md); the connection runtime handles the
-resulting disconnect.
+resulting disconnect. An SSH-managed server is replaced only by draining and
+stopping itself ([SSH replacement](../../structure/ssh.md#replacement)); a client
+never signals it to make way for a new version.
+Which versions may talk to each other, who may start an update, and what happens
+when the app itself cannot update are decided in [remote updates](./remote-updates.md).
 
 ### Desktop without a local environment
 
@@ -97,6 +105,6 @@ no local state is deleted. On the next start the main process skips port selecti
 and the primary and WSL backends, and opens the window right away. The renderer sees this through
 `desktopBridge.getLocalEnvironmentEnabled()`: `readPrimaryEnvironmentTarget` returns null, so primary
 auth and platform-managed discovery are skipped and only saved environments (pairing, relay, SSH)
-connect. This is possible because the desktop renderer is not served by the backend: the `t3code://`
+connect. This is possible because the desktop renderer is not served by the backend: the `goat://`
 scheme serves the bundled client from disk (Vite in development) and API traffic always goes to the
 environment's own URL.

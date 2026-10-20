@@ -1,4 +1,4 @@
-import type { ServerLifecycleStreamEvent } from "@t3tools/contracts";
+import type { ServerLifecycleStreamEvent } from "@goat/contracts";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -7,6 +7,7 @@ import * as Ref from "effect/Ref";
 import * as Stream from "effect/Stream";
 
 type LifecycleEventInput =
+  | Omit<Extract<ServerLifecycleStreamEvent, { type: "runtimeDrain" }>, "sequence">
   | Omit<Extract<ServerLifecycleStreamEvent, { type: "welcome" }>, "sequence">
   | Omit<Extract<ServerLifecycleStreamEvent, { type: "ready" }>, "sequence">
   | Omit<Extract<ServerLifecycleStreamEvent, { type: "legacyThreadMigration" }>, "sequence">;
@@ -23,7 +24,7 @@ export class ServerLifecycleEvents extends Context.Service<
     readonly snapshot: Effect.Effect<SnapshotState>;
     readonly stream: Stream.Stream<ServerLifecycleStreamEvent>;
   }
->()("t3/serverLifecycleEvents") {}
+>()("goat/serverLifecycleEvents") {}
 
 const make = Effect.gen(function* () {
   const pubsub = yield* PubSub.unbounded<ServerLifecycleStreamEvent>();

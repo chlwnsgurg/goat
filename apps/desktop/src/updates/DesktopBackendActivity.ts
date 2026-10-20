@@ -1,4 +1,5 @@
-import { SshServerActivity } from "@t3tools/contracts";
+import { GOAT_ACTIVITY_PATH } from "@goat/contracts/legacyT3Names";
+import { SshServerActivity } from "@goat/contracts";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -18,7 +19,7 @@ export class DesktopBackendActivity extends Context.Service<
       readonly unchanged: Effect.Effect<boolean>;
     }>;
   }
->()("@t3tools/desktop/updates/DesktopBackendActivity") {}
+>()("@goat/desktop/updates/DesktopBackendActivity") {}
 
 const make = Effect.gen(function* () {
   const pool = yield* DesktopBackendPool.DesktopBackendPool;
@@ -86,7 +87,7 @@ const make = Effect.gen(function* () {
             if (!snapshot.ready || Option.isNone(snapshot.activePid) || Option.isNone(config))
               return { activity: "unknown" as const, reason: null };
             const pid = snapshot.activePid.value;
-            const url = new URL("/.well-known/t3/activity", config.value.httpBaseUrl);
+            const url = new URL(GOAT_ACTIVITY_PATH, config.value.httpBaseUrl);
             url.hostname = "127.0.0.1";
             const activity = yield* http.get(url.href).pipe(
               Effect.flatMap((response) =>

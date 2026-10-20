@@ -1,6 +1,6 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
-import { ProviderInstanceId } from "@t3tools/contracts";
+import { ProviderInstanceId } from "@goat/contracts";
 import { AcpRegistrySettings } from "../settings.ts";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -30,7 +30,6 @@ it.layer(NodeServices.layer)("ACP sign-in confirmation", (it) => {
         settings: { ...settings, customModels: ["new-model"] },
       });
       assert.isTrue(yield* recreated.get);
-      // Both logout and an explicit authentication failure revoke confirmation.
       yield* recreated.set(false);
       const restarted = yield* makeAcpRegistryAuthenticationState(input);
       assert.isFalse(yield* restarted.get);

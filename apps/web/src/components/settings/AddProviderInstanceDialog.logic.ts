@@ -1,3 +1,9 @@
+import {
+  PROVIDER_SIGN_IN_COMMANDS,
+  type ProviderAuthState,
+  type ServerProvider,
+} from "@goat/contracts";
+
 export type WizardNavigation =
   | { readonly kind: "navigate"; readonly step: number }
   | { readonly kind: "blocked"; readonly step: number; readonly error: string };
@@ -5,9 +11,62 @@ export type WizardNavigation =
 const IDENTITY_STEP = 1;
 const ACP_REGISTRY_IDENTITY_STEP = 1;
 
-export const ADD_PROVIDER_WIZARD_STEPS = ["Provider", "Identity", "Config"] as const;
-export const ACP_REGISTRY_WIZARD_STEPS = ["Provider", "Identity", "Sign in"] as const;
-export const LOCAL_ACP_WIZARD_STEPS = ["Provider", "Identity"] as const;
+// Every flow ends on "Set up": the instance is created when the wizard enters
+// that step, which then installs the CLI and signs in where the app can.
+export const ADD_PROVIDER_WIZARD_STEPS = ["Provider", "Identity", "Config", "Set up"] as const;
+export const ACP_REGISTRY_WIZARD_STEPS = ["Provider", "Identity", "Set up"] as const;
+
+export const setupStepIndex = (steps: readonly string[]) => steps.length - 1;
+
+export type DriverSetupBadge = "signedIn" | "installed" | "missing";
+
+/** Summarizes the snapshots a driver already has on this environment, if any were checked. */
+export function summarizeDriverSetupState(
+  providers: ReadonlyArray<Pick<ServerProvider, "driver" | "installed" | "status" | "auth">>,
+  driver: string,
+): DriverSetupBadge | null {
+  const checked = providers.filter(
+    (provider) => provider.driver === driver && provider.status !== "disabled",
+  );
+  if (checked.length === 0) return null;
+  if (checked.some((provider) => provider.auth.status === "authenticated")) return "signedIn";
+  return checked.some((provider) => provider.installed) ? "installed" : "missing";
+}
+
+export type ProviderSetupPlan =
+  | { readonly kind: "checking" }
+  | { readonly kind: "install"; readonly inApp: boolean }
+  | { readonly kind: "signedIn" }
+  | { readonly kind: "discovering" }
+  | { readonly kind: "signIn" }
+  | { readonly kind: "command"; readonly command: string }
+  | { readonly kind: "manual" };
+
+/** What the final wizard step asks for next, from the instance snapshot and its sign-in state. */
+export function resolveProviderSetupPlan(input: {
+  readonly provider: Pick<ServerProvider, "driver" | "installed" | "auth" | "setup"> | undefined;
+  readonly auth: Pick<ProviderAuthState, "phase" | "methods"> | null | undefined;
+  readonly authError: string | null;
+}): ProviderSetupPlan {
+  const { provider, auth } = input;
+  if (!provider) return { kind: "checking" };
+  const signedIn =
+    provider.auth.status === "authenticated" ||
+    (provider.auth.status === "unknown" && auth?.phase === "succeeded");
+  if (signedIn) return { kind: "signedIn" };
+  if (!provider.installed) return { kind: "install", inApp: provider.setup?.canInstall === true };
+  const active =
+    auth?.phase === "starting" || auth?.phase === "waiting" || auth?.phase === "verifying";
+  const methodCount = auth?.methods?.length;
+  if (provider.driver === "acpRegistry") {
+    if (active || (methodCount ?? 0) > 0) return { kind: "signIn" };
+    if (methodCount === undefined && input.authError === null) return { kind: "discovering" };
+  } else if (active || provider.setup?.canAuthenticate === true) {
+    return { kind: "signIn" };
+  }
+  const command = PROVIDER_SIGN_IN_COMMANDS[provider.driver];
+  return command ? { kind: "command", command } : { kind: "manual" };
+}
 
 export interface ProviderIdentityDraft {
   readonly label: string;
@@ -71,14 +130,6 @@ export function isConfiguredAcpRegistryAgent(
   });
 }
 
-/**
- * Resolve navigation within the add-provider wizard.
- *
- * Moving forward past Identity requires a valid instance id, whether the user
- * advances one step at a time or skips directly to Config from a step header.
- * A blocked skip lands on Identity so its existing inline validation is
- * visible. Backward navigation is always preserved.
- */
 export function resolveWizardNavigation(
   currentStep: number,
   requestedStep: number,

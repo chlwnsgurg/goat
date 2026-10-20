@@ -1,5 +1,5 @@
 import { assert } from "@effect/vitest";
-import type { ProviderReplayTranscript } from "@t3tools/contracts";
+import type { ProviderReplayTranscript } from "@goat/contracts";
 
 import type { OrchestratorV2ScenarioResult } from "../../OrchestratorScenario.ts";
 import {
@@ -13,8 +13,7 @@ import { CLAUDE_BACKGROUND_TASK_INTERRUPT_PROMPT } from "./input.ts";
 const BACKGROUND_TASK_ID = "bt3kw2qpn";
 
 // Interrupting a turn tears down its CLI process, which kills the background
-// task it started. The roster must clear with the interrupt, and no wake or
-// continuation may follow.
+// task it started.
 export function assertClaudeBackgroundTaskInterruptOutput(
   result: OrchestratorV2ScenarioResult,
   transcript: ProviderReplayTranscript,

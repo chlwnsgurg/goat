@@ -5,9 +5,9 @@ import * as NodePath from "node:path";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
-import { ProviderInstanceId } from "@t3tools/contracts";
+import { ProviderInstanceId } from "@goat/contracts";
 import type { OpenCodeSettings } from "../settings.ts";
-import * as HostProcess from "@t3tools/shared/HostProcess";
+import * as HostProcess from "@goat/shared/HostProcess";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
@@ -15,11 +15,11 @@ import * as TestClock from "effect/testing/TestClock";
 import * as HttpClient from "effect/http/HttpClient";
 import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 
-import * as ProviderLatestVersions from "@t3tools/provider-core/server/ProviderLatestVersions";
-import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
-import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
-import * as ProviderEventLoggers from "@t3tools/provider-core/server/ProviderEventLoggers";
-import * as ProviderMaintenance from "@t3tools/provider-core/server/maintenanceResolver";
+import * as ProviderLatestVersions from "@goat/provider-core/server/ProviderLatestVersions";
+import * as IdAllocator from "@goat/provider-core/server/IdAllocator";
+import * as McpProviderSessions from "@goat/provider-core/server/McpProviderSessions";
+import * as ProviderEventLoggers from "@goat/provider-core/server/ProviderEventLoggers";
+import * as ProviderMaintenance from "@goat/provider-core/server/maintenanceResolver";
 import * as OpenCodeRuntime from "./OpenCodeRuntime.ts";
 import {
   OPENCODE_2_RESPONSES,
@@ -27,7 +27,7 @@ import {
   replayOpenCodeServer,
 } from "./probeResponses.fixture.ts";
 import { OpenCodeDriver, openCodeUpdateFor } from "./driver.ts";
-import * as TestProviderHost from "@t3tools/provider-testing/TestProviderHost";
+import * as TestProviderHost from "@goat/provider-testing/TestProviderHost";
 
 const serverStarts: Array<string> = [];
 const reachedServer = (operation: string) =>
@@ -41,7 +41,6 @@ const reachedServer = (operation: string) =>
       ),
     ),
   );
-// Reports OpenCode 2 from `--version`; any attempt to reach a server is recorded and refused.
 const openCode2Runtime = {
   runOpenCodeCommand: () => Effect.succeed({ stdout: "opencode v2.0.18\n", stderr: "", code: 0 }),
   startOpenCodeServerProcess: () => reachedServer("start"),
@@ -76,7 +75,6 @@ it.layer(layer)("OpenCodeDriver runtime selection", (it) => {
     Effect.gen(function* () {
       serverStarts.length = 0;
       const instance = yield* create({}, noHttp);
-      // Text generation goes to the instance's 2.x server, which this test refuses to start.
       yield* Effect.flip(
         instance.textGeneration.generateThreadTitle({
           cwd: process.cwd(),
@@ -121,7 +119,6 @@ it.layer(layer)("OpenCodeDriver runtime selection", (it) => {
       const hang = HttpClient.make(() => Effect.never);
       const instance = yield* create({ serverUrl: "http://127.0.0.1:9" }, hang);
 
-      // No probe has succeeded yet, and the server never answers: the 1.x default applies.
       const capabilities = yield* instance.orchestrationAdapter
         .getCapabilities()
         .pipe(Effect.forkChild);
@@ -161,7 +158,7 @@ it.effect.skipIf(HostProcess.Platform.defaultValue() === "win32")(
   () =>
     Effect.gen(function* () {
       const root = NodeFS.realpathSync(
-        NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-opencode-update-")),
+        NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "goat-opencode-update-")),
       );
       const v2Prefix = NodePath.join(root, "v2");
       const v1Prefix = NodePath.join(root, "v1");
@@ -182,7 +179,6 @@ it.effect.skipIf(HostProcess.Platform.defaultValue() === "win32")(
         npmGlobalInstall(v1Prefix, ["opencode-ai"], "opencode"),
       );
       assert.strictEqual(v1.update?.args.at(-1), "opencode-ai@latest");
-      // A 1.x install is never offered 2.x's package, or the reverse.
       assert.isNull(
         (yield* resolveUpdate("v2", NodePath.join(v1Prefix, "bin", "opencode"))).update,
       );
@@ -192,7 +188,6 @@ it.effect.skipIf(HostProcess.Platform.defaultValue() === "win32")(
     }),
 );
 
-// The update the driver offers follows the version the binary reports now.
 const versionOutput: { current: string | undefined } = { current: undefined };
 const versionProbes: Array<string> = [];
 const changingRuntime = {
@@ -248,7 +243,7 @@ it.layer(layerUpdate)("OpenCodeDriver updates", (it) => {
     () =>
       Effect.gen(function* () {
         const root = NodeFS.realpathSync(
-          NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-opencode-driver-update-")),
+          NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "goat-opencode-driver-update-")),
         );
         const binaryPath = npmGlobalInstall(NodePath.join(root, "v1"), ["opencode-ai"], "opencode");
         const instance = yield* OpenCodeDriver.create({
@@ -259,7 +254,6 @@ it.layer(layerUpdate)("OpenCodeDriver updates", (it) => {
           config: { ...OpenCodeDriver.defaultConfig(), binaryPath },
         }).pipe(Effect.provideService(HttpClient.HttpClient, noHttp));
 
-        // The version could not be read: which package owns the binary is unknown.
         versionOutput.current = undefined;
         const unknown = yield* instance.snapshot.resolveMaintenance({ fresh: true });
         assert.isNull(unknown.update);
@@ -269,8 +263,6 @@ it.layer(layerUpdate)("OpenCodeDriver updates", (it) => {
         const v1 = yield* instance.snapshot.resolveMaintenance({ fresh: true });
         assert.strictEqual(v1.packageName, "opencode-ai");
 
-        // The same path now reports 2.x (reinstalled in place): a fresh read re-probes
-        // and never offers 1.x's package for it.
         versionOutput.current = "opencode v2.0.18\n";
         const v2 = yield* instance.snapshot.resolveMaintenance({ fresh: true });
         assert.strictEqual(v2.packageName, "@opencode/cli");

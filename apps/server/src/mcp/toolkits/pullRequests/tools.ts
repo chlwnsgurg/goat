@@ -1,12 +1,16 @@
+import { agentSurfaceRegistry } from "@goat/contracts/agentSurface";
+import { agentSurfaceAnnotations } from "../../agentSurface.ts";
 import {
   McpCapabilityUnavailableError,
   OrchestratorMcpFailure,
   PositiveInt,
+  PullRequestReviewGuide,
+  PullRequestReviewGuideRun,
   PullRequestState,
   ThreadPullRequestLinkSource,
   TrimmedNonEmptyString,
   ThreadId,
-} from "@t3tools/contracts";
+} from "@goat/contracts";
 import * as Schema from "effect/Schema";
 import * as Tool from "effect/ai/Tool";
 import * as Toolkit from "effect/ai/Toolkit";
@@ -15,6 +19,7 @@ import * as McpInvocationContext from "../../McpInvocationContext.ts";
 import * as Orchestrator from "../../../orchestration-v2/Orchestrator.ts";
 import * as ThreadManagementService from "../../../orchestration-v2/ThreadManagementService.ts";
 import * as ProjectService from "../../../project/ProjectService.ts";
+import * as PullRequestReviewGuideService from "../../../pullRequest/PullRequestReviewGuideService.ts";
 
 const dependencies = [
   McpInvocationContext.McpInvocationContext,
@@ -23,14 +28,11 @@ const dependencies = [
   ProjectService.ProjectService,
 ];
 
-const REGISTER_EVERY_PR =
-  "Register every pull request you open for this thread, including each layer of a stack, right after creating it.";
+const guideDependencies = [
+  ...dependencies,
+  PullRequestReviewGuideService.PullRequestReviewGuideService,
+];
 
-/**
- * Either the pull request's URL or its repository and number. Both forms
- * resolve to the same host-level identity, so the agent can pass whichever
- * the host CLI handed back.
- */
 export const PullRequestTargetInput = Schema.Struct({
   threadId: Schema.optional(
     ThreadId.annotate({
@@ -162,6 +164,24 @@ export class PullRequestListFailedError extends Schema.TaggedError<PullRequestLi
   }
 }
 
+export class PullRequestProjectNotFoundError extends Schema.TaggedError<PullRequestProjectNotFoundError>()(
+  "PullRequestProjectNotFoundError",
+  { repository: Schema.String },
+) {
+  override get message(): string {
+    return `No project in this environment is a checkout of ${this.repository}, so its pull requests cannot be read here. Add one with goat_project_create.`;
+  }
+}
+
+export class PullRequestGuideFailedError extends Schema.TaggedError<PullRequestGuideFailedError>()(
+  "PullRequestGuideFailedError",
+  { detail: Schema.String, cause: Schema.optional(Schema.Defect()) },
+) {
+  override get message(): string {
+    return this.detail;
+  }
+}
+
 export const PullRequestToolError = Schema.Union([
   OrchestratorMcpFailure,
   McpCapabilityUnavailableError,
@@ -176,6 +196,8 @@ export const PullRequestToolError = Schema.Union([
   PullRequestWatchFailedError,
   PullRequestNotOpenError,
   PullRequestWatchFromSubagentError,
+  PullRequestProjectNotFoundError,
+  PullRequestGuideFailedError,
 ]);
 export type PullRequestToolError = typeof PullRequestToolError.Type;
 
@@ -227,7 +249,7 @@ export const ThreadPullRequestEntry = Schema.Struct({
   stack: Schema.NullOr(
     Schema.Struct({
       kind: Schema.Literals(["native", "derived"]),
-      /** 1-based, bottom of the stack first. */
+      /** 1-based layer, bottom of the stack first. Pull requests built on the same one share it. */
       position: Schema.Int,
       size: Schema.Int,
     }),
@@ -240,42 +262,31 @@ export const ListThreadPullRequestsResult = Schema.Struct({
   chains: Schema.Array(
     Schema.Struct({
       kind: Schema.Literals(["native", "derived"]),
-      /** Bottom to top. */
+      /** Bottom to top; each pull request comes before the ones built on it. */
       numbers: Schema.Array(Schema.Int),
     }),
   ),
 });
 export type ListThreadPullRequestsResult = typeof ListThreadPullRequestsResult.Type;
 
-const LinkPullRequestTool = Tool.make("link_pull_request", {
-  description: `${REGISTER_EVERY_PR} Links a pull request to this thread so GOAT tracks it, shows its status beside the thread, and settles the thread when it merges. Pass the URL, or repository plus number. Linking an already-linked pull request succeeds with alreadyLinked=true.`,
+const LinkPullRequestTool = Tool.make(agentSurfaceRegistry["pull_request.link"].name, {
+  description: agentSurfaceRegistry["pull_request.link"].description,
   parameters: PullRequestTargetInput,
   success: LinkPullRequestResult,
   failure: PullRequestToolError,
   dependencies,
-})
-  .annotate(Tool.Title, "Link pull request to thread")
-  .annotate(Tool.Readonly, false)
-  .annotate(Tool.Destructive, false)
-  .annotate(Tool.Idempotent, true)
-  .annotate(Tool.OpenWorld, false);
+}).annotateMerge(agentSurfaceAnnotations(agentSurfaceRegistry["pull_request.link"]));
 
-const UnlinkPullRequestTool = Tool.make("unlink_pull_request", {
-  description:
-    "Remove a pull request link from this thread, for example after closing a pull request you opened by mistake. Pass the URL, or repository plus number. Unlinking a pull request that is not linked succeeds with wasLinked=false.",
+const UnlinkPullRequestTool = Tool.make(agentSurfaceRegistry["pull_request.unlink"].name, {
+  description: agentSurfaceRegistry["pull_request.unlink"].description,
   parameters: PullRequestTargetInput,
   success: UnlinkPullRequestResult,
   failure: PullRequestToolError,
   dependencies,
-})
-  .annotate(Tool.Title, "Unlink pull request from thread")
-  .annotate(Tool.Readonly, false)
-  .annotate(Tool.Destructive, true)
-  .annotate(Tool.Idempotent, true)
-  .annotate(Tool.OpenWorld, false);
+}).annotateMerge(agentSurfaceAnnotations(agentSurfaceRegistry["pull_request.unlink"]));
 
-const ListThreadPullRequestsTool = Tool.make("list_thread_pull_requests", {
-  description: `List the pull requests linked to a thread (omit threadId for this thread) with their last known host state, and how they chain into stacks (bottom to top). ${REGISTER_EVERY_PR}`,
+const ListThreadPullRequestsTool = Tool.make(agentSurfaceRegistry["pull_request.list"].name, {
+  description: agentSurfaceRegistry["pull_request.list"].description,
   parameters: Schema.Struct({
     threadId: Schema.optional(
       ThreadId.annotate({ description: "Thread to list. Omit for this thread." }),
@@ -284,40 +295,77 @@ const ListThreadPullRequestsTool = Tool.make("list_thread_pull_requests", {
   success: ListThreadPullRequestsResult,
   failure: PullRequestToolError,
   dependencies,
-})
-  .annotate(Tool.Title, "List thread pull requests")
-  .annotate(Tool.Readonly, true)
-  .annotate(Tool.Destructive, false)
-  .annotate(Tool.Idempotent, true)
-  .annotate(Tool.OpenWorld, false);
+}).annotateMerge(agentSurfaceAnnotations(agentSurfaceRegistry["pull_request.list"]));
 
-const WatchPullRequestTool = Tool.make("watch_pull_request", {
-  description:
-    "Have GOAT watch an open pull request for this thread, linking it first if needed. GOAT checks it every two minutes and wakes you with a message when a check fails, the required checks pass, someone else comments or reviews, or the branch starts to conflict with its base. Use this to monitor or babysit a pull request instead of polling, sleeping, or running a watcher. Only comments posted after this call wake you, so handle the existing ones first, then end your turn. A wake is news, not a merge decision: check readiness yourself before merging. While GOAT watches, the thread stays in the user's Working list, not their inbox. When you hand the work back to the user, call unwatch_pull_request first so the thread returns to their inbox. Watching ends when the pull request merges or closes, when its thread settles or is archived, when GOAT fails to read it 8 times in a row (a host rate limit only delays it), when the user stops this thread, or when you call unwatch_pull_request. Unsettle the thread before starting a new watch. A subagent cannot watch: its parent thread owns the pull request.",
+const WatchPullRequestTool = Tool.make(agentSurfaceRegistry["pull_request.watch"].name, {
+  description: agentSurfaceRegistry["pull_request.watch"].description,
   parameters: PullRequestTargetInput,
   success: WatchPullRequestResult,
   failure: PullRequestToolError,
   dependencies,
-})
-  .annotate(Tool.Title, "Watch pull request")
-  .annotate(Tool.Readonly, false)
-  .annotate(Tool.Destructive, false)
-  .annotate(Tool.Idempotent, true)
-  .annotate(Tool.OpenWorld, false);
+}).annotateMerge(agentSurfaceAnnotations(agentSurfaceRegistry["pull_request.watch"]));
 
-const UnwatchPullRequestTool = Tool.make("unwatch_pull_request", {
-  description:
-    "Stop GOAT from watching a pull request for this thread. The pull request stays linked. Pass the URL, or repository plus number.",
+const UnwatchPullRequestTool = Tool.make(agentSurfaceRegistry["pull_request.unwatch"].name, {
+  description: agentSurfaceRegistry["pull_request.unwatch"].description,
   parameters: PullRequestTargetInput,
   success: WatchPullRequestResult,
   failure: PullRequestToolError,
   dependencies,
-})
-  .annotate(Tool.Title, "Stop watching pull request")
-  .annotate(Tool.Readonly, false)
-  .annotate(Tool.Destructive, false)
-  .annotate(Tool.Idempotent, true)
-  .annotate(Tool.OpenWorld, false);
+}).annotateMerge(agentSurfaceAnnotations(agentSurfaceRegistry["pull_request.unwatch"]));
+
+const GuideTarget = Schema.Struct({
+  url: PullRequestTargetInput.fields.url,
+  repository: PullRequestTargetInput.fields.repository,
+  number: PullRequestTargetInput.fields.number,
+  host: PullRequestTargetInput.fields.host,
+});
+
+const GuideOutcome = Schema.Struct({
+  ...PullRequestIdentity,
+  outcome: Schema.Literals(["started", "running", "failed"]).annotate({
+    description:
+      "started: a run began. running: one was already going for this head and the call joined it. failed: this pull request could not be guided; see detail.",
+  }),
+  detail: Schema.NullOr(Schema.String),
+});
+
+export const WritePullRequestGuidesResult = Schema.Struct({
+  guides: Schema.Array(GuideOutcome),
+});
+export type WritePullRequestGuidesResult = typeof WritePullRequestGuidesResult.Type;
+
+export const ReadPullRequestGuideResult = Schema.Struct({
+  ...PullRequestIdentity,
+  guide: Schema.NullOr(PullRequestReviewGuide),
+  run: Schema.NullOr(PullRequestReviewGuideRun),
+  currentHeadSha: Schema.NullOr(Schema.String),
+  stale: Schema.Boolean.annotate({
+    description:
+      "True when the guide was written for an earlier head than the pull request has now.",
+  }),
+});
+export type ReadPullRequestGuideResult = typeof ReadPullRequestGuideResult.Type;
+
+const WritePullRequestGuidesTool = Tool.make(
+  agentSurfaceRegistry["pull_request_guide.update"].name,
+  {
+    description: agentSurfaceRegistry["pull_request_guide.update"].description,
+    parameters: Schema.Struct({
+      pullRequests: Schema.Array(GuideTarget).check(Schema.isMinLength(1), Schema.isMaxLength(20)),
+    }),
+    success: WritePullRequestGuidesResult,
+    failure: PullRequestToolError,
+    dependencies: guideDependencies,
+  },
+).annotateMerge(agentSurfaceAnnotations(agentSurfaceRegistry["pull_request_guide.update"]));
+
+const ReadPullRequestGuideTool = Tool.make(agentSurfaceRegistry["pull_request_guide.read"].name, {
+  description: agentSurfaceRegistry["pull_request_guide.read"].description,
+  parameters: GuideTarget,
+  success: ReadPullRequestGuideResult,
+  failure: PullRequestToolError,
+  dependencies: guideDependencies,
+}).annotateMerge(agentSurfaceAnnotations(agentSurfaceRegistry["pull_request_guide.read"]));
 
 export const PullRequestsToolkit = Toolkit.make(
   LinkPullRequestTool,
@@ -325,4 +373,6 @@ export const PullRequestsToolkit = Toolkit.make(
   ListThreadPullRequestsTool,
   WatchPullRequestTool,
   UnwatchPullRequestTool,
+  WritePullRequestGuidesTool,
+  ReadPullRequestGuideTool,
 );

@@ -1,15 +1,18 @@
+import { isGoatConnectEnabled } from "@goat/shared/goatConnect";
+import { ListChoiceRow } from "../../components/ui/ListChoiceRow";
+import * as Dialog from "../../components/ui/Dialog";
 import { useAtomValue } from "@effect/atom-react";
 import {
   connectionCatalogDisplayUrl,
   gitHubRoutingConnectionKey,
   gitHubRoutingPermissionFor,
   type GitHubRoutingPermission,
-} from "@t3tools/client-runtime/connection";
+} from "@goat/client-runtime/connection";
 import { useState } from "react";
-import { Alert, Pressable, View } from "react-native";
+import { Pressable, View } from "react-native";
 
-import { AppText as Text } from "../../components/AppText";
-import { SymbolView } from "../../components/AppSymbol";
+import { AppText as Text } from "../../components/ui/AppText";
+import { SymbolView } from "../../components/ui/AppSymbol";
 import { environmentCatalog } from "../../connection/catalog";
 import { useAtomCommand } from "../../state/use-atom-command";
 import { SettingsSection } from "../settings/components/SettingsSection";
@@ -57,11 +60,12 @@ export function GitHubRoutingSettings() {
                 onPress={() => setExpanded(expanded === environmentId ? null : environmentId)}
               >
                 <View className="min-w-0 flex-1 gap-0.5">
-                  <Text className="text-base font-t3-bold text-foreground">
+                  <Text className="text-base font-goat-bold text-foreground">
                     {entry.target.label}
                   </Text>
                   <Text className="text-xs text-foreground-muted" numberOfLines={1}>
-                    {connectionCatalogDisplayUrl(entry) ?? "T3 Connect"}
+                    {connectionCatalogDisplayUrl(entry) ??
+                      (isGoatConnectEnabled() ? "T3 Connect" : "Saved environment")}
                   </Text>
                 </View>
                 <Text className="text-sm text-foreground-muted">
@@ -75,39 +79,24 @@ export function GitHubRoutingSettings() {
               </Pressable>
               {expanded === environmentId
                 ? options.map((option) => (
-                    <Pressable
+                    <ListChoiceRow
                       key={option.value}
-                      accessibilityRole="radio"
-                      accessibilityState={{ checked: selected === option.value, disabled }}
+                      label={option.label}
+                      description={option.description}
+                      selected={selected === option.value}
                       disabled={disabled}
-                      className="flex-row items-center gap-4 p-4 disabled:opacity-50"
                       onPress={() => {
                         setSaving(true);
                         void update({ environmentId, permission: option.value }).then((result) => {
                           setSaving(false);
                           if (result._tag === "Failure")
-                            Alert.alert(
+                            Dialog.alert(
                               "Could not save GitHub routing permission",
                               "Try again before leaving this screen.",
                             );
                         });
                       }}
-                    >
-                      <View className="min-w-0 flex-1 gap-1">
-                        <Text className="text-base text-foreground">{option.label}</Text>
-                        <Text className="text-sm leading-normal text-foreground-muted">
-                          {option.description}
-                        </Text>
-                      </View>
-                      {selected === option.value ? (
-                        <SymbolView
-                          name="checkmark"
-                          size={18}
-                          tintColorClassName="accent-icon"
-                          weight="semibold"
-                        />
-                      ) : null}
-                    </Pressable>
+                    />
                   ))
                 : null}
             </View>

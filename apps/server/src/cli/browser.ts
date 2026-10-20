@@ -1,16 +1,4 @@
-/**
- * `goat browser setup` - prepares a Linux host for T3's headless browser, which
- * server browser tabs and HTML render previews share. It is the fix every
- * browser host error names, so it does the whole job in one run:
- *
- * - installs the AppArmor profile that lets Chrome's sandbox run where the host
- *   restricts unprivileged user namespaces (Ubuntu 23.10+), and
- * - installs the Debian packages for any libraries the browser cannot load.
- *
- * Both need root. Without it, the command prints what it would change and the
- * `sudo` line to run. It is safe to run again; it skips what is already done.
- */
-import * as HostProcess from "@t3tools/shared/HostProcess";
+import * as HostProcess from "@goat/shared/HostProcess";
 import * as Console from "effect/Console";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -23,6 +11,7 @@ import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 
 import * as PreviewBrowserHost from "../preview/PreviewBrowserHost.ts";
 import { resolveBaseDir } from "../os-jank.ts";
+import { resolveGoatHome } from "@goat/shared/goatHome";
 import { baseDirFlag } from "./config.ts";
 import { resolveRootCliCommand } from "./invocation.ts";
 
@@ -35,7 +24,6 @@ export class BrowserSetupStepError extends Schema.TaggedError<BrowserSetupStepEr
   }
 }
 
-/** Runs one setup command, streaming its output, and fails with its exit code. */
 const runStep = Effect.fn("browserSetup.runStep")(function* (
   step: string,
   command: string,
@@ -53,14 +41,14 @@ const runStep = Effect.fn("browserSetup.runStep")(function* (
 });
 
 /**
- * The T3 home to check. Under `sudo` the process home is root's, so an
- * unspecified home falls back to the invoking user's `~/.t3`.
+ * The GOAT home to check. Under `sudo` the process home is root's, so an
+ * unspecified home falls back to the invoking user's home.
  */
 export const setupBaseDir = Effect.fn("browserSetup.baseDir")(function* (
   explicit: Option.Option<string>,
 ) {
   const env = yield* HostProcess.Environment;
-  const raw = Option.getOrUndefined(explicit) ?? env.T3CODE_HOME;
+  const raw = Option.getOrUndefined(explicit) ?? env.GOAT_HOME;
   if (raw !== undefined || env.SUDO_USER === undefined) return yield* resolveBaseDir(raw);
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
   const entry = yield* spawner
@@ -69,11 +57,9 @@ export const setupBaseDir = Effect.fn("browserSetup.baseDir")(function* (
     )
     .pipe(Effect.orElseSucceed(() => ""));
   const home = entry.trim().split(":")[5];
-  const path = yield* Path.Path;
-  return home ? path.join(home, ".t3") : yield* resolveBaseDir(undefined);
+  return home ? yield* resolveGoatHome(home, "userdata") : yield* resolveBaseDir(undefined);
 });
 
-/** Whether apt has an installable candidate for `name`. */
 const aptOffers = Effect.fn("browserSetup.aptOffers")(function* (name: string) {
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
   const policy = yield* spawner
@@ -83,7 +69,6 @@ const aptOffers = Effect.fn("browserSetup.aptOffers")(function* (name: string) {
   return candidate !== undefined && candidate !== "(none)";
 });
 
-/** The installed browser in this T3 home, if any, to check its libraries. */
 const installedBrowser = Effect.fn("browserSetup.installedBrowser")(function* (baseDir: string) {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
@@ -101,9 +86,31 @@ const installedBrowser = Effect.fn("browserSetup.installedBrowser")(function* (b
   return Option.none<string>();
 });
 
+/**
+ * Chrome starts without fonts, but pages then render no text. Without
+ * fontconfig there is no `fc-match` at all, which counts as no font.
+ */
+const fontAvailable = Effect.gen(function* () {
+  const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+  const font = yield* spawner
+    .string(
+      ChildProcess.make("fc-match", ["--format=%{file}", "sans-serif"], {
+        stdin: "ignore",
+        stderr: "ignore",
+      }),
+    )
+    .pipe(
+      Effect.timeout("5 seconds"),
+      Effect.orElseSucceed(() => ""),
+    );
+  return font.trim() !== "";
+}).pipe(Effect.withSpan("browserSetup.fontAvailable"));
+
+const FONT_PACKAGES = ["fontconfig", "fonts-liberation"];
+
 const browserSetupCommand = Command.make("setup", { baseDir: baseDirFlag }).pipe(
   Command.withDescription(
-    "Set up this Linux host for GOAT's browser: allow Chrome's sandbox and install its libraries.",
+    "Set up this Linux host for GOAT's browser: allow Chrome's sandbox and install its libraries and fonts.",
   ),
   Command.withHandler(({ baseDir }) =>
     Effect.gen(function* () {
@@ -113,19 +120,33 @@ const browserSetupCommand = Command.make("setup", { baseDir: baseDirFlag }).pipe
       const fs = yield* FileSystem.FileSystem;
       const isRoot = (yield* HostProcess.UserId) === 0;
       const setupCommand = yield* resolveRootCliCommand(PreviewBrowserHost.SETUP_SUBCOMMAND);
+      // Root, unless sudo came from another user, is likely the server's own account.
+      const env = yield* HostProcess.Environment;
+      const rootWarning =
+        isRoot && (env.SUDO_USER ?? "root") === "root" && !PreviewBrowserHost.sandboxDisabled(env)
+          ? new PreviewBrowserHost.PreviewBrowserRootError().message
+          : undefined;
 
       const needsProfile = yield* PreviewBrowserHost.sandboxBlocked;
+      // Only root can move a pre-rename profile; without root it keeps working as is.
+      const replacesLegacyProfile =
+        isRoot &&
+        (yield* fs
+          .exists(PreviewBrowserHost.LEGACY_APPARMOR_PROFILE_PATH)
+          .pipe(Effect.orElseSucceed(() => false)));
       const browser = yield* installedBrowser(yield* setupBaseDir(baseDir));
       const missing = Option.isSome(browser)
         ? yield* PreviewBrowserHost.missingLibraries(browser.value)
         : [];
+      const needsFonts = !(yield* fontAvailable);
       const hasApt = yield* fs.exists("/usr/bin/apt-get").pipe(Effect.orElseSucceed(() => false));
 
-      if (!needsProfile && missing.length === 0) {
+      if (!needsProfile && !replacesLegacyProfile && missing.length === 0 && !needsFonts) {
         return yield* Console.log(
-          Option.isSome(browser)
-            ? "This host is ready for GOAT's browser."
-            : "Chrome's sandbox is allowed here. GOAT's browser installs on first use; if it then reports missing libraries, run this again.",
+          rootWarning ??
+            (Option.isSome(browser)
+              ? "This host is ready for GOAT's browser."
+              : "Chrome's sandbox is allowed here. GOAT's browser installs on first use; if it then reports missing libraries, run this again."),
         );
       }
 
@@ -140,10 +161,32 @@ const browserSetupCommand = Command.make("setup", { baseDir: baseDirFlag }).pipe
             `GOAT's browser is missing ${missing.join(", ")}; setup installs them.`,
           );
         }
+        if (needsFonts) {
+          yield* Console.log(
+            "GOAT's browser needs fontconfig and system fonts; setup installs them.",
+          );
+        }
         return yield* Console.log(`\nThis needs root. Run:\n\n  ${setupCommand}\n`);
       }
 
-      if (needsProfile) {
+      if (replacesLegacyProfile) {
+        // Unload first: two loaded profiles with one attachment conflict.
+        yield* runStep("unload the previous AppArmor profile", "apparmor_parser", [
+          "-R",
+          PreviewBrowserHost.LEGACY_APPARMOR_PROFILE_PATH,
+        ]);
+        yield* fs.remove(PreviewBrowserHost.LEGACY_APPARMOR_PROFILE_PATH).pipe(
+          Effect.mapError(
+            (cause) =>
+              new BrowserSetupStepError({
+                step: `remove ${PreviewBrowserHost.LEGACY_APPARMOR_PROFILE_PATH}`,
+                detail: cause.message,
+              }),
+          ),
+        );
+      }
+
+      if (needsProfile || replacesLegacyProfile) {
         yield* fs
           .writeFileString(
             PreviewBrowserHost.APPARMOR_PROFILE_PATH,
@@ -165,13 +208,24 @@ const browserSetupCommand = Command.make("setup", { baseDir: baseDirFlag }).pipe
         yield* Console.log("Allowed Chrome's sandbox for GOAT's browser.");
       }
 
-      if (missing.length > 0) {
-        if (!hasApt) {
-          return yield* Console.log(
+      if ((missing.length > 0 || needsFonts) && !hasApt) {
+        if (missing.length > 0) {
+          yield* Console.log(
             `GOAT's browser is missing ${missing.join(", ")}. Install them with your package manager, then run this again.`,
           );
         }
+        if (needsFonts) {
+          yield* Console.log(
+            "GOAT's browser needs fontconfig and system fonts. Install them with your package manager, then run this again.",
+          );
+        }
+        return;
+      }
+      if (missing.length > 0 || needsFonts) {
         yield* runStep("refresh the package lists", "apt-get", ["update"]);
+      }
+
+      if (missing.length > 0) {
         const packages = yield* Effect.forEach(PreviewBrowserHost.DEBIAN_PACKAGES, (names) =>
           Effect.findFirst(names, aptOffers).pipe(Effect.map(Option.getOrElse(() => names[0]!))),
         );
@@ -184,7 +238,24 @@ const browserSetupCommand = Command.make("setup", { baseDir: baseDirFlag }).pipe
         yield* Console.log("Installed the browser's libraries.");
       }
 
-      yield* Console.log("This host is ready for GOAT's browser.");
+      if (needsFonts) {
+        yield* runStep("install the browser's fonts", "apt-get", [
+          "install",
+          "-y",
+          "--no-install-recommends",
+          ...FONT_PACKAGES,
+        ]);
+        if (!(yield* fontAvailable)) {
+          return yield* Console.log(
+            "Font packages are installed, but Fontconfig still finds no system font. Check its configuration and run setup again.",
+          );
+        }
+        yield* Console.log(
+          "Installed the browser's fonts. Restart the GOAT server if browser tabs were already open.",
+        );
+      }
+
+      yield* Console.log(rootWarning ?? "This host is ready for GOAT's browser.");
     }),
   ),
 );

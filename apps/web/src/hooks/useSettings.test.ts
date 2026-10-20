@@ -1,9 +1,5 @@
-import {
-  DEFAULT_SERVER_SETTINGS,
-  ProviderDriverKind,
-  ProviderInstanceId,
-} from "@t3tools/contracts";
-import { DEFAULT_CLIENT_SETTINGS, type ClientSettings } from "@t3tools/contracts/settings";
+import { DEFAULT_SERVER_SETTINGS, ProviderDriverKind, ProviderInstanceId } from "@goat/contracts";
+import { DEFAULT_CLIENT_SETTINGS, type ClientSettings } from "@goat/contracts/settings";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 const persistenceMocks = vi.hoisted(() => ({
@@ -23,9 +19,11 @@ import {
   mergeEnvironmentSettings,
   persistClientSettingsPatch,
   persistClientSettingsUpdate,
+  prepareModelPreferencesPatch,
   resolveEnvironmentIdentificationMode,
-  resolveSidebarViewIsProjects,
 } from "./useSettings";
+import { resolveSidebarViewIsProjects } from "../components/Sidebar.logic";
+import { applyServerSettingsPatch } from "@goat/shared/serverSettings";
 
 beforeEach(() => {
   persistenceMocks.getClientSettings.mockReset().mockResolvedValue(null);
@@ -45,6 +43,44 @@ describe("client settings hydration", () => {
   };
   const onboardingCompletedAt = "2026-09-05T12:00:00.000Z";
   const complete = (current: ClientSettings) => ({ ...current, onboardingCompletedAt });
+
+  it("waits for saved model preferences before applying the first server edit", async () => {
+    const provider = ProviderInstanceId.make("codex_work");
+    let finishRead!: (settings: ClientSettings) => void;
+    persistenceMocks.getClientSettings.mockReturnValueOnce(
+      new Promise((resolve) => {
+        finishRead = resolve;
+      }),
+    );
+    const patch = prepareModelPreferencesPatch(DEFAULT_SERVER_SETTINGS, {
+      setModelFavorites: [{ provider, model: "new", favorite: true }],
+      setModelsHidden: [{ provider, model: "new", hidden: true }],
+    });
+    expect(getClientSettings()).toBe(DEFAULT_CLIENT_SETTINGS);
+    finishRead({
+      ...savedSettings,
+      providerModelPreferences: {
+        [provider]: { hiddenModels: ["saved-hidden"], modelOrder: ["saved-order"] },
+      },
+    });
+    const edited = applyServerSettingsPatch(DEFAULT_SERVER_SETTINGS, await patch);
+    expect(edited.favorites).toEqual([...savedSettings.favorites, { provider, model: "new" }]);
+    expect(edited.providerModelPreferences?.[provider]).toEqual({
+      hiddenModels: ["saved-hidden", "new"],
+      modelOrder: ["saved-order"],
+    });
+  });
+
+  it("does not prepare a model preference write after a failed legacy read", async () => {
+    const failure = new Error("storage unavailable");
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    persistenceMocks.getClientSettings.mockRejectedValueOnce(failure);
+    await expect(
+      prepareModelPreferencesPatch(DEFAULT_SERVER_SETTINGS, {
+        setProviderModelOrder: { provider: ProviderInstanceId.make("codex_work"), modelOrder: [] },
+      }),
+    ).rejects.toBe(failure);
+  });
 
   it("rejects completion after a failed read and preserves saved preferences on retry", async () => {
     const failure = new Error("storage unavailable");
@@ -102,8 +138,11 @@ describe("client settings hydration", () => {
     persistenceMocks.getClientSettings.mockRejectedValue(failure);
 
     const hydration = ensureClientSettingsHydrated();
-    persistClientSettingsPatch({ wordWrap: false });
-    await expect(hydration).rejects.toBe(failure);
+    const patch = persistClientSettingsPatch({ wordWrap: false });
+    await Promise.all([
+      expect(hydration).rejects.toBe(failure),
+      expect(patch).rejects.toBe(failure),
+    ]);
     expect(persistenceMocks.setClientSettings).not.toHaveBeenCalled();
 
     persistenceMocks.getClientSettings.mockResolvedValue(savedSettings);
@@ -144,15 +183,22 @@ describe("client settings hydration", () => {
       });
 
     const completion = persistClientSettingsUpdate(complete, persist);
-    persistClientSettingsPatch({ wordWrap: false }, persist);
+    const olderPatch = persistClientSettingsPatch({ wordWrap: false }, persist);
+    expect(getClientSettings()).toBe(DEFAULT_CLIENT_SETTINGS);
     finishRead(savedSettings);
     await completionWriteStarted;
-    persistClientSettingsPatch({ wordWrap: true }, persist);
+    const newerPatch = persistClientSettingsPatch({ wordWrap: true }, persist);
+    expect(getClientSettings().wordWrap).toBe(true);
     const finalWrite = persistClientSettingsUpdate((current) => current, persist);
 
     finishCompletionWrite();
-    await completion;
-    await finalWrite;
+    await Promise.all([completion, olderPatch, newerPatch, finalWrite]);
+    expect(persist.mock.calls.map(([settings]) => settings.wordWrap)).toEqual([
+      true,
+      false,
+      true,
+      true,
+    ]);
 
     const expected = { ...savedSettings, onboardingCompletedAt, wordWrap: true };
     expect(getClientSettings()).toEqual(expected);
@@ -161,6 +207,73 @@ describe("client settings hydration", () => {
 });
 
 describe("persistClientSettingsPatch", () => {
+  it("publishes immediately and rolls back only failed keys before the next write", async () => {
+    __setClientSettingsForTests(DEFAULT_CLIENT_SETTINGS);
+    const failure = new Error("disk full");
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    let rejectWrite!: (error: Error) => void;
+    persistenceMocks.setClientSettings.mockReturnValueOnce(
+      new Promise((_, reject) => {
+        rejectWrite = reject;
+      }),
+    );
+
+    const failed = persistClientSettingsPatch({ wordWrap: false });
+    expect(getClientSettings().wordWrap).toBe(false);
+    await Promise.resolve();
+    const later = persistClientSettingsPatch({ snapShotFlash: false });
+    expect(getClientSettings()).toMatchObject({ wordWrap: false, snapShotFlash: false });
+    expect(persistenceMocks.setClientSettings).toHaveBeenCalledTimes(1);
+
+    const rejection = expect(failed).rejects.toBe(failure);
+    rejectWrite(failure);
+    await rejection;
+    await later;
+    expect(getClientSettings()).toEqual({ ...DEFAULT_CLIENT_SETTINGS, snapShotFlash: false });
+    expect(persistenceMocks.setClientSettings).toHaveBeenLastCalledWith(getClientSettings());
+  });
+
+  it("does not roll back a newer value for a key from a failed patch", async () => {
+    __setClientSettingsForTests(DEFAULT_CLIENT_SETTINGS);
+    const failure = new Error("disk full");
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    let rejectWrite!: (error: Error) => void;
+    persistenceMocks.setClientSettings.mockReturnValueOnce(
+      new Promise((_, reject) => {
+        rejectWrite = reject;
+      }),
+    );
+    const failed = persistClientSettingsPatch({ fontSizeTerminal: 16, wordWrap: false });
+    await Promise.resolve();
+    const later = persistClientSettingsPatch({ fontSizeTerminal: 18 });
+    expect(getClientSettings().fontSizeTerminal).toBe(18);
+    const rejection = expect(failed).rejects.toBe(failure);
+    rejectWrite(failure);
+    await rejection;
+    await later;
+    expect(getClientSettings()).toEqual({ ...DEFAULT_CLIENT_SETTINGS, fontSizeTerminal: 18 });
+    expect(persistenceMocks.setClientSettings).toHaveBeenLastCalledWith(getClientSettings());
+  });
+
+  it("rejects failed patches, keeps the saved snapshot, and continues queued writes", async () => {
+    __setClientSettingsForTests(DEFAULT_CLIENT_SETTINGS);
+    const failure = new Error("disk full");
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    persistenceMocks.setClientSettings.mockRejectedValueOnce(failure);
+
+    const failed = persistClientSettingsPatch({ wordWrap: false });
+    const later = persistClientSettingsPatch({ snapShotFlash: false });
+    await expect(failed).rejects.toBe(failure);
+    await later;
+    expect(getClientSettings()).toEqual({ ...DEFAULT_CLIENT_SETTINGS, snapShotFlash: false });
+    expect(persistenceMocks.setClientSettings).toHaveBeenLastCalledWith({
+      ...DEFAULT_CLIENT_SETTINGS,
+      snapShotFlash: false,
+    });
+    await persistClientSettingsPatch({ wordWrap: false });
+    expect(getClientSettings()).toMatchObject({ wordWrap: false, snapShotFlash: false });
+  });
+
   it("waits for settings writes in request order", async () => {
     __setClientSettingsForTests(DEFAULT_CLIENT_SETTINGS);
     let finishFirst!: () => void;
@@ -228,7 +341,7 @@ describe("persistClientSettingsUpdate", () => {
     expect(getClientSettings()).toBe(DEFAULT_CLIENT_SETTINGS);
   });
 
-  it("preserves an optimistic write made while an awaited update persists", async () => {
+  it("preserves a patch queued while an awaited update persists", async () => {
     let finishFirstPersistence!: () => void;
     let durableSettings = DEFAULT_CLIENT_SETTINGS;
     const firstPersistence = new Promise<void>((resolve) => {
@@ -270,7 +383,7 @@ describe("persistClientSettingsUpdate", () => {
     expect(getClientSettings().browserProfiles).toContainEqual(importedProfile);
   });
 
-  it("orders an awaited update after an older optimistic write", async () => {
+  it("orders an awaited update after an older patch", async () => {
     let finishOldWrite!: () => void;
     let durableSettings = DEFAULT_CLIENT_SETTINGS;
     const oldWrite = new Promise<void>((resolve) => {
@@ -329,44 +442,19 @@ describe("persistClientSettingsUpdate", () => {
 });
 
 describe("resolveEnvironmentIdentificationMode", () => {
-  it("keeps identification hidden until client settings hydrate", () => {
-    expect(resolveEnvironmentIdentificationMode({ mode: "artwork", settingsHydrated: false })).toBe(
-      "none",
-    );
-    expect(resolveEnvironmentIdentificationMode({ mode: "pill", settingsHydrated: true })).toBe(
-      "pill",
-    );
-  });
+  it.each(["artwork", "pill", "none"] as const)(
+    "keeps %s hidden until client settings hydrate",
+    (mode) => {
+      expect(resolveEnvironmentIdentificationMode({ mode, settingsHydrated: false })).toBe("none");
+    },
+  );
 
-  it("uses a pill instead of artwork with a palette theme", () => {
-    expect(
-      resolveEnvironmentIdentificationMode({
-        mode: "artwork",
-        settingsHydrated: true,
-        paletteThemeActive: true,
-      }),
-    ).toBe("pill");
-  });
-
-  it("respects none with a palette theme", () => {
-    expect(
-      resolveEnvironmentIdentificationMode({
-        mode: "none",
-        settingsHydrated: true,
-        paletteThemeActive: true,
-      }),
-    ).toBe("none");
-  });
-
-  it("keeps artwork when the palette theme opts into it", () => {
-    expect(
-      resolveEnvironmentIdentificationMode({
-        mode: "artwork",
-        settingsHydrated: true,
-        paletteThemeActive: true,
-        paletteThemeAllowsArtwork: true,
-      }),
-    ).toBe("artwork");
+  it.each([
+    ["artwork", "pill"],
+    ["pill", "pill"],
+    ["none", "none"],
+  ] as const)("resolves stored %s to %s", (mode, expected) => {
+    expect(resolveEnvironmentIdentificationMode({ mode, settingsHydrated: true })).toBe(expected);
   });
 });
 
@@ -454,30 +542,72 @@ describe("onboarding completion persistence", () => {
 });
 
 describe("Projects view hydration policy", () => {
-  it.each([true, false])("uses Projects before hydration even when the snapshot is %s", (value) => {
-    expect(resolveSidebarViewIsProjects({ hydrated: false, value })).toBe(true);
+  it("holds the sidebar until settings resolve when no view was saved", () => {
+    expect(
+      resolveSidebarViewIsProjects({ status: "pending", value: true, synchronousValue: null }),
+    ).toBeNull();
+    expect(
+      resolveSidebarViewIsProjects({ status: "retrying", value: false, synchronousValue: null }),
+    ).toBeNull();
   });
+
+  it.each([true, false])("paints a synchronous last view of %s before hydration", (value) => {
+    expect(
+      resolveSidebarViewIsProjects({ status: "pending", value: !value, synchronousValue: value }),
+    ).toBe(value);
+  });
+
   it.each([true, false])("preserves a hydrated choice of %s", (value) => {
-    expect(resolveSidebarViewIsProjects({ hydrated: true, value })).toBe(value);
+    expect(resolveSidebarViewIsProjects({ status: "ready", value, synchronousValue: !value })).toBe(
+      value,
+    );
   });
+
   it("uses Projects with no saved settings", async () => {
     await ensureClientSettingsHydrated();
     expect(
       resolveSidebarViewIsProjects({
-        hydrated: true,
+        status: "ready",
         value: getClientSettings().legacySidebarEnabled,
+        synchronousValue: null,
       }),
     ).toBe(true);
   });
-  it("uses Projects after hydration fails", async () => {
+
+  it("uses Projects after hydration fails and keeps a synchronous Activity choice", async () => {
     vi.spyOn(console, "error").mockImplementation(() => undefined);
     persistenceMocks.getClientSettings.mockRejectedValueOnce(new Error("read failed"));
     await expect(ensureClientSettingsHydrated()).rejects.toThrow("read failed");
     expect(
       resolveSidebarViewIsProjects({
-        hydrated: false,
+        status: "failed",
         value: getClientSettings().legacySidebarEnabled,
+        synchronousValue: null,
       }),
     ).toBe(true);
+    expect(
+      resolveSidebarViewIsProjects({
+        status: "failed",
+        value: true,
+        synchronousValue: false,
+      }),
+    ).toBe(false);
   });
+});
+
+it("uses the environment's model preferences after migration, including empty lists", () => {
+  const client = {
+    ...DEFAULT_CLIENT_SETTINGS,
+    favorites: [{ provider: ProviderInstanceId.make("codex_work"), model: "old" }],
+    providerModelPreferences: { codex_work: { hiddenModels: ["old"], modelOrder: [] } },
+  };
+  expect(mergeEnvironmentSettings(DEFAULT_SERVER_SETTINGS, client).favorites).toEqual(
+    client.favorites,
+  );
+  const merged = mergeEnvironmentSettings(
+    { ...DEFAULT_SERVER_SETTINGS, favorites: [], providerModelPreferences: {} },
+    client,
+  );
+  expect(merged.favorites).toEqual([]);
+  expect(merged.providerModelPreferences).toEqual({});
 });

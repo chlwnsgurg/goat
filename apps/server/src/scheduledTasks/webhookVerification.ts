@@ -1,7 +1,7 @@
 // @effect-diagnostics-next-line nodeBuiltinImport:off -- Effect's Crypto has no createHmac or timingSafeEqual.
 import * as NodeCrypto from "node:crypto";
 
-import type { ScheduledTaskWebhookSignature } from "@t3tools/contracts";
+import type { ScheduledTaskWebhookSignature } from "@goat/contracts";
 
 /** Constant-time string comparison that does not leak length through timing. */
 export function constantTimeEquals(a: string, b: string): boolean {
@@ -10,11 +10,6 @@ export function constantTimeEquals(a: string, b: string): boolean {
   return NodeCrypto.timingSafeEqual(digestA, digestB);
 }
 
-/**
- * Checks an HMAC-SHA256 signature over the raw body bytes, as GitHub, Linear,
- * Shopify and most other signing senders do. The header value is
- * `<prefix><digest>`, with the digest hex- or base64-encoded.
- */
 export function verifyWebhookSignature(input: {
   readonly signature: ScheduledTaskWebhookSignature;
   readonly secret: string;

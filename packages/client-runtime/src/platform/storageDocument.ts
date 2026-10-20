@@ -1,4 +1,4 @@
-import { EnvironmentId } from "@t3tools/contracts";
+import { EnvironmentId } from "@goat/contracts";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 
@@ -19,14 +19,12 @@ export type StoredConnectionCredential = typeof StoredConnectionCredential.Type;
 
 export const ConnectionCatalogDocument = Schema.Struct({
   schemaVersion: Schema.Literal(1),
+  hub: Schema.optionalKey(Schema.Struct({ environmentId: EnvironmentId })),
   targets: Schema.Array(PersistedConnectionTarget),
   profiles: Schema.Array(ConnectionProfile),
   credentials: Schema.Array(StoredConnectionCredential),
   remoteDpopTokens: Schema.Array(TokenStore.RemoteDpopAccessToken),
   githubRoutingPermissions: Schema.optionalKey(Schema.Array(StoredGitHubRoutingPermission)),
-  // Saved environments the user switched off. They stay registered with their
-  // credentials and cache but never connect until switched back on. Older
-  // documents predate the key, so decoding defaults it to none.
   disabledEnvironmentIds: Schema.Array(EnvironmentId).pipe(
     Schema.withDecodingDefaultKey(Effect.succeed([])),
   ),
@@ -41,6 +39,21 @@ export const EMPTY_CONNECTION_CATALOG_DOCUMENT: ConnectionCatalogDocument = Obje
   remoteDpopTokens: [],
   disabledEnvironmentIds: [],
 });
+
+export function readCatalogHub(document: ConnectionCatalogDocument): EnvironmentId | null {
+  return document.hub?.environmentId ?? null;
+}
+
+export function setCatalogHub(
+  document: ConnectionCatalogDocument,
+  environmentId: EnvironmentId | null,
+): ConnectionCatalogDocument {
+  if (environmentId === null) {
+    const { hub: _hub, ...rest } = document;
+    return rest;
+  }
+  return { ...document, hub: { environmentId } };
+}
 
 export function replaceCatalogValue<A>(
   values: ReadonlyArray<A>,
@@ -57,6 +70,32 @@ export function removeCatalogValue<A>(
   removedKey: string,
 ): ReadonlyArray<A> {
   return values.filter((value) => key(value) !== removedKey);
+}
+
+export function putConnectionCredentialInCatalog(
+  document: ConnectionCatalogDocument,
+  connectionId: string,
+  credential: StoredConnectionCredential["credential"],
+  expectedToken?: string | null,
+): ConnectionCatalogDocument {
+  const current = document.credentials.find((value) => value.connectionId === connectionId);
+  if (expectedToken !== undefined && (current?.credential.token ?? null) !== expectedToken)
+    return document;
+  // A reconnect can finish after another window forgot this SSH route.
+  if (
+    connectionId.startsWith("ssh:") &&
+    !document.targets.some(
+      (target) => target._tag === "SshConnectionTarget" && target.connectionId === connectionId,
+    )
+  )
+    return document;
+  return {
+    ...document,
+    credentials: replaceCatalogValue(document.credentials, (value) => value.connectionId, {
+      connectionId,
+      credential,
+    }),
+  };
 }
 
 function connectionIdOf(target: ConnectionTarget): string | null {
@@ -85,18 +124,12 @@ function removeRouteMetadata(
     ...document,
     profiles: document.profiles.filter((value) => !connectionIds.has(value.connectionId)),
     credentials: document.credentials.filter((value) => !connectionIds.has(value.connectionId)),
-    // The DPoP token belongs to the T3 Connect route.
     remoteDpopTokens: relayRemoved
       ? document.remoteDpopTokens.filter((value) => !environmentIds.has(value.environmentId))
       : document.remoteDpopTokens,
   };
 }
 
-/**
- * An environment's saved routes in preference order. Targets of one
- * environment keep their relative order in `targets`, so a document written
- * before routes existed is one environment with one route.
- */
 export function catalogRoutes(
   document: ConnectionCatalogDocument,
   environmentId: EnvironmentId,
@@ -105,10 +138,9 @@ export function catalogRoutes(
 }
 
 /**
- * Replaces an environment's routes with `routes`, preferred first. Records
- * owned by a dropped route go with it; the environment keeps its position in
- * the catalog. An empty list leaves the environment's other records in place;
- * use `removeConnectionFromCatalog` to forget the environment.
+ * Records owned by a dropped route go with it; the environment keeps its
+ * position in the catalog. An empty list leaves the environment's other records
+ * in place; use `removeConnectionFromCatalog` to forget the environment.
  */
 export function setRoutesInCatalog(
   document: ConnectionCatalogDocument,
@@ -132,20 +164,18 @@ export function setRoutesInCatalog(
   };
 }
 
-/** Saves one route of an environment, keeping its other routes. */
 export function registerConnectionInCatalog(
   document: ConnectionCatalogDocument,
   registration: ConnectionRegistration,
   routes: ReadonlyArray<PersistedConnectionTarget> = [registration.target],
 ): ConnectionCatalogDocument {
-  // Re-registering (for example editing a label or URL) keeps the disabled
-  // flag; only `setConnectionEnabledInCatalog` or removal changes it.
   const next = setRoutesInCatalog(document, registration.target.environmentId, routes);
 
   switch (registration._tag) {
     case "RelayConnectionRegistration":
       return next;
     case "BearerConnectionRegistration":
+    case "SshConnectionRegistration":
       return {
         ...next,
         profiles: replaceCatalogValue(
@@ -158,24 +188,16 @@ export function registerConnectionInCatalog(
           credential: registration.credential,
         }),
       };
-    case "SshConnectionRegistration":
-      return {
-        ...next,
-        profiles: replaceCatalogValue(
-          next.profiles,
-          (value) => value.connectionId,
-          registration.profile,
-        ),
-      };
   }
 }
 
-/** Forgets an environment and every route it had. */
 export function removeConnectionFromCatalog(
   document: ConnectionCatalogDocument,
   environmentId: EnvironmentId,
 ): ConnectionCatalogDocument {
-  const next = setRoutesInCatalog(document, environmentId, []);
+  const withoutHub =
+    readCatalogHub(document) === environmentId ? setCatalogHub(document, null) : document;
+  const next = setRoutesInCatalog(withoutHub, environmentId, []);
   return {
     ...next,
     remoteDpopTokens: removeCatalogValue(
@@ -198,7 +220,6 @@ export function removeConnectionFromCatalog(
   };
 }
 
-/** Flips the disabled flag for a saved environment; unknown ids are ignored. */
 export function setConnectionEnabledInCatalog(
   document: ConnectionCatalogDocument,
   environmentId: EnvironmentId,

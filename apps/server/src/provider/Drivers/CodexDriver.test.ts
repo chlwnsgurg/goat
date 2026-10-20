@@ -1,3 +1,4 @@
+import * as MemoryDerivedCache from "../../memory/MemoryDerivedCache.ts";
 import * as CodexInstallation from "../CodexInstallation.ts";
 import * as ServerSecretStore from "../../auth/ServerSecretStore.ts";
 import * as ServerEnvironment from "../../environment/ServerEnvironment.ts";
@@ -6,9 +7,10 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 import { expect, it } from "@effect/vitest";
-import { EnvironmentId, ProviderInstanceId, ProviderSessionId, ThreadId } from "@t3tools/contracts";
-import * as HostProcess from "@t3tools/shared/HostProcess";
+import { EnvironmentId, ProviderInstanceId, ProviderSessionId, ThreadId } from "@goat/contracts";
+import * as HostProcess from "@goat/shared/HostProcess";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as Deferred from "effect/Deferred";
 import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
@@ -26,23 +28,23 @@ import * as BackgroundPolicy from "../../background/BackgroundPolicy.ts";
 import * as ServerConfig from "../../config.ts";
 import * as ServerSettings from "../../serverSettings.ts";
 import * as ResetCreditCoordinator from "../resetCreditCoordinator.ts";
-import * as ProviderLatestVersions from "@t3tools/provider-core/server/ProviderLatestVersions";
-import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
-import * as ProviderEventLoggers from "@t3tools/provider-core/server/ProviderEventLoggers";
+import * as ProviderLatestVersions from "@goat/provider-core/server/ProviderLatestVersions";
+import * as McpProviderSessions from "@goat/provider-core/server/McpProviderSessions";
+import * as ProviderEventLoggers from "@goat/provider-core/server/ProviderEventLoggers";
 import * as ModelManifest from "../ModelManifest.ts";
 import {
   createProviderVersionAdvisory,
   resolveLatestProviderVersion,
-} from "@t3tools/provider-core/server/maintenanceResolver";
+} from "@goat/provider-core/server/maintenanceResolver";
 import { CodexDriver } from "./CodexDriver.ts";
 import * as CodexAdapterV2 from "../../orchestration-v2/Adapters/CodexAdapterV2.ts";
-import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
-import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
+import * as IdAllocator from "@goat/provider-core/server/IdAllocator";
+import * as ProviderAdapter from "@goat/provider-core/server/ProviderAdapter";
 import * as ProviderCredentialStore from "../ProviderCredentialStore.ts";
 import * as ProviderHostLive from "../ProviderHostLive.ts";
 
 const layerDeps = ServerConfig.layerTest(process.cwd(), {
-  prefix: "t3-codex-driver-maintenance-",
+  prefix: "goat-codex-driver-maintenance-",
 }).pipe(
   Layer.provideMerge(NodeServices.layer),
   Layer.provideMerge(IdAllocator.layer),
@@ -63,6 +65,7 @@ const layerDeps = ServerConfig.layerTest(process.cwd(), {
       getEnvironmentId: Effect.succeed(EnvironmentId.make("00000000-0000-4000-8000-000000000001")),
     }),
   ),
+  Layer.provideMerge(MemoryDerivedCache.layer),
   Layer.provideMerge(ServerSettings.layerTest()),
   Layer.provideMerge(ModelManifest.layerTest),
   Layer.provideMerge(ResetCreditCoordinator.layerTest),
@@ -96,6 +99,21 @@ const noSpawn = ChildProcessSpawner.make(() =>
 const encodeCredentials = Schema.encodeEffect(Schema.fromJsonString(Schema.Unknown));
 
 it.layer(layerTest)("CodexDriver", (it) => {
+  it.effect("reports a disabled managed account as disabled", () =>
+    Effect.gen(function* () {
+      const instance = yield* CodexDriver.create({
+        instanceId: ProviderInstanceId.make("disabled-managed-account"),
+        displayName: "Disabled account",
+        enabled: false,
+        environment: [],
+        config: { ...CodexDriver.defaultConfig(), setupMode: "managed" },
+      }).pipe(Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, noSpawn));
+
+      expect((yield* instance.snapshot.getSnapshot).enabled).toBe(false);
+      expect((yield* instance.snapshot.refresh).enabled).toBe(false);
+    }).pipe(Effect.scoped),
+  );
+
   it.effect("disconnect refreshes a restored managed account while its auth flow is idle", () =>
     Effect.gen(function* () {
       const instanceId = ProviderInstanceId.make("restored-managed-account");
@@ -138,13 +156,19 @@ it.layer(layerTest)("CodexDriver", (it) => {
         const launches: Array<
           Parameters<CodexAdapterV2.CodexAppServerClientFactoryShape["open"]>[0]
         > = [];
-        // Sign-out interrupts an account check that is still resolving the runtime.
-        // Interrupt the two startup checks that way (one is the sign-in listener's);
-        // the disconnect below must still refresh.
+
         let interruptedChecks = 0;
+        let failAcquire = false;
         const startupChecksInterrupted = yield* Deferred.make<void>();
         const acquire = () =>
           Effect.suspend(() => {
+            if (failAcquire)
+              return Effect.fail(
+                new CodexInstallation.CodexInstallationError({
+                  operation: "acquire",
+                  detail: "The fixture runtime is unavailable",
+                }),
+              );
             if (interruptedChecks === 2) return Effect.succeed(executable);
             interruptedChecks += 1;
             return (
@@ -209,8 +233,20 @@ it.layer(layerTest)("CodexDriver", (it) => {
         expect(restored.runtimePaths?.shadowHomePath).toContain(
           `providers/codex/${instanceId}/shadow`,
         );
+        // The fixture app-server cannot start, so the workspace scan fails
+        // instead of passing the machine snapshot off as the workspace's skills.
+        const scan = yield* instance.snapshotForCwd!(serverConfig.stateDir).pipe(Effect.exit);
+        expect(Exit.isFailure(scan)).toBe(true);
+        // The account is still signed in, so a runtime that cannot start is a
+        // failed scan too, not the machine snapshot's inventory.
+        failAcquire = true;
+        const runtimeScan = yield* instance.snapshotForCwd!(serverConfig.stateDir).pipe(
+          Effect.exit,
+        );
+        failAcquire = false;
+        expect(Exit.isFailure(runtimeScan)).toBe(true);
         yield* Deferred.await(observedAccount);
-        // Sessions launch the T3-installed Codex with the account's token, not ambient credentials.
+
         const threadId = ThreadId.make("managed-account-thread");
         yield* instance.orchestrationAdapter
           .openSession({
@@ -240,6 +276,10 @@ it.layer(layerTest)("CodexDriver", (it) => {
         expect(after.installed).toBe(true);
         expect(after.models).toEqual([]);
         expect(Option.isNone(yield* store.get)).toBe(true);
+        // Signed out, there is no runtime to scan with, so the machine
+        // snapshot's empty inventory stands instead of a failed scan.
+        const signedOutScan = yield* instance.snapshotForCwd!(serverConfig.stateDir);
+        expect(signedOutScan.skills).toEqual([]);
       }).pipe(
         Effect.provideService(ServerSecretStore.ServerSecretStore, secrets),
         Effect.provideService(
@@ -278,7 +318,7 @@ it.layer(layerTest)("CodexDriver", (it) => {
       Effect.gen(function* () {
         const fs = yield* FileSystem.FileSystem;
         const tempDir = yield* fs
-          .makeTempDirectoryScoped({ prefix: "t3-codex-driver-" })
+          .makeTempDirectoryScoped({ prefix: "goat-codex-driver-" })
           .pipe(Effect.flatMap((directory) => fs.realPath(directory)));
         const sharedHome = NodePath.join(tempDir, "codex-home");
         const shadowHome = NodePath.join(tempDir, "codex-shadow");
@@ -355,7 +395,7 @@ it.layer(layerTest)("CodexDriver", (it) => {
       Effect.gen(function* () {
         const fs = yield* FileSystem.FileSystem;
         const tempDir = yield* fs
-          .makeTempDirectoryScoped({ prefix: "t3-codex-installer-" })
+          .makeTempDirectoryScoped({ prefix: "goat-codex-installer-" })
           .pipe(Effect.flatMap((directory) => fs.realPath(directory)));
         const installPath = NodePath.join(tempDir, ...fixture.installSegments);
         const realBinaryPath = NodePath.join(
@@ -414,7 +454,7 @@ it.layer(layerTest)("CodexDriver", (it) => {
       Effect.gen(function* () {
         const fs = yield* FileSystem.FileSystem;
         const tempDir = yield* fs
-          .makeTempDirectoryScoped({ prefix: `t3-codex-mise-${layout}-` })
+          .makeTempDirectoryScoped({ prefix: `goat-codex-mise-${layout}-` })
           .pipe(Effect.flatMap((directory) => fs.realPath(directory)));
         const binaryPath =
           layout === "direct"
@@ -491,7 +531,7 @@ it.layer(layerTest)("CodexDriver", (it) => {
       Effect.gen(function* () {
         const fs = yield* FileSystem.FileSystem;
         const tempDir = yield* fs
-          .makeTempDirectoryScoped({ prefix: "t3-codex-mise-shim-" })
+          .makeTempDirectoryScoped({ prefix: "goat-codex-mise-shim-" })
           .pipe(Effect.flatMap((directory) => fs.realPath(directory)));
         const brewPrefix = NodePath.join(tempDir, "homebrew");
         const brewPath = NodePath.join(brewPrefix, "bin", "brew");

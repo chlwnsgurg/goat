@@ -2,7 +2,7 @@
 import * as NodeOS from "node:os";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
-import { CodexSettings, EnvironmentId, ProviderInstanceId } from "@t3tools/contracts";
+import { CodexSettings, EnvironmentId, ProviderInstanceId } from "@goat/contracts";
 import * as Clock from "effect/Clock";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -117,7 +117,7 @@ it.effect.each(
           CODEX_HOME: "/user/.codex",
           OPENAI_API_KEY: "dummy-global-key",
           OPENAI_BASE_URL: "https://user-proxy.test",
-          T3CODE_CODEX_LAUNCH_ARGS: "--config model_provider=global-proxy",
+          GOAT_CODEX_LAUNCH_ARGS: "--config model_provider=global-proxy",
           PATH: "/usr/bin",
         };
         const runtime = yield* makeCodexManagedRuntime({
@@ -152,7 +152,7 @@ it.effect.each(
           assert.strictEqual(effective.environment.ACCESS_TOKEN, "dummy-owned-access");
           assert.isUndefined(effective.environment.OPENAI_API_KEY);
           assert.isUndefined(effective.environment.OPENAI_BASE_URL);
-          assert.isUndefined(effective.environment.T3CODE_CODEX_LAUNCH_ARGS);
+          assert.isUndefined(effective.environment.GOAT_CODEX_LAUNCH_ARGS);
           const args = codexAppServerArgs(effective.config.launchArgs);
           assert.include(
             args,
@@ -163,6 +163,8 @@ it.effect.each(
             'model_providers.openai_token_sharing.model_catalog_url="https://api.openai.com/v1/models"',
           );
           assert.include(args, "features.api_key_model_discovery=true");
+          assert.include(args, "features.multi_agent=false");
+          assert.include(args, "features.multi_agent_v2=false");
           assert.notInclude(effective.config.launchArgs, "model_catalog_json");
           assert.notInclude(effective.config.launchArgs, "x-openai-chatpass-test");
           assert.include(args, "model_providers.openai_token_sharing.supports_websockets=false");
@@ -214,8 +216,41 @@ it.effect.each(
       Effect.scoped,
       Effect.provide(
         ServerConfig.layerTest(process.cwd(), {
-          prefix: "t3-managed-runtime-",
+          prefix: "goat-managed-runtime-",
         }).pipe(Layer.provideMerge(NodeServices.layer)),
+      ),
+    ),
+);
+
+it.effect(
+  "does not compose a Home route for managed Codex before acquiring installation or credentials",
+  () =>
+    makeCodexManagedRuntime({
+      instanceId: ProviderInstanceId.make("managed-home"),
+      enabled: true,
+      environment: {},
+      config: decodeSettings({ setupMode: "managed", modelRoute: "opencodex" }),
+    }).pipe(
+      Effect.result,
+      Effect.map((result) => {
+        assert.equal(result._tag, "Failure");
+        if (result._tag === "Failure")
+          assert.equal(
+            result.failure.message,
+            "OpenCodex routing needs a Codex instance that uses your Codex CLI.",
+          );
+      }),
+      Effect.provide(
+        Layer.mergeAll(
+          Layer.mock(CodexInstallation.CodexInstallation)({ managedDirectory: "unused" }),
+          ServerConfig.layerTest(process.cwd(), { prefix: "managed-home-reject-" }),
+          Layer.mock(ServerSecretStore.ServerSecretStore)({}),
+          Layer.mock(ServerEnvironment.ServerEnvironmentIdentity)({}),
+          Layer.succeed(
+            HttpClient.HttpClient,
+            HttpClient.make(() => Effect.die("No HTTP before managed route rejection")),
+          ),
+        ).pipe(Layer.provideMerge(NodeServices.layer)),
       ),
     ),
 );

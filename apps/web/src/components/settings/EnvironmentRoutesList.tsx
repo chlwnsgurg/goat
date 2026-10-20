@@ -20,13 +20,13 @@ import {
   type ConnectionRoute,
   connectionRouteAddress,
   connectionRouteId,
-  connectionRouteLabel,
   connectionRoutes,
   isLearned,
-} from "@t3tools/client-runtime/connection";
-import { GripVerticalIcon, PlusIcon, XIcon } from "lucide-react";
+} from "@goat/client-runtime/connection";
+import { GripVerticalIcon, PlusIcon, XIcon } from "~/components/solar";
 import { useState } from "react";
 
+import { savedConnectionRouteLabel } from "./EnvironmentRow.logic";
 import { requestConfirmDialog } from "~/confirmDialog";
 import { environmentCatalog } from "~/connection/catalog";
 import { cn } from "~/lib/utils";
@@ -36,11 +36,6 @@ import { useAtomCommand } from "~/state/use-atom-command";
 import { Button } from "../ui/button";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 
-/**
- * The ways this client reaches one saved machine, preferred first. Drag to
- * reorder; the first route that answers is used and the connection moves back
- * up when a better one is reachable again. Shown under the machine's row.
- */
 export function EnvironmentRoutesList({
   environment,
   onAddRoute,
@@ -50,8 +45,6 @@ export function EnvironmentRoutesList({
 }) {
   const saved = connectionRoutes(environment.entry);
   const savedIds = saved.map((route) => connectionRouteId(route.target));
-  // A dropped order shows until the catalog matches it, so the row does not
-  // jump back while the reorder is being saved.
   const [pending, setPending] = useState<ReadonlyArray<string> | null>(null);
   const order: Array<string> =
     pending !== null &&
@@ -74,12 +67,10 @@ export function EnvironmentRoutesList({
     useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
   );
 
-  // Removing a paired route forgets its credential, so it asks first, like
-  // on mobile. No mounted confirm host means no removal.
   const confirmRemove = async (route: ConnectionRoute) => {
     const address = connectionRouteAddress(route);
     const confirmed = await requestConfirmDialog(
-      `Remove ${connectionRouteLabel(route)} route?${address === null ? "" : `\n${address}`}`,
+      `Remove ${savedConnectionRouteLabel(route)} route?${address === null ? "" : `\n${address}`}`,
       { variant: "destructive" },
     );
     if (confirmed !== true) return;
@@ -118,9 +109,6 @@ export function EnvironmentRoutesList({
                 route={route}
                 position={index + 1}
                 inUse={connectionRouteId(route.target) === activeRouteId}
-                // The last route goes with the machine; that is "Remove from
-                // this device", not a route action. A learned route would be
-                // learned again, so it is only reordered.
                 removable={routes.length > 1 && !isLearned(route)}
                 onRemove={() => void confirmRemove(route)}
               />
@@ -152,7 +140,7 @@ function SortableRouteRow({
   readonly onRemove: () => void;
 }) {
   const id = connectionRouteId(route.target);
-  const label = connectionRouteLabel(route);
+  const label = savedConnectionRouteLabel(route);
   const address = connectionRouteAddress(route);
   const {
     attributes,

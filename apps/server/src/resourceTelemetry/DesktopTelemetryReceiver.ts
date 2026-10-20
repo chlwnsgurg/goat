@@ -10,8 +10,8 @@ import {
   DesktopTelemetryControlMessage,
   type DesktopUpdateStatusReport,
   type ResourceTelemetrySourceStatus,
-} from "@t3tools/contracts";
-import { resolveServerBackgroundActivitySettings } from "@t3tools/shared/backgroundActivitySettings";
+} from "@goat/contracts";
+import { resolveServerBackgroundActivitySettings } from "@goat/shared/backgroundActivitySettings";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
@@ -173,9 +173,6 @@ export class DesktopTelemetryReceiver extends Context.Service<
     readonly setDiagnosticsDemand: (
       enabled: boolean,
     ) => Effect.Effect<void, DesktopTelemetryControlError>;
-    /** Asks the desktop app supervising this server to update itself. The
-        desktop answers with desktopUpdateStatus reports carrying the same
-        requestId. */
     readonly requestDesktopUpdate: (
       requestId: string,
     ) => Effect.Effect<void, DesktopTelemetryControlError>;
@@ -185,9 +182,6 @@ export class DesktopTelemetryReceiver extends Context.Service<
     readonly cancelDesktopUpdate: (
       requestId: string,
     ) => Effect.Effect<void, DesktopTelemetryControlError>;
-    /** Latest desktop update state report plus subsequent reports. The
-        desktop replays its latest report when the backend attaches, so this
-        is populated shortly after startup on desktop-managed servers. */
     readonly desktopUpdates: Effect.Effect<
       {
         readonly latest: Option.Option<DesktopUpdateStatusReport>;
@@ -197,7 +191,7 @@ export class DesktopTelemetryReceiver extends Context.Service<
       Scope.Scope
     >;
   }
->()("t3/resourceTelemetry/DesktopTelemetryReceiver") {}
+>()("goat/resourceTelemetry/DesktopTelemetryReceiver") {}
 
 const decodeMessage = Schema.decodeUnknownEffect(DesktopHostTelemetryMessage);
 const encodeControlMessage = Schema.encodeEffect(
@@ -527,7 +521,6 @@ export const make = Effect.fn("resourceTelemetry.desktopTelemetryReceiver.make")
           );
         }
 
-        // Not a resource sample: do not touch `latest` or sample health.
         if (message.type === "desktopUpdateStatus") {
           return recordContact.pipe(
             Effect.andThen(Ref.set(latestUpdateReport, Option.some(message))),

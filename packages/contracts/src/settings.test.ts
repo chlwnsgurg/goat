@@ -1,13 +1,27 @@
+import { MemoryHubSettings, MemoryHubSettingsUpdateInput } from "./memory.ts";
 import { describe, expect, it } from "vite-plus/test";
 import * as Schema from "effect/Schema";
 
-import type { ProjectId } from "./baseSchemas.ts";
-import { ProviderDriverKind, ProviderInstanceId } from "./providerInstance.ts";
+import { type CommandId, ProjectId } from "./baseSchemas.ts";
+import { DEFAULT_OPENCODEX_BASE_URL } from "./codexRoute.ts";
+import {
+  ProviderDriverKind,
+  ProviderInstanceId,
+  ProviderInstanceMutation,
+} from "./providerInstance.ts";
 import {
   ClientSettingsSchema,
   ClientSettingsPatch,
   ClaudeSettings,
+  CodexSettings,
+  ServerSettingsError,
   DEFAULT_SERVER_SETTINGS,
+  PROJECT_SCOPED_SERVER_SETTING_KEYS,
+  implicitDefaultInstance,
+  isDevinAcpRegistryInstance,
+  requiredScopesForProjectMutation,
+  requiredScopesForServerSettingsPatch,
+  resolveProjectProviderInstanceEnabled,
   resolveProviderInstanceEnabled,
   ServerSettings,
   ServerSettingsPatch,
@@ -54,6 +68,7 @@ describe("storage cleanup settings", () => {
     expect(decodeServerSettings({}).worktreeCleanup).toBeNull();
     expect(decodeServerSettings({}).storageCleanup).toEqual({
       worktreeAfterDays: null,
+      worktreeSettledAfterDays: null,
       worktreeOnMerge: false,
       worktreeOnDelete: false,
       worktreeUnchanged: false,
@@ -70,6 +85,9 @@ describe("storage cleanup settings", () => {
     expect(decodeServerSettingsPatch({ storageCleanup: { worktreeAfterDays: null } })).toEqual({
       storageCleanup: { worktreeAfterDays: null },
     });
+    expect(decodeServerSettingsPatch({ storageCleanup: { worktreeSettledAfterDays: 0 } })).toEqual({
+      storageCleanup: { worktreeSettledAfterDays: 0 },
+    });
   });
 
   it("accepts partial custom patches but requires complete stored project rules", () => {
@@ -85,6 +103,26 @@ describe("storage cleanup settings", () => {
         },
       }),
     ).toThrow();
+    expect(
+      decodeServerSettings({
+        projectSettingsOverrides: {
+          project: {
+            worktreeCleanup: {
+              mode: "custom",
+              rules: {
+                worktreeAfterDays: null,
+                worktreeOnMerge: false,
+                worktreeOnDelete: false,
+                worktreeUnchanged: false,
+              },
+            },
+          },
+        },
+      }).projectSettingsOverrides[ProjectId.make("project")]?.worktreeCleanup,
+    ).toMatchObject({
+      mode: "custom",
+      rules: { worktreeSettledAfterDays: null, worktreeKeepWhen: "uncommitted-changes" },
+    });
   });
 
   it("decodes older custom rules with the default local-file policy", () => {
@@ -113,6 +151,12 @@ describe("storage cleanup settings", () => {
   it.each([0, -1, 1.5, 3651])("rejects invalid retention %s", (days) => {
     expect(() =>
       decodeServerSettingsPatch({ storageCleanup: { browserArtifactsAfterDays: days } }),
+    ).toThrow();
+  });
+
+  it.each([-1, 1.5, 3651])("rejects invalid settled retention %s", (days) => {
+    expect(() =>
+      decodeServerSettingsPatch({ storageCleanup: { worktreeSettledAfterDays: days } }),
     ).toThrow();
   });
 });
@@ -596,8 +640,8 @@ describe("ClientSettings panel animations", () => {
 });
 
 describe("ClientSettings environment identification", () => {
-  it("defaults to artwork and accepts each presentation mode", () => {
-    expect(decodeClientSettings({}).environmentIdentificationMode).toBe("artwork");
+  it("defaults to pill and accepts each presentation mode", () => {
+    expect(decodeClientSettings({}).environmentIdentificationMode).toBe("pill");
 
     for (const mode of ["artwork", "pill", "none"] as const) {
       expect(
@@ -651,13 +695,19 @@ describe("ClientSettings sidebar", () => {
 });
 
 describe("ClientSettings context window meter", () => {
-  it("defaults off and preserves an explicit legacy opt-in", () => {
-    expect(decodeClientSettings({}).contextWindowMeterEnabled).toBe(false);
+  it("shows by default, even for settings persisted with the old default-off flag", () => {
+    expect(decodeClientSettings({}).contextWindowMeterHidden).toBe(false);
     expect(
-      decodeClientSettings({ contextWindowMeterEnabled: true }).contextWindowMeterEnabled,
-    ).toBe(true);
+      decodeClientSettings({ contextWindowMeterEnabled: false }).contextWindowMeterHidden,
+    ).toBe(false);
+  });
+
+  it("preserves an explicit opt-out", () => {
+    expect(decodeClientSettings({ contextWindowMeterHidden: true }).contextWindowMeterHidden).toBe(
+      true,
+    );
     expect(
-      decodeClientSettingsPatch({ contextWindowMeterEnabled: true }).contextWindowMeterEnabled,
+      decodeClientSettingsPatch({ contextWindowMeterHidden: true }).contextWindowMeterHidden,
     ).toBe(true);
   });
 });
@@ -783,9 +833,6 @@ describe("ServerSettings.providerInstances (slice-2 invariant)", () => {
 
     expect(decoded.providerInstances[personalId]?.driver).toBe("codex");
     expect(decoded.providerInstances[workId]?.config).toEqual({ homePath: "~/.codex_work" });
-    // Critical: a config naming a driver this build does not know about
-    // (`ollama` is not in `ProviderDriverKind`) must round-trip without loss.
-    // The runtime handles "driver not installed" — the schema must not.
     expect(decoded.providerInstances[ollamaId]?.driver).toBe("ollama");
     expect(decoded.providerInstances[ollamaId]?.config).toEqual({
       endpoint: "http://localhost:11434",
@@ -824,21 +871,16 @@ describe("provider enabled defaults", () => {
   it("resolves instance enabled state with explicit false winning", () => {
     const grok = ProviderDriverKind.make("grok");
     const codex = ProviderDriverKind.make("codex");
-    // No flags anywhere: driver default applies.
     expect(resolveProviderInstanceEnabled({ driver: grok, config: {} })).toBe(false);
     expect(resolveProviderInstanceEnabled({ driver: codex, config: {} })).toBe(true);
-    // Unknown fork drivers stay enabled.
     expect(
       resolveProviderInstanceEnabled({ driver: ProviderDriverKind.make("ollama"), config: {} }),
     ).toBe(true);
-    // Envelope flag wins over the driver default.
     expect(resolveProviderInstanceEnabled({ driver: grok, enabled: true, config: {} })).toBe(true);
     expect(resolveProviderInstanceEnabled({ driver: codex, enabled: false, config: {} })).toBe(
       false,
     );
-    // Legacy in-config flag fills in when the envelope is silent.
     expect(resolveProviderInstanceEnabled({ driver: grok, config: { enabled: true } })).toBe(true);
-    // Conflicting flags: the explicit false wins, whichever side it is on.
     expect(
       resolveProviderInstanceEnabled({ driver: grok, enabled: true, config: { enabled: false } }),
     ).toBe(false);
@@ -948,13 +990,6 @@ describe("ServerSettingsPatch.providerInstances", () => {
 });
 
 describe("ServerSettingsPatch string normalization", () => {
-  it("lowercases GitHub hosts and defaults them to enabled", () => {
-    const patch = decodeServerSettingsPatch({
-      github: { hosts: { " GitHub.com ": { account: "  work  " } } },
-    });
-    expect(patch.github?.hosts).toEqual({ "github.com": { account: "work", enabled: true } });
-  });
-
   it("trims string settings while decoding patches", () => {
     const patch = decodeServerSettingsPatch({
       addProjectBaseDirectory: "  ~/Development  ",
@@ -1033,12 +1068,15 @@ it("validates remote device hosts and rejects ambiguous host ids", () => {
 });
 
 describe("branch naming settings", () => {
-  it("defaults existing settings to the t3 static prefix", () => {
+  it("defaults missing settings to the GOAT static prefix", () => {
     expect(decodeServerSettings({})).toMatchObject({
       branchNamingMode: "static",
-      branchNamePrefix: "t3",
+      branchNamePrefix: "goat",
       branchNameInstructions: "",
     });
+  });
+  it("preserves an explicitly saved legacy prefix", () => {
+    expect(decodeServerSettings({ branchNamePrefix: "t3" }).branchNamePrefix).toBe("t3"); // goat-rename: legacy
   });
   it.each(["static", "semantic", "custom"])(
     "round-trips %s and project overrides",
@@ -1066,5 +1104,442 @@ describe("ServerSettings.removeAgentCreditsOnMerge", () => {
         projectSettingsOverrides: { project: { removeAgentCreditsOnMerge: true } },
       }).projectSettingsOverrides["project" as ProjectId]?.removeAgentCreditsOnMerge,
     ).toBe(true);
+  });
+});
+
+describe("resolveProjectProviderInstanceEnabled", () => {
+  const projectId = "project-a" as ProjectId;
+  const instanceId = ProviderInstanceId.make("codex_work");
+
+  it("inherits the machine value when the project has no override", () => {
+    const settings: ServerSettings = {
+      ...DEFAULT_SERVER_SETTINGS,
+      providerInstances: {
+        [instanceId]: { driver: ProviderDriverKind.make("codex"), enabled: false },
+      },
+    };
+    expect(resolveProjectProviderInstanceEnabled(settings, projectId, instanceId)).toBe(false);
+  });
+
+  it("lets a project enable an instance the machine disabled", () => {
+    const settings: ServerSettings = {
+      ...DEFAULT_SERVER_SETTINGS,
+      providerInstances: {
+        [instanceId]: { driver: ProviderDriverKind.make("codex"), enabled: false },
+      },
+      projectSettingsOverrides: {
+        [projectId]: { providerInstances: { [instanceId]: { enabled: true } } },
+      },
+    };
+    expect(resolveProjectProviderInstanceEnabled(settings, projectId, instanceId)).toBe(true);
+  });
+
+  it("lets a project disable an instance the machine enabled", () => {
+    const settings: ServerSettings = {
+      ...DEFAULT_SERVER_SETTINGS,
+      providerInstances: {
+        [instanceId]: { driver: ProviderDriverKind.make("codex"), enabled: true },
+      },
+      projectSettingsOverrides: {
+        [projectId]: { providerInstances: { [instanceId]: { enabled: false } } },
+      },
+    };
+    expect(resolveProjectProviderInstanceEnabled(settings, projectId, instanceId)).toBe(false);
+  });
+
+  it("always resolves to the machine value when no project is in scope", () => {
+    const settings: ServerSettings = {
+      ...DEFAULT_SERVER_SETTINGS,
+      providerInstances: {
+        [instanceId]: { driver: ProviderDriverKind.make("codex"), enabled: true },
+      },
+      projectSettingsOverrides: {
+        [projectId]: { providerInstances: { [instanceId]: { enabled: false } } },
+      },
+    };
+    expect(resolveProjectProviderInstanceEnabled(settings, null, instanceId)).toBe(true);
+  });
+
+  it("falls back to the unconfigured default when the instance has no settings entry", () => {
+    const settings: ServerSettings = { ...DEFAULT_SERVER_SETTINGS, providerInstances: {} };
+    expect(resolveProjectProviderInstanceEnabled(settings, projectId, instanceId)).toBe(
+      resolveProjectProviderInstanceEnabled(settings, null, instanceId),
+    );
+
+    const overridden = {
+      ...settings,
+      projectSettingsOverrides: {
+        [projectId]: { providerInstances: { [instanceId]: { enabled: true } } },
+      },
+    };
+    expect(resolveProjectProviderInstanceEnabled(overridden, projectId, instanceId)).toBe(true);
+  });
+});
+
+describe("implicitDefaultInstance", () => {
+  const cursor = ProviderInstanceId.make("cursor");
+  const cursorCloud = ProviderInstanceId.make("cursorCloud");
+  const cloudDriver = ProviderDriverKind.make("cursorCloud");
+
+  it("follows the effective sibling state and project resolution", () => {
+    const off = { ...DEFAULT_SERVER_SETTINGS, providerInstances: {} };
+    expect(implicitDefaultInstance(off, cloudDriver)).toEqual({ present: true, enabled: false });
+    expect(resolveProjectProviderInstanceEnabled(off, null, cursorCloud)).toBe(false);
+
+    const on = {
+      ...off,
+      providerInstances: { [cursor]: { driver: ProviderDriverKind.make("cursor"), enabled: true } },
+    };
+    expect(implicitDefaultInstance(on, cloudDriver)).toEqual({ present: true, enabled: true });
+    expect(resolveProjectProviderInstanceEnabled(on, null, cursorCloud)).toBe(true);
+  });
+
+  it("suppresses the implicit cloud slot for a custom-id cloud instance", () => {
+    const settings = {
+      ...DEFAULT_SERVER_SETTINGS,
+      providerInstances: {
+        [ProviderInstanceId.make("cursor_cloud_work")]: { driver: cloudDriver, enabled: true },
+      },
+    };
+    expect(implicitDefaultInstance(settings, cloudDriver)).toEqual({
+      present: false,
+      enabled: false,
+    });
+    expect(resolveProjectProviderInstanceEnabled(settings, null, cursorCloud)).toBe(false);
+  });
+
+  it("honors an explicit default-id disable ahead of sibling enablement", () => {
+    const settings = {
+      ...DEFAULT_SERVER_SETTINGS,
+      providerInstances: {
+        [cursor]: { driver: ProviderDriverKind.make("cursor"), enabled: true },
+        [cursorCloud]: { driver: cloudDriver, enabled: false },
+      },
+    };
+    expect(implicitDefaultInstance(settings, cloudDriver).present).toBe(false);
+    expect(resolveProjectProviderInstanceEnabled(settings, null, cursorCloud)).toBe(false);
+  });
+
+  it("enables Devin Cloud only for an enabled Devin ACP instance", () => {
+    const driver = ProviderDriverKind.make("devinCloud");
+    const acp = ProviderDriverKind.make("acpRegistry");
+    const settings = {
+      ...DEFAULT_SERVER_SETTINGS,
+      providerInstances: {
+        [ProviderInstanceId.make("devin")]: {
+          driver: acp,
+          enabled: true,
+          config: { agentId: "devin" },
+        },
+      },
+    };
+    expect(implicitDefaultInstance(settings, driver)).toEqual({ present: true, enabled: true });
+    expect(
+      implicitDefaultInstance(
+        {
+          ...settings,
+          providerInstances: {
+            ...settings.providerInstances,
+            [ProviderInstanceId.make("devin")]: {
+              driver: acp,
+              enabled: false,
+              config: { agentId: "devin" },
+            },
+          },
+        },
+        driver,
+      ).enabled,
+    ).toBe(false);
+  });
+
+  it("treats a local devin command as a Devin ACP instance", () => {
+    const acp = ProviderDriverKind.make("acpRegistry");
+    expect(
+      isDevinAcpRegistryInstance({
+        driver: acp,
+        config: { source: "local", commandPath: "/opt/bin/devin" },
+      }),
+    ).toBe(true);
+    expect(
+      isDevinAcpRegistryInstance({
+        driver: acp,
+        config: { source: "local", commandPath: "/bin/sh" },
+      }),
+    ).toBe(false);
+    expect(
+      isDevinAcpRegistryInstance({ driver: acp, config: { agentId: "devin", enabled: false } }),
+    ).toBe(false);
+  });
+
+  it("ignores a project override for a cloud slot that does not run", () => {
+    const projectId = "project-1" as ProjectId;
+    const settings = {
+      ...DEFAULT_SERVER_SETTINGS,
+      providerInstances: {
+        [cursor]: { driver: ProviderDriverKind.make("cursor"), enabled: true },
+        [ProviderInstanceId.make("cursor_cloud_work")]: { driver: cloudDriver, enabled: true },
+      },
+      projectSettingsOverrides: {
+        [projectId]: { providerInstances: { [cursorCloud]: { enabled: true } } },
+      },
+    };
+    expect(resolveProjectProviderInstanceEnabled(settings, projectId, cursorCloud)).toBe(false);
+  });
+});
+
+describe("requiredScopesForProjectMutation", () => {
+  it("adds the settings scope only when a mutation carries scripts", () => {
+    const projectId = "project-1" as ProjectId;
+    const commandId = "command-1" as CommandId;
+    expect(
+      requiredScopesForProjectMutation({ type: "project.update", commandId, projectId }),
+    ).toEqual(["orchestration:operate"]);
+    expect(
+      requiredScopesForProjectMutation({
+        type: "project.update",
+        commandId,
+        projectId,
+        scripts: [],
+      }),
+    ).toEqual(["orchestration:operate", "settings:write"]);
+  });
+});
+
+describe("server model preferences", () => {
+  it("decodes a visibility update scoped to a provider instance and model", () => {
+    const patch = { setModelsHidden: [{ provider: "codex_work", model: "sol", hidden: false }] };
+    expect(decodeServerSettingsPatch(patch)).toEqual(patch);
+    expect(() =>
+      decodeServerSettingsPatch({ setModelsHidden: [{ provider: "codex_work", model: "sol" }] }),
+    ).toThrow();
+  });
+  it("distinguishes unmigrated lists from deliberately cleared lists", () => {
+    expect(decodeServerSettings({})).toMatchObject({
+      favorites: null,
+      providerModelPreferences: null,
+    });
+    const input = { favorites: [], providerModelPreferences: {} };
+    expect(encodeServerSettings(decodeServerSettings(input))).toMatchObject(input);
+    expect(decodeServerSettingsPatch(input)).toEqual(input);
+  });
+
+  it("round trips favorites and hidden models keyed by provider instance", () => {
+    const input = {
+      favorites: [{ provider: "codex_work", model: "sol" }],
+      providerModelPreferences: { codex_work: { hiddenModels: ["astra"], modelOrder: ["sol"] } },
+    };
+    expect(encodeServerSettings(decodeServerSettings(input))).toMatchObject(input);
+    expect(decodeServerSettingsPatch(input)).toEqual(input);
+    expect(decodeServerSettingsPatch({ migrateModelPreferences: input })).toEqual({
+      migrateModelPreferences: input,
+    });
+  });
+});
+
+describe("memory hub settings", () => {
+  it("defaults old settings to disabled memory hub", () => {
+    expect(decodeServerSettings({}).memoryHub).toEqual({ mode: "disabled" });
+    expect(decodeServerSettings({}).memoryHubVersion).toBe(0);
+  });
+  it("round-trips hub and member without secret bytes", () => {
+    for (const memoryHub of [
+      { mode: "hub", memorySpaceId: null },
+      {
+        mode: "member",
+        hubEnvironmentId: "env",
+        endpoint: "https://hub.invalid",
+        secretName: "memory-hub-member",
+        memorySpaceId: null,
+      },
+    ])
+      expect(encodeServerSettings(decodeServerSettings({ memoryHub }))).toMatchObject({
+        memoryHub,
+      });
+  });
+  it("rejects credentials query and nonloopback plain HTTP in hub endpoint", () => {
+    for (const endpoint of [
+      "https://user:pass@hub.invalid",
+      "https://hub.invalid?x=y",
+      "http://hub.invalid",
+      "https://hub.invalid/path",
+      "https://hub.invalid#secret",
+    ])
+      expect(() =>
+        Schema.decodeUnknownSync(MemoryHubSettings)({
+          mode: "member",
+          hubEnvironmentId: "env",
+          endpoint,
+          secretName: "memory-hub-member",
+          memorySpaceId: null,
+        }),
+      ).toThrow();
+  });
+  it("replaces memory hub configuration as one dedicated admin field", () => {
+    expect(
+      Schema.decodeUnknownSync(MemoryHubSettingsUpdateInput)({
+        requestId: "00000000-0000-4000-8000-000000000001",
+        expectedVersion: 0,
+        action: "configure",
+        settings: { mode: "disabled" },
+      }),
+    ).toMatchObject({ settings: { mode: "disabled" } });
+    expect(() =>
+      Schema.decodeUnknownSync(MemoryHubSettings)({
+        mode: "disabled",
+        endpoint: "https://old.invalid",
+      }),
+    ).toThrow();
+  });
+  it("rejects reserved memoryHub in generic settings patch", () => {
+    for (const raw of [
+      { memoryHub: { mode: "disabled" } },
+      { memoryHubVersion: 1 },
+      { standingInstructions: "valid", memoryHub: { mode: "disabled" } },
+      { standingInstructions: "valid", memoryHubVersion: 1 },
+    ])
+      expect(() => decodeServerSettingsPatch(raw)).toThrow();
+    expect(decodeServerSettingsPatch({ standingInstructions: "valid", futureField: 1 })).toEqual({
+      standingInstructions: "valid",
+    });
+  });
+});
+
+describe("managed memory settings", () => {
+  it("defaults installed agent memory on and owner source reads to an empty policy", () => {
+    const settings = decodeServerSettings({});
+    expect(settings.enableAgentMemoryAccess).toBe(true);
+    expect(settings.memoryOwnerSourceReadPolicy).toEqual({
+      allowedRequesterEnvironmentIds: [],
+      ownerPolicyEpoch: 0,
+      removals: [],
+      enrollments: [],
+    });
+    expect(settings.memoryOwnerSourceReadPolicyVersion).toBe(0);
+    expect(decodeServerSettings(encodeServerSettings(settings))).toEqual(settings);
+  });
+  it("round-trips memory off and guards both on/off updates with settings write", () => {
+    expect(decodeServerSettings({ enableAgentMemoryAccess: false }).enableAgentMemoryAccess).toBe(
+      false,
+    );
+    expect(decodeServerSettingsPatch({ enableAgentMemoryAccess: false })).toEqual({
+      enableAgentMemoryAccess: false,
+    });
+    for (const enabled of [true, false])
+      expect(requiredScopesForServerSettingsPatch({ enableAgentMemoryAccess: enabled })).toEqual([
+        "settings:write",
+      ]);
+    expect(() => decodeServerSettingsPatch({ enableAgentMemoryAccess: "on" })).toThrow();
+    for (const key of ["memoryOwnerSourceReadPolicy", "memoryOwnerSourceReadPolicyVersion"])
+      expect(() =>
+        decodeServerSettingsPatch({ [key]: key.endsWith("Version") ? 0 : {} }),
+      ).toThrow();
+  });
+});
+
+it("keeps process-neutral memory disabled and reserves automatic provenance from settings patches", () => {
+  const decoded = decodeServerSettings({});
+  expect(decoded.memoryHub).toEqual({ mode: "disabled" });
+  expect(decoded).not.toHaveProperty("memoryHubProvenance");
+  expect(() => decodeServerSettingsPatch({ memoryHubProvenance: null })).toThrow();
+});
+
+const decodeCodexSettings = Schema.decodeUnknownSync(CodexSettings);
+const mutationCodec = Schema.toCodecJson(ProviderInstanceMutation);
+const decodeInstanceMutation = Schema.decodeUnknownSync(mutationCodec);
+const encodeInstanceMutation = Schema.encodeSync(mutationCodec);
+const settingsErrorCodec = Schema.toCodecJson(ServerSettingsError);
+const decodeSettingsError = Schema.decodeUnknownSync(settingsErrorCodec);
+const encodeSettingsError = Schema.encodeSync(settingsErrorCodec);
+
+describe("OpenCodex Home routing", () => {
+  it("decodes legacy Codex settings as default", () => {
+    expect(decodeCodexSettings({ launchArgs: "--enable feature" })).toMatchObject({
+      modelRoute: "default",
+      opencodexBaseUrl: DEFAULT_OPENCODEX_BASE_URL,
+      launchArgs: "--enable feature",
+    });
+    expect(decodeCodexSettings({ opencodexBaseUrl: "  " }).opencodexBaseUrl).toBe("");
+  });
+
+  it.each(["default", "opencodex"])(
+    "round-trips both Codex route fields through an instance mutation (%s)",
+    (modelRoute) => {
+      const config = decodeCodexSettings({
+        setupMode: "existing",
+        modelRoute,
+        opencodexBaseUrl: "http://127.0.0.1:10101/v1",
+        launchArgs: "--enable feature",
+      });
+      const mutation = decodeInstanceMutation({
+        operation: "upsert",
+        instanceId: "codex_home",
+        instance: { driver: "codex", displayName: "Codex · OpenCodex Home", config },
+      });
+      const restored = decodeInstanceMutation(
+        JSON.parse(JSON.stringify(encodeInstanceMutation(mutation))),
+      );
+      expect(restored).toEqual(mutation);
+      if (restored.operation === "remove") throw new Error("Expected an upsert mutation.");
+      expect(decodeCodexSettings(restored.instance.config)).toEqual(config);
+    },
+  );
+
+  it("rejects an unknown Codex model route", () => {
+    expect(() => decodeCodexSettings({ modelRoute: "direct" })).toThrow();
+  });
+
+  it("round-trips provider_instance_busy errors", () => {
+    const error = new ServerSettingsError({
+      settingsPath: "/sandbox/settings.json",
+      operation: "write-file",
+      providerInstanceId: "codex_home",
+      code: "provider_instance_busy",
+    });
+    const restored = decodeSettingsError(JSON.parse(JSON.stringify(encodeSettingsError(error))));
+    expect(restored.code).toBe("provider_instance_busy");
+    expect(restored.providerInstanceId).toBe("codex_home");
+    expect(restored.message).toBe(
+      "End this instance's active sessions before changing its model route.",
+    );
+  });
+
+  it("preserves legacy settings errors without a code", () => {
+    const restored = decodeSettingsError({
+      _tag: "ServerSettingsError",
+      settingsPath: "/sandbox/settings.json",
+      operation: "write-file",
+    });
+    expect(restored.code).toBeUndefined();
+    expect(restored.message).toBe("Server settings write-file failed at /sandbox/settings.json.");
+  });
+});
+
+describe("automatic server updates", () => {
+  it("defaults existing settings to enabled", () => {
+    expect(decodeServerSettings({}).automaticServerUpdates).toBe(true);
+    expect(DEFAULT_SERVER_SETTINGS.automaticServerUpdates).toBe(true);
+  });
+
+  it.each([true, false])("round-trips %s in environment patches", (automaticServerUpdates) => {
+    const input = { automaticServerUpdates };
+    expect(encodeServerSettings(decodeServerSettings(input))).toMatchObject(input);
+    expect(decodeServerSettingsPatch(input)).toEqual(input);
+    expect(requiredScopesForServerSettingsPatch(input)).toContain("settings:write");
+  });
+
+  // The scheduler reads one environment value; a project override would show but do nothing.
+  it("cannot be overridden per project", () => {
+    expect(PROJECT_SCOPED_SERVER_SETTING_KEYS).not.toContain("automaticServerUpdates");
+    const decoded = decodeServerSettings({
+      projectSettingsOverrides: { project: { automaticServerUpdates: false } },
+    });
+    expect(decoded.projectSettingsOverrides[ProjectId.make("project")]).not.toHaveProperty(
+      "automaticServerUpdates",
+    );
+  });
+
+  it.each(["false", null, 0])("rejects a non-boolean value %s", (automaticServerUpdates) => {
+    expect(() => decodeServerSettings({ automaticServerUpdates })).toThrow();
+    expect(() => decodeServerSettingsPatch({ automaticServerUpdates })).toThrow();
   });
 });

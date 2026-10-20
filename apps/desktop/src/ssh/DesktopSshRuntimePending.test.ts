@@ -1,9 +1,9 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, describe, it } from "@effect/vitest";
 import { vi } from "vite-plus/test";
-import { DesktopSshEnvironmentEnsureResultSchema } from "@t3tools/contracts";
-import * as NetService from "@t3tools/shared/Net";
-import * as SshTunnel from "@t3tools/ssh/tunnel";
+import { DesktopSshEnvironmentEnsureResultSchema } from "@goat/contracts";
+import * as NetService from "@goat/shared/Net";
+import * as SshTunnel from "@goat/ssh/tunnel";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
@@ -57,7 +57,13 @@ describe("desktop SSH pending result", () => {
         Layer.effect(DesktopSshEnvironment.DesktopSshEnvironment, DesktopSshEnvironment.make).pipe(
           Layer.provide(
             Layer.succeed(SshTunnel.SshEnvironmentManager, {
+              status: () => Effect.die("Unexpected status"),
               ensureEnvironment: () => Effect.succeed(pending),
+              readyEnvironment: () => Effect.die("Unexpected ready environment"),
+              beginSetupOperation: () => Effect.die("Unexpected setup operation"),
+              publishProviderDiagnosis: () => Effect.die("Unexpected provider publication"),
+              publishSetupOutcome: () => Effect.die("Unexpected setup outcome"),
+              forgetEnvironment: () => Effect.die("Unexpected forget"),
               disconnectEnvironment: () => Effect.void,
               revalidateTunnels: () => Effect.void,
               issueMcpClientSession: () => Effect.die("Unexpected session"),

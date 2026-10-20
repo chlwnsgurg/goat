@@ -62,7 +62,7 @@ const layerEnvironmentFor = (
       Layer.mergeAll(
         NodeServices.layer,
         DesktopConfig.layerTest({
-          T3CODE_HOME: baseDir,
+          GOAT_HOME: baseDir,
           VITE_DEV_SERVER_URL: isDevelopment ? "http://127.0.0.1:5733" : undefined,
           ...env,
         }),
@@ -76,7 +76,6 @@ interface ExportedRequest {
   readonly body: string;
 }
 
-/** Answers every export with a 200 and keeps what was posted for assertions. */
 const layerCollector = (requests: Array<ExportedRequest>) =>
   Layer.succeed(
     HttpClient.HttpClient,
@@ -144,7 +143,7 @@ describe("DesktopObservability", () => {
     Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;
       const baseDir = yield* fileSystem.makeTempDirectoryScoped({
-        prefix: "t3-desktop-observability-test-",
+        prefix: "goat-desktop-observability-test-",
       });
       const layerEnvironment = layerEnvironmentFor(baseDir);
       const tracePath = yield* Effect.gen(function* () {
@@ -193,7 +192,7 @@ describe("DesktopObservability", () => {
     Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;
       const baseDir = yield* fileSystem.makeTempDirectoryScoped({
-        prefix: "t3-desktop-backend-output-log-test-",
+        prefix: "goat-desktop-backend-output-log-test-",
       });
       const layerEnvironment = layerEnvironmentFor(baseDir, false);
       const logPath = yield* Effect.gen(function* () {
@@ -271,7 +270,7 @@ describe("DesktopObservability", () => {
     Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;
       const baseDir = yield* fileSystem.makeTempDirectoryScoped({
-        prefix: "t3-desktop-backend-output-snapshot-test-",
+        prefix: "goat-desktop-backend-output-snapshot-test-",
       });
       const layerEnvironment = layerEnvironmentFor(baseDir, false);
       const logPath = yield* Effect.gen(function* () {
@@ -311,7 +310,7 @@ describe("DesktopObservability", () => {
     Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;
       const baseDir = yield* fileSystem.makeTempDirectoryScoped({
-        prefix: "t3-desktop-backend-output-bound-test-",
+        prefix: "goat-desktop-backend-output-bound-test-",
       });
       const layerEnvironment = layerEnvironmentFor(baseDir, false);
       const logPath = yield* Effect.gen(function* () {
@@ -355,7 +354,7 @@ describe("DesktopObservability", () => {
     Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;
       const baseDir = yield* fileSystem.makeTempDirectoryScoped({
-        prefix: "t3-desktop-backend-output-chunks-test-",
+        prefix: "goat-desktop-backend-output-chunks-test-",
       });
       const layerEnvironment = layerEnvironmentFor(baseDir, false);
       const logPath = yield* Effect.gen(function* () {
@@ -390,11 +389,11 @@ describe("DesktopObservability", () => {
     return Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;
       const baseDir = yield* fileSystem.makeTempDirectoryScoped({
-        prefix: "t3-desktop-observability-test-",
+        prefix: "goat-desktop-observability-test-",
       });
       const layerEnvironment = layerEnvironmentFor(baseDir, true, {
-        T3CODE_OTLP_LOGS_URL: "https://collector.example.com/v1/logs",
-        T3CODE_OTLP_HEADERS: "x-scope=desktop",
+        GOAT_OTLP_LOGS_URL: "https://collector.example.com/v1/logs",
+        GOAT_OTLP_HEADERS: "x-scope=desktop",
       });
       const tracePath = yield* Effect.gen(function* () {
         const environment = yield* DesktopEnvironment.DesktopEnvironment;
@@ -415,8 +414,6 @@ describe("DesktopObservability", () => {
       assert.include(request?.body ?? "", "service.runtime");
       assert.strictEqual(request?.headers["x-scope"], "desktop");
 
-      // The log record is the export now, so the same message must not also
-      // ride along as an event on the span.
       const record = (yield* fileSystem.readFileString(tracePath))
         .trim()
         .split("\n")
@@ -436,10 +433,10 @@ describe("DesktopObservability", () => {
     return Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;
       const baseDir = yield* fileSystem.makeTempDirectoryScoped({
-        prefix: "t3-desktop-observability-test-",
+        prefix: "goat-desktop-observability-test-",
       });
       const layerEnvironment = layerEnvironmentFor(baseDir, true, {
-        T3CODE_OTLP_HEADERS: "x-scope=desktop",
+        GOAT_OTLP_HEADERS: "x-scope=desktop",
       });
       yield* writeObservabilitySettings(layerEnvironment, {
         otlpLogsUrl: "https://settings.example.com/v1/logs",
@@ -482,10 +479,10 @@ describe("DesktopObservability", () => {
     return Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;
       const baseDir = yield* fileSystem.makeTempDirectoryScoped({
-        prefix: "t3-desktop-observability-test-",
+        prefix: "goat-desktop-observability-test-",
       });
       const layerEnvironment = layerEnvironmentFor(baseDir, true, {
-        T3CODE_OTLP_LOGS_URL: "https://collector.example.com/v1/logs",
+        GOAT_OTLP_LOGS_URL: "https://collector.example.com/v1/logs",
       });
 
       yield* Effect.scoped(
@@ -496,9 +493,9 @@ describe("DesktopObservability", () => {
 
       assert.lengthOf(requests, 1);
       const body = requests[0]?.body ?? "";
-      assert.include(body, '"stringValue":"t3code-desktop"');
+      assert.include(body, '"stringValue":"goat-desktop"');
       assert.include(body, "deployment.environment.name");
-      assert.include(body, '"key":"service.namespace","value":{"stringValue":"t3code"}');
+      assert.include(body, '"key":"service.namespace","value":{"stringValue":"goat"}');
       assert.notInclude(body, "renamed");
     }).pipe(
       Effect.scoped,
@@ -525,10 +522,10 @@ describe("DesktopObservability", () => {
     return Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;
       const baseDir = yield* fileSystem.makeTempDirectoryScoped({
-        prefix: "t3-desktop-observability-test-",
+        prefix: "goat-desktop-observability-test-",
       });
       const layerEnvironment = layerEnvironmentFor(baseDir, true, {
-        T3CODE_OTLP_HEADERS: "x-scope=desktop",
+        GOAT_OTLP_HEADERS: "x-scope=desktop",
       });
       yield* writeObservabilitySettings(layerEnvironment, {
         otlpLogsUrl: "https://settings.example.com/v1/logs",
@@ -565,10 +562,10 @@ describe("DesktopObservability", () => {
     return Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;
       const baseDir = yield* fileSystem.makeTempDirectoryScoped({
-        prefix: "t3-desktop-observability-test-",
+        prefix: "goat-desktop-observability-test-",
       });
       const layerEnvironment = layerEnvironmentFor(baseDir, true, {
-        T3CODE_OTLP_LOGS_URL: "https://collector.example.com/v1/logs",
+        GOAT_OTLP_LOGS_URL: "https://collector.example.com/v1/logs",
       });
 
       yield* Effect.scoped(
@@ -595,14 +592,12 @@ describe("DesktopObservability", () => {
     return Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;
       const baseDir = yield* fileSystem.makeTempDirectoryScoped({
-        prefix: "t3-desktop-observability-test-",
+        prefix: "goat-desktop-observability-test-",
       });
       const layerEnvironment = layerEnvironmentFor(baseDir);
       yield* writeObservabilitySettings(layerEnvironment, {
         otlpTracesUrl: "https://settings.example.com/v1/traces",
         otlpLogsUrl: "https://settings.example.com/v1/logs",
-        // The main process records no metrics yet, so this endpoint must
-        // not produce a request.
         otlpMetricsUrl: "https://settings.example.com/v1/metrics",
       });
 
@@ -636,7 +631,7 @@ describe("DesktopObservability", () => {
     return Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;
       const baseDir = yield* fileSystem.makeTempDirectoryScoped({
-        prefix: "t3-desktop-observability-test-",
+        prefix: "goat-desktop-observability-test-",
       });
 
       yield* Effect.scoped(
@@ -660,7 +655,7 @@ describe("DesktopObservability", () => {
     return Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;
       const baseDir = yield* fileSystem.makeTempDirectoryScoped({
-        prefix: "t3-desktop-observability-test-",
+        prefix: "goat-desktop-observability-test-",
       });
       const layerEnvironment = layerEnvironmentFor(baseDir);
       yield* writeObservabilitySettings(layerEnvironment, {

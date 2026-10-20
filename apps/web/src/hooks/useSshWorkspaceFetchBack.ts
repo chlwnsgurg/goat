@@ -3,15 +3,14 @@ import {
   EnvironmentAuthorizationError,
   SshWorkspaceError,
   type ScopedThreadRef,
-} from "@t3tools/contracts";
+} from "@goat/contracts";
 import * as Schema from "effect/Schema";
 import { sshWorkspaceErrorCopy } from "~/lib/sshWorktreeSubmission";
 import {
   isAtomCommandInterrupted,
   squashAtomCommandFailure,
-} from "@t3tools/client-runtime/state/runtime";
+} from "@goat/client-runtime/state/runtime";
 import { Atom } from "effect/reactivity";
-import { useCallback } from "react";
 import { environmentCatalog } from "~/connection/catalog";
 import { appAtomRegistry } from "~/rpc/atomRegistry";
 import { useProject, useThreadShell } from "~/state/entities";
@@ -31,6 +30,7 @@ const isEnvironmentAuthorizationError = Schema.is(EnvironmentAuthorizationError)
 
 const pendingByThread = Atom.family((_key: string) => Atom.make(false));
 const sshWorkspaceFetchBack = vcsEnvironment.sshWorkspaceFetchBack;
+type FetchBackTarget = NonNullable<ReturnType<typeof resolveSshFetchBackContext>["target"]>;
 
 function readContext(threadRef: ScopedThreadRef | null) {
   const thread =
@@ -101,7 +101,60 @@ export function useSshWorkspaceFetchBack(threadRef: ScopedThreadRef | null) {
     reportFailure: false,
     reportDefect: false,
   });
-  const run = useCallback(async (): Promise<void> => {
+  const fetchBack = async (target: FetchBackTarget): Promise<void> => {
+    const result = await execute(target);
+    if (result._tag === "Failure") {
+      if (isAtomCommandInterrupted(result)) return;
+      const error = squashAtomCommandFailure(result);
+      toastManager.add({
+        type: "error",
+        title: "Fetch branch failed",
+        description: isSshWorkspaceError(error)
+          ? sshWorkspaceErrorCopy[error.code].replaceAll(
+              "<host>",
+              target.input.target.alias.slice(0, 120),
+            )
+          : isEnvironmentAuthorizationError(error)
+            ? "This device's connection cannot change source control."
+            : "Could not fetch the remote branch. Check the connection before trying again.",
+        timeout: 0,
+        data: { threadRef },
+      });
+      return;
+    }
+    const timing = resolveGitActionResultToastTiming("success");
+    toastManager.add({
+      type: "success",
+      title: "Branch fetched to this device",
+      description: result.value.localRef,
+      timeout: timing.timeout,
+      data: {
+        threadRef,
+        ...(timing.dismissAfterVisibleMs === null
+          ? {}
+          : {
+              dismissAfterVisibleMs: timing.dismissAfterVisibleMs,
+            }),
+      },
+    });
+    // refreshStatus invalidates live and persisted local refs in onSettled.
+    const refreshed = await refreshLocalStatus({
+      environmentId: target.environmentId,
+      input: { cwd: result.value.localWorkspaceRoot },
+    });
+    if (refreshed._tag === "Failure" && !isAtomCommandInterrupted(refreshed)) {
+      const error = squashAtomCommandFailure(refreshed);
+      toastManager.add({
+        type: "error",
+        title: "Branch fetched; local Git status refresh failed",
+        description:
+          error instanceof Error ? error.message : "Refresh Git status to see the fetched ref.",
+        timeout: 0,
+        data: { threadRef },
+      });
+    }
+  };
+  const run = async (): Promise<void> => {
     if (appAtomRegistry.get(pendingAtom)) return;
     // Read again: a retained palette row can outlive a branch/catalog/grant change.
     const current = readContext(threadRef);
@@ -124,63 +177,12 @@ export function useSshWorkspaceFetchBack(threadRef: ScopedThreadRef | null) {
     // Retain the guard even when navigation unmounts every menu/palette subscriber.
     const releasePending = appAtomRegistry.mount(pendingAtom);
     appAtomRegistry.set(pendingAtom, true);
-    try {
-      const result = await execute(target);
-      if (result._tag === "Failure") {
-        if (isAtomCommandInterrupted(result)) return;
-        const error = squashAtomCommandFailure(result);
-        toastManager.add({
-          type: "error",
-          title: "Fetch branch failed",
-          description: isSshWorkspaceError(error)
-            ? sshWorkspaceErrorCopy[error.code].replaceAll(
-                "<host>",
-                target.input.target.alias.slice(0, 120),
-              )
-            : isEnvironmentAuthorizationError(error)
-              ? "This device's connection cannot change source control."
-              : "Could not fetch the remote branch. Check the connection before trying again.",
-          timeout: 0,
-          data: { threadRef },
-        });
-        return;
-      }
-      const timing = resolveGitActionResultToastTiming("success");
-      toastManager.add({
-        type: "success",
-        title: "Branch fetched to this device",
-        description: result.value.localRef,
-        timeout: timing.timeout,
-        data: {
-          threadRef,
-          ...(timing.dismissAfterVisibleMs === null
-            ? {}
-            : {
-                dismissAfterVisibleMs: timing.dismissAfterVisibleMs,
-              }),
-        },
-      });
-      // refreshStatus invalidates live and persisted local refs in onSettled.
-      const refreshed = await refreshLocalStatus({
-        environmentId: target.environmentId,
-        input: { cwd: result.value.localWorkspaceRoot },
-      });
-      if (refreshed._tag === "Failure" && !isAtomCommandInterrupted(refreshed)) {
-        const error = squashAtomCommandFailure(refreshed);
-        toastManager.add({
-          type: "error",
-          title: "Branch fetched; local Git status refresh failed",
-          description:
-            error instanceof Error ? error.message : "Refresh Git status to see the fetched ref.",
-          timeout: 0,
-          data: { threadRef },
-        });
-      }
-    } finally {
+    // Promise.finally: the React Compiler cannot compile a try/finally.
+    await fetchBack(target).finally(() => {
       appAtomRegistry.set(pendingAtom, false);
       releasePending();
-    }
-  }, [execute, pendingAtom, refreshLocalStatus, threadRef]);
+    });
+  };
   return {
     visible: context.visible,
     isPending,

@@ -14,8 +14,10 @@ import {
   type ChannelBotRef,
   type ChannelEnsureBotInput,
   ChannelGatewayError,
+  type ChannelGetBotStatusResult,
   type ThreadId,
-} from "@t3tools/contracts";
+  type EnvironmentId,
+} from "@goat/contracts";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
@@ -27,7 +29,9 @@ import * as ThreadManagement from "../orchestration-v2/ThreadManagementService.t
 import * as ManagedProjectFolders from "../project/ManagedProjectFolders.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import type { ChannelConnectionOwner } from "./ChannelIngressContext.ts";
+import * as ChannelBotHome from "./ChannelBotHome.ts";
 import * as ChannelLedger from "./ChannelLedger.ts";
+import { channelOwnerIdFor } from "./channelOwner.ts";
 import { botLaunchIdsFor } from "./channelIds.ts";
 
 const GOAT_BOT_TITLE = "GOAT bot";
@@ -41,13 +45,25 @@ export class ChannelBotRegistry extends Context.Service<
       input: ChannelEnsureBotInput,
       owner: ChannelConnectionOwner,
     ) => Effect.Effect<ChannelBotRef, ChannelGatewayError>;
+    /** Internal memory delivery: canonical local bot without changing the cluster home. */
+    readonly ensureForReport: (
+      owner: EnvironmentId,
+    ) => Effect.Effect<ChannelBotRef, ChannelGatewayError>;
+    /**
+     * The stored bot and its waiting count, read without creating anything, so a client that
+     * never opens the bot still knows which thread it is. Answers on any server, home or not.
+     */
+    readonly status: (
+      owner: ChannelConnectionOwner,
+    ) => Effect.Effect<ChannelGetBotStatusResult, ChannelGatewayError>;
   }
->()("t3/channels/ChannelBotRegistry") {}
+>()("goat/channels/ChannelBotRegistry") {}
 
 const persistence = () => new ChannelGatewayError({ reason: "persistence_failed" });
 
 const make = Effect.gen(function* () {
   const ledger = yield* ChannelLedger.ChannelLedger;
+  const home = yield* ChannelBotHome.ChannelBotHome;
   const threads = yield* ThreadManagement.ThreadManagementService;
   const launches = yield* ThreadLaunch.ThreadLaunchService;
   const folders = yield* ManagedProjectFolders.ManagedProjectFolders;
@@ -79,35 +95,22 @@ const make = Effect.gen(function* () {
       Effect.catch(() => Effect.succeed(false)),
     );
 
-  /** Starts a bot thread in the scratch project. Ids are fixed per owner and replaced thread. */
-  const launchBot = (owner: ChannelConnectionOwner, replacing?: ThreadId) =>
+  /** Starts a bot thread in the bot's project. Ids are fixed per owner and replaced thread. */
+  const launchBot = (ownerId: string, replacing?: ThreadId) =>
     Effect.gen(function* () {
       const environmentId = yield* environment.getEnvironmentId;
-      const scratch = yield* folders.ensureScratchProject.pipe(
-        Effect.catch((error) =>
-          error._tag === "ScratchUnavailableError"
-            ? // The bot lives in Scratch, which is off while the data directory is inside a Git
-              // work tree (a dev worktree's .t3, a dotfiles home).
-              Effect.logWarning(
-                "GOAT bot is unavailable: the Scratch project is off because the data directory is inside a Git work tree. Start the server with --home-dir outside the checkout.",
-              ).pipe(
-                Effect.andThen(
-                  Effect.fail(new ChannelGatewayError({ reason: "adapter_unavailable" })),
-                ),
-              )
-            : Effect.logWarning("GOAT bot Scratch project failed", { cause: error }).pipe(
-                Effect.andThen(Effect.fail(persistence())),
-              ),
-        ),
+      const project = yield* folders.ensureBotProject.pipe(
+        Effect.tapError((cause) => Effect.logWarning("GOAT bot project failed", { cause })),
+        Effect.mapError(persistence),
       );
       const settings = yield* serverSettings.getSettings.pipe(Effect.mapError(persistence));
-      const ids = botLaunchIdsFor(owner.ownerId, replacing);
+      const ids = botLaunchIdsFor(ownerId, replacing);
       // No initial message: the bot thread exists only to hold the conversation and chips.
       const launched = yield* launches
         .launch({
           commandId: ids.commandId,
           threadId: ids.threadId,
-          projectId: scratch.projectId,
+          projectId: project.projectId,
           title: GOAT_BOT_TITLE,
           modelSelection: settings.textGenerationModelSelection,
           runtimeMode: "approval-required",
@@ -120,19 +123,19 @@ const make = Effect.gen(function* () {
           Effect.tapError((cause) => Effect.logWarning("GOAT bot launch failed", { cause })),
           Effect.mapError(persistence),
         );
-      return { environmentId, projectId: scratch.projectId, threadId: launched.threadId };
+      return { environmentId, projectId: project.projectId, threadId: launched.threadId };
     });
 
-  const ensure: ChannelBotRegistry["Service"]["ensure"] = (input, owner) =>
+  const ensureCanonical = (input: ChannelEnsureBotInput, ownerId: string) =>
     Effect.gen(function* () {
-      const existing = yield* ledger.getBot(owner.ownerId).pipe(Effect.mapError(persistence));
+      const existing = yield* ledger.getBot(ownerId).pipe(Effect.mapError(persistence));
       const now = DateTime.formatIso(yield* DateTime.now);
       if (existing !== undefined) {
         const previousThreadId = existing.bot.threadId;
         if (!(yield* wasDeleted(previousThreadId))) return existing.bot;
-        const bot = yield* launchBot(owner, previousThreadId);
+        const bot = yield* launchBot(ownerId, previousThreadId);
         return yield* ledger
-          .replaceBot({ ownerId: owner.ownerId, previousThreadId, bot, now })
+          .replaceBot({ ownerId, previousThreadId, bot, now })
           .pipe(Effect.mapError(persistence));
       }
       const environmentId = yield* environment.getEnvironmentId;
@@ -146,7 +149,7 @@ const make = Effect.gen(function* () {
       if (candidate.type === "adopt" && input.candidateThreadId !== undefined) {
         return yield* ledger
           .setBotIfAbsent({
-            ownerId: owner.ownerId,
+            ownerId,
             bot: {
               environmentId,
               projectId: candidate.projectId,
@@ -156,10 +159,10 @@ const make = Effect.gen(function* () {
           })
           .pipe(Effect.mapError(persistence));
       }
-      const bot = yield* launchBot(owner);
+      const bot = yield* launchBot(ownerId);
       return yield* ledger
         .setBotIfAbsent({
-          ownerId: owner.ownerId,
+          ownerId,
           bot,
           ...(candidate.type === "legacy" && input.candidateThreadId !== undefined
             ? { legacyThreadId: input.candidateThreadId }
@@ -169,7 +172,39 @@ const make = Effect.gen(function* () {
         .pipe(Effect.mapError(persistence));
     });
 
-  return ChannelBotRegistry.of({ ensure });
+  const ensure: ChannelBotRegistry["Service"]["ensure"] = (input, owner) =>
+    home.requireHome.pipe(Effect.andThen(ensureCanonical(input, owner.ownerId)));
+
+  const ensureForReport: ChannelBotRegistry["Service"]["ensureForReport"] = (owner) =>
+    Effect.gen(function* () {
+      if (owner !== (yield* environment.getEnvironmentId))
+        return yield* new ChannelGatewayError({ reason: "invalid_input" });
+      // No candidate means a report can never adopt a user's active agent thread.
+      return yield* ensureCanonical({}, channelOwnerIdFor(owner));
+    });
+
+  /**
+   * The bot thread's visit watermark. Visiting the bot thread (thread.visit, the sidebar's
+   * mark-read path) marks every task that was waiting by then as read.
+   */
+  const botReadThrough = (bot: ChannelBotRef | null) =>
+    Effect.gen(function* () {
+      if (bot === null || bot.environmentId !== (yield* environment.getEnvironmentId))
+        return undefined;
+      const records = yield* threads.getThreadRecords(bot.threadId, []);
+      const visitedAt = records.thread.lastVisitedAt;
+      return visitedAt === null ? undefined : DateTime.formatIso(visitedAt);
+    }).pipe(Effect.orElseSucceed(() => undefined));
+
+  const status: ChannelBotRegistry["Service"]["status"] = (owner) =>
+    Effect.gen(function* () {
+      const bot = (yield* ledger.getBot(owner.ownerId))?.bot ?? null;
+      const readThrough = yield* botReadThrough(bot);
+      const waitingCount = yield* ledger.countWaitingTasks(owner.ownerId, readThrough);
+      return { bot, waitingCount };
+    }).pipe(Effect.mapError(persistence));
+
+  return ChannelBotRegistry.of({ ensure, ensureForReport, status });
 });
 
 export const layer = Layer.effect(ChannelBotRegistry, make);

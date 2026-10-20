@@ -1,18 +1,20 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, describe, it } from "@effect/vitest";
-import { EnvironmentId, ProviderInstanceId, ThreadId } from "@t3tools/contracts";
+import { EnvironmentId, ProviderInstanceId, ThreadId } from "@goat/contracts";
+import { legacyEnvName } from "@goat/contracts/legacyT3Names";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 
 import {
-  PI_T3_MCP_EXTENSION_FILENAME,
-  T3_MCP_BEARER_ENV,
-  T3_MCP_URL_ENV,
-  T3_PI_RUNTIME_MODE_ENV,
+  PI_GOAT_MCP_EXTENSION_FILENAME,
+  GOAT_MCP_BEARER_ENV,
+  GOAT_MCP_URL_ENV,
+  GOAT_PI_RUNTIME_MODE_ENV,
+  GOAT_PI_MCP_EXTENSION_PATH_ENV,
 } from "./mcpExtensionSource.ts";
 import {
   buildPiRpcLaunch,
-  materializePiT3McpExtension,
+  materializePiGoatMcpExtension,
   resolvePiLaunchArgs,
 } from "./mcpInjection.ts";
 
@@ -39,7 +41,7 @@ describe("pi T3 MCP injection", () => {
       launchArgs: resolvedArgs.args,
       environment: { PATH: "/usr/bin" },
       mcpSession,
-      extensionPath: "/tmp/cache/pi-t3-mcp-extension.ts",
+      extensionPath: "/tmp/cache/pi-goat-mcp-extension.ts",
       runtimeMode: "approval-required",
     });
     assert.deepEqual(launch.args, [
@@ -59,33 +61,46 @@ describe("pi T3 MCP injection", () => {
       "-review",
       "--extension-flag=kept",
       "--extension",
-      "/tmp/cache/pi-t3-mcp-extension.ts",
+      "/tmp/cache/pi-goat-mcp-extension.ts",
     ]);
     assert.notInclude(launch.args, "--no-extensions");
-    assert.equal(launch.env[T3_MCP_URL_ENV], "http://127.0.0.1:43123/mcp");
-    assert.equal(launch.env[T3_MCP_BEARER_ENV], "secret-pi-token");
-    assert.equal(launch.env[T3_PI_RUNTIME_MODE_ENV], "approval-required");
+    assert.equal(launch.env[GOAT_MCP_URL_ENV], "http://127.0.0.1:43123/mcp");
+    assert.equal(launch.env[GOAT_MCP_BEARER_ENV], "secret-pi-token");
+    assert.equal(launch.env[GOAT_PI_RUNTIME_MODE_ENV], "approval-required");
+    assert.equal(launch.env[GOAT_PI_MCP_EXTENSION_PATH_ENV], "/tmp/cache/pi-goat-mcp-extension.ts");
+    // An extension materialized by an older build reads the legacy names.
+    assert.equal(launch.env[legacyEnvName(GOAT_MCP_URL_ENV)!], "http://127.0.0.1:43123/mcp");
+    assert.equal(launch.env[legacyEnvName(GOAT_MCP_BEARER_ENV)!], "secret-pi-token");
+    // Older extensions identify their own tools by this exact spelling.
+    assert.equal(launch.env.T3_PI_MCP_EXTENSION_PATH, "/tmp/cache/pi-goat-mcp-extension.ts"); // goat-rename: legacy
+    assert.equal(launch.env.T3_PI_RUNTIME_MODE, "approval-required"); // goat-rename: legacy
 
     const permissionOnly = buildPiRpcLaunch({
       launchArgs: [],
       environment: {
-        [T3_MCP_URL_ENV]: "http://127.0.0.1:9999/stale",
-        [T3_MCP_BEARER_ENV]: "stale-token",
+        [GOAT_MCP_URL_ENV]: "http://127.0.0.1:9999/stale",
+        [legacyEnvName(GOAT_MCP_BEARER_ENV)!]: "stale-token",
+        [GOAT_PI_MCP_EXTENSION_PATH_ENV]: "/stale/extension.ts",
       },
       mcpSession: undefined,
-      extensionPath: "/tmp/cache/pi-t3-mcp-extension.ts",
+      extensionPath: "/tmp/cache/pi-goat-mcp-extension.ts",
       runtimeMode: "auto-accept-edits",
     });
     assert.deepEqual(permissionOnly.args, [
       "--mode",
       "rpc",
       "--extension",
-      "/tmp/cache/pi-t3-mcp-extension.ts",
+      "/tmp/cache/pi-goat-mcp-extension.ts",
     ]);
-    assert.isFalse(permissionOnly.hasT3Mcp);
-    assert.isUndefined(permissionOnly.env[T3_MCP_URL_ENV]);
-    assert.isUndefined(permissionOnly.env[T3_MCP_BEARER_ENV]);
-    assert.equal(permissionOnly.env[T3_PI_RUNTIME_MODE_ENV], "auto-accept-edits");
+    assert.isFalse(permissionOnly.hasGoatMcp);
+    assert.isUndefined(permissionOnly.env[GOAT_MCP_URL_ENV]);
+    assert.isUndefined(permissionOnly.env[GOAT_MCP_BEARER_ENV]);
+    assert.isUndefined(permissionOnly.env[legacyEnvName(GOAT_MCP_BEARER_ENV)!]);
+    assert.equal(permissionOnly.env[GOAT_PI_RUNTIME_MODE_ENV], "auto-accept-edits");
+    assert.equal(
+      permissionOnly.env[GOAT_PI_MCP_EXTENSION_PATH_ENV],
+      "/tmp/cache/pi-goat-mcp-extension.ts",
+    );
   });
 
   it("falls back to Pi's first supported mode for legacy auto threads", () => {
@@ -93,11 +108,11 @@ describe("pi T3 MCP injection", () => {
       launchArgs: [],
       environment: {},
       mcpSession: undefined,
-      extensionPath: "/tmp/cache/pi-t3-mcp-extension.ts",
+      extensionPath: "/tmp/cache/pi-goat-mcp-extension.ts",
       runtimeMode: "auto",
     });
 
-    assert.equal(launch.env[T3_PI_RUNTIME_MODE_ENV], "approval-required");
+    assert.equal(launch.env[GOAT_PI_RUNTIME_MODE_ENV], "approval-required");
   });
 
   it("forces tools and user extensions off for unattended text generation", () => {
@@ -113,7 +128,7 @@ describe("pi T3 MCP injection", () => {
       ],
       environment: {},
       mcpSession,
-      extensionPath: "/tmp/cache/pi-t3-mcp-extension.ts",
+      extensionPath: "/tmp/cache/pi-goat-mcp-extension.ts",
       ephemeral: true,
       disableExtensions: true,
       disableTools: true,
@@ -127,7 +142,7 @@ describe("pi T3 MCP injection", () => {
       "--no-extensions",
       "--no-tools",
     ]);
-    assert.isFalse(launch.hasT3Mcp);
+    assert.isFalse(launch.hasGoatMcp);
     assert.deepInclude(resolvePiLaunchArgs("--mode text"), {
       ok: false,
       message: "Pi launch argument '--mode' is controlled by GOAT and cannot be overridden.",
@@ -151,11 +166,11 @@ describe("pi T3 MCP injection", () => {
   it.effect("materializes the MCP bridge with namespaced tool registration", () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
-      const cacheDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-pi-extensions-" });
-      const mcpDest = yield* materializePiT3McpExtension(cacheDir);
-      assert.isTrue(mcpDest.endsWith(PI_T3_MCP_EXTENSION_FILENAME));
+      const cacheDir = yield* fs.makeTempDirectoryScoped({ prefix: "goat-pi-extensions-" });
+      const mcpDest = yield* materializePiGoatMcpExtension(cacheDir);
+      assert.isTrue(mcpDest.endsWith(PI_GOAT_MCP_EXTENSION_FILENAME));
       const mcpSource = yield* fs.readFileString(mcpDest);
-      assert.include(mcpSource, "export default async function t3McpExtension");
+      assert.include(mcpSource, "export default async function goatMcpExtension");
       assert.include(mcpSource, "before_agent_start");
       assert.include(mcpSource, 'pi.on("tool_call"');
       assert.include(mcpSource, "Allow ${event.toolName}?");

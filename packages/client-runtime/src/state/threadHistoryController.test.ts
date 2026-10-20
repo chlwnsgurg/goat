@@ -1,4 +1,4 @@
-import type { EnvironmentId, ThreadId } from "@t3tools/contracts";
+import type { EnvironmentId, ThreadId } from "@goat/contracts";
 import { describe, expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -38,7 +38,6 @@ describe("ThreadHistoryController", () => {
       const olderRegistration = yield* controller.register(ENV, THREAD, older);
       const newerRegistration = yield* controller.register(ENV, THREAD, newer);
 
-      // Older fiber finalizes after the newer handler is already registered.
       yield* controller.unregister(olderRegistration);
 
       const result = yield* controller.loadEarlier(ENV, THREAD);

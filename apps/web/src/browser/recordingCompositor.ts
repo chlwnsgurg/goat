@@ -1,4 +1,4 @@
-import type { DesktopPreviewRecordingInput } from "@t3tools/contracts";
+import type { DesktopPreviewRecordingInput } from "@goat/contracts";
 
 import { readPreviewAnnotationTheme } from "./annotationTheme";
 
@@ -8,7 +8,6 @@ interface RecordingDecorationOptions {
   readonly frameRate: number;
 }
 
-/** Decorates a detached canvas; no recording UI is inserted into the preview page. */
 export async function createRecordingCompositor(
   source: MediaStream,
   options: RecordingDecorationOptions,
@@ -74,7 +73,6 @@ export async function createRecordingCompositor(
   }
 }
 
-/** Keeps input timing and coordinates independent of native video frame delivery. */
 export class RecordingDecorations {
   private ring: {
     x: number;

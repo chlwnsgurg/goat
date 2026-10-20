@@ -8,7 +8,7 @@ import {
   EnvironmentHttpForbiddenError,
   EnvironmentHttpInternalServerError,
   EnvironmentHttpUnauthorizedError,
-} from "@t3tools/contracts";
+} from "@goat/contracts";
 import * as Effect from "effect/Effect";
 import * as HttpEffect from "effect/http/HttpEffect";
 import { HttpServerRequest, HttpServerResponse } from "effect/http";
@@ -56,7 +56,6 @@ const unauthorized = (error: { readonly message: string }) =>
 const conflict = (error: { readonly message: string }) =>
   Effect.fail(new EnvironmentHttpConflictError({ message: error.message }));
 
-/** How a connect route answers each CloudLink failure. Messages carry through unchanged. */
 const connectErrorCases = {
   CloudLinkRelayConfigInvalidError: badRequest,
   CloudLinkOriginInvalidError: badRequest,
@@ -66,8 +65,16 @@ const connectErrorCases = {
   CloudLinkProofRejectedError: unauthorized,
   CloudLinkProofReplayedError: conflict,
   CloudLinkTunnelSupersededError: conflict,
+  // While GOAT Connect is off, callers holding an old relay grant get a typed
+  // refusal instead of a server error; nothing reaches the relay or cloudflared.
   CloudLinkInternalError: (error: CloudLink.CloudLinkInternalError) =>
-    internalServerError(error, error.cause),
+    error.operation === "connect-disabled"
+      ? Effect.logInfo(error.message).pipe(
+          Effect.andThen(
+            Effect.fail(new EnvironmentHttpForbiddenError({ message: error.message })),
+          ),
+        )
+      : internalServerError(error, error.cause),
   RelayRequestError: relayFailure,
 } as const;
 
@@ -76,7 +83,6 @@ type ConnectFailure =
   | EnvironmentAuth.ServerAuthInternalError
   | RelayRequestError;
 
-/** Internal failures are logged with their cause before the route answers 500. */
 const toHttpError = <A, R>(effect: Effect.Effect<A, ConnectFailure, R>) =>
   effect.pipe(
     Effect.catchTags(connectErrorCases),
@@ -85,7 +91,6 @@ const toHttpError = <A, R>(effect: Effect.Effect<A, ConnectFailure, R>) =>
     ),
   );
 
-/** Relay configuration is the one route that answers 503 when the tunnel cannot serve. */
 const toHttpErrorOrUnavailable = <A, R>(
   effect: Effect.Effect<A, ConnectFailure | CloudLink.CloudLinkEndpointUnavailableError, R>,
 ) =>

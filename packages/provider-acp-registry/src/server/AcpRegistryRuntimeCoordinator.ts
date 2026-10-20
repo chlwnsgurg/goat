@@ -2,7 +2,7 @@ import {
   type AcpRegistryAcceptUrlAuthInput,
   type AcpRegistryUrlAuthAction,
   type ProviderInstanceId,
-} from "@t3tools/contracts";
+} from "@goat/contracts";
 import * as Context from "effect/Context";
 import * as Deferred from "effect/Deferred";
 import * as DateTime from "effect/DateTime";
@@ -32,7 +32,6 @@ interface UrlAuthActionUpdate {
   readonly action: AcpRegistryUrlAuthAction | null;
 }
 
-/** Pending URL logins auto-decline after this window so stale prompts cannot be accepted later. */
 const URL_AUTH_ACTION_TTL = Duration.minutes(10);
 
 interface PendingUrlAuthAction {
@@ -41,7 +40,6 @@ interface PendingUrlAuthAction {
   readonly expiresAt: DateTime.Utc;
 }
 
-/** Gives a user-started ACP process priority over disposable discovery for the same agent. */
 export class AcpRegistryRuntimeCoordinator extends Context.Service<
   AcpRegistryRuntimeCoordinator,
   {
@@ -53,7 +51,6 @@ export class AcpRegistryRuntimeCoordinator extends Context.Service<
       agentId: string,
       effect: Effect.Effect<A, E, R>,
     ) => Effect.Effect<Option.Option<A>, E, R>;
-    /** Serializes native-session imports and deletes across all client connections. */
     readonly withSessionMutation: <A, E, R>(
       effect: Effect.Effect<A, E, R>,
     ) => Effect.Effect<A, E, R>;
@@ -96,7 +93,7 @@ export class AcpRegistryRuntimeCoordinator extends Context.Service<
       onUpdate: (action: AcpRegistryUrlAuthAction | null) => Effect.Effect<void>,
     ) => Effect.Effect<void>;
   }
->()("@t3tools/provider-acp-registry/server/AcpRegistryRuntimeCoordinator") {}
+>()("@goat/provider-acp-registry/server/AcpRegistryRuntimeCoordinator") {}
 
 const make = Effect.gen(function* () {
   const foregroundStarts = yield* PubSub.unbounded<string>();

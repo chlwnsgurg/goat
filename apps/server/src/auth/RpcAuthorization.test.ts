@@ -1,5 +1,5 @@
 import * as Schema from "effect/Schema";
-import { SshWorkspaceLaunchInput } from "@t3tools/contracts";
+import { SshWorkspaceLaunchInput } from "@goat/contracts";
 import {
   AuthEnvironmentMaintainScope,
   AuthDiagnosticsReadScope,
@@ -10,6 +10,7 @@ import {
   ProviderInstanceId,
   ThreadId,
   AuthOrchestrationOperateScope,
+  ORCHESTRATION_V2_WS_METHODS,
   AuthOrchestrationReadScope,
   AuthSourceControlWriteScope,
   AuthPreviewOperateScope,
@@ -18,19 +19,22 @@ import {
   AuthTerminalReadScope,
   AuthTerminalOperateScope,
   WS_METHODS,
-  WsRpcGroup,
-} from "@t3tools/contracts";
+} from "@goat/contracts";
 import { describe, expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as RpcTest from "effect/rpc/RpcTest";
 
 import {
-  RPC_REQUIRED_SCOPES,
+  AuthorizedWsRpcGroup as WsRpcGroup,
+  RPC_REQUIRED_SCOPES as BASE_RPC_REQUIRED_SCOPES,
+  MEMORY_RPC_REQUIRED_SCOPES,
   requiredScopeForRpcMethod,
   requiredScopeForDeviceList,
 } from "./RpcAuthorization.ts";
 import * as RpcAuthorization from "./RpcAuthorization.ts";
+
+const RPC_REQUIRED_SCOPES = { ...BASE_RPC_REQUIRED_SCOPES, ...MEMORY_RPC_REQUIRED_SCOPES };
 
 describe("RPC authorization scopes", () => {
   it.effect("accepts only the owning desktop with settings write scope as a catalog host", () =>
@@ -68,6 +72,31 @@ describe("RPC authorization scopes", () => {
     expect(new Set(Object.keys(RPC_REQUIRED_SCOPES))).toEqual(new Set(WsRpcGroup.requests.keys()));
   });
 
+  // Boat machines bill the owner's account, so only a settings writer may change or wake them.
+  it("lets readers list cloud machines and only settings writers change them", () => {
+    expect(requiredScopeForRpcMethod(WS_METHODS.cloudMachinesList)).toBe(
+      AuthOrchestrationReadScope,
+    );
+    for (const method of [
+      WS_METHODS.cloudMachinesConfigure,
+      WS_METHODS.cloudMachinesDisconnect,
+      WS_METHODS.cloudMachinesCreate,
+      WS_METHODS.cloudMachinesStop,
+      WS_METHODS.cloudMachinesResume,
+      WS_METHODS.cloudMachinesDelete,
+      WS_METHODS.cloudMachinesForget,
+      WS_METHODS.cloudMachinesDismissUnconfirmed,
+      WS_METHODS.cloudMachinesEnsureReady,
+    ])
+      expect(requiredScopeForRpcMethod(method), method).toBe(AuthSettingsWriteScope);
+  });
+
+  it("requires operate access to stop a workflow", () => {
+    expect(requiredScopeForRpcMethod(ORCHESTRATION_V2_WS_METHODS.stopWorkflow)).toBe(
+      AuthOrchestrationOperateScope,
+    );
+  });
+
   it("authorizes background policy reporting and observation deliberately", () => {
     expect(requiredScopeForRpcMethod(WS_METHODS.serverReportClientActivity)).toBe(
       AuthOrchestrationReadScope,
@@ -91,6 +120,12 @@ describe("RPC authorization scopes", () => {
     ]) {
       expect(requiredScopeForRpcMethod(method)).toBe(AuthOrchestrationOperateScope);
     }
+  });
+
+  it("reads host status with read scope, like host resources", () => {
+    expect(requiredScopeForRpcMethod(WS_METHODS.serverGetHostStatus)).toBe(
+      AuthOrchestrationReadScope,
+    );
   });
 
   it("allows relay status reads without granting relay installation access", () => {
@@ -140,8 +175,6 @@ describe("RPC authorization scopes", () => {
   });
 
   it("reads the reviewer menu under the same scope as the pull request it belongs to", () => {
-    // The candidate list is a read like the detail beside it, and asking somebody for a review is
-    // a write like every other pull request operation.
     expect(requiredScopeForRpcMethod(WS_METHODS.pullRequestsChecks)).toBe(
       AuthOrchestrationReadScope,
     );
@@ -284,6 +317,27 @@ describe("RPC scope middleware", () => {
         requiredPermission: missing,
       });
       expect(handled).toEqual([]);
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect("reports only authorized requests that succeed", () =>
+    Effect.gen(function* () {
+      const observed: Array<string> = [];
+      const client = yield* RpcTest.makeClient(group).pipe(
+        Effect.provide(
+          Layer.mergeAll(
+            group.toLayerHandler(WS_METHODS.serverProbe, () => Effect.succeed({})),
+            group.toLayerHandler(WS_METHODS.serverRetryResourceTelemetry, () => Effect.never),
+            RpcAuthorization.layer([AuthOrchestrationReadScope], (method) =>
+              Effect.sync(() => void observed.push(method)),
+            ),
+          ),
+        ),
+      );
+
+      yield* client[WS_METHODS.serverProbe]({});
+      yield* client[WS_METHODS.serverRetryResourceTelemetry]({}).pipe(Effect.flip);
+      expect(observed).toEqual([WS_METHODS.serverProbe]);
     }).pipe(Effect.scoped),
   );
 });
@@ -588,3 +642,92 @@ it.effect("SSH fetchBack permits source-control write without orchestration oper
     expect(handled).toBe(1);
   }).pipe(Effect.scoped),
 );
+
+it.effect(
+  "guards all installed memory routes, including compound source and settings-only owner administration",
+  () =>
+    Effect.gen(function* () {
+      const reads = [
+        WS_METHODS.memorySearch,
+        WS_METHODS.memoryList,
+        WS_METHODS.memoryRead,
+        WS_METHODS.memoryHistory,
+        WS_METHODS.memoryChanges,
+        WS_METHODS.memorySyncStatus,
+        WS_METHODS.memoryHubDiagnostics,
+      ];
+      const writes = [
+        WS_METHODS.memoryUpsert,
+        WS_METHODS.memoryForget,
+        WS_METHODS.memoryRevertResolution,
+        WS_METHODS.memoryProjectBindingGet,
+        WS_METHODS.memoryProjectBindingUpdate,
+      ];
+      const settings = [
+        WS_METHODS.memoryHubSettingsGet,
+        WS_METHODS.memoryHubSettingsUpdate,
+        WS_METHODS.memoryResetReportAttempts,
+        WS_METHODS.memoryHubReconcile,
+        WS_METHODS.memoryOwnerSourceReadPolicyGet,
+        WS_METHODS.memoryOwnerSourceReadPolicyUpdate,
+      ];
+      const cases = [
+        {
+          method: WS_METHODS.memoryImportProvider,
+          scopes: ["memory:write", "filesystem:read"] as const,
+        },
+        ...reads.map((method) => ({ method, scopes: ["memory:read"] as const })),
+        ...writes.map((method) => ({ method, scopes: ["memory:write"] as const })),
+        ...settings.map((method) => ({ method, scopes: ["settings:write"] as const })),
+        {
+          method: WS_METHODS.memoryReadSource,
+          scopes: ["memory:read", "orchestration:read"] as const,
+        },
+      ];
+      expect(new Set(cases.map((c) => c.method))).toEqual(
+        new Set([...WsRpcGroup.requests.keys()].filter((tag) => tag.startsWith("memory."))),
+      );
+      expect(WsRpcGroup.requests.has(WS_METHODS.memoryImportProvider)).toBe(true);
+      for (const { method, scopes } of cases) {
+        let calls = 0;
+        const invoke = (grants: ReadonlyArray<import("@goat/contracts").AuthEnvironmentScope>) =>
+          RpcAuthorization.authorizeRpcCall(grants, method, {}).pipe(
+            Effect.andThen(
+              Effect.sync(() => {
+                calls++;
+              }),
+            ),
+          );
+        expect((yield* Effect.flip(invoke([])))._tag).toBe("EnvironmentAuthorizationError");
+        expect(calls).toBe(0);
+        yield* invoke(scopes);
+        expect(calls).toBe(1);
+        for (const missing of scopes) {
+          expect(
+            (yield* Effect.flip(invoke(scopes.filter((scope) => scope !== missing))))
+              .requiredPermission,
+          ).toBe(missing);
+          expect(calls).toBe(1);
+        }
+        if (settings.includes(method as (typeof settings)[number])) {
+          expect(
+            (yield* Effect.flip(
+              invoke(["memory:read", "memory:write", "orchestration:read", "providers:manage"]),
+            )).requiredPermission,
+          ).toBe("settings:write");
+        }
+      }
+    }).pipe(Effect.scoped),
+);
+
+it.each([
+  [WS_METHODS.sshHostStatus, AuthOrchestrationReadScope],
+  [WS_METHODS.sshHostHandoffProgress, AuthOrchestrationReadScope],
+  [WS_METHODS.sshHostProbe, AuthSettingsWriteScope],
+  [WS_METHODS.sshHostTrust, AuthSettingsWriteScope],
+  [WS_METHODS.sshHostPrepare, AuthEnvironmentMaintainScope],
+  [WS_METHODS.sshHostForget, AuthSettingsWriteScope],
+] as const)("registers %s with its destination authority", (method, scope) => {
+  expect(WsRpcGroup.requests.has(method)).toBe(true);
+  expect(requiredScopeForRpcMethod(method)).toBe(scope);
+});

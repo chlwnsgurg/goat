@@ -1,4 +1,4 @@
-import type { ServerSettings, ServerSettingsError } from "@t3tools/contracts";
+import type { ServerSettings, ServerSettingsError } from "@goat/contracts";
 import * as Effect from "effect/Effect";
 import * as Equal from "effect/Equal";
 import * as Stream from "effect/Stream";
@@ -27,7 +27,6 @@ export function haveProviderSnapshotSettingsChanged<Settings>(
   return !Equal.equals(previous, next);
 }
 
-/** The instance's settings paired with the host's server settings, as snapshots read them. */
 export const makeProviderSnapshotSettingsSource = <Settings>(
   provider: Settings,
 ): Effect.Effect<

@@ -1,15 +1,16 @@
+import { makeMobileCloudSession } from "./cloud-session";
 import {
   ClientCapabilities,
   PlatformConnectionSource,
   Persistence,
-} from "@t3tools/client-runtime/platform";
+} from "@goat/client-runtime/platform";
 import {
   ConnectionBlockedError,
   ConnectionTransientError,
   Connectivity,
   Wakeups,
-} from "@t3tools/client-runtime/connection";
-import { managedRelayAccountChanges, managedRelaySessionAtom } from "@t3tools/client-runtime/relay";
+} from "@goat/client-runtime/connection";
+import { managedRelayAccountChanges, managedRelaySessionAtom } from "@goat/client-runtime/relay";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -20,6 +21,7 @@ import Constants from "expo-constants";
 import * as Network from "expo-network";
 import { AppState } from "react-native";
 
+import { isForegroundHandoffActive } from "../lib/foreground-handoff";
 import { authClientMetadata } from "../lib/authClientMetadata";
 import * as Runtime from "../lib/runtime";
 import * as MobileStorage from "../persistence/mobile-storage";
@@ -128,17 +130,24 @@ const layerWakeups = Wakeups.layer({
         Effect.acquireRelease(
           Effect.sync(() => {
             let backgroundedAtMs = AppState.currentState === "background" ? Date.now() : null;
+            let foregroundHandoff = isForegroundHandoffActive();
             return AppState.addEventListener("change", (state) => {
               if (state === "background") {
                 backgroundedAtMs = Date.now();
+                foregroundHandoff = isForegroundHandoffActive();
                 return;
               }
               if (state === "active") {
                 Queue.offerUnsafe(
                   queue,
-                  mobileApplicationActiveWakeup(backgroundedAtMs, Date.now()),
+                  mobileApplicationActiveWakeup(
+                    backgroundedAtMs,
+                    Date.now(),
+                    foregroundHandoff || isForegroundHandoffActive(),
+                  ),
                 );
                 backgroundedAtMs = null;
+                foregroundHandoff = false;
               }
             });
           }),
@@ -159,36 +168,7 @@ const layerCapabilities = Layer.effectContext(
     const storage = yield* MobileStorage.MobileStorage;
     return Context.make(
       ClientCapabilities.CloudSession,
-      ClientCapabilities.CloudSession.of({
-        identity: Effect.sync(() =>
-          Option.fromNullishOr(appAtomRegistry.get(managedRelaySessionAtom)),
-        ),
-        clerkToken: Effect.gen(function* () {
-          const session = appAtomRegistry.get(managedRelaySessionAtom);
-          if (session === null) {
-            return yield* new ConnectionBlockedError({
-              reason: "authentication",
-              detail: "Sign in to T3 Connect to connect this environment.",
-            });
-          }
-          const token = yield* session.readClerkToken().pipe(
-            Effect.mapError(
-              (error) =>
-                new ConnectionTransientError({
-                  reason: "network",
-                  detail: error.message,
-                }),
-            ),
-          );
-          if (token === null) {
-            return yield* new ConnectionBlockedError({
-              reason: "authentication",
-              detail: "The T3 Connect session is unavailable.",
-            });
-          }
-          return token;
-        }),
-      }),
+      makeMobileCloudSession(() => appAtomRegistry.get(managedRelaySessionAtom)),
     ).pipe(
       Context.add(
         ClientCapabilities.PrimaryEnvironmentAuth,

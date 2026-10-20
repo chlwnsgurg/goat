@@ -1,8 +1,8 @@
 import type {
   AuthClientPresentationMetadata,
   ExecutionEnvironmentDescriptor,
-} from "@t3tools/contracts";
-import { withRelayClientTracing } from "@t3tools/shared/relayTracing";
+} from "@goat/contracts";
+import { withRelayClientTracing } from "@goat/shared/relayTracing";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -46,12 +46,14 @@ import {
 } from "./compatibility.ts";
 import { credentialConnectionId } from "./routes.ts";
 import { fetchRemoteEnvironmentDescriptor } from "../environment/descriptor.ts";
+import { withSshConnectionTiming } from "./sshTiming.ts";
 
 export class ConnectionResolver extends Context.Service<
   ConnectionResolver,
   {
     readonly prepare: (
       entry: ConnectionCatalogEntry,
+      onHostAnswered?: Effect.Effect<void>,
     ) => Effect.Effect<PreparedConnection, ConnectionAttemptError>;
     /**
      * Authorizes a socket without the orchestration protocol gate, for hosts
@@ -65,10 +67,11 @@ export class ConnectionResolver extends Context.Service<
       ConnectionAttemptError
     >;
   }
->()("@t3tools/client-runtime/connection/resolver/ConnectionResolver") {}
+>()("@goat/client-runtime/connection/resolver/ConnectionResolver") {}
 
 const isBearerProfile = Schema.is(BearerConnectionProfile);
 const isSshProfile = Schema.is(SshConnectionProfile);
+const sameBearerCredential = Schema.toEquivalence(BearerConnectionCredential);
 const isBearerCredential = Schema.is(BearerConnectionCredential);
 
 function primarySocketUrl(
@@ -147,7 +150,6 @@ const makeBearerBroker = Effect.fn("clientRuntime.connection.broker.makeBearer")
       });
       return { ...authorized, target } satisfies PreparedConnection;
     }
-    // A learned route borrows the credential of the route it was learned from.
     const credential = yield* credentials.get(credentialConnectionId(target.connectionId)).pipe(
       Effect.flatMap(
         Option.match({
@@ -201,11 +203,13 @@ const makeRelayBroker = Effect.fn("clientRuntime.connection.broker.makeRelay")(f
 
 const makeSshBroker = Effect.fn("clientRuntime.connection.broker.makeSsh")(function* () {
   const profiles = yield* ConnectionProfileStore.ConnectionProfileStore;
+  const credentials = yield* ConnectionCredentialStore.ConnectionCredentialStore;
   const ssh = yield* ClientCapabilities.SshEnvironmentGateway;
   const remote = yield* RemoteEnvironmentAuthorization.RemoteEnvironmentAuthorization;
 
   return Effect.fn("clientRuntime.connection.broker.ssh")(function* (
     entry: ConnectionCatalogEntry & { readonly target: SshConnectionTarget },
+    onHostAnswered?: Effect.Effect<void>,
   ) {
     const target = entry.target;
     const profile = yield* Effect.fromOption(entry.profile, () =>
@@ -223,11 +227,45 @@ const makeSshBroker = Effect.fn("clientRuntime.connection.broker.makeSsh")(funct
         actual: profile.environmentId,
       });
     }
+    // Each pairing adds a session on the host, so connects reuse the saved token.
+    const saved = Option.getOrUndefined(yield* credentials.get(target.connectionId));
+    const savedToken = saved !== undefined && isBearerCredential(saved) ? saved.token : undefined;
+    const authorize = (
+      prepared: ClientCapabilities.PreparedSshEnvironment,
+      onEndpointVerified?: Parameters<
+        RemoteEnvironmentAuthorization.RemoteEnvironmentAuthorization["Service"]["authorizeBearer"]
+      >[0]["onEndpointVerified"],
+    ) =>
+      remote
+        .authorizeBearer({
+          expectedEnvironmentId: target.environmentId,
+          httpBaseUrl: prepared.bootstrap.httpBaseUrl,
+          wsBaseUrl: prepared.bootstrap.wsBaseUrl,
+          bearerToken: prepared.bearerToken,
+          connectionMethod: "ssh",
+          ...(onEndpointVerified === undefined ? {} : { onEndpointVerified }),
+          ...(prepared.verifiedEndpoint === undefined
+            ? {}
+            : { verifiedSshEndpoint: prepared.verifiedEndpoint }),
+        })
+        .pipe(withSshConnectionTiming("authorization"));
     const prepared = yield* ssh.prepare({
       connectionId: target.connectionId,
       expectedEnvironmentId: target.environmentId,
       target: profile.target,
+      ...(savedToken === undefined ? {} : { bearerToken: savedToken }),
+      ...(onHostAnswered === undefined ? {} : { onHostAnswered }),
+      authorize,
     });
+    const preparedCredential = new BearerConnectionCredential({
+      token: prepared.bearerToken,
+      ...(prepared.sshPairingGrant === undefined
+        ? {}
+        : { sshPairingGrant: prepared.sshPairingGrant }),
+    });
+    if (saved === undefined || !sameBearerCredential(preparedCredential, saved)) {
+      yield* credentials.put(target.connectionId, preparedCredential, savedToken ?? null);
+    }
     const preparedProfile = new SshConnectionProfile({
       connectionId: profile.connectionId,
       environmentId: profile.environmentId,
@@ -242,21 +280,18 @@ const makeSshBroker = Effect.fn("clientRuntime.connection.broker.makeSsh")(funct
       yield* permissions.forget(target.environmentId);
     }
     yield* profiles.put(preparedProfile);
-    const authorized = yield* remote.authorizeBearer({
-      expectedEnvironmentId: target.environmentId,
-      httpBaseUrl: prepared.bootstrap.httpBaseUrl,
-      wsBaseUrl: prepared.bootstrap.wsBaseUrl,
-      bearerToken: prepared.bearerToken,
-      connectionMethod: "ssh",
-    });
+    const authorized = prepared.authorization ?? (yield* authorize(prepared));
     return {
-      environmentId: authorized.environmentId,
-      label: authorized.label,
-      httpBaseUrl: authorized.httpBaseUrl,
-      socketUrl: authorized.socketUrl,
-      httpAuthorization: authorized.httpAuthorization,
-      target,
-    } satisfies PreparedConnection;
+      prepared: {
+        environmentId: authorized.environmentId,
+        label: authorized.label,
+        httpBaseUrl: authorized.httpBaseUrl,
+        socketUrl: authorized.socketUrl,
+        httpAuthorization: authorized.httpAuthorization,
+        target,
+      } satisfies PreparedConnection,
+      verifiedEndpoint: authorized.verifiedEndpoint,
+    };
   });
 });
 
@@ -270,30 +305,40 @@ export const make = Effect.gen(function* () {
 
   const authorize = Effect.fn("clientRuntime.connection.broker.authorize")(function* (
     entry: ConnectionCatalogEntry,
+    onHostAnswered?: Effect.Effect<void>,
   ) {
     const target: ConnectionTarget = entry.target;
     yield* Effect.annotateCurrentSpan({
       "connection.environment.id": target.environmentId,
       "connection.target.kind": target._tag,
     });
-    const prepared = yield* (() => {
+    const { prepared, verifiedEndpoint } = yield* (() => {
       switch (target._tag) {
         case "PrimaryConnectionTarget":
-          return primary(target);
+          return primary(target).pipe(
+            Effect.map((prepared) => ({ prepared, verifiedEndpoint: undefined })),
+          );
         case "BearerConnectionTarget":
-          return bearer({ ...entry, target });
+          return bearer({ ...entry, target }).pipe(
+            Effect.map((prepared) => ({ prepared, verifiedEndpoint: undefined })),
+          );
         case "RelayConnectionTarget":
-          return relay(target);
+          return relay(target).pipe(
+            Effect.map((prepared) => ({ prepared, verifiedEndpoint: undefined })),
+          );
         case "SshConnectionTarget":
-          return ssh({ ...entry, target });
+          return ssh({ ...entry, target }, onHostAnswered);
       }
     })();
-    const descriptor = yield* fetchRemoteEnvironmentDescriptor({
-      httpBaseUrl: prepared.httpBaseUrl,
-    }).pipe(
-      Effect.mapError(mapRemoteEnvironmentError),
-      Effect.provideService(HttpClient.HttpClient, httpClient),
-    );
+    const descriptor =
+      verifiedEndpoint?.httpBaseUrl === prepared.httpBaseUrl
+        ? verifiedEndpoint.descriptor
+        : yield* fetchRemoteEnvironmentDescriptor({
+            httpBaseUrl: prepared.httpBaseUrl,
+          }).pipe(
+            Effect.mapError(mapRemoteEnvironmentError),
+            Effect.provideService(HttpClient.HttpClient, httpClient),
+          );
     if (descriptor.environmentId !== target.environmentId) {
       return yield* environmentMismatchError({
         expected: target.environmentId,
@@ -305,8 +350,9 @@ export const make = Effect.gen(function* () {
 
   const prepare = Effect.fn("clientRuntime.connection.broker.prepare")(function* (
     entry: ConnectionCatalogEntry,
+    onHostAnswered?: Effect.Effect<void>,
   ) {
-    const { prepared, descriptor } = yield* authorize(entry);
+    const { prepared, descriptor } = yield* authorize(entry, onHostAnswered);
     const compatibilityError = orchestrationProtocolCompatibilityError(descriptor);
     if (compatibilityError !== null) {
       return yield* compatibilityError;

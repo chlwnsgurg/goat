@@ -1,4 +1,4 @@
-import type { ServerProviderUsageWindow } from "@t3tools/contracts";
+import type { ServerProviderUsageWindow } from "@goat/contracts";
 import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
@@ -15,8 +15,8 @@ import {
   clampPercent,
   makeUnavailableUsageLimits,
   makeUsageLimits,
-} from "@t3tools/provider-core/server/usageLimits";
-import * as HostProcess from "@t3tools/shared/HostProcess";
+} from "@goat/provider-core/server/usageLimits";
+import * as HostProcess from "@goat/shared/HostProcess";
 
 const AuthFile = Schema.Struct({ "opencode-go": Schema.optionalKey(Schema.Unknown) });
 const ApiAuth = Schema.Struct({ type: Schema.Literal("api"), key: Schema.String });
@@ -103,9 +103,8 @@ export const readOpenCodeGoUsageLimits = Effect.fn("readOpenCodeGoUsageLimits")(
       },
     ];
     const crypto = yield* Crypto.Crypto;
-    // Go's usage response has no account ID. An unkeyed hash matches across
-    // environments without a shared secret. It permits offline guesses, but
-    // Go keys are randomly generated.
+    // An unkeyed hash matches across environments without a shared secret. It
+    // permits offline guesses, but Go keys are randomly generated.
     const credentialFingerprint = yield* crypto
       .digest("SHA-256", new TextEncoder().encode(`opencode-go\0${apiKey}`))
       .pipe(Effect.map(Hex.encode), Effect.orDie);

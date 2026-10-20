@@ -1,5 +1,7 @@
-import { scopedThreadKey } from "@t3tools/client-runtime/environment";
-import type { ScopedThreadRef } from "@t3tools/contracts";
+import { scopedThreadKey } from "@goat/client-runtime/environment";
+import { shellSyncMessage } from "@goat/client-runtime/state/presentation";
+import type { EnvironmentId, ScopedThreadRef } from "@goat/contracts";
+import { useAtomRefresh } from "@effect/atom-react";
 import { useNavigate } from "@tanstack/react-router";
 import { useEffect, useState } from "react";
 
@@ -8,6 +10,8 @@ import { GoatBotThreadView } from "./goatBot/GoatBotThreadView";
 import { resolveDraftPromotionNavigationTarget, threadHasStarted } from "./ChatView.logic";
 import { waitForDraftHeroTransition } from "./chat/draftHeroTransition";
 import { SidebarInset } from "./ui/sidebar";
+import { Button } from "./ui/button";
+import { useEnvironmentShellSync } from "../state/presentation";
 import {
   finalizePromotedDraftThreadByRef,
   markPromotedDraftThreadByRef,
@@ -17,27 +21,19 @@ import {
 import { isGoatBotThread } from "../globalAgentRoute";
 import { useGlobalAgentStore } from "../globalAgentStore";
 import { useSidebarPendingFileDropStore } from "../sidebarPendingFileDropStore";
-import { useEnvironmentThreadRefs, useThreadRefs, useThreadShell } from "../state/entities";
-import { useEnvironmentQuery } from "../state/query";
-import { environmentShell } from "../state/shell";
+import { useEnvironmentThreadRefs, useThreadRefs, useQuietThreadShell } from "../state/entities";
+import { environmentShell, useEnvironmentShellStatus } from "../state/shell";
 import {
   buildThreadRouteParams,
+  isThreadRouteSnapshotAuthoritative,
   resolveThreadRouteRenderState,
   type ThreadRouteTarget,
 } from "../threadRoutes";
 
 /**
- * The single chat surface behind both `/draft/$draftId` and
- * `/$environmentId/$threadId`. Each draft gets its own ChatView instance (so
- * a background send's state stays with the draft it came from), and that
- * instance carries the draft through its promotion to a server thread: the
- * thread route keeps keying by the draft id while the draft record exists,
- * so the route swap only changes props and the timeline never paints an
- * empty frame. Plain server threads are unkeyed, so navigating between them
- * reuses one instance as ChatView expects.
- *
- * Rendered by the `_chat` layout rather than by the two leaf routes, since
- * an element only survives a route swap when the same parent renders it.
+ * Plain server threads are unkeyed, so navigating between them reuses one instance as ChatView
+ * expects. Rendered by the `_chat` layout rather than by the two leaf routes, since an element
+ * only survives a route swap when the same parent renders it.
  */
 export function ThreadRouteView({ target }: { target: ThreadRouteTarget }) {
   const navigate = useNavigate();
@@ -55,8 +51,7 @@ export function ThreadRouteView({ target }: { target: ThreadRouteTarget }) {
     draftId === null ? null : store.getDraftSession(draftId),
   );
   const threadRefs = useThreadRefs();
-  // The server thread this view is about: the route's own ref, or the draft's
-  // reserved ref once the server knows it.
+  // Promotion can begin before the server creates the reserved thread.
   const inferredThreadRef = draftSession
     ? (threadRefs.find(
         (ref) =>
@@ -65,8 +60,10 @@ export function ThreadRouteView({ target }: { target: ThreadRouteTarget }) {
       ) ?? null)
     : null;
   const serverThreadRef: ScopedThreadRef | null =
-    target.kind === "server" ? target.threadRef : (draftSession?.promotedTo ?? inferredThreadRef);
-  const serverThread = useThreadShell(serverThreadRef);
+    target.kind === "server" ? target.threadRef : inferredThreadRef;
+  const serverThread = useQuietThreadShell(serverThreadRef);
+  const sync = useEnvironmentShellSync(serverThreadRef?.environmentId ?? null);
+  const syncMessage = shellSyncMessage(sync);
   const backgroundSubmissionPending = useBackgroundDraftSubmissionPending(
     target.kind === "draft" ? serverThreadRef : null,
   );
@@ -79,12 +76,10 @@ export function ThreadRouteView({ target }: { target: ThreadRouteTarget }) {
         })
       : null;
 
-  const shell = useEnvironmentQuery(
-    serverThreadRef === null ? null : environmentShell.stateAtom(serverThreadRef.environmentId),
-  );
+  const shellStatus = useEnvironmentShellStatus(serverThreadRef?.environmentId ?? null);
   const serverThreadShell = serverThread;
   const environmentThreadRefs = useEnvironmentThreadRefs(serverThreadRef?.environmentId ?? null);
-  const bootstrapComplete = shell.data?.snapshot._tag === "Some";
+  const bootstrapComplete = isThreadRouteSnapshotAuthoritative(shellStatus);
   const draftThread = useComposerDraftStore((store) =>
     serverThreadRef ? store.getDraftThreadByRef(serverThreadRef) : null,
   );
@@ -157,9 +152,6 @@ export function ThreadRouteView({ target }: { target: ThreadRouteTarget }) {
     if (target.kind !== "server" || !bootstrapComplete || goatBotTarget) {
       return;
     }
-    // Navigation already resolved onto this path, so a drop aimed here
-    // passed its landing check; once the thread reads as missing it can
-    // never be attached, release it even when there is nowhere to redirect.
     if (renderState === "missing") {
       const { clearPendingFileDropsForThread } = useSidebarPendingFileDropStore.getState();
       clearPendingFileDropsForThread(target.threadRef);
@@ -210,7 +202,29 @@ export function ThreadRouteView({ target }: { target: ThreadRouteTarget }) {
 
   return (
     <SidebarInset className="h-svh min-h-0 overflow-hidden overscroll-y-none md:h-dvh">
+      {target.kind === "server" && syncMessage !== null && (
+        <div
+          role="status"
+          className="flex shrink-0 items-center justify-between gap-3 border-b border-warning/30 bg-warning-surface px-4 py-2 text-sm text-warning-foreground"
+        >
+          <span>{syncMessage}</span>
+          {(sync === "error" || sync === "stale") && (
+            <RetryShellSyncButton environmentId={target.threadRef.environmentId} />
+          )}
+        </div>
+      )}
       {view}
     </SidebarInset>
+  );
+}
+
+// Separate component so the route view never subscribes to the shell state, which changes on
+// every streamed event.
+function RetryShellSyncButton({ environmentId }: { environmentId: EnvironmentId }) {
+  const refresh = useAtomRefresh(environmentShell.stateAtom(environmentId));
+  return (
+    <Button variant="outline" size="sm" onClick={refresh}>
+      Retry sync
+    </Button>
   );
 }

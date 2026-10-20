@@ -1,11 +1,5 @@
-/**
- * Pi's client definition: settings form, label, and glyph. Browser- and
- * React Native-safe.
- *
- * @module provider-pi/client
- */
-import { ProviderDriverKind } from "@t3tools/contracts";
-import { defineProviderClient } from "@t3tools/provider-core/client";
+import { ProviderDriverKind } from "@goat/contracts";
+import { defineProviderClient } from "@goat/provider-core/client";
 
 import { PiSettings } from "./settings.ts";
 

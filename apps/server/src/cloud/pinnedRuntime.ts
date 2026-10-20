@@ -1,6 +1,6 @@
+// @effect-diagnostics nodeBuiltinImport:off - Archive digests hash file bytes in place; WebCrypto rejects views over possibly shared buffers.
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
-import * as Hex from "effect/encoding/Hex";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
@@ -8,6 +8,7 @@ import * as Option from "effect/Option";
 import * as Stream from "effect/Stream";
 import * as Semaphore from "effect/Semaphore";
 import { HttpClient, HttpClientRequest, HttpClientResponse } from "effect/http";
+import * as NodeCrypto from "node:crypto";
 
 import {
   CLI_RELEASE_CHECKSUMS_FILE,
@@ -16,35 +17,34 @@ import {
   cliArchiveTarCommand,
   cliReleaseDownloadBaseUrl,
   parseChecksums,
-} from "@t3tools/shared/cliRelease";
+} from "@goat/shared/cliRelease";
 
 import * as ProcessRunner from "../processRunner.ts";
 
-/**
- * A pinned runtime is an exact GOAT release archive unpacked into
- * <baseDir>/runtime/goat/versions/<version>: the self-contained executable, the
- * web client, and the native packages beside it. The boot service points its
- * unit or launch agent at the executable, and server self-update installs the
- * target version here before switching over. The runtime never depends on a
- * Node or npm on the machine; the only npm involvement in T3 Code is the `t3`
- * package for people who prefer `npx t3` or `npm install -g t3`, and even a
- * CLI installed that way pins an archive when it sets up the service.
- */
 const PINNED_RUNTIME_DIR = "runtime";
 const PINNED_RUNTIME_INSTALL_TIMEOUT = Duration.minutes(10);
 const PINNED_RUNTIME_ARCHIVE_FILE = "t3-runtime-archive";
+/** Written beside the sentinel, which the launcher reads as a bare version and must not change. */
+const PINNED_RUNTIME_RECORD_FILE = ".install-record";
+const PinnedRuntimeInstallRecord = Schema.fromJsonString(
+  Schema.Struct({
+    version: Schema.String,
+    archiveSha256: Schema.String,
+    entrySha256: Schema.String,
+  }),
+);
+const decodeInstallRecord = Schema.decodeUnknownOption(PinnedRuntimeInstallRecord);
+const encodeInstallRecord = Schema.encodeSync(PinnedRuntimeInstallRecord);
 // Boot-service setup and remote update can construct separate layers. Serialize
 // the complete install transaction across every caller in this process.
 const pinnedRuntimeInstallLock = Semaphore.makeUnsafe(1);
 
 export interface PinnedRuntimePaths {
   readonly versionDir: string;
-  /** The executable. Its existence is what marks a runtime as present. */
   readonly entryPath: string;
   readonly sentinelPath: string;
 }
 
-/** The exact command that runs a pinned runtime. */
 export function pinnedRuntimeCommand(paths: PinnedRuntimePaths): {
   readonly command: string;
   readonly args: ReadonlyArray<string>;
@@ -104,12 +104,9 @@ export type PinnedRuntimeProgress =
   | { readonly stage: "verify" | "extract" | "validate" | "cached" };
 
 /**
- * Installs the GOAT release archive for `version` into the pinned runtime
- * directory unless a complete install is already there, and returns its
- * paths. The sentinel is written only after extraction and validation
- * succeed; checking the entry file alone is not enough, since tar writes the
- * executable before the last native package and a killed install leaves a
- * plausible-looking but broken tree behind.
+ * The sentinel is written only after extraction and validation succeed; checking the entry file
+ * alone is not enough, since tar writes the executable before the last native package and a
+ * killed install leaves a plausible-looking but broken tree behind.
  */
 
 interface PinnedRuntimeInstallInput {
@@ -126,7 +123,43 @@ interface PinnedRuntimeInstallInput {
   readonly httpClient: HttpClient.HttpClient;
   readonly releaseBaseUrl?: string | undefined;
   readonly onProgress?: (progress: PinnedRuntimeProgress) => void;
+  /**
+   * Reuse an existing install only when its executable still matches the digest recorded when
+   * it was installed from a checksum-verified archive; otherwise reinstall. Server updates set
+   * this because they run the cached build unattended. Only safe for a version that is not
+   * running, since a mismatch removes its directory.
+   */
+  readonly verifyCachedInstall?: boolean | undefined;
 }
+
+const sha256Hex = (bytes: Uint8Array, step: string) =>
+  Effect.try({
+    try: () => NodeCrypto.createHash("sha256").update(bytes).digest("hex"),
+    catch: (cause) => new PinnedRuntimeInstallError({ step, cause }),
+  });
+
+const fileSha256 = (fs: FileSystem.FileSystem, filePath: string, step: string) =>
+  fs.readFile(filePath).pipe(
+    Effect.mapError((cause) => new PinnedRuntimeInstallError({ step, cause })),
+    Effect.flatMap((bytes) => sha256Hex(bytes, step)),
+  );
+
+/** Whether the cached executable is byte-identical to what the verified archive installed. */
+const cachedInstallMatchesRecord = (input: PinnedRuntimeInstallInput, paths: PinnedRuntimePaths) =>
+  Effect.gen(function* () {
+    const recorded = yield* input.fs
+      .readFileString(input.path.join(paths.versionDir, PINNED_RUNTIME_RECORD_FILE))
+      .pipe(Effect.option);
+    if (Option.isNone(recorded)) return false;
+    const record = decodeInstallRecord(recorded.value);
+    if (Option.isNone(record) || record.value.version !== input.version) return false;
+    const actual = yield* fileSha256(
+      input.fs,
+      paths.entryPath,
+      "checking the cached pinned runtime",
+    ).pipe(Effect.option);
+    return Option.isSome(actual) && actual.value === record.value.entrySha256;
+  });
 
 const fetchReleaseAsset = Effect.fn("cloud.pinned_runtime.fetch_release_asset")(function* (
   httpClient: HttpClient.HttpClient,
@@ -154,7 +187,6 @@ const fetchReleaseAsset = Effect.fn("cloud.pinned_runtime.fetch_release_asset")(
           ),
           Stream.runCollect,
         );
-        // A completed chunked response finally gives us its total size.
         if (total === undefined && received > 0) {
           onProgress({ stage: "download", received, total: received });
         }
@@ -175,12 +207,6 @@ const fetchReleaseAsset = Effect.fn("cloud.pinned_runtime.fetch_release_asset")(
   );
 });
 
-/**
- * Downloads the release archive for this platform, verifies it against the
- * release's checksum file, and unpacks it so the executable sits directly in
- * the staging directory. Only `tar` is required on the host; every supported
- * OS ships one that reads gzip and zip.
- */
 const installFromArchive = Effect.fn("cloud.pinned_runtime.install_archive")(function* (
   input: PinnedRuntimeInstallInput,
   stagingDir: string,
@@ -219,12 +245,8 @@ const installFromArchive = Effect.fn("cloud.pinned_runtime.install_archive")(fun
     input.onProgress,
   );
   input.onProgress?.({ stage: "verify" });
-  const digest = yield* Effect.tryPromise({
-    try: () => crypto.subtle.digest("SHA-256", archive),
-    catch: (cause) =>
-      new PinnedRuntimeInstallError({ step: "verifying the GOAT release archive", cause }),
-  });
-  if (Hex.encode(new Uint8Array(digest)) !== expected) {
+  const digest = yield* sha256Hex(archive, "verifying the GOAT release archive");
+  if (digest !== expected) {
     return yield* new PinnedRuntimeInstallError({
       step: "verifying the GOAT release archive checksum",
     });
@@ -263,6 +285,7 @@ const installFromArchive = Effect.fn("cloud.pinned_runtime.install_archive")(fun
       ),
     );
   yield* fs.remove(archivePath, { force: true }).pipe(Effect.ignore);
+  return expected;
 });
 
 const installPinnedRuntime = Effect.fn("cloud.pinned_runtime.ensure_installed")(function* (
@@ -279,8 +302,16 @@ const installPinnedRuntime = Effect.fn("cloud.pinned_runtime.ensure_installed")(
       (cause) => new PinnedRuntimeInstallError({ step: "checking the pinned runtime", cause }),
     ),
   );
-  const alreadyPinned =
+  let alreadyPinned =
     entryExists && Option.isSome(sentinel) && sentinel.value.trim() === input.version;
+  if (alreadyPinned && input.verifyCachedInstall === true) {
+    alreadyPinned = yield* cachedInstallMatchesRecord(input, paths);
+    if (!alreadyPinned) {
+      yield* Effect.logWarning("Cached pinned runtime is unverified or changed; reinstalling.", {
+        version: input.version,
+      });
+    }
+  }
   if (alreadyPinned) {
     input.onProgress?.({ stage: "cached" });
     yield* input.validate(paths);
@@ -329,10 +360,26 @@ const installPinnedRuntime = Effect.fn("cloud.pinned_runtime.ensure_installed")(
   };
 
   return yield* Effect.gen(function* () {
-    yield* installFromArchive(input, stagingDir);
+    const archiveSha256 = yield* installFromArchive(input, stagingDir);
 
     input.onProgress?.({ stage: "validate" });
     yield* input.validate(stagingPaths);
+    const entrySha256 = yield* fileSha256(
+      fs,
+      stagingPaths.entryPath,
+      "recording the installed executable digest",
+    );
+    yield* fs
+      .writeFileString(
+        input.path.join(stagingDir, PINNED_RUNTIME_RECORD_FILE),
+        encodeInstallRecord({ version: input.version, archiveSha256, entrySha256 }) + "\n",
+      )
+      .pipe(
+        Effect.mapError(
+          (cause) =>
+            new PinnedRuntimeInstallError({ step: "recording the verified install", cause }),
+        ),
+      );
     yield* fs
       .writeFileString(stagingPaths.sentinelPath, `${input.version}\n`)
       .pipe(

@@ -1,12 +1,12 @@
 import { parsePatchFiles } from "@pierre/diffs/utils/parsePatchFiles";
 import type { ChangeTypes, FileDiffMetadata } from "@pierre/diffs/types";
-import type { ThreadCheckpointSummary } from "@t3tools/client-runtime/state/thread-checkpoints";
-import type { ReviewDiffPreviewSource } from "@t3tools/contracts";
+import type { ThreadCheckpointSummary } from "@goat/client-runtime/state/thread-checkpoints";
+import type { ReviewDiffPreviewSource, ReviewDiffPreviewSourceKind } from "@goat/contracts";
 import * as Arr from "effect/Array";
 import { pipe } from "effect/Function";
 import * as Order from "effect/Order";
 
-export type ReviewSectionKind = "turn" | "working-tree" | "branch-range";
+export type ReviewSectionKind = "turn" | ReviewDiffPreviewSourceKind;
 
 const CHANGES_SECTION_ID = "git:branch-range";
 const CHANGES_TITLE = "Changes";
@@ -122,6 +122,8 @@ const readyCheckpointOrder = Order.make<ThreadCheckpointSummary>(
 );
 
 function gitSubtitle(section: ReviewDiffPreviewSource): string | null {
+  if (section.kind === "staged") return "HEAD → index";
+  if (section.kind === "unstaged") return "Index → working tree";
   if (section.kind === "working-tree") {
     return UNCOMMITTED_SUBTITLE;
   }
@@ -141,7 +143,7 @@ function splitTruncationMarker(diff: string): {
 } {
   const trimmed = diff.trimEnd();
   if (!trimmed.endsWith("[truncated]")) {
-    return { text: trimmed, truncated: false };
+    return { text: diff, truncated: false };
   }
 
   return {
@@ -442,7 +444,6 @@ export function buildReviewSectionItems(input: {
     truncated: section.truncated,
     isLoading: false,
   }));
-  // Changes is the default section, so it holds the place while git sources load.
   const hasChangesItem = gitItems.some((item) => item.id === CHANGES_SECTION_ID);
   const visibleGitItems =
     input.loadingGitSections && !hasChangesItem
@@ -462,7 +463,6 @@ export function buildReviewSectionItems(input: {
   return [...turnItems, ...visibleGitItems];
 }
 
-/** Prefers Changes, then the first section (a turn when the project is not a git repo). */
 export function getDefaultReviewSectionId(
   sections: ReadonlyArray<ReviewSectionItem>,
 ): string | null {
@@ -473,7 +473,8 @@ export function buildReviewParsedDiff(
   diff: string | null | undefined,
   cacheScope: string,
 ): ReviewParsedDiff {
-  const normalized = diff?.trim();
+  // Only line breaks: a hunk can end in a blank context line, which is a single space.
+  const normalized = diff?.replace(/^\s+/, "").replace(/[\r\n]+$/, "");
   if (!normalized) {
     return { kind: "empty" };
   }

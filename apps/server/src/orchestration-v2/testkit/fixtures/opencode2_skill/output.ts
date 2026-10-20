@@ -1,5 +1,5 @@
 import { assert } from "@effect/vitest";
-import type { ProviderReplayTranscript } from "@t3tools/contracts";
+import type { ProviderReplayTranscript } from "@goat/contracts";
 
 import type { OrchestratorV2ScenarioResult } from "../../OrchestratorScenario.ts";
 import {
@@ -12,11 +12,6 @@ import {
   projectionFor,
 } from "../shared.ts";
 
-/**
- * `$greet` names a workspace skill, so the prompt attaches it natively
- * (`prompt{skills:[{id:"greet"}]}`, checked by the transcript) and the model
- * follows it: the skill says to open with MANGO.
- */
 export function assertOpenCode2SkillOutput(
   result: OrchestratorV2ScenarioResult,
   transcript: ProviderReplayTranscript,

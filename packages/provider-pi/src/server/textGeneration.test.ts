@@ -1,6 +1,6 @@
 import { assert, it } from "@effect/vitest";
-import { ProviderInstanceId } from "@t3tools/contracts";
-import { createModelSelection } from "@t3tools/shared/model";
+import { ProviderInstanceId } from "@goat/contracts";
+import { createModelSelection } from "@goat/shared/model";
 import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
 import * as Queue from "effect/Queue";
@@ -14,10 +14,6 @@ import { makePiTextGeneration } from "./textGeneration.ts";
 const decodeJsonLine = Schema.decodeUnknownSync(Schema.fromJsonString(Schema.Unknown));
 const encodeJsonLine = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
 
-/**
- * In-process `pi --mode rpc` that answers one prompt with `reply`. Every
- * record written to its stdin lands in `received`.
- */
 const makeFakePi = (reply: string) =>
   Effect.gen(function* () {
     const stdout = yield* Queue.unbounded<Uint8Array, Cause.Done>();

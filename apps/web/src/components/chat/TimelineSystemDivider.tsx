@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import type { LucideIcon } from "lucide-react";
+import type { IconComponent } from "~/components/solar";
 
 import { cn } from "~/lib/utils";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "~/components/ui/tooltip";
@@ -8,7 +8,7 @@ export function TimelineSystemDivider(props: {
   readonly label: string;
   readonly detail?: ReactNode | null;
   readonly tone?: "neutral" | "danger";
-  readonly icon?: LucideIcon;
+  readonly icon?: IconComponent;
   readonly showDetailSeparator?: boolean;
   readonly actionLabel?: string;
   readonly onAction?: () => void;
@@ -21,8 +21,8 @@ export function TimelineSystemDivider(props: {
       {props.detail ? (
         <span
           className={cn(
-            "inline-flex min-w-0 max-w-80 items-center opacity-70",
-            typeof props.detail === "string" && "truncate",
+            "inline-flex min-w-0 items-center opacity-70",
+            typeof props.detail === "string" && "max-w-80 truncate",
           )}
         >
           {props.showDetailSeparator === false ? null : "·\u00a0"}

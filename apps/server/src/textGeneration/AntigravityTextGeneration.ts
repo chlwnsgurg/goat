@@ -1,4 +1,9 @@
-import { type ProviderSetupError, TextGenerationError } from "@t3tools/contracts";
+import { ProviderDriverKind } from "@goat/contracts";
+import {
+  withMemoryExecution,
+  type MemoryGenerationRunnerContext,
+} from "@goat/provider-core/server/memoryGenerationRunner";
+import { type ProviderSetupError, TextGenerationError } from "@goat/contracts";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
@@ -13,8 +18,8 @@ import { type AcpError, AcpRequestError } from "effect-acp/errors";
 
 import { applyAntigravityAcpModelSelection } from "../provider/acp/AntigravityAcpSupport.ts";
 import { removeAntigravitySessionFiles } from "../provider/acp/AntigravitySessionFiles.ts";
-import type * as AcpSessionRuntime from "@t3tools/provider-acp/server/AcpSessionRuntime";
-import * as TextGenerationOperations from "@t3tools/provider-core/server/textGenerationOperations";
+import type * as AcpSessionRuntime from "@goat/provider-acp/server/AcpSessionRuntime";
+import * as TextGenerationOperations from "@goat/provider-core/server/textGenerationOperations";
 
 const ANTIGRAVITY_TIMEOUT_MS = 180_000;
 const MAX_OUTPUT_CHARS = 128_000;
@@ -48,13 +53,11 @@ type AntigravityTextRuntime = Pick<
 
 export interface AntigravityTextGenerationOptions {
   readonly profileDirectory: string;
-  /** Model the provider default alias selects, when the account offers it. */
+  readonly memoryRunnerContext?: MemoryGenerationRunnerContext;
   readonly defaultModel?: Effect.Effect<string | undefined>;
-  /** Uses the instance's personal Google login, with no injected MCP servers or client tools. */
   readonly makeRuntime: (
     cwd: string,
   ) => Effect.Effect<AntigravityTextRuntime, AcpError | ProviderSetupError, Scope.Scope>;
-  /** Registers the whole helper so sign-out can stop it before clearing credentials. */
   readonly withProcess: <A, E, R>(
     stop: Effect.Effect<void>,
     task: Effect.Effect<A, E, R>,
@@ -91,7 +94,6 @@ export const isAntigravityTextGenerationAvailable = Effect.fn(
   return true;
 });
 
-/** Runs short-lived subscription helpers without giving them the user's workspace. */
 export const makeAntigravityTextGeneration = Effect.fn("makeAntigravityTextGeneration")(function* (
   options: AntigravityTextGenerationOptions,
 ) {
@@ -102,7 +104,6 @@ export const makeAntigravityTextGeneration = Effect.fn("makeAntigravityTextGener
     Effect.provideService(Path.Path, path),
   );
 
-  // Ignores `cwd`: the helper runs in an empty temp directory, away from the project.
   const runAntigravityJson = Effect.fn("AntigravityTextGeneration.runJson")(
     function* <S extends Schema.Top>(input: TextGenerationOperations.Request<S>) {
       const { operation } = input;
@@ -117,7 +118,7 @@ export const makeAntigravityTextGeneration = Effect.fn("makeAntigravityTextGener
           });
         }
 
-        const cwd = yield* fs.makeTempDirectoryScoped({ prefix: "t3-antigravity-text-" });
+        const cwd = yield* fs.makeTempDirectoryScoped({ prefix: "goat-antigravity-text-" });
         let sessionId: string | undefined;
         yield* Effect.addFinalizer(() =>
           removeAntigravitySessionFiles({
@@ -214,7 +215,7 @@ export const makeAntigravityTextGeneration = Effect.fn("makeAntigravityTextGener
               });
             }
             yield* runtime.setMode("default");
-            yield* applyAntigravityAcpModelSelection({
+            const effectiveModel = yield* applyAntigravityAcpModelSelection({
               runtime,
               model: input.modelSelection.model,
               defaultModel: yield* options.defaultModel ?? Effect.undefined,
@@ -226,6 +227,11 @@ export const makeAntigravityTextGeneration = Effect.fn("makeAntigravityTextGener
                 }),
             });
 
+            if (TextGenerationOperations.isMemoryOperation(operation) && !effectiveModel)
+              return yield* new TextGenerationError({
+                operation,
+                detail: "Antigravity did not disclose its selected memory model.",
+              });
             const result = yield* runtime.prompt({
               prompt: [
                 {
@@ -248,7 +254,10 @@ export const makeAntigravityTextGeneration = Effect.fn("makeAntigravityTextGener
                 detail: "Antigravity text generation was cancelled.",
               });
             }
-            return (yield* Ref.get(output)).trim();
+            return {
+              text: (yield* Ref.get(output)).trim(),
+              effectiveModel: effectiveModel ?? input.modelSelection.model,
+            };
           }).pipe(
             Effect.onInterrupt(() =>
               runtime.cancel.pipe(Effect.timeoutOption(2_000), Effect.ignore),
@@ -263,13 +272,18 @@ export const makeAntigravityTextGeneration = Effect.fn("makeAntigravityTextGener
             detail: "Antigravity wrote files during text generation.",
           });
         }
-        if (!rawResult) {
+        if (!rawResult.text) {
           return yield* new TextGenerationError({
             operation,
             detail: "Antigravity returned empty text generation output.",
           });
         }
-        return yield* TextGenerationOperations.decodeJsonReply(input, "Antigravity", rawResult);
+        const result = yield* TextGenerationOperations.decodeJsonReply(
+          input,
+          "Antigravity",
+          rawResult.text,
+        );
+        return { result, effectiveModel: rawResult.effectiveModel };
       }).pipe(
         Effect.scoped,
         Effect.timeoutOption(ANTIGRAVITY_TIMEOUT_MS),
@@ -306,5 +320,17 @@ export const makeAntigravityTextGeneration = Effect.fn("makeAntigravityTextGener
       ),
   );
 
-  return TextGenerationOperations.fromRunner("AntigravityTextGeneration", runAntigravityJson);
+  return TextGenerationOperations.fromRunner(
+    "AntigravityTextGeneration",
+    TextGenerationOperations.withoutInvestigation("Antigravity", (request) =>
+      runAntigravityJson(request).pipe(Effect.map((selected) => selected.result)),
+    ),
+    {
+      memoryRunner: withMemoryExecution(
+        options.memoryRunnerContext,
+        ProviderDriverKind.make("antigravity"),
+        runAntigravityJson,
+      ),
+    },
+  );
 });

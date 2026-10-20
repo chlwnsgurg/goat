@@ -1,3 +1,5 @@
+// Adopts legacy T3 env names before anything reads the environment.
+import "@goat/contracts/adoptLegacyEnv";
 // @effect-diagnostics-next-line nodeBuiltinImport:off - NodeHttpServer.layer takes `NodeHttp.createServer` as arg
 import * as NodeHttp from "node:http";
 
@@ -18,8 +20,8 @@ const resolveMockUpdateServerConfig = Effect.gen(function* () {
   const fileSystem = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const config = yield* Config.all({
-    port: Config.Port("T3CODE_DESKTOP_MOCK_UPDATE_SERVER_PORT").pipe(Config.withDefault(3000)),
-    root: Config.String("T3CODE_DESKTOP_MOCK_UPDATE_SERVER_ROOT").pipe(
+    port: Config.Port("GOAT_DESKTOP_MOCK_UPDATE_SERVER_PORT").pipe(Config.withDefault(3000)),
+    root: Config.String("GOAT_DESKTOP_MOCK_UPDATE_SERVER_ROOT").pipe(
       Config.withDefault("../release-mock"),
     ),
   });

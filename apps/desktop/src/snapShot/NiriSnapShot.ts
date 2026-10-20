@@ -48,7 +48,6 @@ const isWindowChanged = Schema.is(WindowChanged);
 const isWindowClosed = Schema.is(WindowClosed);
 const isScreenshotCaptured = Schema.is(ScreenshotCaptured);
 
-/** A session hint, never a probe of another compositor or a sandbox escape. */
 export function niriSocketPath(env = process.env): string | undefined {
   if (env.FLATPAK_ID || env.SNAP) return undefined;
   if (!env.XDG_CURRENT_DESKTOP?.split(":").some((name) => name.toLowerCase() === "niri"))
@@ -56,7 +55,6 @@ export function niriSocketPath(env = process.env): string | undefined {
   return env.NIRI_SOCKET && NodePath.isAbsolute(env.NIRI_SOCKET) ? env.NIRI_SOCKET : undefined;
 }
 
-/** One bounded exchange or event subscription. All waiters end when the socket closes. */
 class NiriConnection {
   private readonly socket: NodeNet.Socket;
   private readonly listeners = new Set<(value: unknown) => void>();
@@ -170,7 +168,7 @@ async function activateNiriWindow(path: string, title: string, signal: AbortSign
       } else if (isWindowClosed(value)) {
         windows.delete(value.WindowClosed.id);
       } else return undefined;
-      // Never activate another process's lookalike window, or guess between multiple T3 windows.
+      // Never activate another process's lookalike window, or guess between multiple GOAT windows.
       const matches = [...windows.values()].filter(
         (window) => window.pid === process.pid && window.title === title,
       );
@@ -189,7 +187,7 @@ async function activateNiriWindow(path: string, title: string, signal: AbortSign
 }
 
 export async function captureNiriWindow(path: string): Promise<LinuxWindowSnapshot> {
-  const directory = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-niri-capture-"));
+  const directory = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "goat-niri-capture-"));
   const imagePath = NodePath.join(directory, "capture.png");
   const events = new NiriConnection(path);
   try {

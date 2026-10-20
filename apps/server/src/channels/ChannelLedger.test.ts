@@ -1,11 +1,21 @@
+// @effect-diagnostics nodeBuiltinImport:off -- cursor recovery test uses an isolated SQLite fixture.
+import * as NodeFS from "node:fs";
+import * as NodeOS from "node:os";
+import * as NodePath from "node:path";
+import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, describe, it } from "@effect/vitest";
 import {
+  type ChannelAnswerProjectChoice,
+  ChannelDispatchTarget,
+  ChannelTaskBrief,
+  ChannelWorkerAssignment,
   ChannelInboundMessage,
+  ProjectId,
   ChannelOutboundMessage,
   ChannelRequester,
   ChannelTask,
   ChannelTaskEvent,
-} from "@t3tools/contracts";
+} from "@goat/contracts";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
@@ -22,6 +32,12 @@ import {
   taskEventIdFor,
   taskIdFor,
 } from "./channelIds.ts";
+import { freezeChannelBrief } from "./channelBriefs.ts";
+import {
+  prepareTransition,
+  type ChannelTaskEventSpec,
+  commitTransition,
+} from "./channelTaskWrites.ts";
 import { applyChannelTaskEvent } from "./channelTaskTransitions.ts";
 
 const decodeMessage = Schema.decodeUnknownSync(ChannelInboundMessage);
@@ -29,6 +45,7 @@ const decodeRequester = Schema.decodeUnknownSync(ChannelRequester);
 const decodeTask = Schema.decodeUnknownSync(ChannelTask);
 const decodeEvent = Schema.decodeUnknownSync(ChannelTaskEvent);
 const decodeOutbound = Schema.decodeUnknownSync(ChannelOutboundMessage);
+const decodeTarget = Schema.decodeUnknownSync(ChannelDispatchTarget);
 
 const TestLayer = ChannelLedger.layer.pipe(Layer.provideMerge(SqlitePersistence.layerMemory));
 const NOW = "2026-10-12T00:00:00.000Z";
@@ -97,6 +114,90 @@ const claimOwner = (token: string, now: string, staleBefore: string) =>
   ChannelLedger.ChannelLedger.pipe(
     Effect.flatMap((ledger) => ledger.claimOwnership({ token, now, staleBefore })),
   );
+
+describe("iMessage cursor fence", () => {
+  it.effect("reads the same cursor from a fresh ledger connection", () =>
+    Effect.gen(function* () {
+      const dir = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "goat-imsg-ledger-"));
+      try {
+        const dbPath = NodePath.join(dir, "state.sqlite");
+        const layer = ChannelLedger.layer.pipe(
+          Layer.provide(SqlitePersistence.layerFromPath(dbPath)),
+          Layer.provide(NodeServices.layer),
+        );
+        yield* Effect.gen(function* () {
+          const ledger = yield* ChannelLedger.ChannelLedger;
+          yield* ledger.claimOwnership({
+            token: "owner-a",
+            now: NOW,
+            staleBefore: "2026-10-11T00:00:00.000Z",
+          });
+          yield* ledger.checkpointImessageCursor({
+            owner: "owner-a",
+            connectionId: "imessage-000000000001",
+            expected: undefined,
+            next: { cursor: 7, pendingRowIds: [6] },
+            now: NOW,
+          });
+        }).pipe(Effect.provide(layer));
+        const recovered = yield* ChannelLedger.ChannelLedger.pipe(
+          Effect.flatMap((ledger) => ledger.getImessageCursor("imessage-000000000001")),
+          Effect.provide(layer),
+        );
+        assert.deepEqual(recovered, { cursor: 7, pendingRowIds: [6] });
+      } finally {
+        NodeFS.rmSync(dir, { recursive: true, force: true });
+      }
+    }),
+  );
+  it.effect("commits cursor and pending atomically under the current owner", () =>
+    Effect.gen(function* () {
+      const ledger = yield* ChannelLedger.ChannelLedger;
+      yield* claimOwner("owner-a", NOW, "2026-10-11T00:00:00.000Z");
+      const first = { cursor: 9, pendingRowIds: [8] };
+      yield* ledger.checkpointImessageCursor({
+        owner: "owner-a",
+        connectionId: "imessage-000000000001",
+        expected: undefined,
+        next: first,
+        now: NOW,
+      });
+      assert.deepEqual(yield* ledger.getImessageCursor("imessage-000000000001"), first);
+      const stale = yield* Effect.result(
+        ledger.checkpointImessageCursor({
+          owner: "owner-a",
+          connectionId: "imessage-000000000001",
+          expected: undefined,
+          next: { cursor: 10, pendingRowIds: [] },
+          now: NOW,
+        }),
+      );
+      assert.strictEqual(stale._tag, "Failure");
+      const lost = yield* Effect.result(
+        ledger.checkpointImessageCursor({
+          owner: "owner-b",
+          connectionId: "imessage-000000000001",
+          expected: first,
+          next: { cursor: 10, pendingRowIds: [] },
+          now: NOW,
+        }),
+      );
+      assert.strictEqual(lost._tag, "Failure");
+      assert.deepEqual(yield* ledger.getImessageCursor("imessage-000000000001"), first);
+      yield* ledger.checkpointImessageCursor({
+        owner: "owner-a",
+        connectionId: "imessage-000000000001",
+        expected: first,
+        next: { cursor: 10, pendingRowIds: [] },
+        now: NOW,
+      });
+      assert.deepEqual(yield* ledger.getImessageCursor("imessage-000000000001"), {
+        cursor: 10,
+        pendingRowIds: [],
+      });
+    }).pipe(Effect.provide(TestLayer)),
+  );
+});
 
 const newTask = (inputId: string, conversationId: string, bindingId: string) => {
   const taskId = taskIdFor(inputId as never, 0);
@@ -473,6 +574,375 @@ describe("ChannelLedger identity links", () => {
       assert.isUndefined(
         yield* ledger.findIdentity({ connectionId: "slack-1", externalActorId: "U1" }),
       );
+    }).pipe(Effect.provide(TestLayer)),
+  );
+});
+
+describe("ChannelLedger answer project choices", () => {
+  it.effect(
+    "persists resolutions once, fences writes, and keeps unresolved answers as barriers",
+    () =>
+      Effect.gen(function* () {
+        const ledger = yield* ChannelLedger.ChannelLedger;
+        yield* claimOwner("a", NOW, "2026-10-11T23:59:30.000Z");
+        const accepted = yield* accept();
+        yield* ledger.beginReception({
+          owner: "a",
+          inputId: accepted.inputId,
+          receptionId: "r" as never,
+          readAt: NOW,
+        });
+        const created = newTask(accepted.inputId, accepted.conversationId, accepted.bindingId);
+        yield* ledger.completeReception({
+          owner: "a",
+          inputId: accepted.inputId,
+          receptionId: "r" as never,
+          replyText: "Starting.",
+          decision: { replyText: "Starting.", action: { type: "report_only" } },
+          createdTask: created,
+          deliveries: [],
+          now: NOW,
+        });
+        const answer = (text: string, choice?: ChannelAnswerProjectChoice) =>
+          Effect.gen(function* () {
+            const stored = (yield* ledger.getTask(created.task.taskId))!;
+            yield* commitTransition(ledger, stored, {
+              type: "task.question.opened",
+              payload: {
+                question: { questionId: "q" as never, text: "Which project?", askedAt: NOW },
+              },
+            });
+            const waiting = (yield* ledger.getTask(created.task.taskId))!;
+            yield* commitTransition(ledger, waiting, {
+              type: "task.question.answered",
+              payload: { questionId: "q" as never, answer: text },
+            });
+            const event = (yield* ledger.recentAnswers(created.task.taskId, 1))[0]!;
+            assert.isUndefined(event.payload.projectChoice);
+            if (choice !== undefined)
+              yield* ledger.recordAnswerProjectChoice({
+                owner: "a",
+                eventId: event.eventId,
+                choice,
+              });
+            return event;
+          });
+        const remote = {
+          type: "remote",
+          host: "studio",
+          projectId: ProjectId.make("remote-p"),
+        } as const;
+        const first = yield* answer("P", remote);
+        yield* ledger.recordAnswerProjectChoice({
+          owner: "a",
+          eventId: first.eventId,
+          choice: { type: "none" },
+        });
+        assert.deepStrictEqual(
+          (yield* ledger.recentAnswers(created.task.taskId, 1))[0]?.payload.projectChoice,
+          remote,
+        );
+        yield* answer("try again", { type: "none" });
+        yield* answer("try again", { type: "none" });
+        assert.deepStrictEqual(yield* ledger.rememberedProjectChoice(created.task.taskId), remote);
+        const unresolved = yield* answer("unknown while offline");
+        yield* answer("try again", { type: "none" });
+        assert.isUndefined(yield* ledger.rememberedProjectChoice(created.task.taskId));
+        const lost = yield* Effect.flip(
+          ledger.recordAnswerProjectChoice({
+            owner: "other",
+            eventId: unresolved.eventId,
+            choice: remote,
+          }),
+        );
+        assert.strictEqual(lost.reason, "ownership_lost");
+        yield* ledger.recordAnswerProjectChoice({
+          owner: "a",
+          eventId: unresolved.eventId,
+          choice: { type: "local", projectId: ProjectId.make("local-p") },
+        });
+        assert.deepStrictEqual(yield* ledger.rememberedProjectChoice(created.task.taskId), {
+          type: "local",
+          projectId: ProjectId.make("local-p"),
+        });
+        const stored = (yield* ledger.getTask(created.task.taskId))!;
+        yield* commitTransition(ledger, stored, {
+          type: "task.cancelled",
+          payload: { reason: "Restart" },
+        });
+        yield* commitTransition(ledger, (yield* ledger.getTask(created.task.taskId))!, {
+          type: "task.retry.requested",
+          payload: { generation: 2 },
+        });
+        assert.deepStrictEqual(yield* ledger.recentAnswers(created.task.taskId, 1), []);
+        assert.isUndefined(yield* ledger.rememberedProjectChoice(created.task.taskId));
+      }).pipe(Effect.provide(TestLayer)),
+  );
+});
+
+describe("ChannelLedger brief/outcome pairs", () => {
+  const target = decodeTarget({
+    environmentId: "env-1",
+    projectId: "project-1",
+    modelSelection: { instanceId: "codex", model: "gpt-6.1-sol" },
+    runtimeMode: "approval-required",
+    interactionMode: "default",
+    workspaceStrategy: { type: "root" },
+  });
+  const decodePair = Schema.decodeUnknownSync(
+    Schema.fromJsonString(
+      Schema.Struct({
+        sequence: Schema.Number,
+        brief: Schema.NullOr(ChannelTaskBrief),
+        terminalState: Schema.String,
+        resultSummary: Schema.NullOr(Schema.String),
+        evidence: Schema.NullOr(ChannelWorkerAssignment),
+        channelAnswers: Schema.Number,
+        reruns: Schema.Number,
+        generation: Schema.Number,
+      }),
+    ),
+  );
+
+  const seed = (instruction = "Run it again.") =>
+    Effect.gen(function* () {
+      const ledger = yield* ChannelLedger.ChannelLedger;
+      yield* claimOwner("brief-owner", NOW, "2026-10-11T23:59:30.000Z");
+      const input = yield* accept();
+      yield* ledger.beginReception({
+        owner: "brief-owner",
+        inputId: input.inputId,
+        receptionId: "brief-r" as never,
+        readAt: NOW,
+      });
+      const initial = newTask(input.inputId, input.conversationId, input.bindingId);
+      const created = {
+        task: { ...initial.task, instruction },
+        event: decodeEvent({
+          ...initial.event,
+          payload: { ...initial.event.payload, instruction },
+        }),
+      };
+      yield* ledger.completeReception({
+        owner: "brief-owner",
+        inputId: input.inputId,
+        receptionId: "brief-r" as never,
+        replyText: "Starting.",
+        decision: { replyText: "Starting.", action: { type: "report_only" } },
+        createdTask: created,
+        deliveries: [],
+        now: NOW,
+      });
+      return created.task.taskId;
+    });
+
+  const move = (taskId: ChannelTask["taskId"], spec: ChannelTaskEventSpec, at = NOW) =>
+    Effect.gen(function* () {
+      const ledger = yield* ChannelLedger.ChannelLedger;
+      const stored = (yield* ledger.getTask(taskId))!;
+      const prepared = prepareTransition(stored, spec, at, undefined);
+      if (!prepared.ok) return yield* Effect.die("transition rejected: " + prepared.reason);
+      yield* ledger.applyTaskEvent({
+        owner: "brief-owner",
+        write: prepared.write,
+        deliveries: prepared.deliveries,
+      });
+      return prepared.event;
+    });
+
+  const claim = (taskId: ChannelTask["taskId"], generation = 1) =>
+    move(taskId, {
+      type: "task.dispatch.claimed",
+      payload: { generation, target, leaseExpiresAt: NOW },
+    });
+  const range = { ownerId: "owner", from: NOW, to: "2026-10-13T00:00:00.000Z" };
+
+  it.effect(
+    "takes the first non-empty intent line and caps it while preserving the full instructions",
+    () =>
+      Effect.gen(function* () {
+        const instruction = "\n  \n  " + "x".repeat(501) + "  \nSecond line.";
+        const taskId = yield* seed(instruction);
+        yield* claim(taskId);
+        const ledger = yield* ChannelLedger.ChannelLedger;
+        const { brief } = yield* freezeChannelBrief(
+          ledger,
+          (yield* ledger.getTask(taskId))!,
+          "brief-owner",
+          instruction + "\nGuidance.",
+        );
+        assert.strictEqual(brief.intent, "x".repeat(500));
+        assert.strictEqual(brief.instruction, instruction);
+        assert.strictEqual(brief.deliveredText, instruction + "\nGuidance.");
+        assert.isNull(brief.criteria);
+        assert.isNull(brief.verification);
+      }).pipe(Effect.provide(TestLayer)),
+  );
+
+  it.effect("reuses a frozen generation, versions retries, and links all terminal writes", () =>
+    Effect.gen(function* () {
+      const taskId = yield* seed();
+      yield* claim(taskId);
+      const ledger = yield* ChannelLedger.ChannelLedger;
+      const stored = (yield* ledger.getTask(taskId))!;
+      const first = yield* freezeChannelBrief(ledger, stored, "brief-owner", "Exact worker text");
+      const restarted = yield* freezeChannelBrief(
+        ledger,
+        (yield* ledger.getTask(taskId))!,
+        "brief-owner",
+        "Changed text after restart",
+      );
+      assert.deepStrictEqual(restarted.brief, first.brief);
+      assert.strictEqual(restarted.stored.task.version, first.stored.task.version);
+      assert.strictEqual(first.brief.intent, "Run it again.");
+      const failed = yield* move(taskId, {
+        type: "task.failed",
+        payload: { generation: 1, reason: "launch_failed" },
+      });
+      assert.isTrue(failed.type === "task.failed");
+      if (failed.type === "task.failed") assert.strictEqual(failed.payload.briefVersion, 1);
+      yield* move(taskId, { type: "task.retry.requested", payload: { generation: 2 } });
+      assert.isUndefined((yield* ledger.getTask(taskId))?.task.briefVersion);
+      yield* claim(taskId, 2);
+      const second = yield* freezeChannelBrief(
+        ledger,
+        (yield* ledger.getTask(taskId))!,
+        "brief-owner",
+        "Second generation",
+      );
+      assert.strictEqual(second.brief.version, 2);
+      assert.strictEqual(second.brief.generation, 2);
+      const cancelled = yield* move(taskId, {
+        type: "task.cancelled",
+        payload: { reason: "Stop" },
+      });
+      if (cancelled.type === "task.cancelled")
+        assert.strictEqual(cancelled.payload.briefVersion, 2);
+      yield* move(taskId, { type: "task.retry.requested", payload: { generation: 3 } });
+      // A failure before this generation launches must not reference its predecessor's brief.
+      const beforeLaunch = yield* move(taskId, {
+        type: "task.failed",
+        payload: { generation: 3, reason: "unavailable" },
+      });
+      if (beforeLaunch.type === "task.failed")
+        assert.isUndefined(beforeLaunch.payload.briefVersion);
+    }).pipe(Effect.provide(TestLayer)),
+  );
+
+  it.effect(
+    "exports persisted pairs by terminal time, paginates, and preserves earlier outcomes after retry",
+    () =>
+      Effect.gen(function* () {
+        const taskId = yield* seed();
+        const ledger = yield* ChannelLedger.ChannelLedger;
+        yield* claim(taskId);
+        yield* freezeChannelBrief(
+          ledger,
+          (yield* ledger.getTask(taskId))!,
+          "brief-owner",
+          "First brief",
+        );
+        yield* move(taskId, {
+          type: "task.worker.bound",
+          payload: {
+            worker: {
+              environmentId: "env-1" as never,
+              threadId: "worker-1" as never,
+              runId: "run-1" as never,
+              generation: 1,
+            },
+          },
+        });
+        yield* move(taskId, {
+          type: "task.question.opened",
+          payload: {
+            question: {
+              questionId: "question-1" as never,
+              text: "Which branch?",
+              askedAt: NOW,
+            },
+          },
+        });
+        yield* move(taskId, {
+          type: "task.question.answered",
+          payload: { questionId: "question-1" as never, answer: "dev" },
+        });
+        const completed = yield* move(taskId, {
+          type: "task.completed",
+          payload: { generation: 1, summary: "Build passed.", runId: "run-1" as never },
+        });
+        if (completed.type === "task.completed")
+          assert.strictEqual(completed.payload.briefVersion, 1);
+        yield* move(taskId, { type: "task.retry.requested", payload: { generation: 2 } });
+        yield* claim(taskId, 2);
+        yield* freezeChannelBrief(
+          ledger,
+          (yield* ledger.getTask(taskId))!,
+          "brief-owner",
+          "Second brief",
+        );
+        yield* move(
+          taskId,
+          {
+            type: "task.failed",
+            payload: { generation: 2, reason: "build_failed", summary: "Second result." },
+          },
+          "2026-10-12T01:00:00.000Z",
+        );
+        const first = yield* ledger.exportTasks({ ...range, limit: 1 });
+        const line = decodePair(first.jsonl);
+        assert.isNotNull(line.brief);
+        assert.isNotNull(line.evidence);
+        if (line.brief === null || line.evidence === null) return;
+        assert.strictEqual(line.brief.version, 1);
+        assert.strictEqual(line.brief.deliveredText, "First brief");
+        assert.strictEqual(line.terminalState, "completed");
+        assert.strictEqual(line.resultSummary, "Build passed.");
+        assert.strictEqual(line.evidence.runId, "run-1");
+        assert.strictEqual(line.channelAnswers, 1);
+        assert.lengthOf((yield* ledger.answerEventIdsThrough(taskId, line.sequence)).eventIds, 1);
+        assert.strictEqual(line.reruns, 0);
+        assert.strictEqual(line.generation, 1);
+        assert.isDefined(first.nextCursor);
+        const second = yield* ledger.exportTasks({ ...range, limit: 1, cursor: first.nextCursor });
+        const next = decodePair(second.jsonl);
+        assert.isNotNull(next.brief);
+        if (next.brief === null) return;
+        assert.strictEqual(next.brief.version, 2);
+        assert.strictEqual(next.terminalState, "failed");
+        assert.strictEqual(next.resultSummary, "Second result.");
+        assert.strictEqual(next.reruns, 1);
+        assert.strictEqual(next.channelAnswers, 0);
+        assert.deepStrictEqual(
+          (yield* ledger.answerEventIdsThrough(taskId, next.sequence)).eventIds,
+          [],
+        );
+        // Historical exports retain their own boundary after the task has retried.
+        assert.lengthOf((yield* ledger.answerEventIdsThrough(taskId, line.sequence)).eventIds, 1);
+        assert.isNull(next.evidence);
+        assert.isUndefined(second.nextCursor);
+        assert.strictEqual((yield* ledger.exportTasks({ ...range, to: NOW })).jsonl, "");
+        const onlySecond = yield* ledger.exportTasks({
+          ...range,
+          from: "2026-10-12T01:00:00.000Z",
+        });
+        assert.strictEqual(decodePair(onlySecond.jsonl).generation, 2);
+        assert.strictEqual(
+          (yield* ledger.exportTasks({ ...range, ownerId: "another-owner" })).jsonl,
+          "",
+        );
+      }).pipe(Effect.provide(TestLayer)),
+  );
+
+  it.effect("exports old tasks and events without a brief as brief:null", () =>
+    Effect.gen(function* () {
+      const taskId = yield* seed();
+      const ledger = yield* ChannelLedger.ChannelLedger;
+      assert.isUndefined((yield* ledger.getTask(taskId))?.task.briefVersion);
+      yield* move(taskId, { type: "task.cancelled", payload: {} });
+      const page = yield* ledger.exportTasks(range);
+      assert.isNull(decodePair(page.jsonl).brief);
+      assert.strictEqual(decodePair(page.jsonl).generation, 1);
     }).pipe(Effect.provide(TestLayer)),
   );
 });

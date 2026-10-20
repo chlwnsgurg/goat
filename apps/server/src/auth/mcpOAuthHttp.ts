@@ -3,7 +3,7 @@ import {
   type AuthMcpAuthorizationRequest,
   AuthMcpClientAccess,
   EnvironmentHttpApi,
-} from "@t3tools/contracts";
+} from "@goat/contracts";
 import * as Effect from "effect/Effect";
 import * as Result from "effect/Result";
 import { HttpServerRequest, HttpServerResponse } from "effect/http";
@@ -14,7 +14,6 @@ import * as EnvironmentAuth from "./EnvironmentAuth.ts";
 import * as McpOAuth from "./McpOAuth.ts";
 import { renderErrorPage } from "./mcpOAuthHtml.ts";
 
-/** Where the approval page lives in the web app. */
 const APPROVAL_PAGE_PATH = "/connect-agent";
 
 const PAGE_HEADERS = {
@@ -33,13 +32,11 @@ const noStore = HttpEffect.appendPreResponseHandler((_request, response) =>
   ),
 );
 
-/** Issuer and resource for the origin this request reached. */
 const requestUrls = Effect.map(HttpServerRequest.HttpServerRequest, McpOAuth.requestUrls);
 
 /**
- * Validates the request the approval page forwards. An unverified client or
- * redirect is reported, never redirected; any other problem goes back to the
- * agent through its (verified) redirect URI.
+ * An unverified client or redirect is reported, never redirected; any other problem goes back to
+ * the agent through its (verified) redirect URI.
  */
 const forwardedAuthorization = (
   oauth: McpOAuth.McpOAuth["Service"],
@@ -126,6 +123,9 @@ export const layer = HttpApiBuilder.group(
                 ? {}
                 : {
                     csrfToken: session.csrfToken,
+                    oneClickMemoryScopes: (["memory:read", "memory:write"] as const).filter(
+                      (scope) => session.scopes.includes(scope),
+                    ),
                     oneClickAccess: AuthMcpClientAccess.literals.filter((access) =>
                       EnvironmentAuth.mcpClientScopes(access).every((scope) =>
                         session.scopes.includes(scope),

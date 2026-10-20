@@ -1,9 +1,8 @@
-import type { ServerProcessSignal } from "@t3tools/contracts";
+import type { ServerProcessSignal } from "@goat/contracts";
 
 import { InlineButton } from "../ui/button";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 
-/** Process ownership and confirmation stay with the diagnostics view. */
 export function ProcessSignalActions({
   disabled,
   onSignal,

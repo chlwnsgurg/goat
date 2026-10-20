@@ -89,9 +89,9 @@ jobs:
           import { appendFileSync, readFileSync } from "node:fs";
           import { parseEnv } from "node:util";
           const env = parseEnv(readFileSync(".env.local", "utf8"));
-          const googleServicesFile = env.T3CODE_ANDROID_GOOGLE_SERVICES_FILE;
+          const googleServicesFile = env.GOAT_ANDROID_GOOGLE_SERVICES_FILE;
           if (googleServicesFile) {
-            appendFileSync(process.env.GITHUB_ENV, `T3CODE_ANDROID_GOOGLE_SERVICES_FILE=${googleServicesFile}\n`);
+            appendFileSync(process.env.GITHUB_ENV, `GOAT_ANDROID_GOOGLE_SERVICES_FILE=${googleServicesFile}\n`);
           }
           NODE
 
@@ -100,6 +100,8 @@ jobs:
         uses: expo/expo-github-action/continuous-deploy-fingerprint@main
         env:
           EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
+          # The Expo action otherwise suppresses the EAS command's failure output.
+          RUNNER_DEBUG: "1"
         with:
           profile: preview:dev
           branch: pr-${{ github.event.pull_request.number }}

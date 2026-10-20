@@ -1,24 +1,28 @@
-import type { ProviderInteractionMode } from "@t3tools/contracts";
+import { GOAT_THREAD_LINK_PROTOCOL } from "@goat/contracts/legacyT3Names";
+import type { ProviderInteractionMode } from "@goat/contracts";
 
-export const T3_CODE_ORCHESTRATION_INSTRUCTIONS = `
-
-## GOAT orchestration
+/**
+ * Authored as self-contained sections so a provider that limits the size of
+ * each instruction entry can deliver every one whole. Codex cuts the middle out
+ * of any entry over 4,000 bytes, so start a new section before one gets close.
+ */
+export const GOAT_ORCHESTRATION_SECTIONS: ReadonlyArray<string> = [
+  `## GOAT orchestration
 
 The \`goat\` MCP server provides app-owned orchestration. Treat these concepts distinctly:
 
-- A delegated task/subagent is bounded child work owned by the current thread: one research lane, one review round, or one implementation slice that reports back and ends. Use \`orchestrator_capabilities\` to discover the current provider/model IDs from the same live catalog as the composer, including configured custom models. Do not treat a native tool's model list as the full list of available subagent models. Prefer native subagent tools for same-provider work only when they support the chosen model. Use \`delegate_task\` with that provider instance and model when native tools cannot, including for same-provider work. Also use \`delegate_task\` for cross-provider or explicitly GOAT-owned child tasks. Retain each returned \`taskId\`, and use \`task_status\` or \`task_cancel\` to manage it. The returned \`childThreadId\` is backing storage for the subagent, not the target for starting another delegated review round.
+- A delegated task/subagent is bounded child work owned by the current thread: one research lane, one review round, or one implementation slice that reports back and ends. Use \`orchestrator_capabilities\` to discover the current provider/model IDs from the same live catalog as the composer, including configured custom models. Do not treat a native tool's model list as the full list of available subagent models. Prefer native subagent tools for same-provider work only when they support the chosen model. Use \`delegate_task\` with that provider instance and model when native tools cannot, including for same-provider work. Also use \`delegate_task\` for cross-provider or explicitly GOAT-owned child tasks. For a child task that needs a separate checkout, use \`delegate_task\` with \`isolation:"worktree"\` across any provider or model. It starts from the parent local commit and runs project setup; uncommitted edits are not copied. Retain each returned \`taskId\`, and use \`task_status\` or \`task_cancel\` to manage it. The returned \`childThreadId\` is backing storage for the subagent, not the target for starting another delegated review round.
 - \`goat_thread_launch\` and \`create_threads\` create ordinary top-level GOAT conversations, which the user sees in the sidebar and can open, steer, and resume. Delegated children do not appear there. Use \`goat_thread_launch\` when the user asks for a separate/new/top-level thread, and for work that owns a goal, runs a loop (HOTL, \`cxc-loop\`, repeated PABCD), or spans several cycles, even when the user calls it a subagent. Launch it in the right project and workspace, put the full brief in \`message\`, and let that thread run its own delegated lanes. Otherwise never use these tools merely because the user said "subagent" or requested parallel delegated work.
-- For every GOAT delegated review round, call \`delegate_task\` again. Include the original brief, prior findings, responses, and unresolved objections in each new task prompt. Track each round by its own \`taskId\`. Use a distinct \`clientRequestId\` per round, stable across retries of that round. Do not use \`goat_thread_send\` on \`childThreadId\` to continue a delegated review.
-- \`schedule_task\` creates persistent recurring work in the app scheduler. Pass \`schedule\` as a structured object, never as JSON text: \`{"type":"interval","everyMs":3600000}\` for an interval, or \`{"type":"fixed_time","timeOfDay":"09:00","weekdays":[1,2,3,4,5]}\` for a wall-clock schedule, or \`{"type":"webhook"}\` to run on each request to the returned \`webhookUrl\` (the run sees the request only through \`{{body.path}}\`-style placeholders in the prompt). By default runs return to the current thread, which suits orchestrating: each trigger arrives here and you delegate or dedupe; set \`bindToCurrentThread=false\` only when the user wants a fresh thread for every run. After scheduling a timer, report the returned cadence and next run time; for a webhook, report its \`webhookUrl\`, or, when it is missing, pass on \`webhookUrlUnavailableReason\`, which says why and what the user should do. Never share the bare hook path instead.
+- For every GOAT delegated review round, call \`delegate_task\` again. Include the original brief, prior findings, responses, and unresolved objections in each new task prompt. Track each round by its own \`taskId\`. Use a distinct \`clientRequestId\` per round, stable across retries of that round. Do not use \`goat_thread_send\` on \`childThreadId\` to continue a delegated review.`,
+  `- \`schedule_task\` creates persistent recurring work in the app scheduler. Pass \`schedule\` as a structured object, never as JSON text: \`{"type":"interval","everyMs":3600000}\` for an interval, or \`{"type":"fixed_time","timeOfDay":"09:00","weekdays":[1,2,3,4,5]}\` for a wall-clock schedule, or \`{"type":"webhook"}\` to run on each request to the returned \`webhookUrl\` (the run sees the request only through \`{{body.path}}\`-style placeholders in the prompt). By default runs return to the current thread, which suits orchestrating: each trigger arrives here and you delegate or dedupe; set \`bindToCurrentThread=false\` only when the user wants a fresh thread for every run. After scheduling a timer, report the returned cadence and next run time; for a webhook, report its \`webhookUrl\`, or, when it is missing, pass on \`webhookUrlUnavailableReason\`, which says why and what the user should do. Never share the bare hook path instead.
 - When you need a secret from the user (a token, API key, or webhook signing secret), call \`request_secret\` so they enter it privately, then pass the returned \`secretRef\` to the tool that needs it, e.g. \`signature.secretRef\` on a webhook task for a sender that signs requests such as GitHub. A \`secretRef\` works once. Never ask for a secret in chat, never invent one, and never repeat one.
-- To mention another thread to the user, link it as \`[title](t3-thread://v1/<threadId>)\` with its exact \`threadId\`, not URL-encoded. GOAT opens the thread in the app and shows its current title.
+- To mention another thread to the user, link it as \`[title](${GOAT_THREAD_LINK_PROTOCOL}://v1/<threadId>)\` with its exact \`threadId\`, not URL-encoded. GOAT opens the thread in the app and shows its current title.
 
 Questions from threads you launched here or on hosts arrive as notifications: read with \`goat_pending_request_read\`, decide with \`goat_pending_request_respond\` (\`host\` for remote threads, \`reason\` required), or forward to the user; approvals and \`humanRequired\` questions are human-only.
 Forward to the user any decision your own user has not authorized, such as pushing, deploying, sending outside, or starting new work beyond the request.
 After asking an async question, end the turn so its answer arrives as a message, never sleep-poll; provider-native blocking question tools resume when answered.
-If you do wait with \`goat_thread_wait\` (also with \`host\`) or \`delegate_task(mode:"wait")\`, it returns on a pending question with \`pendingRequestIds\`; \`goat_pending_request_list\` with \`scope:"launched"\` shows all your launched threads' questions, including connected hosts and explicit \`hosts\`.
-
-### Choose the workspace before starting a new thread
+If you do wait with \`goat_thread_wait\` (also with \`host\`) or \`delegate_task(mode:"wait")\`, it returns on a pending question with \`pendingRequestIds\`; \`goat_pending_request_list\` with \`scope:"launched"\` shows all your launched threads' questions, including connected hosts and explicit \`hosts\`.`,
+  `### Choose the workspace before starting a new thread
 
 For independent implementation or a PR stack in its own worktree, use \`goat_thread_launch\` with an explicit \`workspaceStrategy\`. It creates or selects the workspace, binds the new thread to it, and prepares it before the agent starts. Put the task in \`message\`, not \`prompt\`:
 
@@ -26,24 +30,27 @@ For independent implementation or a PR stack in its own worktree, use \`goat_thr
 - Existing worktree: \`{"title":"Continue cleanup","workspaceStrategy":{"type":"existing_worktree","worktreePath":"/absolute/path/to/worktree","branch":"feature/ui-cleanup"},"message":"Continue the cleanup."}\`
 - Project's main checkout: \`workspaceStrategy:{"type":"root"}\`. Omitting workspaceStrategy also selects root; it does not inherit the caller's worktree.
 
-For stacked work, set \`baseRef\` to the intended parent branch and \`startFromOrigin:false\` to use its local commits. Use \`startFromOrigin:true\` when you intend to fetch and start from origin. Uncommitted edits are not copied. Use \`goat_worktree_list\` to discover existing checkout paths. Project, model selection, and modes inherit unless supplied; a launched thread may not run with broader modes than yours.
+For stacked work, set \`baseRef\` to the intended parent branch and \`startFromOrigin:false\` to use its local commits. Use \`startFromOrigin:true\` when you intend to fetch and start from origin. Uncommitted edits are not copied. Use \`goat_worktree_list\` to discover existing checkout paths. Launched worktrees are not removed when their thread ends: \`goat_worktree_inventory\` lists them with their thread and unsaved work, \`goat_worktree_cleanup\` (dry run by default) sweeps finished ones, and \`goat_worktree_remove\` removes one; each takes \`host\` for another machine. Project, model selection, and modes inherit unless supplied; a launched thread may not run with broader modes than yours.
 
 \`goat_thread_launch\` is the single-thread launch tool. Use \`create_threads\` only for a batch of threads intentionally sharing the caller's checkout: it always inherits the caller's project, branch, and worktree and has no workspace override. Asking an agent to run \`git worktree add\` or \`cd\` in its prompt does not update GOAT's thread binding. Select the workspace in the launch call instead. \`goat_worktree_handoff\` moves the calling thread, not another thread, and cannot move a thread already attached to a worktree.
 
-\`goat_thread_launch\` has no idempotency key. Retain its returned \`threadId\`; preparation can still be running after acceptance. The launching thread is notified automatically when the launched thread's run ends, when it waits on a question, or if its host becomes unreachable, so do not poll or loop on \`goat_thread_wait\`. Pass \`notifyOnCompletion:false\` or use \`goat_thread_unwatch\` to stop run-end and host-outage reports. Only local user-input questions still arrive. SSH-host questions then need \`goat_thread_wait({host})\` or \`goat_pending_request_list({scope:"launched", hosts})\`. Approvals are no longer reported; check \`goat_thread_read\` or tell the user the thread may be waiting. Use \`goat_thread_watch_list\` to inspect watches, \`goat_thread_unwatch\` to stop one, and \`goat_thread_watch\` to re-arm one. A \`goat_thread_send\` from the launcher re-arms the watch for that run. If a launch fails or its response is lost, inspect \`goat_thread_list\` before retrying, since a thread may already exist, then use \`goat_thread_watch\` to watch it.
+\`goat_thread_launch\` has no idempotency key. Retain its returned \`threadId\`; preparation can still be running after acceptance. The launching thread is notified automatically when the launched thread's run ends, when it waits on a question, or if its host becomes unreachable, so do not poll or loop on \`goat_thread_wait\`. Pass \`notifyOnCompletion:false\` or use \`goat_thread_unwatch\` to stop run-end and host-outage reports. Only local user-input questions still arrive. SSH-host questions then need \`goat_thread_wait({host})\` or \`goat_pending_request_list({scope:"launched", hosts})\`. Approvals are no longer reported; check \`goat_thread_read\` or tell the user the thread may be waiting. Use \`goat_thread_watch_list\` to inspect watches, \`goat_thread_unwatch\` to stop one, and \`goat_thread_watch\` to re-arm one. A \`goat_thread_send\` from the launcher re-arms the watch for that run. For an immediate answer to whether a run started, what it is doing, or whether it ended, call \`goat_thread_status\`; it never waits. If a launch fails or its response is lost, inspect \`goat_thread_list\` before retrying, since a thread may already exist, then use \`goat_thread_watch\` to watch it.`,
+  `To work on ANOTHER machine, use the SSH tools instead of running ssh in a terminal: \`goat_ssh_host_list\` names the hosts this machine can reach, \`goat_ssh_browse\` lists a folder there with its Git branch and worktrees, and \`goat_ssh_thread_launch\` starts a thread in that machine's own GOAT environment, in a new worktree (\`workspace:{"type":"worktree","baseRef":"dev","branch":"feature/x"}\`, which starts from origin/dev by default; prefer this for coding work) or in the folder itself (\`{"type":"cwd"}\`). Its \`threadId\` belongs to that machine: pass the same \`host\` to \`goat_thread_read\`, \`goat_thread_send\`, \`goat_thread_interrupt\`, \`goat_thread_list\`, \`goat_thread_watch\`, \`goat_thread_unwatch\`, and \`goat_pending_request_list/read/respond\` to follow, steer, and answer it from here. The launching machine follows it over SSH and automatically notifies the launching thread when its run ends, when it waits on a question, or if its host becomes unreachable, so do not poll or loop on \`goat_thread_wait\`. Pass \`notifyOnCompletion:false\` or use \`goat_thread_unwatch\` to stop run-end and host-outage reports. Only local user-input questions still arrive. SSH-host questions then need \`goat_thread_wait({host})\` or \`goat_pending_request_list({scope:"launched", hosts})\`. Approvals are no longer reported; check \`goat_thread_read\` or tell the user the thread may be waiting. Use \`goat_thread_watch_list\` to inspect watches, \`goat_thread_unwatch\` to stop one, and \`goat_thread_watch\` to re-arm one. If the launch response is lost, inspect \`goat_thread_list\` with the same \`host\`, then use \`goat_thread_watch\`. Never read the remote's database over SSH. \`host_unavailable\` is reported once and means the machine or its GOAT server is unreachable, not that the thread is gone.`,
+  `Tool names may include a harness-normalized MCP prefix, such as \`mcp__goat__delegate_task\`; the semantics are the same. Some harnesses attach optional MCP servers lazily: if an initial tool-catalog scan does not show GOAT tools, do not conclude that cross-provider delegation is unavailable. Make one bounded direct attempt using the known GOAT tool name on the next tool step. In Codex code mode, for example, call \`tools.mcp__goat__orchestrator_capabilities({})\` before reporting that the capability is absent. Keep polling/wait loops bounded, do not duplicate active work, and use stable \`clientRequestId\` values when retrying tools that accept them.
 
-To work on ANOTHER machine, use the SSH tools instead of running ssh in a terminal: \`goat_ssh_host_list\` names the hosts this machine can reach, \`goat_ssh_browse\` lists a folder there with its Git branch and worktrees, and \`goat_ssh_thread_launch\` starts a thread in that machine's own GOAT environment, in the folder (\`workspace:{"type":"cwd"}\`) or a new worktree (\`{"type":"worktree","branch":"feature/x"}\`). Its \`threadId\` belongs to that machine: pass the same \`host\` to \`goat_thread_read\`, \`goat_thread_send\`, \`goat_thread_interrupt\`, \`goat_thread_list\`, \`goat_thread_watch\`, \`goat_thread_unwatch\`, and \`goat_pending_request_list/read/respond\` to follow, steer, and answer it from here. The launching machine follows it over SSH and automatically notifies the launching thread when its run ends, when it waits on a question, or if its host becomes unreachable, so do not poll or loop on \`goat_thread_wait\`. Pass \`notifyOnCompletion:false\` or use \`goat_thread_unwatch\` to stop run-end and host-outage reports. Only local user-input questions still arrive. SSH-host questions then need \`goat_thread_wait({host})\` or \`goat_pending_request_list({scope:"launched", hosts})\`. Approvals are no longer reported; check \`goat_thread_read\` or tell the user the thread may be waiting. Use \`goat_thread_watch_list\` to inspect watches, \`goat_thread_unwatch\` to stop one, and \`goat_thread_watch\` to re-arm one. If the launch response is lost, inspect \`goat_thread_list\` with the same \`host\`, then use \`goat_thread_watch\`. Never read the remote's database over SSH. \`host_unavailable\` is reported once and means the machine or its GOAT server is unreachable, not that the thread is gone.
-
-Tool names may include a harness-normalized MCP prefix, such as \`mcp__goat__delegate_task\`; the semantics are the same. Some harnesses attach optional MCP servers lazily: if an initial tool-catalog scan does not show GOAT tools, do not conclude that cross-provider delegation is unavailable. Make one bounded direct attempt using the known GOAT tool name on the next tool step. In Codex code mode, for example, call \`tools.mcp__goat__orchestrator_capabilities({})\` before reporting that the capability is absent. Keep polling/wait loops bounded, do not duplicate active work, and use stable \`clientRequestId\` values when retrying tools that accept them.
-
-ACP fallback: some ACP agents accept the injected MCP server but fail to expose its tools. When the GOAT tools are absent and \`T3_ACP_MCP_NODE\` is present, call the same tools through the terminal: \`ELECTRON_RUN_AS_NODE=1 "$T3_ACP_MCP_NODE" \${T3_ACP_MCP_ENTRYPOINT:+"$T3_ACP_MCP_ENTRYPOINT"} acp-mcp-call orchestrator_capabilities '{}'\` (\`T3_ACP_MCP_ENTRYPOINT\` is unset when GOAT runs as a standalone executable). Delegate with \`acp-mcp-call delegate_task '{"task":"...","target":{"providerInstanceId":"...","model":"..."},"mode":"async","clientRequestId":"..."}'\`. This is the supported GOAT transport fallback, not an ordinary shell-based substitute for delegation.
+ACP fallback: some ACP agents accept the injected MCP server but fail to expose its tools. When the GOAT tools are absent and \`GOAT_ACP_MCP_NODE\` is present, call the same tools through the terminal: \`ELECTRON_RUN_AS_NODE=1 "$GOAT_ACP_MCP_NODE" \${GOAT_ACP_MCP_ENTRYPOINT:+"$GOAT_ACP_MCP_ENTRYPOINT"} acp-mcp-call orchestrator_capabilities '{}'\` (\`GOAT_ACP_MCP_ENTRYPOINT\` is unset when GOAT runs as a standalone executable). Delegate with \`acp-mcp-call delegate_task '{"task":"...","target":{"providerInstanceId":"...","model":"..."},"mode":"async","clientRequestId":"..."}'\`. This is the supported GOAT transport fallback, not an ordinary shell-based substitute for delegation.
 
 ### Showing visuals
 
-When a chart, table, diagram, image collage, or mockup would say more than prose, build a self-contained HTML page, check it with \`html_preview\`, then publish it with \`html_render\` before your final reply. The reader sees the page above that reply, so don't announce or restate it; add only what it doesn't say.
+When a chart, table, diagram, image collage, or mockup would say more than prose, build a self-contained HTML page, check it with \`html_preview\`, then publish it with \`html_render\` before your final reply. The reader sees the page above that reply, so don't announce or restate it; add only what it doesn't say.`,
+];
+
+export const GOAT_ORCHESTRATION_INSTRUCTIONS = `
+
+${GOAT_ORCHESTRATION_SECTIONS.join("\n\n")}
 `;
 
-export const T3_CODE_BROWSER_TOOL_INSTRUCTIONS = `
+export const GOAT_BROWSER_TOOL_INSTRUCTIONS = `
 
 ## GOAT collaborative browser
 
@@ -59,66 +66,64 @@ Do not switch to global browser skills, Chrome, Node REPL browser automation, st
 - preview calls on an open tab have failed twice on the same step (timeouts, \`chrome-error://\` pages, a different client answering). Quote the raw error and switch without asking the user which browser to use.
 `;
 
-const T3_CODE_ACP_DEFAULT_MODE_INSTRUCTIONS = `## GOAT interaction mode: Default
+const GOAT_ACP_DEFAULT_MODE_INSTRUCTIONS = `## GOAT interaction mode: Default
 
 Prefer making reasonable assumptions and carrying out the user's request. Ask a concise question only when a missing user decision would materially change the result. Treat this mode as active until GOAT supplies a different interaction-mode instruction.`;
 
-const T3_CODE_ACP_PLAN_MODE_INSTRUCTIONS = `## GOAT interaction mode: Plan
+const GOAT_ACP_PLAN_MODE_INSTRUCTIONS = `## GOAT interaction mode: Plan
 
 Investigate with read-only actions and do not edit files or otherwise execute the implementation. Resolve discoverable facts before asking questions. When the requirements are decision complete, return a concrete implementation plan and do not start implementing it. Treat this mode as active until GOAT supplies a different interaction-mode instruction.`;
 
-export interface T3AcpInstructionState {
+export interface GoatAcpInstructionState {
   readonly interactionMode: ProviderInteractionMode;
-  readonly hasT3Mcp: boolean;
+  readonly hasGoatMcp: boolean;
 }
 
 /**
  * ACP has no system/developer prompt field, so send T3-owned context in the
  * first user prompt and whenever the available tools or interaction mode change.
  */
-export function t3AcpPromptWithInstructions(input: {
+export function goatAcpPromptWithInstructions(input: {
   readonly prompt: string;
-  readonly state: T3AcpInstructionState;
-  readonly previousState?: T3AcpInstructionState;
+  readonly state: GoatAcpInstructionState;
+  readonly previousState?: GoatAcpInstructionState;
 }): string {
   // Native slash commands must remain at the start of the prompt.
   if (input.prompt.trimStart().startsWith("/")) return input.prompt;
   if (
     input.previousState?.interactionMode === input.state.interactionMode &&
-    input.previousState.hasT3Mcp === input.state.hasT3Mcp
+    input.previousState.hasGoatMcp === input.state.hasGoatMcp
   ) {
     return input.prompt;
   }
   const instructions = [
     input.state.interactionMode === "plan"
-      ? T3_CODE_ACP_PLAN_MODE_INSTRUCTIONS
-      : T3_CODE_ACP_DEFAULT_MODE_INSTRUCTIONS,
-    ...(input.state.hasT3Mcp
-      ? [T3_CODE_BROWSER_TOOL_INSTRUCTIONS.trim(), T3_CODE_ORCHESTRATION_INSTRUCTIONS.trim()]
+      ? GOAT_ACP_PLAN_MODE_INSTRUCTIONS
+      : GOAT_ACP_DEFAULT_MODE_INSTRUCTIONS,
+    ...(input.state.hasGoatMcp
+      ? [GOAT_BROWSER_TOOL_INSTRUCTIONS.trim(), GOAT_ORCHESTRATION_INSTRUCTIONS.trim()]
       : []),
   ];
   return `<t3_code_instructions>\n${instructions.join("\n\n")}\n</t3_code_instructions>\n\n<user_request>\n${input.prompt}\n</user_request>`;
 }
 
 /**
- * Providers without a system/developer-instruction channel receive this
- * context in the first prompt. Keep the wrapper explicit so it cannot be
- * mistaken for text authored by the user.
+ * Keep the wrapper explicit so it cannot be mistaken for text authored by the user.
  */
-function prependT3OrchestrationInstructions(prompt: string): string {
-  return `<t3_code_orchestration_instructions>${T3_CODE_ORCHESTRATION_INSTRUCTIONS.trim()}</t3_code_orchestration_instructions>\n\n<user_request>\n${prompt}\n</user_request>`;
+function prependGoatOrchestrationInstructions(prompt: string): string {
+  return `<t3_code_orchestration_instructions>${GOAT_ORCHESTRATION_INSTRUCTIONS.trim()}</t3_code_orchestration_instructions>\n\n<user_request>\n${prompt}\n</user_request>`;
 }
 
-export function t3OrchestrationPromptForFirstRun(input: {
+export function goatOrchestrationPromptForFirstRun(input: {
   readonly prompt: string;
   readonly runOrdinal: number;
-  readonly hasT3Mcp: boolean;
+  readonly hasGoatMcp: boolean;
 }): string {
-  return input.runOrdinal === 1 && input.hasT3Mcp
-    ? prependT3OrchestrationInstructions(input.prompt)
+  return input.runOrdinal === 1 && input.hasGoatMcp
+    ? prependGoatOrchestrationInstructions(input.prompt)
     : input.prompt;
 }
 
-export function t3OrchestrationSystemPrompt(hasT3Mcp: boolean): string | undefined {
-  return hasT3Mcp ? T3_CODE_ORCHESTRATION_INSTRUCTIONS : undefined;
+export function goatOrchestrationSystemPrompt(hasGoatMcp: boolean): string | undefined {
+  return hasGoatMcp ? GOAT_ORCHESTRATION_INSTRUCTIONS : undefined;
 }

@@ -69,6 +69,7 @@ export const STATIC_KEYBINDING_COMMANDS = [
   "rightPanel.toggle",
   "rightPanel.new",
   "threadPanel.toggle",
+  "sideChat.toggle",
   "rightPanel.toggleMaximized",
   "rightPanel.close",
   "view.reopenClosed",
@@ -94,6 +95,8 @@ export const STATIC_KEYBINDING_COMMANDS = [
   "composer.host",
   "composer.cycleHost",
   "composer.effort",
+  "composer.increaseEffort",
+  "composer.decreaseEffort",
   "composer.mode",
   "composer.workspace",
   "composer.branch",
@@ -202,8 +205,6 @@ export const ResolvedKeybindingRule = Schema.Struct({
 export type ResolvedKeybindingRule = typeof ResolvedKeybindingRule.Type;
 
 /**
- * The command set grows over time, so a client may receive rules it cannot
- * represent (a command or `when` node added after that client shipped).
  * Decoding drops those rules instead of failing the whole payload —
  * rejecting the config would take down the connection over a shortcut the
  * client couldn't dispatch anyway.

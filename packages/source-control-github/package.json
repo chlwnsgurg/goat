@@ -1,15 +1,19 @@
 {
-  "name": "@t3tools/source-control-github",
+  "name": "@goat/source-control-github",
   "private": true,
   "type": "module",
   "exports": {
+    "./client/definition": {
+      "types": "./src/client/definition.ts",
+      "import": "./src/client/definition.ts"
+    },
     "./server/driver": {
       "types": "./src/server/driver.ts",
       "import": "./src/server/driver.ts"
     },
-    "./server/GitHubApi": {
-      "types": "./src/server/GitHubApi.ts",
-      "import": "./src/server/GitHubApi.ts"
+    "./server/GitHubRest": {
+      "types": "./src/server/GitHubRest.ts",
+      "import": "./src/server/GitHubRest.ts"
     },
     "./server/gitHubAuthStatus": {
       "types": "./src/server/gitHubAuthStatus.ts",
@@ -27,9 +31,9 @@
       "types": "./src/server/GitHubCredentials.ts",
       "import": "./src/server/GitHubCredentials.ts"
     },
-    "./server/githubGraphQl": {
-      "types": "./src/server/githubGraphQl.ts",
-      "import": "./src/server/githubGraphQl.ts"
+    "./server/GitHubRequestPolicy": {
+      "types": "./src/server/GitHubRequestPolicy.ts",
+      "import": "./src/server/GitHubRequestPolicy.ts"
     },
     "./server/GitHubPullRequestApi": {
       "types": "./src/server/GitHubPullRequestApi.ts",
@@ -69,20 +73,22 @@
     }
   },
   "scripts": {
-    "typecheck": "tsc --noEmit",
-    "test": "vp test run --config ../../vite.config.ts --dir ."
+    "typecheck": "tsc-rs --noEmit",
+    "test": "vp test run --config ../../vite.config.ts --dir .",
+    "generate": "graphqlgen"
   },
   "dependencies": {
-    "@t3tools/contracts": "workspace:*",
-    "@t3tools/provider-core": "workspace:*",
-    "@t3tools/shared": "workspace:*",
-    "@t3tools/source-control-core": "workspace:*",
+    "@goat/contracts": "workspace:*",
+    "@goat/provider-core": "workspace:*",
+    "@goat/shared": "workspace:*",
+    "@goat/source-control-core": "workspace:*",
     "effect": "catalog:"
   },
   "devDependencies": {
+    "@effect/graphql-generator": "catalog:",
     "@effect/platform-node": "catalog:",
     "@effect/vitest": "catalog:",
-    "@t3tools/source-control-testing": "workspace:*",
+    "@goat/source-control-testing": "workspace:*",
     "@types/node": "catalog:",
     "vite-plus": "catalog:"
   }

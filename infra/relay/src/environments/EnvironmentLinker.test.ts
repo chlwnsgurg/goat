@@ -3,8 +3,8 @@ import * as NodeCrypto from "node:crypto";
 import type {
   RelayEnvironmentLinkProofPayload,
   RelayEnvironmentLinkRequest,
-} from "@t3tools/contracts/relay";
-import { RELAY_LINK_PROOF_TYP } from "@t3tools/shared/relayJwt";
+} from "@goat/contracts/relay";
+import { RELAY_LINK_PROOF_TYP } from "@goat/shared/relayJwt";
 import { describe, expect, it } from "@effect/vitest";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
@@ -232,8 +232,6 @@ describe("EnvironmentLinker", () => {
       expect(result.environmentCredential).toBe("t3env_credential_secret");
       expect(result.endpointRuntime).toBeNull();
       expect(persistedEndpoint).toBe("http://127.0.0.1:3773/");
-      // Downgrading from a managed link must release the previously provisioned
-      // tunnel; nothing else cleans it up before a full unlink.
       expect(deprovisionedEnvironmentId).toBe("env-link-test");
     }).pipe(
       Effect.provide(

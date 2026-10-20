@@ -1,4 +1,5 @@
 import { useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
+import { formatDiffCount } from "@goat/client-runtime/diff-count";
 
 import { countReviewCommentContexts, parseReviewInlineComments } from "./reviewCommentSelection";
 import { getCachedNativeReviewDiffData } from "./nativeReviewDiffAdapter";
@@ -12,11 +13,7 @@ import {
   type ReviewSectionItem,
 } from "./reviewModel";
 
-import type {
-  EnvironmentId,
-  ReviewDiffFileStat,
-  ReviewDiffPreviewSource,
-} from "@t3tools/contracts";
+import type { EnvironmentId, ReviewDiffFileStat, ReviewDiffPreviewSource } from "@goat/contracts";
 import { RegistryContext, useAtomValue } from "@effect/atom-react";
 import * as AsyncResult from "effect/reactivity/AsyncResult";
 import * as Atom from "effect/reactivity/Atom";
@@ -109,12 +106,15 @@ export function formatHeaderDiffSummary(
 } {
   if (files) {
     return {
-      additions: `+${files.reduce((total, file) => total + file.additions, 0)}`,
-      deletions: `-${files.reduce((total, file) => total + file.deletions, 0)}`,
+      additions: `+${formatDiffCount(files.reduce((total, file) => total + file.additions, 0))}`,
+      deletions: `-${formatDiffCount(files.reduce((total, file) => total + file.deletions, 0))}`,
     };
   }
   if (parsedDiff.kind !== "files") return { additions: null, deletions: null };
-  return { additions: `+${parsedDiff.additions}`, deletions: `-${parsedDiff.deletions}` };
+  return {
+    additions: `+${formatDiffCount(parsedDiff.additions)}`,
+    deletions: `-${formatDiffCount(parsedDiff.deletions)}`,
+  };
 }
 
 export function useReviewDiffData(input: {

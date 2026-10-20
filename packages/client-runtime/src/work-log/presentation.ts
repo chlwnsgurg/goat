@@ -5,31 +5,35 @@ import {
   type ToolActivitySource,
   type ToolActivitySurface,
   type ToolActivityIcon,
+  type OrchestrationV2CommandAction,
   type OrchestrationV2TurnItem,
   type ThreadId,
-} from "@t3tools/contracts";
+} from "@goat/contracts";
 import {
-  resolveT3McpToolDefinition,
-  type T3McpToolDefinition,
-  type T3McpToolSummaryAction,
-} from "@t3tools/shared/t3McpToolPresentation";
-import { classifyMarkdownImageSource } from "@t3tools/client-runtime/markdown-images";
-import { resolveMediaSource } from "@t3tools/client-runtime/media-source";
-import { parseChangeRequestUrl } from "@t3tools/shared/changeRequestUrl";
-import { isWorkspaceImagePreviewPath } from "@t3tools/shared/filePreview";
-import { formatTokens } from "@t3tools/shared/usageFormat";
-import { classifyToolActivity } from "@t3tools/shared/toolActivity";
-import { toolOutputIndicatesFailure } from "@t3tools/shared/toolOutput";
+  resolveGoatMcpToolDefinition,
+  type GoatMcpToolDefinition,
+  type GoatMcpToolSummaryAction,
+} from "@goat/shared/goatMcpToolPresentation";
+import { classifyMarkdownImageSource } from "@goat/client-runtime/markdown-images";
+import { resolveMediaSource } from "@goat/client-runtime/media-source";
+import { parseChangeRequestUrl } from "@goat/shared/changeRequestUrl";
+import { isWorkspaceImagePreviewPath } from "@goat/shared/filePreview";
+import { formatTokens } from "@goat/shared/usageFormat";
+import {
+  classifyToolActivity,
+  formatReadToolLabel,
+  formatSearchToolLabel,
+} from "@goat/shared/toolActivity";
+import { toolOutputIndicatesFailure } from "@goat/shared/toolOutput";
 
 import {
-  summarizeT3ToolCalls,
-  t3ToolResultIndicatesFailure,
-  type T3ToolSummaryCall,
-} from "@t3tools/client-runtime/t3ToolSummary";
+  summarizeGoatToolCalls,
+  goatToolResultIndicatesFailure,
+  type GoatToolSummaryCall,
+} from "@goat/client-runtime/goatToolSummary";
 
 export type WorkLogToolLifecycleStatus = RuntimeItemStatus | "stopped" | "idle";
 
-/** Inspection and copying omit raw outputs, including values from older caches. */
 export function toolItemForDisplay(item: OrchestrationV2TurnItem): OrchestrationV2TurnItem {
   switch (item.type) {
     case "command_execution":
@@ -49,21 +53,37 @@ export function toolItemForDisplay(item: OrchestrationV2TurnItem): Orchestration
   }
 }
 
-export function contextCompactionLabel(
-  item: Pick<
-    Extract<OrchestrationV2TurnItem, { type: "compaction" }>,
-    "status" | "beforeTokenCount" | "afterTokenCount"
-  >,
-): string {
-  if (item.status === "running") return "Compacting context";
-  if (item.beforeTokenCount !== undefined && item.afterTokenCount !== undefined) {
-    return `Context compacted ${formatTokens(item.beforeTokenCount)} → ${formatTokens(item.afterTokenCount)} tokens`;
+type CompactionLabelItem = Pick<
+  Extract<OrchestrationV2TurnItem, { type: "compaction" }>,
+  "status" | "beforeTokenCount" | "afterTokenCount"
+>;
+
+export function contextCompactionTokenCounts(
+  item: CompactionLabelItem,
+): { readonly before: string; readonly after: string } | null {
+  if (
+    item.status === "running" ||
+    item.beforeTokenCount === undefined ||
+    item.afterTokenCount === undefined
+  ) {
+    return null;
   }
-  return "Context compacted";
+  return { before: formatTokens(item.beforeTokenCount), after: formatTokens(item.afterTokenCount) };
+}
+
+export function contextCompactionLabel(item: CompactionLabelItem): string {
+  if (item.status === "failed") return "Context compaction failed";
+  if (item.status === "cancelled" || item.status === "interrupted")
+    return "Context compaction stopped";
+  if (item.status === "running") return "Compacting context";
+  const tokens = contextCompactionTokenCounts(item);
+  return tokens
+    ? `Context compacted ${tokens.before} → ${tokens.after} tokens`
+    : "Context compacted";
 }
 
 export interface WorkLogPresentationEntry {
-  readonly questionAnswer?: import("@t3tools/contracts").UserInputAttachmentAnswerPayload;
+  readonly questionAnswer?: import("@goat/contracts").UserInputAttachmentAnswerPayload;
   readonly id: string;
   readonly createdAt: string;
   readonly label: string;
@@ -91,6 +111,7 @@ export type ToolGroupAction =
   | "watch-pr"
   | "unwatch-pr"
   | "read"
+  | "list"
   | "edit"
   | "command"
   | "thread-create"
@@ -114,7 +135,95 @@ export function normalizeCompactToolLabel(value: string): string {
   return value.replace(/\s+(?:complete|completed)\s*$/i, "").trim();
 }
 
-/** Structured identity is authoritative, including when it identifies a foreign server. */
+/** The read, list, and search steps of a command row that only inspects files. */
+export function workEntryCommandActions(
+  entry: Pick<WorkLogPresentationEntry, "structuredPayload">,
+): ReadonlyArray<OrchestrationV2CommandAction> | null {
+  const item = entry.structuredPayload;
+  return item?.type === "command_execution" && item.commandActions?.length
+    ? item.commandActions
+    : null;
+}
+
+const COMMAND_ACTION_GROUP = {
+  read: "read",
+  list: "list",
+  search: "code-search",
+} as const satisfies Record<OrchestrationV2CommandAction["type"], ToolGroupAction>;
+
+function commandActionsGroupActions(
+  actions: ReadonlyArray<OrchestrationV2CommandAction>,
+): ReadonlyArray<ToolGroupAction> {
+  return [...new Set(actions.map((action) => COMMAND_ACTION_GROUP[action.type]))];
+}
+
+/** A row's single kind; a command mixing kinds is filed under search. */
+function commandActionsGroupAction(
+  actions: ReadonlyArray<OrchestrationV2CommandAction>,
+): ToolGroupAction {
+  const kinds = commandActionsGroupActions(actions);
+  return kinds.length === 1 ? kinds[0]! : "code-search";
+}
+
+function commandActionPhrase(
+  run: ReadonlyArray<OrchestrationV2CommandAction>,
+  formatPath: (path: string) => string,
+  active: boolean,
+): string {
+  const first = run[0]!;
+  // Providers report list and search paths as short display names; only read paths are full.
+  const targets = [
+    ...new Set(
+      run.flatMap((action) => {
+        const path = action.path?.trim();
+        if (!path || path === "." || path === "./") return [];
+        return [action.type === "read" ? formatPath(path) : path];
+      }),
+    ),
+  ];
+  const more = (count: number) => (count > 0 ? ` +${count} more` : "");
+  switch (first.type) {
+    case "read": {
+      const label = formatReadToolLabel(targets[0] ?? "", Math.max(0, targets.length - 1));
+      return active ? label.replace(/^Read\b/u, "Reading") : label;
+    }
+    case "list":
+      return `${active ? "Listing" : "Listed"} ${targets[0] ?? "files"}${more(targets.length - 1)}`;
+    case "search": {
+      const label =
+        formatSearchToolLabel({ input: { query: first.query, path: first.path } }) ??
+        "Searched files";
+      return `${active ? label.replace(/^Searched\b/u, "Searching") : label}${more(run.length - 1)}`;
+    }
+  }
+}
+
+/**
+ * One-line label for a command that only inspects files, such as
+ * "Read a.ts +1 more" or "Searched foo in src, read a.ts". Consecutive steps
+ * of one kind share a phrase.
+ */
+export function formatCommandActionsLabel(
+  actions: ReadonlyArray<OrchestrationV2CommandAction>,
+  options: { readonly active?: boolean; readonly formatPath?: (path: string) => string } = {},
+): string {
+  const formatPath = options.formatPath ?? ((path: string) => path);
+  const phrases: string[] = [];
+  for (let start = 0; start < actions.length;) {
+    let end = start + 1;
+    while (end < actions.length && actions[end]!.type === actions[start]!.type) end += 1;
+    phrases.push(
+      commandActionPhrase(actions.slice(start, end), formatPath, options.active === true),
+    );
+    start = end;
+  }
+  return [...new Set(phrases)]
+    .map((phrase, index) =>
+      index === 0 ? phrase : phrase.charAt(0).toLowerCase() + phrase.slice(1),
+    )
+    .join(", ");
+}
+
 function workEntryToolName(
   entry: Pick<WorkLogPresentationEntry, "label" | "toolTitle" | "toolData" | "structuredPayload">,
 ): string | undefined {
@@ -125,7 +234,7 @@ function workEntryToolName(
     return `${data.server}.${data.tool}`;
   }
   if (typeof data?.toolName === "string") return data.toolName;
-  return resolveT3McpToolDefinition(entry.toolTitle) ? entry.toolTitle : entry.label;
+  return resolveGoatMcpToolDefinition(entry.toolTitle) ? entry.toolTitle : entry.label;
 }
 
 function workEntryToolOutput(
@@ -138,8 +247,8 @@ function workEntryToolOutput(
     : (data?.output ?? data?.result ?? data?.rawOutput ?? data?.content);
 }
 
-function resolveT3McpToolPresentation(
-  definition: T3McpToolDefinition | null,
+function resolveGoatMcpToolPresentation(
+  definition: GoatMcpToolDefinition | null,
   status: string | undefined,
   data?: unknown,
 ) {
@@ -186,7 +295,6 @@ function resolveT3McpToolPresentation(
   };
 }
 
-/** Only active or completed calls can inherit the live group’s present tense. */
 export function liveActivityToolStatus(status: string | undefined, presentTense: boolean) {
   if (status === "failed" || status === "declined" || status === "stopped" || status === "idle") {
     return status;
@@ -195,7 +303,6 @@ export function liveActivityToolStatus(status: string | undefined, presentTense:
   return "completed";
 }
 
-/** Resolves tool identity before choosing labels or icons in either client. */
 export function resolveWorkEntryToolPresentation(
   entry: Pick<
     WorkLogPresentationEntry,
@@ -203,11 +310,11 @@ export function resolveWorkEntryToolPresentation(
   >,
   fallbackStatus?: "inProgress" | "completed",
 ) {
-  const definition = resolveT3McpToolDefinition(workEntryToolName(entry));
+  const definition = resolveGoatMcpToolDefinition(workEntryToolName(entry));
   const status = entry.toolLifecycleStatus ?? fallbackStatus;
-  return resolveT3McpToolPresentation(
+  return resolveGoatMcpToolPresentation(
     definition,
-    definition && t3ToolResultIndicatesFailure(workEntryToolOutput(entry)) ? "failed" : status,
+    definition && goatToolResultIndicatesFailure(workEntryToolOutput(entry)) ? "failed" : status,
     entry.toolData,
   );
 }
@@ -241,7 +348,6 @@ function commandResultContent(value: unknown): string | null {
   return chunks.length > 0 ? chunks.join("\n") : null;
 }
 
-/** Returns provider command output before it is formatted for a work-log row. */
 export function extractCommandOutputText(dataValue: unknown): string | null {
   const data = asRecord(dataValue);
   const item = asRecord(data?.item);
@@ -304,12 +410,11 @@ function textRepeatsCommand(text: string, commands: ReadonlyArray<string | null>
 }
 
 /**
- * Decides whether a command row's `detail` is a synthetic echo of the command
- * rather than real output. OpenCode stores completed output in `detail` with no
- * other output channel, so plain equality is only treated as synthetic when the
- * payload shape shows the detail came from the command: Codex item metadata,
- * an ACP tool call (`data.toolCallId`, `kind: "execute"`), a Claude tool-name
- * prefix, or no structured command at all.
+ * OpenCode stores completed output in `detail` with no other output channel, so
+ * plain equality is only treated as synthetic when the payload shape shows the
+ * detail came from the command: Codex item metadata, an ACP tool call
+ * (`data.toolCallId`, `kind: "execute"`), a Claude tool-name prefix, or no
+ * structured command at all.
  */
 export function commandDetailRepeatsCommand(input: {
   readonly detail: string;
@@ -371,10 +476,13 @@ function workEntryIndicatesToolFailureFromOutput(
   ) {
     return true;
   }
-  if (!workLogEntryIsToolLike(entry)) return false;
+  // Reasoning detail is the model's own prose (often tens of KB), not tool
+  // output: scanning it is slow on long threads and misreads phrases like
+  // "that exit code 2 is expected" as a failed tool.
+  if (!workLogEntryIsToolLike(entry) || entry.itemType === "reasoning") return false;
   if (
-    resolveT3McpToolDefinition(workEntryToolName(entry)) &&
-    t3ToolResultIndicatesFailure(workEntryToolOutput(entry))
+    resolveGoatMcpToolDefinition(workEntryToolName(entry)) &&
+    goatToolResultIndicatesFailure(workEntryToolOutput(entry))
   ) {
     return true;
   }
@@ -383,8 +491,6 @@ function workEntryIndicatesToolFailureFromOutput(
     if (item.outputIndicatesFailure || (item.exitCode !== undefined && item.exitCode !== 0)) {
       return true;
     }
-    // Older servers/caches can still carry output. Read only the previous
-    // preview-sized prefix for status, without exposing it in the row detail.
     if (item.output && toolOutputIndicatesFailure(item.output.slice(0, 32_768))) {
       return true;
     }
@@ -395,17 +501,14 @@ function workEntryIndicatesToolFailureFromOutput(
   return output.length > 0 && toolOutputIndicatesFailure(output);
 }
 
-/** Includes legacy activities that stored error output in the command field. */
 export function workEntryIndicatesToolFailure(entry: WorkLogPresentationEntry): boolean {
   return workEntryIndicatesToolFailureFromOutput(entry, true);
 }
 
-/** Checks rendered output without treating the user's command as an error. */
 export function workEntryDisplayIndicatesToolFailure(entry: WorkLogPresentationEntry): boolean {
   return workEntryIndicatesToolFailureFromOutput(entry, false);
 }
 
-/** Decides whether the row can show a success marker. */
 export function workEntryIndicatesToolSuccess(entry: WorkLogPresentationEntry): boolean {
   return (
     workLogEntryIsToolLike(entry) &&
@@ -427,12 +530,13 @@ function workLogEntryIsLocalCodeSearch(entry: WorkLogPresentationEntry): boolean
 
 export function toolGroupAction(entry: WorkLogPresentationEntry): ToolGroupAction {
   if (entry.itemType === "thread_created") return "thread-create";
+  const commandActions = workEntryCommandActions(entry);
+  if (commandActions) return commandActionsGroupAction(commandActions);
   const presentation = resolveWorkEntryToolPresentation(entry);
   if (presentation?.action !== undefined) return presentation.action;
   if (presentation?.icon === "browser") return "browser";
   if (presentation?.icon === "device") return "device";
   if (entry.requestKind === "file-read" || entry.viewedImagePath !== undefined) return "read";
-  // Approvals and questions describe requested work, not work that ran.
   if (entry.itemType === "approval_request" || entry.itemType === "user_input_request") {
     return workLogEntryIsToolLike(entry) ? "other" : "update";
   }
@@ -474,6 +578,12 @@ export function toolGroupAction(entry: WorkLogPresentationEntry): ToolGroupActio
   return workLogEntryIsToolLike(entry) ? "other" : "update";
 }
 
+/** Every kind a row counts toward in a summary: `ls && cat a.ts` is a listing and a read. */
+function toolGroupActions(entry: WorkLogPresentationEntry): ReadonlyArray<ToolGroupAction> {
+  const commandActions = workEntryCommandActions(entry);
+  return commandActions ? commandActionsGroupActions(commandActions) : [toolGroupAction(entry)];
+}
+
 export function workEntryViewedImagePath(entry: WorkLogPresentationEntry): string | null {
   const viewedImagePath = entry.viewedImagePath?.trim();
   if (
@@ -505,8 +615,6 @@ export function resolveViewedImageAsset(
     readonly workspaceRoot?: string | null | undefined;
   },
 ): ViewedImageAsset | null {
-  // A relative path with no known workspace still names a media-file relative
-  // to the thread's workspace, so classify against "." and drop the prefix.
   const imageSource = classifyMarkdownImageSource(source, input.workspaceRoot ?? ".");
   if (imageSource._tag !== "WorkspaceFile") return null;
   const resolvedFilePath =
@@ -527,6 +635,29 @@ function toolGroupActionCount(
   action: ToolGroupAction,
   entries: ReadonlyArray<WorkLogPresentationEntry>,
 ): number {
+  if (action === "read") {
+    // One command can read several files, and agents often reread a file.
+    const commandReadPaths = new Set<string>();
+    let otherReads = 0;
+    for (const entry of entries) {
+      const actions = workEntryCommandActions(entry);
+      if (actions === null) otherReads += 1;
+      else
+        for (const commandAction of actions) {
+          if (commandAction.type === "read") commandReadPaths.add(commandAction.path ?? "");
+        }
+    }
+    return otherReads + commandReadPaths.size;
+  }
+  if (action === "list" || action === "code-search") {
+    // A command counts each listing or search it ran.
+    const type = action === "list" ? "list" : "search";
+    return entries.reduce((count, entry) => {
+      const actions = workEntryCommandActions(entry);
+      if (actions === null) return count + 1;
+      return count + actions.filter((commandAction) => commandAction.type === type).length;
+    }, 0);
+  }
   if (action !== "edit") return entries.length;
   const changedFiles = new Set<string>();
   let editsWithoutFileDetails = 0;
@@ -556,6 +687,8 @@ function toolGroupActionLabel(action: ToolGroupAction, count: number): string {
         : `Checked linked pull requests ${count} times`;
     case "read":
       return `Read ${count} ${count === 1 ? "file" : "files"}`;
+    case "list":
+      return `Listed files ${count} ${count === 1 ? "time" : "times"}`;
     case "edit":
       return `Changed ${count} ${count === 1 ? "file" : "files"}`;
     case "command":
@@ -577,7 +710,27 @@ function toolGroupActionLabel(action: ToolGroupAction, count: number): string {
   }
 }
 
-function t3ToolSummaryCall(entry: WorkLogPresentationEntry): T3ToolSummaryCall {
+/** Reads, listings, and searches read as one exploration step, as in Codex. */
+const EXPLORE_ACTIONS: ReadonlySet<ToolGroupAction> = new Set(["read", "list", "code-search"]);
+
+function exploreSummaryLabel(
+  groups: ReadonlyArray<{
+    readonly action: ToolGroupAction;
+    readonly entries: ReadonlyArray<WorkLogPresentationEntry>;
+  }>,
+): string {
+  const order = ["read", "code-search", "list"];
+  const sorted = [...groups].sort((a, b) => order.indexOf(a.action) - order.indexOf(b.action));
+  const parts = sorted.map(({ action, entries }) => {
+    const count = toolGroupActionCount(action, entries);
+    if (action === "read") return `${count} ${count === 1 ? "file" : "files"}`;
+    if (action === "list") return `${count} ${count === 1 ? "list" : "lists"}`;
+    return `${count} ${count === 1 ? "search" : "searches"}`;
+  });
+  return `Explored ${parts.join(", ")}`;
+}
+
+function goatToolSummaryCall(entry: WorkLogPresentationEntry): GoatToolSummaryCall {
   const item = entry.structuredPayload;
   const data =
     entry.toolData !== null && typeof entry.toolData === "object"
@@ -600,7 +753,7 @@ function t3ToolSummaryCall(entry: WorkLogPresentationEntry): T3ToolSummaryCall {
   };
 }
 
-function summaryActionPriority(action: ToolGroupAction | T3McpToolSummaryAction): number {
+function summaryActionPriority(action: ToolGroupAction | GoatMcpToolSummaryAction): number {
   switch (action) {
     case "command":
     case "edit":
@@ -609,6 +762,7 @@ function summaryActionPriority(action: ToolGroupAction | T3McpToolSummaryAction)
     case "thread-create":
     case "thread-send":
     case "thread-interrupt":
+    case "workflow-stop":
     case "schedule-create":
     case "schedule-update":
     case "schedule-delete":
@@ -643,7 +797,6 @@ function summaryActionPriority(action: ToolGroupAction | T3McpToolSummaryAction)
   }
 }
 
-/** Summarizes at most two action categories; every omitted call still counts in the remainder. */
 export function summarizeToolGroup(entries: ReadonlyArray<WorkLogPresentationEntry>): {
   summary: string;
   hasFailure: boolean;
@@ -657,40 +810,67 @@ export function summarizeToolGroup(entries: ReadonlyArray<WorkLogPresentationEnt
   }
   entries = toolEntries;
   const groups = new Map<
-    ToolGroupAction | T3McpToolSummaryAction,
+    ToolGroupAction | GoatMcpToolSummaryAction,
     {
       action: ToolGroupAction;
-      t3Action: T3McpToolSummaryAction | null;
+      goatAction: GoatMcpToolSummaryAction | null;
       entries: WorkLogPresentationEntry[];
     }
   >();
   const sources = new Map<string, ToolActivitySource>();
   for (const entry of entries) {
-    const t3Action = resolveT3McpToolDefinition(workEntryToolName(entry))?.summaryAction ?? null;
-    if (entry.toolSource && t3Action === null) {
+    const goatAction =
+      resolveGoatMcpToolDefinition(workEntryToolName(entry))?.summaryAction ?? null;
+    if (entry.toolSource && goatAction === null) {
       sources.set(entry.toolSource.key, entry.toolSource);
       continue;
     }
-    const action = toolGroupAction(entry);
-    const key = t3Action ?? action;
-    const group = groups.get(key);
-    if (group) group.entries.push(entry);
-    else groups.set(key, { action, t3Action, entries: [entry] });
+    for (const action of goatAction === null ? toolGroupActions(entry) : [toolGroupAction(entry)]) {
+      const key = goatAction ?? action;
+      const group = groups.get(key);
+      if (group) group.entries.push(entry);
+      else groups.set(key, { action, goatAction, entries: [entry] });
+    }
   }
-  const summaries = [...groups].map(([action, group], index) => ({
-    index,
-    count: group.entries.length,
-    priority: summaryActionPriority(action),
-    ...(group.t3Action
-      ? summarizeT3ToolCalls(group.t3Action, group.entries.map(t3ToolSummaryCall))
-      : {
-          label: toolGroupActionLabel(
-            group.action,
-            toolGroupActionCount(group.action, group.entries),
-          ),
-          failedCount: group.entries.filter(workEntryDisplayIndicatesToolFailure).length,
-        }),
-  }));
+  // Two or more exploration kinds share one "Explored …" phrase so they never
+  // crowd a real command or edit out of the two-category summary.
+  const exploreGroups = [...groups.values()].filter(
+    (group) => group.goatAction === null && EXPLORE_ACTIONS.has(group.action),
+  );
+  const mergeExplore = exploreGroups.length > 1;
+  const summaries = [...groups].flatMap(([action, group], index) => {
+    if (mergeExplore && exploreGroups.includes(group)) {
+      if (group !== exploreGroups[0]) return [];
+      // A command that both lists and reads sits in two exploration groups; count each input once.
+      const exploreMembers = new Set(exploreGroups.flatMap((explore) => explore.entries));
+      const exploreEntries = entries.filter((entry) => exploreMembers.has(entry));
+      return [
+        {
+          index,
+          entries: exploreEntries,
+          priority: summaryActionPriority(action),
+          label: exploreSummaryLabel(exploreGroups),
+          failedCount: exploreEntries.filter(workEntryDisplayIndicatesToolFailure).length,
+        },
+      ];
+    }
+    return [
+      {
+        index,
+        entries: group.entries,
+        priority: summaryActionPriority(action),
+        ...(group.goatAction
+          ? summarizeGoatToolCalls(group.goatAction, group.entries.map(goatToolSummaryCall))
+          : {
+              label: toolGroupActionLabel(
+                group.action,
+                toolGroupActionCount(group.action, group.entries),
+              ),
+              failedCount: group.entries.filter(workEntryDisplayIndicatesToolFailure).length,
+            }),
+      },
+    ];
+  });
   const selected = [...summaries]
     .sort((a, b) => a.priority - b.priority || a.index - b.index)
     .slice(0, 2)
@@ -698,7 +878,7 @@ export function summarizeToolGroup(entries: ReadonlyArray<WorkLogPresentationEnt
   const labels = selected.map(({ label }) => label);
   if (sources.size > 0) {
     const sourceValues = [...sources.values()];
-    const sourceNames = sourceValues.map((source) => source.name);
+    const sourceNames = [...new Set(sourceValues.map((source) => source.name))];
     const formattedNames =
       sourceNames.length < 2
         ? sourceNames[0]!
@@ -707,16 +887,17 @@ export function summarizeToolGroup(entries: ReadonlyArray<WorkLogPresentationEnt
           : `${sourceNames.slice(0, -1).join(", ")}, and ${sourceNames.at(-1)}`;
     const allIntegrations = sourceValues.every((source) => source.kind === "integration");
     labels.unshift(
-      `Used ${formattedNames}${allIntegrations ? ` ${sources.size === 1 ? "integration" : "integrations"}` : ""}`,
+      `Used ${formattedNames}${allIntegrations ? ` ${sourceNames.length === 1 ? "integration" : "integrations"}` : ""}`,
     );
   }
   const sourcedCount = entries.filter(
     (entry) =>
       entry.toolSource !== undefined &&
-      resolveT3McpToolDefinition(workEntryToolName(entry)) === null,
+      resolveGoatMcpToolDefinition(workEntryToolName(entry)) === null,
   ).length;
-  const remainingCount =
-    entries.length - sourcedCount - selected.reduce((count, group) => count + group.count, 0);
+  const summarizedMembers = new Set(selected.flatMap((group) => group.entries));
+  const summarizedCount = entries.filter((entry) => summarizedMembers.has(entry)).length;
+  const remainingCount = entries.length - sourcedCount - summarizedCount;
   if (remainingCount > 0) {
     labels.push(`Performed ${remainingCount} other ${remainingCount === 1 ? "action" : "actions"}`);
   }
@@ -742,6 +923,9 @@ export function toolGroupSummaryKind(
   )
     return "pull-request";
   const actions = new Set(entries.map(toolGroupAction));
+  if (actions.size > 1 && [...actions].every((action) => EXPLORE_ACTIONS.has(action))) {
+    return "code-search";
+  }
   if (actions.size !== 1) return "mixed";
   const action = actions.values().next().value!;
   if (action !== "other") return action;
@@ -757,11 +941,6 @@ export function toolGroupSummaryKind(
   return fallbackKinds.size === 1 ? fallbackKinds.values().next().value! : "mixed";
 }
 
-/**
- * Plain-text line for the latest thought in the live activity row. A
- * bold-only opening line (the Codex summary heading) wins; otherwise this is
- * the first sentence of the reasoning text. Web and mobile both render it.
- */
 export function liveThoughtLine(markdown: string): string {
   const heading = /^\s*\*\*([^*\r\n]+)\*\*[ \t]*\r?(?:\n|$)/.exec(markdown)?.[1];
   const text = (heading ?? markdown)
@@ -772,7 +951,6 @@ export function liveThoughtLine(markdown: string): string {
     .replace(/\s+/g, " ")
     .trim();
   if (heading !== undefined) return text;
-  // Cut after the first . ? or ! (plus a closing quote or paren) that a space follows.
   const end = /[.?!]["'”’)]?(?=\s)/.exec(text);
   return end ? text.slice(0, end.index + end[0].length) : text;
 }

@@ -1,3 +1,10 @@
+import {
+  LEGACY_ACTIVITY_PATH,
+  GOAT_ACTIVITY_PATH,
+  LEGACY_ENVIRONMENT_PATH,
+  GOAT_ENVIRONMENT_PATH,
+  LEGACY_ORCHESTRATION_PROTOCOL_HEADER,
+} from "@goat/contracts/legacyT3Names";
 import * as Option from "effect/Option";
 import { expect, it } from "@effect/vitest";
 import { describe, vi } from "vite-plus/test";
@@ -12,14 +19,36 @@ import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
+import * as PlatformError from "effect/PlatformError";
 import * as Queue from "effect/Queue";
 import * as Tracer from "effect/Tracer";
-import { HttpClient, HttpClientRequest, HttpRouter, HttpServerResponse } from "effect/http";
+import * as TestClock from "effect/testing/TestClock";
+import {
+  FetchHttpClient,
+  HttpClient,
+  HttpClientRequest,
+  HttpRouter,
+  HttpServerRequest,
+  HttpServerResponse,
+} from "effect/http";
 import { openMediaFile } from "./assets/MediaFile.ts";
 
-import { ORCHESTRATION_PROTOCOL_HEADER } from "@t3tools/contracts";
+import {
+  injectMcpAppCsp,
+  injectMcpAppCookieBootstrap,
+  injectMcpAppThemeBootstrap,
+  MCP_APP_MAX_HTML_BYTES,
+} from "@goat/shared/mcpApp";
+import { ORCHESTRATION_PROTOCOL_HEADER } from "@goat/contracts";
 
 import * as ServerConfig from "./config.ts";
+import * as ServerSecretStore from "./auth/ServerSecretStore.ts";
+import { base64UrlEncode, signPayload } from "./auth/utils.ts";
+import * as Orchestrator from "./orchestration-v2/Orchestrator.ts";
+import * as WorkspacePaths from "./workspace/WorkspacePaths.ts";
+import * as ProjectFaviconResolver from "./project/ProjectFaviconResolver.ts";
+import * as NativeAppIconResolver from "./assets/NativeAppIconResolver.ts";
+import * as GitHubCredentials from "@goat/source-control-github/server/GitHubCredentials";
 
 import {
   assetResponseHeaders,
@@ -30,6 +59,70 @@ import {
   withUntracedRequests,
 } from "./http.ts";
 import * as ServerHttp from "./http.ts";
+
+describe("MCP app asset responses", () => {
+  it.effect(
+    "transforms existing snapshots only with explicit render intent and fresh metadata",
+    () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const directory = yield* fs.makeTempDirectoryScoped({ prefix: "goat-mcp-theme-" });
+        const file = path.join(directory, "app.html");
+        const html = injectMcpAppCsp(
+          "<html><head><script>vendor()</script></head><body>☃</body></html>",
+          undefined,
+        );
+        yield* fs.writeFileString(file, html);
+        for (const method of ["GET", "HEAD"] as const) {
+          const response = HttpServerResponse.toWeb(
+            yield* assetFileResponse(
+              { path: file, mimeType: "text/html", renderIntent: "mcp-app" },
+              "bytes=0-1",
+              undefined,
+              method,
+            ),
+          );
+          const expected = injectMcpAppCookieBootstrap(injectMcpAppThemeBootstrap(html));
+          expect(response.status).toBe(200);
+          expect(response.headers.get("content-length")).toBe(
+            String(new TextEncoder().encode(expected).byteLength),
+          );
+          expect(response.headers.get("etag")).toBeNull();
+          expect(response.headers.get("last-modified")).toBeNull();
+          expect(response.headers.get("content-security-policy")).toBe(
+            "sandbox allow-scripts allow-forms allow-popups allow-downloads",
+          );
+          expect(yield* Effect.promise(() => response.text())).toBe(
+            method === "HEAD" ? "" : expected,
+          );
+        }
+        for (const download of [false, true]) {
+          const response = HttpServerResponse.toWeb(
+            yield* assetFileResponse({
+              path: file,
+              mimeType: "text/html",
+              download,
+              ...(download ? { renderIntent: "mcp-app" as const } : {}),
+            }),
+          );
+          expect(yield* Effect.promise(() => response.text())).toBe(html);
+        }
+      }).pipe(Effect.provide(layerFileResponse)),
+  );
+
+  it.effect("rejects oversized captures before transforming them", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const directory = yield* fs.makeTempDirectoryScoped({ prefix: "goat-mcp-theme-size-" });
+      const file = path.join(directory, "app.html");
+      yield* fs.writeFileString(file, "x".repeat(MCP_APP_MAX_HTML_BYTES + 128 * 1024 + 1));
+      const response = yield* assetFileResponse({ path: file, renderIntent: "mcp-app" });
+      expect(response.status).toBe(413);
+    }).pipe(Effect.provide(layerFileResponse)),
+  );
+});
 
 describe("untraced requests", () => {
   it.effect("drops the HTTP server span for browser trace exports, query string included", () => {
@@ -71,6 +164,55 @@ describe("untraced requests", () => {
 });
 
 describe("browser API CORS", () => {
+  it.each(["goat://app", "t3code://app", "goat-dev://app", "t3code-dev://app"])(
+    "accepts credentialed desktop preflight and GET from %s in dev",
+    async (origin) => {
+      const layerRoute = Layer.effectDiscard(
+        Effect.gen(function* () {
+          const router = yield* HttpRouter.HttpRouter;
+          yield* router.add("GET", "/api/environment", HttpServerResponse.empty());
+        }),
+      );
+      const config = Layer.effect(
+        ServerConfig.ServerConfig,
+        Effect.gen(function* () {
+          const config = yield* ServerConfig.ServerConfig;
+          return { ...config, devUrl: new URL("http://localhost:5733") };
+        }),
+      ).pipe(
+        Layer.provide(ServerConfig.layerTest(process.cwd(), { prefix: "http-desktop-cors-" })),
+      );
+      const layerApp = Layer.merge(layerRoute, ServerHttp.layerBrowserApiCors).pipe(
+        Layer.provide(config),
+        Layer.provide(NodeServices.layer),
+      );
+      const { handler, dispose } = HttpRouter.toWebHandler(layerApp, { disableLogger: true });
+      try {
+        for (const method of ["OPTIONS", "GET"]) {
+          const response = await handler(
+            new Request("http://localhost:3773/api/environment", {
+              method,
+              headers: {
+                origin,
+                ...(method === "OPTIONS"
+                  ? {
+                      "access-control-request-method": "GET",
+                      "access-control-request-headers": "authorization, dpop",
+                    }
+                  : {}),
+              },
+            }),
+          );
+          expect(response.status).toBe(204);
+          expect(response.headers.get("access-control-allow-origin")).toBe(origin);
+          expect(response.headers.get("access-control-allow-credentials")).toBe("true");
+        }
+      } finally {
+        await dispose();
+      }
+    },
+  );
+
   it("accepts protocol negotiation with authenticated browser headers", async () => {
     const layerRoute = Layer.effectDiscard(
       Effect.gen(function* () {
@@ -93,6 +235,7 @@ describe("browser API CORS", () => {
             "access-control-request-method": "GET",
             "access-control-request-headers": [
               ORCHESTRATION_PROTOCOL_HEADER,
+              LEGACY_ORCHESTRATION_PROTOCOL_HEADER,
               "authorization",
               "dpop",
             ].join(", "),
@@ -108,6 +251,7 @@ describe("browser API CORS", () => {
           .map((header) => header.trim().toLowerCase()),
       );
       expect(allowedHeaders.has(ORCHESTRATION_PROTOCOL_HEADER)).toBe(true);
+      expect(allowedHeaders.has(LEGACY_ORCHESTRATION_PROTOCOL_HEADER)).toBe(true);
       expect(allowedHeaders.has("authorization")).toBe(true);
       expect(allowedHeaders.has("dpop")).toBe(true);
     } finally {
@@ -141,7 +285,7 @@ const makeStaticRequest = Effect.fn("HttpTest.makeStaticRequest")(function* (sta
 });
 
 it.layer(
-  ServerConfig.layerTest(process.cwd(), { prefix: "t3-static-http-test-" }).pipe(
+  ServerConfig.layerTest(process.cwd(), { prefix: "goat-static-http-test-" }).pipe(
     Layer.provideMerge(NodeServices.layer),
   ),
 )("static HTTP responses", (it) => {
@@ -149,7 +293,7 @@ it.layer(
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
-      const staticDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-static-cache-" });
+      const staticDir = yield* fs.makeTempDirectoryScoped({ prefix: "goat-static-cache-" });
       const assetPath = path.join(staticDir, "app.js");
       yield* fs.writeFileString(assetPath, 'export const build = "first";');
       const request = yield* makeStaticRequest(staticDir);
@@ -188,11 +332,185 @@ it.layer(
     }),
   );
 
+  it.effect("serves static files without handles and skips fallback reads for HEAD and 304", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const staticDir = yield* fs.makeTempDirectoryScoped({ prefix: "goat-static-no-open-" });
+      const filePath = path.join(staticDir, "app.txt");
+      const body = "packaged asset";
+      yield* fs.writeFileString(filePath, body);
+      let reads = 0;
+      // Electron asar files can be statted and read even when opening a handle fails.
+      const fileSystem = FileSystem.FileSystem.of({
+        ...fs,
+        open: (candidate, options) =>
+          candidate === filePath
+            ? Effect.fail(
+                PlatformError.systemError({
+                  _tag: "NotFound",
+                  module: "FileSystem",
+                  method: "open",
+                  pathOrDescriptor: candidate,
+                }),
+              )
+            : fs.open(candidate, options),
+        readFile: (candidate) =>
+          Effect.gen(function* () {
+            if (candidate === filePath) reads += 1;
+            return yield* fs.readFile(candidate);
+          }),
+      });
+      const request = yield* makeStaticRequest(staticDir).pipe(
+        Effect.provideService(FileSystem.FileSystem, fileSystem),
+      );
+
+      const get = yield* request("/app.txt");
+      expect(get.status).toBe(200);
+      expect(yield* get.text).toBe(body);
+      expect(reads).toBeGreaterThan(0);
+      const readsAfterGet = reads;
+      const head = yield* request("/app.txt", { method: "HEAD" });
+      expect(head.status).toBe(200);
+      expect(yield* head.text).toBe("");
+      expect(reads).toBe(readsAfterGet);
+      const unchanged = yield* request("/app.txt", {
+        headers: { "if-none-match": get.headers["etag"]! },
+      });
+      expect(unchanged.status).toBe(304);
+      expect(yield* unchanged.text).toBe("");
+      expect(reads).toBe(readsAfterGet);
+    }),
+  );
+
+  it.effect("returns 500 for static file open errors other than NotFound", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const staticDir = yield* fs.makeTempDirectoryScoped({ prefix: "goat-static-open-error-" });
+      const filePath = path.join(staticDir, "index.html");
+      yield* fs.writeFileString(filePath, "<html>readable</html>");
+      const fileSystem = FileSystem.FileSystem.of({
+        ...fs,
+        open: (candidate, options) =>
+          candidate === filePath
+            ? Effect.fail(
+                PlatformError.systemError({
+                  _tag: "PermissionDenied",
+                  module: "FileSystem",
+                  method: "open",
+                  pathOrDescriptor: candidate,
+                }),
+              )
+            : fs.open(candidate, options),
+      });
+      const request = yield* makeStaticRequest(staticDir).pipe(
+        Effect.provideService(FileSystem.FileSystem, fileSystem),
+      );
+
+      const response = yield* request("/");
+      expect(response.status).toBe(500);
+      expect(yield* response.text).toBe("Internal Server Error");
+    }),
+  );
+
+  it.effect("returns 500 when a static fallback read fails", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const staticDir = yield* fs.makeTempDirectoryScoped({ prefix: "goat-static-read-error-" });
+      const filePath = path.join(staticDir, "index.html");
+      yield* fs.writeFileString(filePath, "<html>unreadable</html>");
+      const fileSystem = FileSystem.FileSystem.of({
+        ...fs,
+        open: (candidate, options) =>
+          candidate === filePath
+            ? Effect.fail(
+                PlatformError.systemError({
+                  _tag: "NotFound",
+                  module: "FileSystem",
+                  method: "open",
+                  pathOrDescriptor: candidate,
+                }),
+              )
+            : fs.open(candidate, options),
+        readFile: (candidate) =>
+          candidate === filePath
+            ? Effect.fail(
+                PlatformError.systemError({
+                  _tag: "PermissionDenied",
+                  module: "FileSystem",
+                  method: "readFile",
+                  pathOrDescriptor: candidate,
+                }),
+              )
+            : fs.readFile(candidate),
+      });
+      const request = yield* makeStaticRequest(staticDir).pipe(
+        Effect.provideService(FileSystem.FileSystem, fileSystem),
+      );
+
+      const response = yield* request("/");
+      expect(response.status).toBe(500);
+      expect(yield* response.text).toBe("Internal Server Error");
+    }),
+  );
+
+  it.effect("serves replacement bytes with matching static fallback length and validators", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const staticDir = yield* fs.makeTempDirectoryScoped({ prefix: "goat-static-replaced-" });
+      const filePath = path.join(staticDir, "app.txt");
+      const before = DateTime.toDateUtc(DateTime.makeUnsafe("1985-10-26T08:15:00.000Z"));
+      const after = DateTime.toDateUtc(DateTime.makeUnsafe("2015-10-21T16:29:00.000Z"));
+      const replacement = "the replacement asset";
+      const replacementPath = path.join(staticDir, "replacement.txt");
+      yield* fs.writeFileString(filePath, "old");
+      yield* fs.utimes(filePath, before, before);
+      yield* fs.writeFileString(replacementPath, replacement);
+      yield* fs.utimes(replacementPath, after, after);
+      let replaceOnOpen = false;
+      const fileSystem = FileSystem.FileSystem.of({
+        ...fs,
+        open: (candidate, options) =>
+          Effect.gen(function* () {
+            if (candidate !== filePath) return yield* fs.open(candidate, options);
+            if (replaceOnOpen) {
+              yield* fs.rename(replacementPath, filePath);
+              replaceOnOpen = false;
+            }
+            return yield* PlatformError.systemError({
+              _tag: "NotFound",
+              module: "FileSystem",
+              method: "open",
+              pathOrDescriptor: candidate,
+            });
+          }),
+      });
+      const request = yield* makeStaticRequest(staticDir).pipe(
+        Effect.provideService(FileSystem.FileSystem, fileSystem),
+      );
+      const initial = yield* request("/app.txt", { headers: { "accept-encoding": "identity" } });
+      expect(yield* initial.text).toBe("old");
+
+      replaceOnOpen = true;
+      const response = yield* request("/app.txt", { headers: { "accept-encoding": "identity" } });
+      expect(response.status).toBe(200);
+      expect(response.headers).toMatchObject({
+        "content-length": String(Buffer.byteLength(replacement)),
+        "last-modified": after.toUTCString(),
+      });
+      expect(response.headers["etag"]).not.toBe(initial.headers["etag"]);
+      expect(yield* response.text).toBe(replacement);
+    }),
+  );
+
   it.effect("serves changed HTML when deployments preserve its size and timestamp", () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
-      const staticDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-static-html-" });
+      const staticDir = yield* fs.makeTempDirectoryScoped({ prefix: "goat-static-html-" });
       const indexPath = path.join(staticDir, "index.html");
       const modifiedAt = DateTime.toDateUtc(DateTime.makeUnsafe("1985-10-26T08:15:00.000Z"));
       yield* fs.writeFileString(indexPath, "<html>old build</html>");
@@ -231,7 +549,7 @@ it.layer(
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
-      const staticDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-static-close-" });
+      const staticDir = yield* fs.makeTempDirectoryScoped({ prefix: "goat-static-close-" });
       const filePath = path.join(staticDir, "app.txt");
       const body = "file content\n".repeat(1024);
       yield* fs.writeFileString(filePath, body);
@@ -312,12 +630,114 @@ it.layer(
   );
 });
 
+describe("signed media HTTP route", () => {
+  it.effect(
+    "authenticates before revalidation and derives cache freshness from the signed claims",
+    () => {
+      const signingKey = new Uint8Array(32).fill(7);
+      return Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const directory = yield* fs.makeTempDirectoryScoped({ prefix: "goat-media-http-" });
+        const filePath = path.join(directory, "clip.mp4");
+        yield* fs.writeFileString(filePath, "0123456789");
+        yield* TestClock.setTime(1_800_000_000_000);
+        const canonicalPath = yield* fs.realPath(filePath);
+        const file = yield* openMediaFile(canonicalPath);
+        if (!file) throw new Error("Expected an opened media file");
+        const makeUrl = (expiresAt: number, validSignature = true) => {
+          const payload = base64UrlEncode(
+            JSON.stringify({
+              version: 1,
+              kind: "media-file-exact",
+              filePath: canonicalPath,
+              device: file.info.dev.toString(),
+              inode: file.info.ino.toString(),
+              expiresAt,
+            }),
+          );
+          const signature = signPayload(payload, validSignature ? signingKey : new Uint8Array(32));
+          return `http://localhost/api/assets/${payload}.${signature}/clip.mp4`;
+        };
+        const app = yield* HttpRouter.toHttpEffect(ServerHttp.layerAssetRoute);
+        const request = (url: string, method = "GET", headers: Record<string, string> = {}) =>
+          app.pipe(
+            Effect.provideService(
+              HttpServerRequest.HttpServerRequest,
+              HttpServerRequest.fromWeb(new Request(url, { method, headers })),
+            ),
+            Effect.map(HttpServerResponse.toWeb),
+          );
+        const url = makeUrl(1_800_000_005_900);
+        const initial = yield* request(url);
+        expect(initial.status).toBe(200);
+        expect(initial.headers.get("cache-control")).toBe("private, max-age=5, must-revalidate");
+        const etag = initial.headers.get("etag")!;
+        const lastModified = initial.headers.get("last-modified")!;
+        expect(yield* Effect.promise(() => initial.text())).toBe("0123456789");
+        for (const method of ["GET", "HEAD"]) {
+          for (const headers of [
+            { "if-none-match": etag },
+            { "if-modified-since": lastModified },
+          ]) {
+            const unchanged = yield* request(url, method, headers);
+            expect(unchanged.status).toBe(304);
+            expect(unchanged.headers.get("etag")).toBe(etag);
+            expect(yield* Effect.promise(() => unchanged.text())).toBe("");
+          }
+        }
+        yield* TestClock.adjust("2 seconds");
+        const partial = yield* request(url, "GET", { range: "bytes=2-4" });
+        expect(partial.status).toBe(206);
+        expect(partial.headers.get("cache-control")).toBe("private, max-age=3, must-revalidate");
+        expect(yield* Effect.promise(() => partial.text())).toBe("234");
+        for (const deniedUrl of [makeUrl(1_800_000_000_000), makeUrl(1_800_000_060_000, false)]) {
+          const denied = yield* request(deniedUrl, "GET", { "if-none-match": "*" });
+          expect(denied.status).toBe(404);
+          expect(denied.headers.get("etag")).toBeNull();
+        }
+        yield* TestClock.adjust("4 seconds");
+        const expired = yield* request(url, "GET", { "if-none-match": etag });
+        expect(expired.status).toBe(404);
+      }).pipe(
+        Effect.provide(
+          Layer.mergeAll(
+            FetchHttpClient.layer,
+            ServerConfig.layerTest(process.cwd(), { prefix: "goat-media-http-config-" }),
+            Layer.mock(ServerSecretStore.ServerSecretStore)({
+              getOrCreateRandom: () => Effect.succeed(signingKey),
+            }),
+            Layer.mock(Orchestrator.OrchestratorV2)({}),
+            Layer.mock(WorkspacePaths.WorkspacePaths)({}),
+            Layer.mock(ProjectFaviconResolver.ProjectFaviconResolver)({}),
+            Layer.mock(NativeAppIconResolver.NativeAppIconResolver)({}),
+            Layer.mock(GitHubCredentials.GitHubCredentials)({}),
+          ).pipe(Layer.provide(NodeServices.layer), Layer.provideMerge(layerFileResponse)),
+        ),
+      );
+    },
+  );
+});
+
+/** A guarded response closes its descriptor, so each request opens a fresh one, as the server does. */
+const mediaAsset = (
+  path: string,
+  guarded: boolean,
+  extra: { readonly mimeType: string; readonly expiresAt?: number },
+) =>
+  Effect.gen(function* () {
+    if (!guarded) return { path, ...extra };
+    const file = yield* openMediaFile(path);
+    if (!file) throw new Error("Expected an opened media file");
+    return { path, file, ...extra };
+  });
+
 describe("video asset byte ranges", () => {
   it.effect("uses current descriptor metadata after an in-place truncate or extension", () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
-      const directory = yield* fs.makeTempDirectoryScoped({ prefix: "t3-guarded-current-stat-" });
+      const directory = yield* fs.makeTempDirectoryScoped({ prefix: "goat-guarded-current-stat-" });
       const filePath = path.join(directory, "clip.mp4");
       for (const [contents, range, method, expected, status, contentRange] of [
         ["1234", undefined, "GET", "1234", 200, null],
@@ -360,7 +780,9 @@ describe("video asset byte ranges", () => {
       Effect.gen(function* () {
         const fs = yield* FileSystem.FileSystem;
         const path = yield* Path.Path;
-        const directory = yield* fs.makeTempDirectoryScoped({ prefix: "t3-guarded-offset-limit-" });
+        const directory = yield* fs.makeTempDirectoryScoped({
+          prefix: "goat-guarded-offset-limit-",
+        });
         const filePath = path.join(directory, "clip.mp4");
         yield* fs.writeFileString(filePath, "0123456789");
         const canonicalPath = yield* fs.realPath(filePath);
@@ -375,7 +797,6 @@ describe("video asset byte ranges", () => {
         ] as const) {
           const file = yield* openMediaFile(canonicalPath);
           if (!file) throw new Error("Expected an opened media file");
-          // Model a sparse file beyond the native stream's numeric addressing limit.
           const info = yield* Effect.promise(() => file.handle.stat({ bigint: true }));
           info.size = size;
           const statSpy = vi.spyOn(file.handle, "stat").mockResolvedValue(info);
@@ -403,7 +824,7 @@ describe("video asset byte ranges", () => {
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
-      const directory = yield* fs.makeTempDirectoryScoped({ prefix: "t3-guarded-range-" });
+      const directory = yield* fs.makeTempDirectoryScoped({ prefix: "goat-guarded-range-" });
       const filePath = path.join(directory, "clip.mp4");
       yield* fs.writeFileString(filePath, "0123456789");
       const canonicalPath = yield* fs.realPath(filePath);
@@ -430,8 +851,8 @@ describe("video asset byte ranges", () => {
         expect(response.headers.get("accept-ranges")).toBe("bytes");
         expect(response.headers.get("content-range")).toBe(contentRange);
         expect(response.headers.get("cache-control")).toBe("private, no-store");
-        expect(response.headers.get("etag")).toBeNull();
-        expect(response.headers.get("last-modified")).toBeNull();
+        expect(response.headers.get("etag")).toMatch(/^"[\da-f]+(?:-[\da-f]+){3}"$/);
+        expect(response.headers.get("last-modified")).not.toBeNull();
         if (status !== 416)
           expect(response.headers.get("content-length")).toBe(String(expected.length));
         expect(yield* Effect.promise(() => response.text())).toBe(expected);
@@ -439,16 +860,15 @@ describe("video asset byte ranges", () => {
     }).pipe(Effect.provide(layerFileResponse)),
   );
 
-  it.effect("keeps attachment media out of the cache once its signed URL expires", () =>
+  it.effect("keeps media without a verified signed expiry out of the cache", () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
-      const directory = yield* fs.makeTempDirectoryScoped({ prefix: "t3-attachment-media-" });
+      const directory = yield* fs.makeTempDirectoryScoped({ prefix: "goat-attachment-media-" });
       const filePath = path.join(directory, "audio.wav");
       yield* fs.writeFileString(filePath, "RIFF");
       const canonicalPath = yield* fs.realPath(filePath);
-      // An attachment is read straight from disk, so it carries no opened host file. Its URL is
-      // signed and short-lived; a cached copy would outlive the grant that served it.
+      // Direct callers lack the verified token expiry that the HTTP route supplies.
       const response = HttpServerResponse.toWeb(
         yield* assetFileResponse({ path: canonicalPath, mimeType: "audio/wav" }),
       );
@@ -457,11 +877,175 @@ describe("video asset byte ranges", () => {
     }).pipe(Effect.provide(layerFileResponse)),
   );
 
+  it.effect("bounds full and partial media freshness by the signed expiry", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const directory = yield* fs.makeTempDirectoryScoped({ prefix: "goat-media-cache-" });
+      const filePath = path.join(directory, "clip.mp4");
+      yield* fs.writeFileString(filePath, "0123456789");
+      yield* TestClock.setTime(1_800_000_000_000);
+      for (const guarded of [false, true]) {
+        const canonicalPath = yield* fs.realPath(filePath);
+        for (const range of [undefined, "bytes=2-4"]) {
+          const asset = yield* mediaAsset(canonicalPath, guarded, {
+            mimeType: "video/mp4",
+            expiresAt: 1_800_000_005_900,
+          });
+          const response = HttpServerResponse.toWeb(yield* assetFileResponse(asset, range));
+          expect(response.status).toBe(range ? 206 : 200);
+          expect(response.headers.get("cache-control")).toBe("private, max-age=5, must-revalidate");
+          expect(response.headers.get("etag")).toMatch(
+            guarded ? /^"[\da-f]+(?:-[\da-f]+){3}"$/ : /^W\/"[\da-f]+-[\da-f]+"$/,
+          );
+          expect(response.headers.get("last-modified")).not.toBeNull();
+          expect(yield* Effect.promise(() => response.text())).toBe(range ? "234" : "0123456789");
+        }
+      }
+      for (const expiresAt of [1_799_999_999_000, 1_800_000_000_000, 1_800_000_000_999]) {
+        const response = HttpServerResponse.toWeb(
+          yield* assetFileResponse({ path: filePath, mimeType: "audio/wav", expiresAt }),
+        );
+        expect(response.headers.get("cache-control")).toBe("private, no-store");
+        expect(yield* Effect.promise(() => response.text())).toBe("0123456789");
+      }
+    }).pipe(Effect.provide(layerFileResponse)),
+  );
+
+  it.effect("revalidates GET and HEAD before processing ranges or reading the media body", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const directory = yield* fs.makeTempDirectoryScoped({ prefix: "goat-media-conditional-" });
+      const filePath = path.join(directory, "clip.mp4");
+      yield* fs.writeFileString(filePath, "0123456789");
+      yield* fs.utimes(
+        filePath,
+        DateTime.toDateUtc(DateTime.makeUnsafe(1_700_000_000_000)),
+        DateTime.toDateUtc(DateTime.makeUnsafe(1_700_000_000_000)),
+      );
+      yield* TestClock.setTime(1_800_000_000_000);
+      for (const guarded of [false, true]) {
+        const canonicalPath = yield* fs.realPath(filePath);
+        const open = () =>
+          mediaAsset(canonicalPath, guarded, {
+            mimeType: "video/mp4",
+            expiresAt: 1_800_000_060_000,
+          });
+        const initial = HttpServerResponse.toWeb(yield* assetFileResponse(yield* open()));
+        const etag = initial.headers.get("etag")!;
+        // The same tag in the other strength still matches under weak comparison.
+        const otherStrength = etag.startsWith("W/") ? etag.slice(2) : `W/${etag}`;
+        expect(yield* Effect.promise(() => initial.text())).toBe("0123456789");
+        let bodyReads = 0;
+        const mtime = "Tue, 14 Nov 2023 22:13:20 GMT";
+        for (const method of ["GET", "HEAD"] as const) {
+          for (const [conditions, status] of [
+            [{ ifNoneMatch: etag }, 304],
+            [{ ifNoneMatch: otherStrength }, 304],
+            [{ ifNoneMatch: `"other", ${etag}` }, 304],
+            [{ ifNoneMatch: "*" }, 304],
+            [{ ifNoneMatch: etag, ifModifiedSince: "Mon, 13 Nov 2023 22:13:20 GMT" }, 304],
+            [{ ifModifiedSince: mtime }, 304],
+            [{ ifModifiedSince: "Wed, 15 Nov 2023 22:13:20 GMT" }, 304],
+            [{ ifNoneMatch: '"other"', ifModifiedSince: mtime }, method === "HEAD" ? 200 : 416],
+            [{ ifModifiedSince: "Mon, 13 Nov 2023 22:13:20 GMT" }, method === "HEAD" ? 200 : 416],
+            [{ ifModifiedSince: "invalid" }, method === "HEAD" ? 200 : 416],
+          ] as const) {
+            const asset = yield* open();
+            const readSpy =
+              "file" in asset ? vi.spyOn(asset.file.handle, "createReadStream") : undefined;
+            const response = HttpServerResponse.toWeb(
+              yield* assetFileResponse(asset, "bytes=100-", undefined, method, conditions),
+            );
+            bodyReads += readSpy?.mock.calls.length ?? 0;
+            expect(response.status).toBe(status);
+            expect(response.headers.get("etag")).toBe(etag);
+            expect(response.headers.get("last-modified")).toBe(mtime);
+            if (status === 304) {
+              expect(response.headers.get("content-range")).toBeNull();
+              expect(response.headers.get("content-length")).toBeNull();
+              expect(response.headers.get("cache-control")).toBe(
+                "private, max-age=60, must-revalidate",
+              );
+            }
+            expect(yield* Effect.promise(() => response.text())).toBe("");
+          }
+        }
+        expect(bodyReads).toBe(0);
+      }
+    }).pipe(Effect.provide(layerFileResponse)),
+  );
+
+  it.effect("joins ranges only on an exact strong ETag for the same file revision", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const directory = yield* fs.makeTempDirectoryScoped({ prefix: "goat-media-if-range-" });
+      const filePath = path.join(directory, "clip.mp4");
+      yield* fs.writeFileString(filePath, "0123456789");
+      yield* fs.utimes(
+        filePath,
+        DateTime.toDateUtc(DateTime.makeUnsafe(1_700_000_000_000)),
+        DateTime.toDateUtc(DateTime.makeUnsafe(1_700_000_000_000)),
+      );
+      yield* TestClock.setTime(1_800_000_000_000);
+      for (const guarded of [false, true]) {
+        const canonicalPath = yield* fs.realPath(filePath);
+        const open = () => mediaAsset(canonicalPath, guarded, { mimeType: "video/mp4" });
+        const initial = HttpServerResponse.toWeb(yield* assetFileResponse(yield* open()));
+        const etag = initial.headers.get("etag")!;
+        const lastModified = initial.headers.get("last-modified")!;
+        expect(yield* Effect.promise(() => initial.text())).toBe("0123456789");
+        expect(etag.startsWith("W/")).toBe(!guarded);
+        if (guarded) {
+          const joined = HttpServerResponse.toWeb(
+            yield* assetFileResponse(yield* open(), "bytes=0-1", etag),
+          );
+          expect(joined.status).toBe(206);
+          expect(joined.headers.get("content-range")).toBe("bytes 0-1/10");
+          expect(yield* Effect.promise(() => joined.text())).toBe("01");
+        }
+        const mismatches = guarded
+          ? [`W/${etag}`, lastModified, '"old"', "invalid", ""]
+          : [etag, etag.slice(2), lastModified, '"old"', "invalid", ""];
+        for (const ifRange of mismatches) {
+          const response = HttpServerResponse.toWeb(
+            yield* assetFileResponse(yield* open(), "bytes=0-1", ifRange),
+          );
+          expect(response.status).toBe(200);
+          expect(response.headers.get("content-range")).toBeNull();
+          expect(yield* Effect.promise(() => response.text())).toBe("0123456789");
+        }
+        yield* fs.writeFileString(filePath, "changed");
+        yield* fs.utimes(
+          filePath,
+          DateTime.toDateUtc(DateTime.makeUnsafe(1_700_000_001_000)),
+          DateTime.toDateUtc(DateTime.makeUnsafe(1_700_000_001_000)),
+        );
+        const changed = HttpServerResponse.toWeb(
+          yield* assetFileResponse(yield* open(), undefined, undefined, "GET", {
+            ifNoneMatch: etag,
+          }),
+        );
+        expect(changed.status).toBe(200);
+        expect(changed.headers.get("etag")).not.toBe(etag);
+        expect(yield* Effect.promise(() => changed.text())).toBe("changed");
+        yield* fs.writeFileString(filePath, "0123456789");
+        yield* fs.utimes(
+          filePath,
+          DateTime.toDateUtc(DateTime.makeUnsafe(1_700_000_000_000)),
+          DateTime.toDateUtc(DateTime.makeUnsafe(1_700_000_000_000)),
+        );
+      }
+    }).pipe(Effect.provide(layerFileResponse)),
+  );
+
   it.effect("closes guarded descriptors after full, HEAD, rejected, and cancelled responses", () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
-      const directory = yield* fs.makeTempDirectoryScoped({ prefix: "t3-guarded-cleanup-" });
+      const directory = yield* fs.makeTempDirectoryScoped({ prefix: "goat-guarded-cleanup-" });
       const filePath = path.join(directory, "clip.mp4");
       const bytes = new Uint8Array(1024 * 1024).fill(42);
       yield* fs.writeFile(filePath, bytes);
@@ -508,7 +1092,7 @@ describe("video asset byte ranges", () => {
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
-      const directory = yield* fs.makeTempDirectoryScoped({ prefix: "t3-video-range-" });
+      const directory = yield* fs.makeTempDirectoryScoped({ prefix: "goat-video-range-" });
       const file = path.join(directory, "clip.mp4");
       yield* fs.writeFileString(file, "0123456789");
       const asset = { path: file, mimeType: "video/mp4" };
@@ -563,7 +1147,7 @@ describe("video asset byte ranges", () => {
       Effect.gen(function* () {
         const fs = yield* FileSystem.FileSystem;
         const path = yield* Path.Path;
-        const directory = yield* fs.makeTempDirectoryScoped({ prefix: "t3-audio-range-" });
+        const directory = yield* fs.makeTempDirectoryScoped({ prefix: "goat-audio-range-" });
         const file = path.join(directory, "recording.wav");
         yield* fs.writeFileString(file, "0123456789");
         const asset = { path: file, mimeType: "audio/wav" };
@@ -591,7 +1175,7 @@ describe("video asset byte ranges", () => {
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
-      const directory = yield* fs.makeTempDirectoryScoped({ prefix: "t3-video-range-" });
+      const directory = yield* fs.makeTempDirectoryScoped({ prefix: "goat-video-range-" });
       const file = path.join(directory, "clip.mp4");
       yield* fs.writeFileString(file, "0123456789");
       for (const header of ["bytes=10-", "bytes=-0", "bytes=999999999999999999999999-"]) {
@@ -773,9 +1357,16 @@ describe("SSH activity HTTP", () => {
       const Etag = await import("effect/http/Etag");
       const HttpApi = await import("effect/http-api/HttpApi");
       const HttpApiBuilder = await import("effect/http-api/HttpApiBuilder");
-      const { EnvironmentHttpApi, EnvironmentId } = await import("@t3tools/contracts");
+      const { EnvironmentHttpApi, EnvironmentId } = await import("@goat/contracts");
       const ServerEnvironment = await import("./environment/ServerEnvironment.ts");
       const Sqlite = await import("./persistence/Sqlite.ts");
+      const descriptor = {
+        environmentId: EnvironmentId.make("test"),
+        label: "Test",
+        platform: { os: "linux" as const, arch: "x64" as const },
+        serverVersion: "1.0.0",
+        capabilities: { repositoryIdentity: false },
+      };
       const layerApp = HttpApiBuilder.layer(
         HttpApi.make("environment").add(EnvironmentHttpApi.groups.metadata),
       ).pipe(
@@ -783,7 +1374,7 @@ describe("SSH activity HTTP", () => {
         Layer.provide(
           Layer.succeed(ServerEnvironment.ServerEnvironment, {
             getEnvironmentId: Effect.succeed(EnvironmentId.make("test")),
-            getDescriptor: Effect.die("Activity must not load descriptor"),
+            getDescriptor: Effect.succeed(descriptor),
           }),
         ),
         Layer.provide(Sqlite.layerMemory),
@@ -806,24 +1397,28 @@ describe("SSH activity HTTP", () => {
           }),
       });
       try {
-        const response = await handler(
-          new Request("http://127.0.0.1/.well-known/t3/activity"),
-          Context.empty(),
-        );
-        expect(response.status).toBe(status);
-        if (status === 403) {
-          expect(await response.json()).toEqual({
-            _tag: "EnvironmentHttpForbiddenError",
-            message: "SSH activity requires a loopback peer.",
-          });
-          return;
+        for (const route of [LEGACY_ENVIRONMENT_PATH, GOAT_ENVIRONMENT_PATH]) {
+          const response = await handler(new Request(`http://127.0.0.1${route}`), Context.empty());
+          expect(response.status).toBe(200);
+          expect(await response.json()).toEqual(descriptor);
         }
-        expect(await response.json()).toEqual({
-          activity: "idle",
-          serverVersion: (await import("../package.json", { with: { type: "json" } })).default
-            .version,
-          pid: process.pid,
-        });
+        for (const route of [LEGACY_ACTIVITY_PATH, GOAT_ACTIVITY_PATH]) {
+          const response = await handler(new Request(`http://127.0.0.1${route}`), Context.empty());
+          expect(response.status).toBe(status);
+          if (status === 403) {
+            expect(await response.json()).toEqual({
+              _tag: "EnvironmentHttpForbiddenError",
+              message: "SSH activity requires a loopback peer.",
+            });
+            continue;
+          }
+          expect(await response.json()).toEqual({
+            activity: "idle",
+            serverVersion: (await import("../package.json", { with: { type: "json" } })).default
+              .version,
+            pid: process.pid,
+          });
+        }
       } finally {
         await dispose();
       }
@@ -837,7 +1432,7 @@ it.effect("serves SSH activity to a real IPv4-mapped loopback peer", () =>
     const HttpApiBuilder = yield* Effect.promise(() => import("effect/http-api/HttpApiBuilder"));
     const { HttpServer, HttpServerRequest } = yield* Effect.promise(() => import("effect/http"));
     const { EnvironmentHttpApi, EnvironmentId } = yield* Effect.promise(
-      () => import("@t3tools/contracts"),
+      () => import("@goat/contracts"),
     );
     const ServerEnvironment = yield* Effect.promise(
       () => import("./environment/ServerEnvironment.ts"),
@@ -876,9 +1471,9 @@ it.effect("serves SSH activity to a real IPv4-mapped loopback peer", () =>
     origin.hostname = "127.0.0.1";
     const client = HttpClient.mapRequest(
       Context.get(services, HttpClient.HttpClient),
-      HttpClientRequest.setUrl(new URL("/.well-known/t3/activity", origin)),
+      HttpClientRequest.setUrl(new URL("/.well-known/t3/activity", origin)), // goat-rename: legacy
     );
-    const response = yield* client.get("/.well-known/t3/activity");
+    const response = yield* client.get("/.well-known/t3/activity"); // goat-rename: legacy
     expect(response.status).toBe(200);
     expect(yield* response.json).toMatchObject({
       activity: "idle",

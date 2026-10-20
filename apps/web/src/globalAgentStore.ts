@@ -1,15 +1,15 @@
-import type { ChannelBotRef, EnvironmentId, ThreadId } from "@t3tools/contracts";
+import type { ChannelBotRef, EnvironmentId, ThreadId } from "@goat/contracts";
 import { create } from "zustand";
 import { createJSONStorage, persist } from "zustand/middleware";
 
 import type { DraftId } from "./composerDraftStore";
 import { resolveStorage } from "./lib/storage";
 
-export const GLOBAL_AGENT_STORAGE_KEY = "t3code:global-agent:v1";
+export const GLOBAL_AGENT_STORAGE_KEY = "goat:global-agent:v1";
 const GLOBAL_AGENT_STORAGE_VERSION = 2;
 
 /**
- * The one projectless thread T3 opens on launch and from the sidebar logo.
+ * The one projectless thread GOAT opens on launch and from the sidebar logo.
  * Client-local: each installation remembers its own global agent.
  */
 export interface GlobalAgentRef {
@@ -18,6 +18,12 @@ export interface GlobalAgentRef {
   readonly draftId: DraftId;
 }
 
+/**
+ * Which agent the logo opens when the server offers GOAT Bot: the bot's messenger, or the
+ * global agent's coding thread. Client-local, like the refs.
+ */
+export type GlobalAgentMode = "bot" | "thread";
+
 export interface GlobalAgentStoreState {
   ref: GlobalAgentRef | null;
   /**
@@ -25,8 +31,10 @@ export interface GlobalAgentStoreState {
    * survives archive and delete; whether the bot can take messages is decided per connection.
    */
   botRef: ChannelBotRef | null;
+  mode: GlobalAgentMode;
   setRef: (ref: GlobalAgentRef) => void;
   setBotRef: (botRef: ChannelBotRef) => void;
+  setMode: (mode: GlobalAgentMode) => void;
   /** Forgets the global agent when the given thread is it (archived or deleted here). The bot ref stays. */
   clearIfThread: (target: {
     readonly environmentId: EnvironmentId;
@@ -67,12 +75,18 @@ function readPersistedBotRef(persisted: unknown): ChannelBotRef | null {
   return isChannelBotRef(botRef) ? botRef : null;
 }
 
+function readPersistedMode(persisted: unknown): GlobalAgentMode {
+  const mode = (persisted as { mode?: unknown } | null | undefined)?.mode;
+  return mode === "thread" ? "thread" : "bot";
+}
+
 /** Hydration from another storage version. Versions before GOAT Bot had no bot to keep. */
 export function migratePersistedGlobalAgent(persisted: unknown): {
   ref: GlobalAgentRef | null;
   botRef: ChannelBotRef | null;
+  mode: GlobalAgentMode;
 } {
-  return { ref: readPersistedRef(persisted), botRef: null };
+  return { ref: readPersistedRef(persisted), botRef: null, mode: "bot" };
 }
 
 /** Same-version hydration: zustand skips migrate here, so validate again. */
@@ -80,7 +94,12 @@ export function mergePersistedGlobalAgent(
   persisted: unknown,
   current: GlobalAgentStoreState,
 ): GlobalAgentStoreState {
-  return { ...current, ref: readPersistedRef(persisted), botRef: readPersistedBotRef(persisted) };
+  return {
+    ...current,
+    ref: readPersistedRef(persisted),
+    botRef: readPersistedBotRef(persisted),
+    mode: readPersistedMode(persisted),
+  };
 }
 
 export const useGlobalAgentStore = create<GlobalAgentStoreState>()(
@@ -88,8 +107,10 @@ export const useGlobalAgentStore = create<GlobalAgentStoreState>()(
     (set) => ({
       ref: null,
       botRef: null,
+      mode: "bot",
       setRef: (ref) => set({ ref }),
       setBotRef: (botRef) => set({ botRef }),
+      setMode: (mode) => set({ mode }),
       clearIfThread: (target) =>
         set((state) =>
           state.ref !== null &&
@@ -107,7 +128,7 @@ export const useGlobalAgentStore = create<GlobalAgentStoreState>()(
       version: GLOBAL_AGENT_STORAGE_VERSION,
       migrate: (persisted) => migratePersistedGlobalAgent(persisted) as GlobalAgentStoreState,
       merge: (persisted, current) => mergePersistedGlobalAgent(persisted, current),
-      partialize: ({ ref, botRef }) => ({ ref, botRef }),
+      partialize: ({ ref, botRef, mode }) => ({ ref, botRef, mode }),
     },
   ),
 );

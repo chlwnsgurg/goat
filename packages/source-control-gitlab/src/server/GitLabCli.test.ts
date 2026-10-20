@@ -3,10 +3,10 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import { ChildProcessSpawner } from "effect/process";
 
-import { VcsProcessExitError } from "@t3tools/contracts";
+import { VcsProcessExitError } from "@goat/contracts";
 
-import type * as SourceControlHost from "@t3tools/source-control-core/server/SourceControlHost";
-import * as TestSourceControlHost from "@t3tools/source-control-testing/TestSourceControlHost";
+import type * as SourceControlHost from "@goat/source-control-core/server/SourceControlHost";
+import * as TestSourceControlHost from "@goat/source-control-testing/TestSourceControlHost";
 import * as GitLabCli from "./GitLabCli.ts";
 
 const mockedRun = vi.fn<SourceControlHost.SourceControlHost["Service"]["process"]["run"]>();
@@ -77,7 +77,7 @@ layer("GitLabCli.layer", (it) => {
         expect.objectContaining({
           command: "glab",
           cwd: "/repo",
-          args: ["mr", "view", "42", "--output", "json"],
+          args: ["mr", "view", "--output", "json", "--", "42"],
         }),
       );
     }),
@@ -295,7 +295,7 @@ layer("GitLabCli.layer", (it) => {
         expect.objectContaining({
           command: "glab",
           cwd: "/repo",
-          args: ["mr", "checkout", "42"],
+          args: ["mr", "checkout", "--", "42"],
         }),
       );
     }),

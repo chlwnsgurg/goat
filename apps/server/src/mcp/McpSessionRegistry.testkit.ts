@@ -1,4 +1,4 @@
-import { EnvironmentId } from "@t3tools/contracts";
+import { EnvironmentId } from "@goat/contracts";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 
@@ -10,6 +10,7 @@ export const layer = Layer.succeed(
     issue: ({ threadId, providerInstanceId }) =>
       Effect.succeed({
         config: {
+          grantedScopes: [],
           environmentId: EnvironmentId.make("environment:mcp-test"),
           threadId,
           providerSessionId: `mcp-test:${threadId}`,
@@ -20,6 +21,7 @@ export const layer = Layer.succeed(
         },
       }),
     resolve: () => Effect.succeed(undefined),
+    currentMemoryPolicy: () => Effect.undefined,
     touch: () => Effect.void,
     revokeProviderSession: () => Effect.void,
     revokeThread: () => Effect.void,

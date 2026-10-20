@@ -1,17 +1,18 @@
 {
-  "name": "@t3tools/scripts",
+  "name": "@goat/scripts",
   "private": true,
   "type": "module",
   "scripts": {
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc-rs --noEmit",
     "test": "vp test run --config ../vite.config.ts --dir ."
   },
   "dependencies": {
     "@effect/platform-node": "catalog:",
     "@electron/asar": "^4.3.0",
     "@electron/osx-sign": "2.7.0",
-    "@t3tools/shared": "workspace:*",
-    "@t3tools/tailscale": "workspace:*",
+    "@goat/contracts": "workspace:*",
+    "@goat/shared": "workspace:*",
+    "@goat/tailscale": "workspace:*",
     "effect": "catalog:",
     "plist": "catalog:",
     "pngjs": "7.0.0",

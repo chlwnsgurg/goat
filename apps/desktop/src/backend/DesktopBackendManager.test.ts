@@ -1,8 +1,9 @@
 import {
+  SERVER_EXIT_CODE_STATE_DIR_OWNED,
   DesktopBackendBootstrap,
   type DesktopBackendBootstrap as DesktopBackendBootstrapValue,
   DesktopTelemetryControlMessage,
-} from "@t3tools/contracts";
+} from "@goat/contracts";
 import { assert, describe, it } from "@effect/vitest";
 import * as Deferred from "effect/Deferred";
 import * as Duration from "effect/Duration";
@@ -48,7 +49,7 @@ const baseConfig: DesktopBackendManager.DesktopBackendStartConfig = {
     mode: "desktop",
     noBrowser: true,
     port: 3773,
-    t3Home: "/tmp/t3",
+    goatHome: "/tmp/t3",
     host: "127.0.0.1",
     desktopBootstrapToken: "token",
     tailscaleServeEnabled: false,
@@ -124,6 +125,7 @@ interface MakeInstanceInput {
   readonly backendOutputLog?: Partial<DesktopObservability.DesktopBackendOutputLogShape>;
   readonly onReady?: Effect.Effect<void>;
   readonly onShutdown?: Effect.Effect<void>;
+  readonly onStateDirOwned?: Effect.Effect<void>;
   readonly onPreflightFailed?: (
     failure: DesktopBackendManager.PreflightFailure,
   ) => Effect.Effect<boolean>;
@@ -139,11 +141,6 @@ interface MakeInstanceInput {
   readonly pruneRuntimes?: (distro: string | null, runtimeId: string) => Effect.Effect<void>;
 }
 
-// Helper that constructs a primary backend instance using the factory
-// directly. The factory's deps (FileSystem, ChildProcessSpawner,
-// HttpClient, DesktopBackendOutputLogFactory) are provided per-test via
-// a scoped layer; tests yield the returned Effect inside `Effect.scoped`
-// to drive the instance's lifecycle.
 function makeTestInstance(input: MakeInstanceInput) {
   const stubLog: DesktopObservability.DesktopBackendOutputLogShape = {
     beginSession: () => Effect.void,
@@ -186,6 +183,7 @@ function makeTestInstance(input: MakeInstanceInput) {
     configResolve: input.configResolve ?? Effect.succeed(input.config ?? baseConfig),
     ...(input.onReady ? { onReady: () => input.onReady! } : {}),
     ...(input.onShutdown ? { onShutdown: () => input.onShutdown! } : {}),
+    ...(input.onStateDirOwned ? { onStateDirOwned: () => input.onStateDirOwned! } : {}),
     ...(input.onPreflightFailed ? { onPreflightFailed: input.onPreflightFailed } : {}),
   });
 
@@ -264,7 +262,7 @@ describe("DesktopBackendManager", () => {
         assert.equal(spawnedCommand.options.additionalFds?.fd5?.type, "output");
         assert.equal(
           Duration.toMillis(Duration.fromInputUnsafe(spawnedCommand.options.forceKillAfter)),
-          2_000,
+          5_000,
         );
 
         assert.deepEqual(yield* decodeBootstrap(bootstrapJson), configWithObservability);
@@ -296,7 +294,7 @@ describe("DesktopBackendManager", () => {
         }).pipe(Effect.flip, Effect.forkChild);
 
         const request = yield* Deferred.await(requested);
-        assert.equal(request.url, "http://127.0.0.1:3773/.well-known/t3/environment");
+        assert.equal(request.url, "http://127.0.0.1:3773/.well-known/goat/environment");
 
         yield* TestClock.adjust(Duration.millis(50));
         const error = yield* Fiber.join(readiness);
@@ -306,12 +304,12 @@ describe("DesktopBackendManager", () => {
         assert.equal(error.entryPath, "/server/bin.mjs");
         assert.equal(error.cwd, "/server");
         assert.equal(error.httpBaseUrl.href, "http://127.0.0.1:3773/");
-        assert.equal(error.readinessUrl.href, "http://127.0.0.1:3773/.well-known/t3/environment");
+        assert.equal(error.readinessUrl.href, "http://127.0.0.1:3773/.well-known/goat/environment");
         assert.equal(error.timeoutMs, 50);
         assert.isDefined(error.cause);
         assert.equal(
           error.message,
-          "Timed out after 50ms waiting for desktop backend readiness at http://127.0.0.1:3773/.well-known/t3/environment.",
+          "Timed out after 50ms waiting for desktop backend readiness at http://127.0.0.1:3773/.well-known/goat/environment.",
         );
       }).pipe(Effect.provide(layer));
     }),
@@ -430,6 +428,30 @@ describe("DesktopBackendManager", () => {
       assert.equal(error.message, "Failed to read the exit status of desktop backend process 123.");
       assert.notInclude(error.message, "exit-status-secret-sentinel");
       assert.isTrue(isBackendProcessError(error));
+    }),
+  );
+
+  it.effect("reports a SIGKILL exit without an exit code", () =>
+    Effect.gen(function* () {
+      const exitCause = PlatformError.systemError({
+        _tag: "Unknown",
+        module: "ChildProcess",
+        method: "exitCode",
+        cause: new Error("Process interrupted due to receipt of signal: 'SIGKILL'"),
+      });
+      const layerSpawner = Layer.succeed(
+        ChildProcessSpawner.ChildProcessSpawner,
+        ChildProcessSpawner.make(() =>
+          Effect.succeed(makeProcess({ exitCode: Effect.fail(exitCause) })),
+        ),
+      );
+
+      const exit = yield* DesktopBackendManager.runBackendProcess({
+        ...baseConfig,
+        desktopTelemetryStream: Stream.empty,
+      }).pipe(Effect.scoped, Effect.provide(Layer.merge(layerSpawner, layerHealthyHttpClient)));
+
+      assert.deepEqual(exit, { code: Option.none(), reason: "killed by SIGKILL" });
     }),
   );
 
@@ -713,7 +735,7 @@ describe("DesktopBackendManager", () => {
 
         assert.equal(readyCount, 0);
         assert.deepEqual(prunedRuntimes, []);
-        assert.deepEqual(requestUrls, ["http://127.0.0.1:3773/.well-known/t3/environment"]);
+        assert.deepEqual(requestUrls, ["http://127.0.0.1:3773/.well-known/goat/environment"]);
 
         yield* TestClock.adjust(Duration.millis(100));
         yield* Deferred.await(backendReady);
@@ -724,8 +746,8 @@ describe("DesktopBackendManager", () => {
         assert.equal(readyCount, 1);
         assert.deepEqual(prunedRuntimes, [["Ubuntu", "1.2.3-x64"]]);
         assert.deepEqual(requestUrls, [
-          "http://127.0.0.1:3773/.well-known/t3/environment",
-          "http://127.0.0.1:3773/.well-known/t3/environment",
+          "http://127.0.0.1:3773/.well-known/goat/environment",
+          "http://127.0.0.1:3773/.well-known/goat/environment",
         ]);
       }).pipe(Effect.provide(TestClock.layer())),
     ),
@@ -756,9 +778,6 @@ describe("DesktopBackendManager", () => {
             ),
           );
 
-          // The backend stays 503 through the first *two* readiness budgets
-          // and only becomes healthy (200) for the third round, i.e. it comes
-          // up well after the initial 50ms budget has expired.
           const layerHttp = layerHttpClient((request) =>
             Effect.gen(function* () {
               requestCount += 1;
@@ -786,18 +805,10 @@ describe("DesktopBackendManager", () => {
           assert.equal(readyCount, 0);
           assert.equal(readinessTimeoutCount, 0);
 
-          // The first 50ms readiness budget expires while the backend still
-          // answers 503. The child is alive and may yet become healthy, so the
-          // probe must start a fresh round instead of stopping permanently —
-          // the pre-fix behavior left the app stuck on "Connecting to WSL…"
-          // forever even though the backend kept running.
           yield* TestClock.adjust(Duration.millis(50));
           assert.equal(readinessTimeoutCount, 1);
           assert.equal(readyCount, 0);
 
-          // The second budget also expires (backend still 503), then the third
-          // round connects. The point is the probe persisted across budgets
-          // while the process was alive instead of giving up after the first.
           yield* TestClock.adjust(Duration.millis(100));
           assert.equal(readinessTimeoutCount, 2);
           assert.equal(readyCount, 1);
@@ -1206,6 +1217,39 @@ describe("DesktopBackendManager", () => {
     ),
   );
 
+  it.effect("reports state-directory ownership once without scheduling another backend", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        let startCount = 0;
+        const refused = yield* Deferred.make<void>();
+        const instance = yield* makeTestInstance({
+          spawnerLayer: Layer.succeed(
+            ChildProcessSpawner.ChildProcessSpawner,
+            ChildProcessSpawner.make(() =>
+              Effect.sync(() => {
+                startCount += 1;
+                return makeProcess({
+                  exitCode: Effect.succeed(
+                    ChildProcessSpawner.ExitCode(SERVER_EXIT_CODE_STATE_DIR_OWNED),
+                  ),
+                });
+              }),
+            ),
+          ),
+          httpClientLayer: layerHttpClient(() => Effect.never),
+          onStateDirOwned: Deferred.succeed(refused, undefined).pipe(Effect.asVoid),
+        });
+        yield* instance.start;
+        yield* Deferred.await(refused);
+        const snapshot = yield* instance.snapshot;
+        assert.isFalse(snapshot.desiredRunning);
+        assert.isFalse(snapshot.restartScheduled);
+        yield* TestClock.adjust(Duration.minutes(1));
+        assert.equal(startCount, 1);
+      }).pipe(Effect.provide(TestClock.layer())),
+    ),
+  );
+
   it.effect("does not notify shutdown when a scheduled restart starts from non-ready state", () =>
     Effect.scoped(
       Effect.gen(function* () {
@@ -1260,15 +1304,12 @@ describe("DesktopBackendManager", () => {
         yield* instance.start;
         assert.deepEqual(failures, []);
 
-        // Five fatal attempts with exponential backoff (500ms, 1s, 2s, 4s) reach
-        // the cap, at which point the failure is surfaced exactly once.
         yield* TestClock.adjust(Duration.millis(500));
         yield* TestClock.adjust(Duration.seconds(1));
         yield* TestClock.adjust(Duration.seconds(2));
         yield* TestClock.adjust(Duration.seconds(4));
         assert.deepEqual(failures, ["Node.js not found"]);
 
-        // Past the cap the loop stops and nothing else is surfaced.
         yield* TestClock.adjust(Duration.seconds(8));
         yield* TestClock.adjust(Duration.seconds(30));
         assert.deepEqual(failures, ["Node.js not found"]);
@@ -1358,8 +1399,7 @@ describe("DesktopBackendManager", () => {
         });
 
         yield* instance.start;
-        // Well beyond the fatal cap's worth of time: a transient failure must
-        // keep retrying (self-heal) and never surface.
+
         yield* TestClock.adjust(Duration.minutes(2));
         assert.deepEqual(failures, []);
       }).pipe(Effect.provide(TestClock.layer())),
@@ -1509,10 +1549,6 @@ describe("DesktopBackendManager", () => {
   it.effect("stopAllPoolInstances bounds the quit finalizer when backends hang", () =>
     Effect.scoped(
       Effect.gen(function* () {
-        // Each backend's process-scope finalizer reports when it starts and
-        // when it finishes, keyed by instance name, so the test can prove
-        // both backends reached each milestone instead of inferring it from
-        // a shared flag or a clock advance.
         const teardownStarted = yield* Queue.unbounded<string>();
         const teardownFinished = yield* Queue.unbounded<string>();
         const allowTeardown = yield* Deferred.make<void>();
@@ -1553,9 +1589,6 @@ describe("DesktopBackendManager", () => {
           unregister: () => Effect.die(new Error("unregister not implemented")),
         });
 
-        // Mirror the quit path: register stopAllPoolInstances as a scope
-        // finalizer and let the scope close run it, rather than calling it
-        // as an ordinary interruptible effect.
         const quitFiber = yield* Effect.scoped(
           Effect.addFinalizer(() => DesktopApp.stopAllPoolInstances()),
         ).pipe(Effect.provide(layerMockPool), Effect.forkChild);
@@ -1563,14 +1596,10 @@ describe("DesktopBackendManager", () => {
         const started = yield* Queue.takeN(teardownStarted, 2);
         assert.deepEqual(started.toSorted(), ["instance1", "instance2"]);
 
-        // Both backends are now hung in teardown. Advancing past the 5s
-        // budget must let the quit finalizer return without them.
         yield* TestClock.adjust(Duration.seconds(5));
         yield* Fiber.join(quitFiber);
         assert.equal(yield* Queue.size(teardownFinished), 0);
 
-        // The timed-out closes keep running in the background and finish
-        // once the backends unblock.
         yield* Deferred.succeed(allowTeardown, undefined);
         const finished = yield* Queue.takeN(teardownFinished, 2);
         assert.deepEqual(finished.toSorted(), ["instance1", "instance2"]);

@@ -1,4 +1,4 @@
-import type { EnvironmentId, ThreadId } from "@t3tools/contracts";
+import type { EnvironmentId, ThreadId } from "@goat/contracts";
 import { create } from "zustand";
 import { DraftId, useComposerDraftStore } from "./composerDraftStore";
 import { releaseDraftAttachments } from "./lib/attachmentUploadQueue";
@@ -25,7 +25,6 @@ export const useQuestionAttachmentPreparation = create<{ counts: Record<string, 
   counts: {},
 }));
 
-/** Count both staged files and in-flight preparation against the shared question limit. */
 export function countQuestionAttachments(keys: ReadonlyArray<DraftId>): number {
   const store = useComposerDraftStore.getState();
   const { counts } = useQuestionAttachmentPreparation.getState();

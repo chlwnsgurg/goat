@@ -8,7 +8,18 @@ import * as NodeChildProcess from "node:child_process";
 import * as NodeCrypto from "node:crypto";
 import * as NodeFS from "node:fs";
 import * as NodeFSP from "node:fs/promises";
+import * as NodeHttp from "node:http";
 import * as NodePath from "node:path";
+
+import {
+  adoptLegacyEnv,
+  GOAT_ENVIRONMENT_PATH,
+  withLegacyEnvNames,
+} from "@goat/contracts/legacyT3Names";
+import {
+  compareRuntimeProtocols,
+  type RuntimeProtocolRanges,
+} from "@goat/shared/sshRuntimeProtocol";
 
 import type {
   PendingServiceUpdate,
@@ -29,10 +40,21 @@ import {
   SERVICE_RESTART_PENDING_FILE,
   SERVICE_STOP_MARKER_FILE,
 } from "./cloud/serviceProtocol.ts";
+import { tryAcquireServerOwnerLock } from "./serverOwnerLockFile.ts";
 
 const HANDOFF_DELAY_MS = 2_000;
-const PREPARED_TIMEOUT_MS = 120_000;
+/**
+ * Migrations count toward it and can scale with the database: tens of GB on a cold page cache
+ * take minutes. A missed window rolls back the database, so the next attempt pays the same cost.
+ */
+export const PREPARED_TIMEOUT_MS = 30 * 60_000;
+export const PROBATION_MS = 10 * 60_000;
+export const SMOKE_TIMEOUT_MS = 30_000;
 const TERMINATE_GRACE_MS = 5_000;
+const RESTORE_RETRY_MS = 5_000;
+// Matches SERVER_EXIT_CODE_STATE_DIR_OWNED in contracts. The standalone
+// launcher stays independent of the Effect-backed contracts package.
+const STATE_DIR_OWNED_EXIT_CODE = 78;
 
 type TerminalStatus = "committed" | "rolled-back" | "failed";
 type ChildRole = "active" | "trial";
@@ -41,14 +63,12 @@ interface ManagedChild {
   readonly version: string;
   role: ChildRole;
   readonly process: NodeChildProcess.ChildProcess;
+  exitedAt?: number;
 }
 
-// Mirrors pinnedRuntimePaths: a runtime is an unpacked release archive whose
-// executable runs on its own. Kept inline so this file stays on Node
-// built-ins only.
 const runtimePaths = (baseDir: string, version: string) => {
   const versionDir = NodePath.join(baseDir, "runtime", "goat", "versions", version);
-  // oxlint-disable-next-line t3code/no-global-process-runtime -- Standalone launcher has no Effect runtime.
+  // oxlint-disable-next-line goat/no-global-process-runtime -- Standalone launcher has no Effect runtime.
   const executableName = process.platform === "win32" ? "goat.exe" : "goat";
   return {
     versionDir,
@@ -62,9 +82,17 @@ const runtimeSpawnArguments = (paths: ReturnType<typeof runtimePaths>) => ({
   args: ["serve"],
 });
 
-/** SQLite persists across the main file plus its WAL and shared-memory sidecars. */
 const DB_FILE_SUFFIXES = ["", "-wal", "-shm"] as const;
 const RESTORE_MARKER = ".restore-pending";
+const ROLLBACK_MARKER = ".rollback-pending";
+const OWNER_GENERATION_FILE = "owner-generation";
+
+// Owner tags in the server-owner.lock generation log. Only these two may own
+// the userdata between an update's backup and its restore.
+const launcherOwner = (updateId: string) => `service-launcher:${updateId}`;
+const trialOwner = (updateId: string) => `service-trial:${updateId}`;
+const probationOwner = (updateId: string) => `service-probation:${updateId}`;
+const ownerLockDir = (pending: PendingServiceUpdate) => NodePath.dirname(pending.dbPath);
 
 const databaseBackupDir = (baseDir: string, updateId: string) =>
   NodePath.join(baseDir, "runtime", "db-backup", updateId);
@@ -106,12 +134,138 @@ async function syncDirectory(directory: string): Promise<void> {
   }
 }
 
+function runCp(args: ReadonlyArray<string>): Promise<boolean> {
+  return new Promise((resolve) => {
+    NodeChildProcess.execFile("cp", args, (error) => resolve(error === null));
+  });
+}
+
 /**
- * Snapshots the database once per update before the first trial. A completed
- * backup is never overwritten because a restarted launcher may be looking at
- * database writes from an earlier attempt by the same trial.
+ * Node's own clone flag is not used: on macOS `fs.copyFile` falls back to a full copy.
  */
-async function backupDatabaseOnce(baseDir: string, pending: PendingServiceUpdate): Promise<void> {
+async function copyDatabaseFile(source: string, destination: string): Promise<void> {
+  // oxlint-disable-next-line goat/no-global-process-runtime -- Standalone launcher has no Effect runtime.
+  const platform = process.platform;
+  // `cp -c` replaces the destination with a new file, which would cut a
+  // hard-linked database off from its other links; copy into it instead.
+  const hardLinked =
+    platform === "darwin" &&
+    ((await NodeFSP.stat(destination).catch(() => undefined))?.nlink ?? 1) > 1;
+  const args =
+    platform === "darwin" && !hardLinked
+      ? ["-c", source, destination]
+      : platform === "linux"
+        ? ["--reflink=auto", source, destination]
+        : undefined;
+  if (args === undefined || !(await runCp(args))) await NodeFSP.copyFile(source, destination);
+}
+
+const GIB = 1024 ** 3;
+/**
+ * Clones share blocks, but the trial server diverges from them as it writes,
+ * migrations included, so a cloned backup still needs room for that churn.
+ */
+const CLONED_BACKUP_MIN_HEADROOM_BYTES = GIB;
+const CLONED_BACKUP_HEADROOM_FRACTION = 0.1;
+
+async function statDatabaseFiles(dbPath: string): Promise<ReadonlyArray<NodeFS.Stats>> {
+  const stats: Array<NodeFS.Stats> = [];
+  for (const suffix of DB_FILE_SUFFIXES) {
+    const stat = await NodeFSP.stat(`${dbPath}${suffix}`).catch((cause: unknown) => {
+      if (suffix !== "" && (cause as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+      throw cause;
+    });
+    if (stat !== undefined) stats.push(stat);
+  }
+  return stats;
+}
+
+/**
+ * - macOS: `cp -c` clones within one APFS volume and silently copies
+ *   anywhere else, so every existing database file must share the backup
+ *   directory's device, whose filesystem type must match the system volume's,
+ *   which is always APFS.
+ */
+async function backupCanClone(dbPath: string, backupRoot: string): Promise<boolean> {
+  // oxlint-disable-next-line goat/no-global-process-runtime -- Standalone launcher has no Effect runtime.
+  const platform = process.platform;
+  if (platform === "darwin") {
+    const [backupDirectory, backupFs, systemFs] = await Promise.all([
+      NodeFSP.stat(backupRoot),
+      NodeFSP.statfs(backupRoot),
+      NodeFSP.statfs("/"),
+    ]);
+    if (backupFs.type !== systemFs.type) return false;
+    return (await statDatabaseFiles(dbPath)).every(
+      (source) => source.dev === backupDirectory.dev && source.nlink === 1,
+    );
+  }
+  if (platform !== "linux") return false;
+  const probe = NodePath.join(backupRoot, `.clone-probe-${NodeCrypto.randomUUID()}`);
+  try {
+    for (const suffix of DB_FILE_SUFFIXES) {
+      const source = `${dbPath}${suffix}`;
+      if (suffix !== "" && !(await pathExists(source))) continue;
+      if (!(await runCp(["--reflink=always", source, `${probe}${suffix}`]))) return false;
+    }
+    return true;
+  } finally {
+    for (const suffix of DB_FILE_SUFFIXES) {
+      await NodeFSP.rm(`${probe}${suffix}`, { force: true }).catch(() => undefined);
+    }
+  }
+}
+
+export interface BackupSpaceProbe {
+  readonly readFreeBytes: (directory: string) => Promise<number>;
+  readonly canClone: (dbPath: string, backupRoot: string) => Promise<boolean>;
+}
+
+const filesystemBackupSpaceProbe: BackupSpaceProbe = {
+  readFreeBytes: async (directory) => {
+    const stats = await NodeFSP.statfs(directory);
+    return stats.bavail * stats.bsize;
+  },
+  canClone: backupCanClone,
+};
+
+/**
+ * Runs before the server is stopped so a full disk refuses the update instead of causing an
+ * outage and a cold restart.
+ */
+export async function databaseBackupBlocker(
+  baseDir: string,
+  dbPath: string,
+  probe: Partial<BackupSpaceProbe> = {},
+): Promise<string | undefined> {
+  const { readFreeBytes, canClone } = { ...filesystemBackupSpaceProbe, ...probe };
+  const backupRoot = NodePath.join(baseDir, "runtime", "db-backup");
+  await NodeFSP.mkdir(backupRoot, { recursive: true, mode: 0o700 });
+  const [files, free] = await Promise.all([statDatabaseFiles(dbPath), readFreeBytes(backupRoot)]);
+  const size = files.reduce((total, file) => total + file.size, 0);
+  const fullCopyBytes = size * 1.05;
+  if (free >= fullCopyBytes) return undefined;
+  const clonedBytes = Math.max(
+    CLONED_BACKUP_MIN_HEADROOM_BYTES,
+    size * CLONED_BACKUP_HEADROOM_FRACTION,
+  );
+  const needed = (await canClone(dbPath, backupRoot)) ? clonedBytes : fullCopyBytes;
+  if (free >= needed) return undefined;
+  const gb = (bytes: number) => (bytes / GIB).toFixed(1);
+  return `Not enough free disk space to back up the database before updating: ${gb(needed)} GB needed, ${gb(free)} GB free. Free up disk space and try again. The server was not stopped.`;
+}
+
+/**
+ * Snapshots the database once per update before the first trial, while the
+ * caller holds server-owner.lock at `generation`. A completed backup is never
+ * overwritten because a restarted launcher may be looking at database writes
+ * from an earlier attempt by the same trial.
+ */
+async function backupDatabaseOnce(
+  baseDir: string,
+  pending: PendingServiceUpdate,
+  generation: number,
+): Promise<void> {
   const backupDir = databaseBackupDir(baseDir, pending.id);
   if (await pathExists(backupDir)) return;
 
@@ -123,9 +277,12 @@ async function backupDatabaseOnce(baseDir: string, pending: PendingServiceUpdate
       const source = `${pending.dbPath}${suffix}`;
       if (suffix !== "" && !(await pathExists(source))) continue;
       const destination = databaseBackupFile(stagingDir, suffix);
-      await NodeFSP.copyFile(source, destination);
+      await copyDatabaseFile(source, destination);
       await syncFile(destination);
     }
+    const generationPath = NodePath.join(stagingDir, OWNER_GENERATION_FILE);
+    await NodeFSP.writeFile(generationPath, `${generation}\n`, { mode: 0o600 });
+    await syncFile(generationPath);
     await NodeFSP.rename(stagingDir, backupDir);
     await syncDirectory(NodePath.dirname(backupDir));
   } catch (cause) {
@@ -134,15 +291,20 @@ async function backupDatabaseOnce(baseDir: string, pending: PendingServiceUpdate
   }
 }
 
-const restoreMarkerPath = (baseDir: string, updateId: string) =>
-  NodePath.join(databaseBackupDir(baseDir, updateId), RESTORE_MARKER);
+/** A rollback was decided, or its restore started, and recovery must finish it. */
+async function databaseRestorePending(
+  baseDir: string,
+  pending: PendingServiceUpdate,
+): Promise<boolean> {
+  const backupDir = databaseBackupDir(baseDir, pending.id);
+  return (
+    (await pathExists(NodePath.join(backupDir, ROLLBACK_MARKER))) ||
+    (await pathExists(NodePath.join(backupDir, RESTORE_MARKER)))
+  );
+}
 
-const databaseRestorePending = (baseDir: string, pending: PendingServiceUpdate) =>
-  pathExists(restoreMarkerPath(baseDir, pending.id));
-
-/** Mark rollback before changing live files so launcher recovery cannot boot a partial restore. */
-async function markDatabaseRestorePending(backupDir: string): Promise<void> {
-  const markerPath = NodePath.join(backupDir, RESTORE_MARKER);
+async function writeMarker(backupDir: string, marker: string): Promise<void> {
+  const markerPath = NodePath.join(backupDir, marker);
   if (!(await pathExists(markerPath))) {
     const handle = await NodeFSP.open(markerPath, "wx", 0o600);
     try {
@@ -154,26 +316,97 @@ async function markDatabaseRestorePending(backupDir: string): Promise<void> {
   }
 }
 
-/** Restore is retryable after any process crash while the backup directory remains. */
+/**
+ * The file a restore writes for `path`: where its symlinks lead, even when the
+ * last target is missing, as after a crash between `cp -c` removing a file
+ * and cloning over it.
+ */
+async function restoreTarget(path: string): Promise<string> {
+  let current = path;
+  for (let hops = 0; hops < 40; hops++) {
+    try {
+      return await NodeFSP.realpath(current);
+    } catch (cause) {
+      if ((cause as NodeJS.ErrnoException).code !== "ENOENT") throw cause;
+    }
+    const link = await NodeFSP.readlink(current).catch((cause: unknown) => {
+      const code = (cause as NodeJS.ErrnoException).code;
+      if (code === "ENOENT" || code === "EINVAL") return undefined;
+      throw cause;
+    });
+    if (link === undefined) return current;
+    // Joined without normalizing: a `..` in the link must follow directory links
+    // the way the filesystem does, not cancel a path segment.
+    current = NodePath.isAbsolute(link)
+      ? link
+      : `${await NodeFSP.realpath(NodePath.dirname(current))}${NodePath.sep}${link}`;
+  }
+  throw new Error(`Too many symbolic links resolving ${path}.`);
+}
+
+/**
+ * Restores the backup under server-owner.lock. `busy` means another process
+ * holds the lock now, and the rollback stays pending until it can run.
+ * `kept` means a server other than this update's launcher and trial owned
+ * the data since the backup, so its writes win over the snapshot. Once the
+ * copy has started the live files are partial, and later attempts finish it
+ * regardless. Retryable after any process crash while the backup remains.
+ */
 async function restoreDatabaseBackup(
   baseDir: string,
   pending: PendingServiceUpdate,
-): Promise<void> {
+): Promise<"restored" | "busy" | "kept"> {
   const backupDir = databaseBackupDir(baseDir, pending.id);
-  if (!(await pathExists(backupDir))) return;
+  if (!(await pathExists(backupDir))) return "restored";
+  await writeMarker(backupDir, ROLLBACK_MARKER);
 
-  await markDatabaseRestorePending(backupDir);
-  for (const suffix of DB_FILE_SUFFIXES) {
-    const target = `${pending.dbPath}${suffix}`;
-    const source = databaseBackupFile(backupDir, suffix);
-    if (await pathExists(source)) {
-      await NodeFSP.copyFile(source, target);
-      await syncFile(target);
-    } else {
-      await NodeFSP.rm(target, { force: true });
+  const lock = tryAcquireServerOwnerLock(ownerLockDir(pending), launcherOwner(pending.id));
+  if (lock === undefined) return "busy";
+  try {
+    if (!(await pathExists(NodePath.join(backupDir, RESTORE_MARKER)))) {
+      const recorded = await NodeFSP.readFile(
+        NodePath.join(backupDir, OWNER_GENERATION_FILE),
+        "utf8",
+      ).catch(() => "");
+      const generation = Number.parseInt(recorded, 10);
+      const ours = new Set([
+        launcherOwner(pending.id),
+        trialOwner(pending.id),
+        probationOwner(pending.id),
+      ]);
+      // A backup without a recorded generation cannot prove nobody else wrote.
+      if (
+        !Number.isSafeInteger(generation) ||
+        lock.ownersSince(generation).some((owner) => !ours.has(owner))
+      ) {
+        return "kept";
+      }
+      await writeMarker(backupDir, RESTORE_MARKER);
     }
+    const directories = new Set([NodePath.dirname(pending.dbPath)]);
+    for (const suffix of DB_FILE_SUFFIXES) {
+      const livePath = `${pending.dbPath}${suffix}`;
+      const source = databaseBackupFile(backupDir, suffix);
+      if (await pathExists(source)) {
+        // Restore through the link: cloning replaces its destination.
+        const target = await restoreTarget(livePath);
+        await copyDatabaseFile(source, target);
+        await syncFile(target);
+        directories.add(NodePath.dirname(target));
+      } else {
+        await NodeFSP.rm(livePath, { force: true });
+      }
+    }
+    for (const directory of directories) await syncDirectory(directory);
+    // A completed copy goes back to the ownership check if the launcher
+    // crashes before recording the rollback, so a server that writes after
+    // this point is never overwritten by a second copy.
+    await NodeFSP.rm(NodePath.join(backupDir, RESTORE_MARKER), { force: true });
+    await syncDirectory(backupDir);
+    return "restored";
+  } finally {
+    lock.release();
   }
-  await syncDirectory(NodePath.dirname(pending.dbPath));
 }
 
 async function discardDatabaseBackup(baseDir: string, updateId: string): Promise<void> {
@@ -190,7 +423,6 @@ export async function readServiceState(filePath: string): Promise<ServiceState> 
   return state;
 }
 
-/** Durable same-directory replacement used for every runtime state transition. */
 export async function writeServiceState(filePath: string, state: ServiceState): Promise<void> {
   const directory = NodePath.dirname(filePath);
   await NodeFSP.mkdir(directory, { recursive: true, mode: 0o700 });
@@ -277,20 +509,95 @@ const stopMarkerPath = (baseDir: string) =>
 const restartPendingPath = (baseDir: string) =>
   NodePath.join(baseDir, "runtime", SERVICE_RESTART_PENDING_FILE);
 
+/** A wildcard listener answers on loopback of its family; a specific address only on itself. */
+export function smokeProbeHostname(host: string | undefined): string {
+  if (host === undefined || host === "0.0.0.0" || host === "localhost") return "127.0.0.1";
+  if (host === "::" || host === "::0") return "::1";
+  return host;
+}
+
+function smokeProbe(
+  port: number,
+  host: string | undefined,
+  targetVersion: string,
+): Promise<string | undefined> {
+  return new Promise((resolve) => {
+    const finish = (reason?: string) => {
+      clearTimeout(timeout);
+      request.destroy();
+      resolve(reason);
+    };
+    const request = NodeHttp.get(
+      { hostname: smokeProbeHostname(host), port, path: GOAT_ENVIRONMENT_PATH, agent: false },
+      (response) => {
+        if (response.statusCode !== 200) {
+          finish(`http-${response.statusCode}`);
+          return;
+        }
+        let body = "";
+        response.setEncoding("utf8");
+        response.on("data", (chunk: string) => {
+          body += chunk;
+        });
+        response.on("error", () => finish("response-error"));
+        response.on("end", () => {
+          try {
+            const descriptor = JSON.parse(body) as {
+              serverVersion?: unknown;
+              protocol?: RuntimeProtocolRanges;
+            } | null;
+            if (descriptor?.serverVersion !== targetVersion) return finish("version");
+            const protocol = descriptor.protocol;
+            // Compare the advertised ranges with themselves: smoke requires valid ranges,
+            // not compatibility with the old build embedded in this surviving launcher.
+            if (
+              protocol === undefined ||
+              compareRuntimeProtocols(protocol, { protocol }) !== "compatible"
+            ) {
+              return finish("protocol");
+            }
+            finish();
+          } catch {
+            finish("descriptor");
+          }
+        });
+      },
+    );
+    // One deadline covers connection, headers and the entire JSON body, even a trickle.
+    const timeout = setTimeout(() => finish("timeout"), SMOKE_TIMEOUT_MS);
+    request.on("error", () => finish("request-error"));
+  });
+}
+
 export class Launcher {
   readonly #baseDir: string;
   readonly #statePath: string;
   #state: ServiceState;
   #child: ManagedChild | null = null;
   #timer: NodeJS.Timeout | undefined;
+  #probationTimer: NodeJS.Timeout | undefined;
   #transitions: Promise<void> = Promise.resolve();
   #stopRequested = false;
   #stopping = false;
   #done = false;
   readonly #completion = Promise.withResolvers<void>();
+  readonly #backupSpaceProbe: Partial<BackupSpaceProbe> | undefined;
+  readonly #probationMs: number;
+  readonly #now: () => number;
 
-  constructor(baseDir: string, state: ServiceState) {
+  constructor(
+    baseDir: string,
+    state: ServiceState,
+    options: {
+      readonly backupSpaceProbe?: Partial<BackupSpaceProbe>;
+      readonly probationMs?: number;
+      readonly now?: () => number;
+    } = {},
+  ) {
     this.#baseDir = baseDir;
+    this.#backupSpaceProbe = options.backupSpaceProbe;
+    this.#probationMs = options.probationMs ?? PROBATION_MS;
+    this.#now = options.now ?? Date.now;
     this.#statePath = NodePath.join(baseDir, "runtime", SERVICE_STATE_FILE);
     this.#state = state;
   }
@@ -331,15 +638,10 @@ export class Launcher {
   async stop(signal: NodeJS.Signals): Promise<void> {
     // This must happen synchronously at signal receipt. A queued update
     // transition may already be terminating the active child, and that child
-    // needs to see the marker in its shutdown finalizer. KillMode=mixed also
-    // ensures systemd signals the launcher before the rest of the cgroup, and
-    // launchd signals only the job's main process (this launcher), so the
-    // marker lands before the child sees any signal on both platforms.
+    // needs to see the marker in its shutdown finalizer.
     try {
       NodeFS.writeFileSync(stopMarkerPath(this.#baseDir), "", { mode: 0o600 });
-    } catch {
-      // Err toward keeping the tunnel; the next link or unlink reconciles it.
-    }
+    } catch {}
     if (this.#stopRequested || this.#stopping) {
       await this.#completion.promise.catch(() => undefined);
       return;
@@ -351,6 +653,8 @@ export class Launcher {
       // before this queued stop tears it down. That replacement owns the
       // pre-activation tunnel cleanup path and observes the marker above.
       this.#stopping = true;
+      // A rollback waiting on server-owner.lock stays pending for the next launcher.
+      this.#clearTimer();
       const child = this.#child?.process;
       this.#child = null;
       if (child !== undefined) await terminateChild(child, signal);
@@ -363,6 +667,8 @@ export class Launcher {
   #clearTimer(): void {
     clearTimeout(this.#timer);
     this.#timer = undefined;
+    clearTimeout(this.#probationTimer);
+    this.#probationTimer = undefined;
   }
 
   async #recover(): Promise<void> {
@@ -381,7 +687,40 @@ export class Launcher {
     }
     const update = this.#state.update;
     if (update?.status !== "pending") {
-      if (update !== undefined) {
+      const probation = this.#state.probation;
+      if (update?.status === "committed" && probation !== undefined) {
+        if (
+          probation.rollbackReason !== undefined ||
+          (await databaseRestorePending(this.#baseDir, {
+            ...update,
+            status: "pending",
+            dbPath: probation.dbPath,
+          }))
+        ) {
+          await this.#returnToPrevious(
+            { ...update, status: "pending", dbPath: probation.dbPath },
+            "rolled-back",
+            probation.rollbackReason ?? "rollback-interrupted",
+          );
+          return;
+        }
+        await this.#resumeProbation();
+        if (this.#state.probation !== undefined) {
+          // A target that cannot even start must roll back now. Failing to the service manager
+          // instead would repeat until the deadline passes and the snapshot is discarded.
+          try {
+            await this.#startChild(this.#state.activeVersion, "active", update);
+          } catch {
+            this.#clearTimer();
+            await this.#returnToPrevious(
+              { ...update, status: "pending", dbPath: probation.dbPath },
+              "rolled-back",
+              "probation-start-failed",
+            );
+          }
+          return;
+        }
+      } else if (update !== undefined) {
         await discardDatabaseBackup(this.#baseDir, update.id).catch(() => undefined);
       }
       await this.#startChild(this.#state.activeVersion, "active", update);
@@ -399,13 +738,27 @@ export class Launcher {
   }
 
   async #startTrial(pending: PendingServiceUpdate): Promise<void> {
-    // The previous child is dead here, so all three SQLite files are quiescent.
+    // The previous child is dead here. Holding server-owner.lock keeps every
+    // other server out while the three SQLite files are copied.
+    let lock: ReturnType<typeof tryAcquireServerOwnerLock>;
     try {
-      await backupDatabaseOnce(this.#baseDir, pending);
+      lock = tryAcquireServerOwnerLock(ownerLockDir(pending), launcherOwner(pending.id));
     } catch {
       await this.#returnToPrevious(pending, "failed", "db-backup-failed");
       return;
     }
+    if (lock === undefined) {
+      await this.#returnToPrevious(pending, "failed", "db-owner-busy");
+      return;
+    }
+    try {
+      await backupDatabaseOnce(this.#baseDir, pending, lock.generation);
+    } catch {
+      lock.release();
+      await this.#returnToPrevious(pending, "failed", "db-backup-failed");
+      return;
+    }
+    lock.release();
     try {
       await this.#startChild(pending.targetVersion, "trial", pending);
     } catch {
@@ -424,10 +777,16 @@ export class Launcher {
       protocol: SERVICE_LAUNCHER_PROTOCOL,
       childVersion: version,
       ...(update === undefined ? {} : { update }),
+      ...(role === "active" && update?.status === "committed" && this.#state.probation !== undefined
+        ? { probation: true as const }
+        : {}),
     };
     const spawnArguments = runtimeSpawnArguments(paths);
     const child = NodeChildProcess.spawn(spawnArguments.command, spawnArguments.args, {
-      env: { ...process.env, [SERVICE_LAUNCHER_CONTEXT_ENV]: JSON.stringify(context) },
+      env: {
+        ...process.env,
+        ...withLegacyEnvNames({ [SERVICE_LAUNCHER_CONTEXT_ENV]: JSON.stringify(context) }),
+      },
       stdio: ["inherit", "inherit", "inherit", "ipc"],
     });
     await new Promise<void>((resolve, reject) => {
@@ -454,9 +813,10 @@ export class Launcher {
       const message = decodeServiceLauncherChildMessage(value);
       if (message !== undefined) this.#enqueue(() => this.#handleMessage(managed, message));
     });
-    child.once("exit", (code, signal) =>
-      this.#enqueue(() => this.#handleExit(managed, code, signal)),
-    );
+    child.once("exit", (code, signal) => {
+      managed.exitedAt = this.#now();
+      this.#enqueue(() => this.#handleExit(managed, code, signal));
+    });
 
     if (role === "trial") {
       this.#timer = setTimeout(
@@ -472,7 +832,7 @@ export class Launcher {
       await this.#handleUpdateRequest(child, message);
       return;
     }
-    await this.#handlePrepared(child, message.updateId);
+    await this.#handlePrepared(child, message.updateId, message.port, message.host);
   }
 
   async #handleUpdateRequest(
@@ -493,6 +853,13 @@ export class Launcher {
       await reject("Another server update is already pending.");
       return;
     }
+    if (this.#state.probation !== undefined) {
+      if (this.#now() >= this.#state.probation.deadline) await this.#finishProbation();
+      else {
+        await reject("The current update is still on probation.");
+        return;
+      }
+    }
     if (!isExactServiceVersion(message.targetVersion)) {
       await reject("The requested target is not an exact version.");
       return;
@@ -507,6 +874,21 @@ export class Launcher {
     }
     if (!(await runtimeExists(this.#baseDir, message.targetVersion))) {
       await reject("The requested target runtime is missing or incomplete.");
+      return;
+    }
+    // A check that cannot run refuses the update too: the alternative is
+    // stopping the server without knowing whether the backup fits.
+    const backupBlocker = await databaseBackupBlocker(
+      this.#baseDir,
+      message.dbPath,
+      this.#backupSpaceProbe,
+    ).catch(
+      (error: unknown) =>
+        `Could not check that the database backup fits before updating: ${error instanceof Error ? error.message : String(error)}. The server was not stopped.`,
+    );
+    if (!child.process.connected) return;
+    if (backupBlocker !== undefined) {
+      await reject(backupBlocker);
       return;
     }
 
@@ -535,7 +917,12 @@ export class Launcher {
     await this.#startTrial(pending);
   }
 
-  async #handlePrepared(child: ManagedChild, updateId: string): Promise<void> {
+  async #handlePrepared(
+    child: ManagedChild,
+    updateId: string,
+    port?: number,
+    host?: string,
+  ): Promise<void> {
     const pending = this.#state.update;
     if (
       child.role !== "trial" ||
@@ -550,17 +937,66 @@ export class Launcher {
       throw new Error("Trial child reported prepared for an unexpected update.");
     }
     this.#clearTimer();
+    if (port !== undefined) {
+      const failure = await smokeProbe(port, host, pending.targetVersion);
+      if (failure !== undefined) {
+        await this.#returnToPrevious(pending, "rolled-back", `smoke-failed:${failure}`, child);
+        return;
+      }
+    } else {
+      process.stderr.write("[service-launcher] Trial supplied no port; skipping smoke probe.\n");
+    }
     const committed = terminalUpdate({ pending, status: "committed" });
     const next: ServiceState = {
       ...this.#state,
       activeVersion: pending.targetVersion,
       update: committed,
+      probation: { dbPath: pending.dbPath, deadline: this.#now() + this.#probationMs },
     };
     await writeServiceState(this.#statePath, next);
     this.#state = next;
     child.role = "active";
-    await discardDatabaseBackup(this.#baseDir, committed.id).catch(() => undefined);
-    await sendMessage(child.process, { type: "committed", updateId: committed.id });
+    await this.#resumeProbation();
+    try {
+      await sendMessage(child.process, { type: "committed", updateId: committed.id });
+    } catch {
+      // Exit can race the durable commit. Do not let a failed IPC acknowledgement
+      // bypass probation by reaching the launcher's fatal-error path first.
+      // A surviving trial fails its own bounded acknowledgement wait and exits.
+      process.stderr.write(
+        "[service-launcher] Commit acknowledgement failed; awaiting child exit.\n",
+      );
+    }
+  }
+
+  async #resumeProbation(): Promise<void> {
+    if (this.#stopping || this.#stopRequested || this.#done) return;
+    const probation = this.#state.probation;
+    // A deadline callback already queued before cancellation must not erase a rollback.
+    if (probation === undefined || probation.rollbackReason !== undefined) return;
+    const remaining = probation.deadline - this.#now();
+    if (remaining <= 0) {
+      await this.#finishProbation();
+      return;
+    }
+    this.#probationTimer = setTimeout(
+      () => this.#enqueue(() => this.#resumeProbation()),
+      remaining,
+    );
+  }
+
+  async #finishProbation(): Promise<void> {
+    clearTimeout(this.#probationTimer);
+    this.#probationTimer = undefined;
+    const { probation, ...next } = this.#state;
+    if (probation === undefined || probation.rollbackReason !== undefined) return;
+    // The exit transition may still be queued behind a durable write at the deadline.
+    if (this.#child?.exitedAt !== undefined && this.#child.exitedAt < probation.deadline) return;
+    await writeServiceState(this.#statePath, next);
+    this.#state = next;
+    if (next.update !== undefined) {
+      await discardDatabaseBackup(this.#baseDir, next.update.id).catch(() => undefined);
+    }
   }
 
   async #handlePreparedTimeout(child: ManagedChild): Promise<void> {
@@ -579,6 +1015,16 @@ export class Launcher {
   ): Promise<void> {
     if (this.#child !== child || this.#stopping) return;
     this.#child = null;
+    if (code === STATE_DIR_OWNED_EXIT_CODE) {
+      await this.#idleWhileStateDirOwned();
+      return;
+    }
+    if (this.#stopRequested || (await pathExists(stopMarkerPath(this.#baseDir)))) {
+      this.#clearTimer();
+      this.#done = true;
+      this.#completion.resolve();
+      return;
+    }
     if (child.role === "trial") {
       this.#clearTimer();
       const pending = this.#state.update;
@@ -599,7 +1045,45 @@ export class Launcher {
       await this.#startTrial(pending);
       return;
     }
+    const probation = this.#state.probation;
+    if (pending?.status === "committed" && probation !== undefined) {
+      if ((child.exitedAt ?? this.#now()) < probation.deadline) {
+        await this.#returnToPrevious(
+          { ...pending, status: "pending", dbPath: probation.dbPath },
+          "rolled-back",
+          `probation-exit:${String(code ?? signal ?? "unknown")}`,
+        );
+        return;
+      }
+      await this.#finishProbation();
+    }
     throw new Error(`Active child exited unexpectedly (${String(code ?? signal ?? "unknown")}).`);
+  }
+
+  /**
+   * Exiting would make systemd or launchd start another refused server, so stay
+   * idle until stopped or restarted. A pending update fails without restoring
+   * its backup: the other owner may have written to the database since.
+   */
+  async #idleWhileStateDirOwned(): Promise<void> {
+    this.#clearTimer();
+    const pending = this.#state.update;
+    if (pending?.status === "pending") {
+      const next: ServiceState = {
+        ...this.#state,
+        activeVersion: pending.fromVersion,
+        update: terminalUpdate({ pending, status: "failed", reason: "state-dir-owned" }),
+      };
+      await writeServiceState(this.#statePath, next);
+      this.#state = next;
+      await discardDatabaseBackup(this.#baseDir, pending.id).catch(() => undefined);
+    }
+    await this.#resumeProbation();
+    // Signal listeners alone do not keep Node alive.
+    this.#timer = setInterval(() => {}, 2_147_483_647);
+    process.stderr.write(
+      "[service-launcher] Another GOAT server owns this GOAT home. Stop it, then restart this service.\n",
+    );
   }
 
   async #returnToPrevious(
@@ -608,14 +1092,39 @@ export class Launcher {
     reason: string,
     child?: ManagedChild,
   ): Promise<void> {
+    this.#clearTimer();
+    if (this.#state.probation !== undefined) {
+      // Recovery must finish this rollback even if the lock stays busy past the deadline.
+      const next = {
+        ...this.#state,
+        probation: { ...this.#state.probation, rollbackReason: reason },
+      };
+      await writeServiceState(this.#statePath, next);
+      this.#state = next;
+    }
     if (child !== undefined) {
       this.#child = null;
       await terminateChild(child.process);
     }
-    await restoreDatabaseBackup(this.#baseDir, pending);
-    const outcome = terminalUpdate({ pending, status, reason });
+    const restore = await restoreDatabaseBackup(this.#baseDir, pending);
+    if (restore === "busy") {
+      // Another server owns the userdata. Starting the previous version would
+      // skip the restore, so retry until the lock frees up.
+      this.#clearTimer();
+      this.#timer = setTimeout(
+        () => this.#enqueue(() => this.#returnToPrevious(pending, status, reason)),
+        RESTORE_RETRY_MS,
+      );
+      return;
+    }
+    const outcome = terminalUpdate({
+      pending,
+      status,
+      reason: restore === "kept" ? `${reason};db-kept-for-other-server` : reason,
+    });
+    const { probation: _probation, ...state } = this.#state;
     const next: ServiceState = {
-      ...this.#state,
+      ...state,
       activeVersion: pending.fromVersion,
       update: outcome,
     };
@@ -627,9 +1136,12 @@ export class Launcher {
 }
 
 export async function main(): Promise<void> {
-  const baseDir = process.env.T3CODE_HOME?.trim();
+  // Units installed before the GOAT rename set only legacy names, and the retained server
+  // versions this launcher starts may be older builds that read only those: carry both.
+  Object.assign(process.env, withLegacyEnvNames(adoptLegacyEnv(process.env)));
+  const baseDir = process.env.GOAT_HOME?.trim();
   if (baseDir === undefined || baseDir === "") {
-    throw new Error("T3CODE_HOME is required by the GOAT service launcher.");
+    throw new Error("GOAT_HOME is required by the GOAT service launcher.");
   }
   const statePath = NodePath.join(baseDir, "runtime", SERVICE_STATE_FILE);
   const state = await readServiceState(statePath);

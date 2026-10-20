@@ -1,3 +1,4 @@
+import { useAtomValue } from "@effect/atom-react";
 import {
   SECRET_REQUEST_DEFAULT_PLACEHOLDER,
   SECRET_REQUEST_PRIVACY_NOTE,
@@ -5,13 +6,13 @@ import {
   secretRequestDisplay,
   secretRequestFailureMessage,
   type SecretRequestItem,
-} from "@t3tools/client-runtime/secret-request";
+} from "@goat/client-runtime/secret-request";
 import {
   isAtomCommandInterrupted,
   squashAtomCommandFailure,
-} from "@t3tools/client-runtime/state/runtime";
-import type { EnvironmentId, OrchestrationV2ProjectedTurnItem } from "@t3tools/contracts";
-import { CheckIcon, LockIcon, MinusIcon, ShieldCheckIcon } from "lucide-react";
+} from "@goat/client-runtime/state/runtime";
+import type { EnvironmentId, OrchestrationV2ProjectedTurnItem } from "@goat/contracts";
+import { CheckIcon, LockIcon, MinusIcon, ShieldCheckIcon } from "~/components/solar";
 import { useId, useRef, useState, type FormEvent } from "react";
 
 import { serverEnvironment } from "../../state/server";
@@ -20,11 +21,6 @@ import { Button } from "../ui/button";
 import { Input } from "../ui/input";
 import { WorkLogRow } from "./WorkLog";
 
-/**
- * Inline card for a secret an agent asked the user for. The typed value lives
- * only in this component's state and the RPC payload: it is never logged,
- * toasted, or persisted, and the field clears once the answer is sent.
- */
 export function SecretRequestCard(props: {
   readonly environmentId: EnvironmentId;
   readonly item: SecretRequestItem;
@@ -59,6 +55,24 @@ function PendingSecretRequestForm(props: {
   readonly item: SecretRequestItem;
 }) {
   const { item } = props;
+  const canAnswer = useAtomValue(
+    serverEnvironment.answerSecretRequest.permissionAtom(props.environmentId),
+  );
+  const open = useAtomCommand(serverEnvironment.openHandoff, {
+    label: "open secret handoff",
+    reportFailure: false,
+    reportDefect: false,
+  });
+  const opened = useRef(false);
+  const markOpened = () => {
+    if (!opened.current && item.handoff?.state === "pending" && canAnswer) {
+      opened.current = true;
+      void open({
+        environmentId: props.environmentId,
+        input: { threadId: item.threadId, handoffId: item.id },
+      });
+    }
+  };
   const inputId = useId();
   const errorId = useId();
   const privacyId = useId();
@@ -87,7 +101,6 @@ function PendingSecretRequestForm(props: {
       setSubmitting(false);
     });
     if (result._tag === "Success") {
-      // The card switches to its answered row once the item updates.
       setSecret("");
       return;
     }
@@ -101,16 +114,13 @@ function PendingSecretRequestForm(props: {
     void send({ type: "save", secret });
   };
 
-  // Same hierarchy as a chat card: what is asked, why, the field, then the
-  // promise about where the value goes.
   return (
     <form
       data-v2-item-type={item.type}
       className="flex min-w-0 flex-col gap-3 rounded-xl border border-border/60 bg-card p-4"
       onSubmit={onSubmit}
+      onFocusCapture={markOpened}
       autoComplete="off"
-      // A click anywhere on the card targets its field, so a paste that
-      // follows lands here rather than with the composer.
       onPointerDown={(event) => {
         if (!(event.target instanceof HTMLElement)) return;
         if (event.target.closest("input, button, a")) return;
@@ -141,13 +151,13 @@ function PendingSecretRequestForm(props: {
             data-bwignore
             placeholder={item.placeholder ?? SECRET_REQUEST_DEFAULT_PLACEHOLDER}
             value={secret}
-            disabled={submitting}
+            disabled={!canAnswer || submitting}
             aria-invalid={error !== null || undefined}
             aria-describedby={error !== null ? `${privacyId} ${errorId}` : privacyId}
             onChange={(event) => setSecret(event.currentTarget.value)}
           />
         </div>
-        <Button type="submit" disabled={submitting || secret.trim().length === 0}>
+        <Button type="submit" disabled={!canAnswer || submitting || secret.trim().length === 0}>
           Save securely
         </Button>
       </div>
@@ -168,7 +178,7 @@ function PendingSecretRequestForm(props: {
           type="button"
           size="xs"
           variant="ghost-muted"
-          disabled={submitting}
+          disabled={!canAnswer || submitting}
           onClick={() => void send({ type: "decline" })}
         >
           Decline

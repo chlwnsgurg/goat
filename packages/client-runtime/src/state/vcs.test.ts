@@ -5,7 +5,7 @@ import {
   WS_METHODS,
   type VcsListRefsInput,
   type VcsListRefsResult,
-} from "@t3tools/contracts";
+} from "@goat/contracts";
 import { describe, expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
@@ -646,8 +646,6 @@ describe("cached VCS refs", () => {
   );
 });
 
-// Transport fixtures have a source-control-only session; authorization edge cases
-// are exercised by commandPermissions.test.ts.
 vi.mock("./session.ts", () => ({
   createEnvironmentSessionAtoms: () => ({ sessionStateAtom: grantedSessions }),
 }));

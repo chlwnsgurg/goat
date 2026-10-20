@@ -1,0 +1,168 @@
+import type {
+  HostStatusEntry,
+  HostStatusQuota,
+  HostThreadCounts,
+  RuntimeProtocolRanges,
+  ServerProvider,
+  ServerProviderUsageLimits,
+} from "@goat/contracts";
+import { GoatHostStatusResult } from "@goat/contracts";
+import { hostCompatibilityOf } from "@goat/shared/sshRuntimeProtocol";
+
+/** Active work this machine should show. Archived, deleted, and subagent threads are omitted. */
+export interface HostThreadCountSource {
+  readonly deletedAt: unknown;
+  readonly archivedAt: unknown;
+  readonly lineage: { readonly relationshipToParent: string | null };
+  readonly activityRunStatus?: "preparing" | "starting" | "running" | "waiting" | null | undefined;
+  readonly status: string;
+  readonly pendingRuntimeRequest?: unknown;
+}
+
+const RUNNING = new Set(["preparing", "starting", "running"]);
+
+export function countHostThreads(threads: ReadonlyArray<HostThreadCountSource>): HostThreadCounts {
+  const counts = { running: 0, waiting: 0, queued: 0 };
+  for (const thread of threads) {
+    if (thread.deletedAt != null || thread.archivedAt != null) continue;
+    if (thread.lineage.relationshipToParent === "subagent") continue;
+    const activity = thread.activityRunStatus ?? null;
+    if (
+      activity === "waiting" ||
+      thread.status === "waiting" ||
+      thread.pendingRuntimeRequest != null
+    ) {
+      counts.waiting += 1;
+    } else if (RUNNING.has(activity ?? "") || RUNNING.has(thread.status)) {
+      counts.running += 1;
+    } else if (thread.status === "queued") {
+      counts.queued += 1;
+    }
+  }
+  return counts;
+}
+
+/** A remote GOAT that answered, but does not implement this tool. */
+export function isUnsupportedHostStatusMessage(message: string): boolean {
+  return /tool ['"]goat_host_status['"] not found|does not have goat_host_status/i.test(message);
+}
+
+export function clipHostStatusMessage(message: string): string {
+  return Array.from(message).slice(0, 500).join("");
+}
+
+const UNSUPPORTED_MESSAGE = (host: string) =>
+  `GOAT on ${host} does not offer goat_host_status. Update GOAT on that machine.`;
+
+/** The remote answered for itself (`host: null`). Tag that entry with the SSH alias. */
+export function tagRemoteHostStatus(result: GoatHostStatusResult, host: string): HostStatusEntry {
+  const entry = result.hosts.find((candidate) => candidate.host === null) ?? result.hosts[0];
+  if (entry === undefined) {
+    return {
+      host,
+      reachability: "unreachable",
+      message: `${host} returned no host status.`,
+    };
+  }
+  return { ...entry, host };
+}
+
+export function unsupportedHostStatus(host: string): HostStatusEntry {
+  return {
+    host,
+    reachability: "unsupported",
+    message: UNSUPPORTED_MESSAGE(host),
+  };
+}
+
+const formatRanges = (protocol: RuntimeProtocolRanges) => {
+  const range = ({ min, max }: { readonly min: number; readonly max: number }) =>
+    min === max ? `${min}` : `${min}-${max}`;
+  return `orchestration ${range(protocol.orchestration)}, SSH ${range(protocol.ssh)}`;
+};
+
+/**
+ * Judges a reachable remote against this machine by the protocols it serves. `versionMismatch`
+ * still marks a different build (or none reported) for older readers; only an incompatible or
+ * unprovable host gets a warning message.
+ */
+export function markHostCompatibility(
+  entry: HostStatusEntry,
+  local: { readonly version: string; readonly speaks: RuntimeProtocolRanges },
+): HostStatusEntry {
+  if (entry.reachability !== "ok" || entry.host === null) return entry;
+  const { message: _remoteMessage, ...rest } = entry;
+  const verdict = hostCompatibilityOf(local.speaks, entry);
+  const marked: HostStatusEntry = {
+    ...rest,
+    ...(entry.serverVersion === local.version ? {} : { versionMismatch: true as const }),
+    compatibility: verdict.compatibility,
+  };
+  const remote =
+    entry.serverVersion === undefined
+      ? "an older GOAT that does not report its version"
+      : `GOAT ${entry.serverVersion}`;
+  const here = `this machine runs GOAT ${local.version} (${formatRanges(local.speaks)})`;
+  switch (verdict.compatibility) {
+    case "compatible":
+      return marked;
+    case "degraded":
+      return {
+        ...marked,
+        message: `${entry.host} runs ${remote}, which does not report the protocols it serves, so compatibility with this machine cannot be confirmed. Status works; update GOAT on ${entry.host} to confirm the rest.`,
+      };
+    case "incompatible":
+      return {
+        ...marked,
+        message: `${entry.host} runs ${remote}, serving ${entry.protocol === undefined ? "unknown protocols" : formatRanges(entry.protocol)}; ${here}. They cannot work together. Update GOAT on ${verdict.update === "this-machine" ? "this machine" : entry.host}.`,
+      };
+  }
+}
+
+export function unreachableHostStatus(
+  host: string | null,
+  message: string,
+  previous: HostStatusEntry | undefined,
+): HostStatusEntry {
+  const metrics = previous?.reachability === "ok" ? previous.metrics : undefined;
+  return {
+    host,
+    reachability: "unreachable",
+    ...(metrics === undefined ? {} : { lastKnown: true as const, metrics }),
+    message: clipHostStatusMessage(message),
+  };
+}
+
+/** How long a status read waits before probing provider CLIs again. */
+export const HOST_STATUS_QUOTA_REFRESH_INTERVAL_MS = 60_000;
+
+export function quotaRefreshDue(
+  limits: ServerProviderUsageLimits | undefined,
+  nowMs: number,
+  intervalMs: number,
+): boolean {
+  if (limits === undefined || limits.unavailable?.reason === "unsupported") return false;
+  const checkedAt = Date.parse(limits.checkedAt);
+  if (!Number.isFinite(checkedAt)) return true;
+  return nowMs - checkedAt >= intervalMs;
+}
+
+export function hostStatusQuotas(
+  providers: ReadonlyArray<
+    Pick<ServerProvider, "instanceId" | "driver" | "displayName" | "usageLimits">
+  >,
+  refreshed: ReadonlySet<string>,
+): Array<HostStatusQuota> {
+  return providers.flatMap((provider) => {
+    if (provider.usageLimits === undefined) return [];
+    return [
+      {
+        instanceId: provider.instanceId,
+        driver: provider.driver,
+        ...(provider.displayName === undefined ? {} : { displayName: provider.displayName }),
+        limits: provider.usageLimits,
+        fromCache: !refreshed.has(provider.instanceId),
+      },
+    ];
+  });
+}

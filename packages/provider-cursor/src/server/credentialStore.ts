@@ -1,11 +1,11 @@
 import type { SdkCredentialStore } from "@cursor/sdk";
-import { ProviderSetupError, type ProviderInstanceId } from "@t3tools/contracts";
+import { ProviderSetupError, type ProviderInstanceId } from "@goat/contracts";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 
-import * as ProviderHost from "@t3tools/provider-core/server/ProviderHost";
+import * as ProviderHost from "@goat/provider-core/server/ProviderHost";
 
 const Credentials = Schema.fromJsonString(
   Schema.Struct({
@@ -21,11 +21,6 @@ const Credentials = Schema.fromJsonString(
 const decodeCredentials = Schema.decodeUnknownEffect(Credentials);
 const encodeCredentials = Schema.encodeEffect(Credentials);
 
-/**
- * The SDK owns the credential format; persistence uses the environment's secret store.
- * `legacyFile` is the SDK file store earlier versions used; its sign-in moves into
- * the secret store once and the file is deleted.
- */
 export const makeCursorCredentialStore = Effect.fn("makeCursorCredentialStore")(function* (
   instanceId: ProviderInstanceId,
   legacyFile?: string,
@@ -36,7 +31,6 @@ export const makeCursorCredentialStore = Effect.fn("makeCursorCredentialStore")(
     yield* Effect.gen(function* () {
       const legacy = yield* fileSystem.readFileString(legacyFile).pipe(Effect.option);
       if (Option.isNone(legacy)) return;
-      // A stored sign-in wins unless it is damaged; the SDK would ignore it anyway.
       const stored = yield* credentials.get;
       const storedIsValid =
         Option.isSome(stored) &&

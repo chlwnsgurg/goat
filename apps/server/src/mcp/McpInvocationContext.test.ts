@@ -1,3 +1,4 @@
+import { sessionGrantsScope } from "@goat/contracts";
 import { expect, it } from "@effect/vitest";
 import {
   EnvironmentId,
@@ -5,7 +6,7 @@ import {
   PreviewAutomationUnavailableError,
   ProviderInstanceId,
   ThreadId,
-} from "@t3tools/contracts";
+} from "@goat/contracts";
 import * as Effect from "effect/Effect";
 
 import * as McpInvocationContext from "./McpInvocationContext.ts";
@@ -20,7 +21,7 @@ it.effect("reports the scoped credential context when preview capability is unav
       providerInstanceId: ProviderInstanceId.make("codex"),
     },
     client: undefined,
-    capabilities: new Set(),
+    capabilities: new Set<McpInvocationContext.McpCapability>(),
     issuedAt: 1,
   };
 
@@ -95,4 +96,43 @@ it.effect("refuses thread-owned capabilities to a caller signed in from outside 
     expect(error).toMatchObject({ capability: "preview", environmentId: "environment-1" });
     expect(error.threadId).toBeUndefined();
   });
+});
+
+const memoryInvocation: McpInvocationContext.McpInvocationScope = {
+  environmentId: EnvironmentId.make("env"),
+  requestNamespace: "memory-fixture",
+  thread: undefined,
+  client: { sessionId: "session", label: "Synthetic", access: "full-access" },
+  capabilities: new Set(["memory"]),
+  issuedAt: 1,
+};
+it.effect("reports missing memory capability with neutral error", () =>
+  Effect.gen(function* () {
+    const error = yield* McpInvocationContext.requireMcpCapability("memory").pipe(
+      Effect.provideService(McpInvocationContext.McpInvocationContext, {
+        ...memoryInvocation,
+        capabilities: new Set<McpInvocationContext.McpCapability>(),
+      }),
+      Effect.flip,
+    );
+    expect(error).toBeInstanceOf(McpCapabilityUnavailableError);
+    expect(error.message).toBe("MCP credential does not grant the memory capability.");
+  }),
+);
+it.effect("accepts memory capability without granting write permission", () =>
+  Effect.gen(function* () {
+    const scope = yield* McpInvocationContext.requireMcpCapability("memory").pipe(
+      Effect.provideService(McpInvocationContext.McpInvocationContext, memoryInvocation),
+    );
+    expect(scope).toBe(memoryInvocation);
+    expect(
+      sessionGrantsScope({ authenticated: true, permissions: scope.grantedScopes }, "memory:write"),
+    ).toBe(false);
+  }),
+);
+it("leaves omitted permissions denied", () => {
+  expect(memoryInvocation.reauthorize).toBeUndefined();
+  expect(
+    sessionGrantsScope({ authenticated: true, scopes: ["orchestration:operate"] }, "memory:read"),
+  ).toBe(false);
 });

@@ -1,68 +1,73 @@
 import { assert, describe, it } from "@effect/vitest";
 
 import {
-  T3_CODE_ORCHESTRATION_INSTRUCTIONS,
-  t3AcpPromptWithInstructions,
-  t3OrchestrationPromptForFirstRun,
-  t3OrchestrationSystemPrompt,
+  GOAT_ORCHESTRATION_INSTRUCTIONS,
+  goatAcpPromptWithInstructions,
+  goatOrchestrationPromptForFirstRun,
+  goatOrchestrationSystemPrompt,
 } from "./orchestrationInstructions.ts";
 
 describe("T3 orchestration provider instructions", () => {
+  it("instructs every provider to write GOAT thread links", () => {
+    assert.include(GOAT_ORCHESTRATION_INSTRUCTIONS, "[title](goat-thread://v1/<threadId>)");
+    assert.notInclude(GOAT_ORCHESTRATION_INSTRUCTIONS, "t3-thread://");
+  });
+
   it("distinguishes delegated subagents from ordinary top-level threads", () => {
-    assert.include(T3_CODE_ORCHESTRATION_INSTRUCTIONS, "Use `delegate_task`");
-    assert.include(T3_CODE_ORCHESTRATION_INSTRUCTIONS, "ordinary top-level GOAT conversations");
-    assert.include(T3_CODE_ORCHESTRATION_INSTRUCTIONS, "never use these tools merely");
-    assert.include(T3_CODE_ORCHESTRATION_INSTRUCTIONS, "cross-provider");
-    assert.include(T3_CODE_ORCHESTRATION_INSTRUCTIONS, "call `delegate_task` again");
+    assert.include(GOAT_ORCHESTRATION_INSTRUCTIONS, "Use `delegate_task`");
+    assert.include(GOAT_ORCHESTRATION_INSTRUCTIONS, "ordinary top-level GOAT conversations");
+    assert.include(GOAT_ORCHESTRATION_INSTRUCTIONS, "never use these tools merely");
+    assert.include(GOAT_ORCHESTRATION_INSTRUCTIONS, "cross-provider");
+    assert.include(GOAT_ORCHESTRATION_INSTRUCTIONS, "call `delegate_task` again");
     assert.include(
-      T3_CODE_ORCHESTRATION_INSTRUCTIONS,
+      GOAT_ORCHESTRATION_INSTRUCTIONS,
       "Do not use `goat_thread_send` on `childThreadId`",
     );
   });
 
   it("sends goal-owning and looping work to a top-level thread", () => {
-    assert.include(T3_CODE_ORCHESTRATION_INSTRUCTIONS, "bounded child work");
+    assert.include(GOAT_ORCHESTRATION_INSTRUCTIONS, "bounded child work");
     assert.include(
-      T3_CODE_ORCHESTRATION_INSTRUCTIONS,
+      GOAT_ORCHESTRATION_INSTRUCTIONS,
       "for work that owns a goal, runs a loop (HOTL, `cxc-loop`, repeated PABCD), or spans several cycles",
     );
   });
 
   it("documents structured schedules instead of JSON strings", () => {
-    assert.include(T3_CODE_ORCHESTRATION_INSTRUCTIONS, "structured object, never as JSON text");
-    assert.include(T3_CODE_ORCHESTRATION_INSTRUCTIONS, '"everyMs":3600000');
-    assert.include(T3_CODE_ORCHESTRATION_INSTRUCTIONS, "bindToCurrentThread=false");
+    assert.include(GOAT_ORCHESTRATION_INSTRUCTIONS, "structured object, never as JSON text");
+    assert.include(GOAT_ORCHESTRATION_INSTRUCTIONS, '"everyMs":3600000');
+    assert.include(GOAT_ORCHESTRATION_INSTRUCTIONS, "bindToCurrentThread=false");
   });
 
   it("injects prompt fallback only for an MCP-enabled first run", () => {
     const prompt = "Inspect the repository.";
-    const injected = t3OrchestrationPromptForFirstRun({
+    const injected = goatOrchestrationPromptForFirstRun({
       prompt,
       runOrdinal: 1,
-      hasT3Mcp: true,
+      hasGoatMcp: true,
     });
 
     assert.include(injected, "<t3_code_orchestration_instructions>");
     assert.include(injected, `<user_request>\n${prompt}\n</user_request>`);
     assert.equal(
-      t3OrchestrationPromptForFirstRun({ prompt, runOrdinal: 2, hasT3Mcp: true }),
+      goatOrchestrationPromptForFirstRun({ prompt, runOrdinal: 2, hasGoatMcp: true }),
       prompt,
     );
     assert.equal(
-      t3OrchestrationPromptForFirstRun({ prompt, runOrdinal: 1, hasT3Mcp: false }),
+      goatOrchestrationPromptForFirstRun({ prompt, runOrdinal: 1, hasGoatMcp: false }),
       prompt,
     );
   });
 
   it("only exposes the system prompt when the T3 MCP server is attached", () => {
-    assert.equal(t3OrchestrationSystemPrompt(false), undefined);
-    assert.equal(t3OrchestrationSystemPrompt(true), T3_CODE_ORCHESTRATION_INSTRUCTIONS);
+    assert.equal(goatOrchestrationSystemPrompt(false), undefined);
+    assert.equal(goatOrchestrationSystemPrompt(true), GOAT_ORCHESTRATION_INSTRUCTIONS);
   });
 
   it("gives ACP sessions provider-neutral mode, browser, and orchestration guidance", () => {
-    const injected = t3AcpPromptWithInstructions({
+    const injected = goatAcpPromptWithInstructions({
       prompt: "Inspect the repository.",
-      state: { interactionMode: "default", hasT3Mcp: true },
+      state: { interactionMode: "default", hasGoatMcp: true },
     });
 
     assert.include(injected, "GOAT interaction mode: Default");
@@ -73,23 +78,23 @@ describe("T3 orchestration provider instructions", () => {
 
   it("reinjects ACP guidance only when mode or tool availability changes", () => {
     const prompt = "Continue.";
-    const defaultState = { interactionMode: "default", hasT3Mcp: true } as const;
+    const defaultState = { interactionMode: "default", hasGoatMcp: true } as const;
 
     assert.equal(
-      t3AcpPromptWithInstructions({ prompt, state: defaultState, previousState: defaultState }),
+      goatAcpPromptWithInstructions({ prompt, state: defaultState, previousState: defaultState }),
       prompt,
     );
     assert.include(
-      t3AcpPromptWithInstructions({
+      goatAcpPromptWithInstructions({
         prompt,
         state: { ...defaultState, interactionMode: "plan" },
         previousState: defaultState,
       }),
       "GOAT interaction mode: Plan",
     );
-    const withoutMcp = t3AcpPromptWithInstructions({
+    const withoutMcp = goatAcpPromptWithInstructions({
       prompt,
-      state: { interactionMode: "default", hasT3Mcp: false },
+      state: { interactionMode: "default", hasGoatMcp: false },
     });
     assert.include(withoutMcp, "GOAT interaction mode: Default");
     assert.notInclude(withoutMcp, "GOAT collaborative browser");
@@ -113,6 +118,6 @@ it("explains question decisions and question-aware waits", () => {
     'SSH-host questions then need `goat_thread_wait({host})` or `goat_pending_request_list({scope:"launched", hosts})`. Approvals are no longer reported; check `goat_thread_read` or tell the user the thread may be waiting.',
     "Forward to the user any decision your own user has not authorized, such as pushing, deploying, sending outside, or starting new work beyond the request.",
   ]) {
-    assert.include(T3_CODE_ORCHESTRATION_INSTRUCTIONS, text);
+    assert.include(GOAT_ORCHESTRATION_INSTRUCTIONS, text);
   }
 });

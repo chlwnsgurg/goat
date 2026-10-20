@@ -1,18 +1,60 @@
 import * as Schema from "effect/Schema";
 import { GitPreparePullRequestThreadInput } from "./git.ts";
 import {
+  AuthMemoryReadScope,
+  AuthMemoryWriteScope,
+  AuthFilesystemReadScope,
+  AuthOrchestrationReadScope,
   AuthOrchestrationOperateScope,
+  AuthProvidersManageScope,
   AuthSettingsWriteScope,
+  AuthEnvironmentMaintainScope,
   AuthSourceControlWriteScope,
   type AuthEnvironmentScope,
 } from "./auth.ts";
 import { CHANNEL_GATEWAY_WS_METHODS } from "./channelGateway.ts";
+import { ORCHESTRATION_V2_WS_METHODS } from "./orchestrationV2.ts";
 import { WS_METHODS } from "./rpc.ts";
 import { SLACK_CHANNEL_WS_METHODS } from "./slackChannel.ts";
 
 /** Incremental client enforcement; the server still authorizes every request. */
 export const CLIENT_GUARDED_RPC_SCOPES = {
+  [WS_METHODS.sshHostStatus]: AuthOrchestrationReadScope,
+  [WS_METHODS.providerHostMatrix]: AuthOrchestrationReadScope,
+  [WS_METHODS.providerHostSyncStart]: AuthProvidersManageScope,
+  [WS_METHODS.providerHostSyncStatus]: AuthOrchestrationReadScope,
+  [WS_METHODS.providerHostSyncCancel]: AuthProvidersManageScope,
+  [WS_METHODS.sshHostHandoffProgress]: AuthOrchestrationReadScope,
+  [WS_METHODS.sshHostProbe]: AuthSettingsWriteScope,
+  [WS_METHODS.sshHostTrust]: AuthSettingsWriteScope,
+  [WS_METHODS.sshHostPrepare]: AuthEnvironmentMaintainScope,
+  [WS_METHODS.sshHostForget]: AuthSettingsWriteScope,
+  [WS_METHODS.handoffsOpen]: AuthOrchestrationOperateScope,
+  [WS_METHODS.handoffsRespond]: AuthOrchestrationOperateScope,
+  [WS_METHODS.secretsAnswerRequest]: AuthOrchestrationOperateScope,
+  [WS_METHODS.memorySearch]: AuthMemoryReadScope,
+  [WS_METHODS.memoryList]: AuthMemoryReadScope,
+  [WS_METHODS.memoryRead]: AuthMemoryReadScope,
+  [WS_METHODS.memoryHistory]: AuthMemoryReadScope,
+  [WS_METHODS.memoryResetReportAttempts]: AuthSettingsWriteScope,
+  [WS_METHODS.memoryHubReconcile]: AuthSettingsWriteScope,
+  [WS_METHODS.memoryChanges]: AuthMemoryReadScope,
+  [WS_METHODS.memoryHubDiagnostics]: AuthMemoryReadScope,
+  [WS_METHODS.memorySyncStatus]: AuthMemoryReadScope,
+  [WS_METHODS.memoryOwnerSourceReadPolicyGet]: AuthSettingsWriteScope,
+  [WS_METHODS.memoryOwnerSourceReadPolicyUpdate]: AuthSettingsWriteScope,
+  [WS_METHODS.memoryUpsert]: AuthMemoryWriteScope,
+  [WS_METHODS.memoryForget]: AuthMemoryWriteScope,
+  [WS_METHODS.memoryRevertResolution]: AuthMemoryWriteScope,
+  [WS_METHODS.memoryImportProvider]: AuthMemoryWriteScope,
+  [WS_METHODS.memoryProjectBindingGet]: AuthMemoryWriteScope,
+  [WS_METHODS.memoryProjectBindingUpdate]: AuthMemoryWriteScope,
+  [WS_METHODS.memoryHubSettingsGet]: AuthSettingsWriteScope,
+  [WS_METHODS.memoryHubSettingsUpdate]: AuthSettingsWriteScope,
+  [WS_METHODS.memoryReadSource]: AuthMemoryReadScope,
+
   [WS_METHODS.serverRunStorageCleanup]: AuthSettingsWriteScope,
+  [WS_METHODS.serverCheckOtlpEndpoint]: AuthSettingsWriteScope,
   [WS_METHODS.pullRequestsRunAction]: AuthSourceControlWriteScope,
   [WS_METHODS.pullRequestsUpdate]: AuthSourceControlWriteScope,
   [WS_METHODS.pullRequestsComment]: AuthSourceControlWriteScope,
@@ -24,6 +66,8 @@ export const CLIENT_GUARDED_RPC_SCOPES = {
   [WS_METHODS.pullRequestsSetFilesViewed]: AuthSourceControlWriteScope,
   [WS_METHODS.pullRequestsRequestReviewers]: AuthSourceControlWriteScope,
   [WS_METHODS.pullRequestsSetLabels]: AuthSourceControlWriteScope,
+  // Writing a guide runs a model on this environment's providers, which reading one does not.
+  [WS_METHODS.pullRequestsGenerateReviewGuide]: AuthOrchestrationOperateScope,
   [WS_METHODS.sourceControlCloneRepository]: AuthSourceControlWriteScope,
   [WS_METHODS.sourceControlPublishRepository]: AuthSourceControlWriteScope,
   [WS_METHODS.projectCloneStart]: AuthSourceControlWriteScope,
@@ -52,6 +96,17 @@ export const CLIENT_GUARDED_RPC_SCOPES = {
   [CHANNEL_GATEWAY_WS_METHODS.unlinkIdentity]: AuthSettingsWriteScope,
   [SLACK_CHANNEL_WS_METHODS.configure]: AuthSettingsWriteScope,
   [SLACK_CHANNEL_WS_METHODS.disconnect]: AuthSettingsWriteScope,
+  // Boat machines bill the owner's account, so every lifecycle change needs settings write.
+  [WS_METHODS.cloudMachinesConfigure]: AuthSettingsWriteScope,
+  [WS_METHODS.cloudMachinesDisconnect]: AuthSettingsWriteScope,
+  [WS_METHODS.cloudMachinesCreate]: AuthSettingsWriteScope,
+  [WS_METHODS.cloudMachinesStop]: AuthSettingsWriteScope,
+  [WS_METHODS.cloudMachinesResume]: AuthSettingsWriteScope,
+  [WS_METHODS.cloudMachinesDelete]: AuthSettingsWriteScope,
+  [WS_METHODS.cloudMachinesForget]: AuthSettingsWriteScope,
+  [WS_METHODS.cloudMachinesDismissUnconfirmed]: AuthSettingsWriteScope,
+  [WS_METHODS.cloudMachinesEnsureReady]: AuthSettingsWriteScope,
+  [ORCHESTRATION_V2_WS_METHODS.stopWorkflow]: AuthOrchestrationOperateScope,
 } as const;
 export type ClientGuardedRpcTag = keyof typeof CLIENT_GUARDED_RPC_SCOPES;
 
@@ -61,6 +116,10 @@ export function clientRpcRequiredScopes(
   method: string,
   input: unknown,
 ): readonly AuthEnvironmentScope[] {
+  if (method === WS_METHODS.memoryImportProvider)
+    return [AuthMemoryWriteScope, AuthFilesystemReadScope];
+  if (method === WS_METHODS.memoryReadSource)
+    return [AuthMemoryReadScope, AuthOrchestrationReadScope];
   if (method === WS_METHODS.sshWorkspaceLaunch)
     return [AuthSourceControlWriteScope, AuthOrchestrationOperateScope];
   if (method === WS_METHODS.gitPreparePullRequestThread && input !== undefined) {

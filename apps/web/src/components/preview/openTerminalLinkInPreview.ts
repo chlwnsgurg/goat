@@ -1,5 +1,5 @@
-import type { ScopedThreadRef } from "@t3tools/contracts";
-import { isAtomCommandInterrupted } from "@t3tools/client-runtime/state/runtime";
+import type { ScopedThreadRef } from "@goat/contracts";
+import { isAtomCommandInterrupted } from "@goat/client-runtime/state/runtime";
 import * as Schema from "effect/Schema";
 
 import {
@@ -35,14 +35,9 @@ interface OpenTerminalLinkInPreviewInput<E> {
   readonly threadRef: ScopedThreadRef;
   readonly openPreview: OpenPreviewMutation<E>;
   readonly fallbackToBrowser: () => void;
-  /** Cmd/Ctrl-click bypasses the preference and opens in the system browser. */
   readonly forceBrowser: boolean;
 }
 
-/**
- * Opens a terminal hyperlink where the "Open links in" setting says, unless a
- * Cmd/Ctrl-click explicitly requests the system browser.
- */
 export async function openTerminalLinkInPreview<E>(
   input: OpenTerminalLinkInPreviewInput<E>,
 ): Promise<void> {
@@ -71,8 +66,6 @@ export async function openTerminalLinkInPreview<E>(
     input: {
       threadId: input.threadRef.threadId,
       url: input.url,
-      // Same reason as `openUrlInPreview`: this path handles its own result
-      // mapping, so the configured defaults are applied explicitly.
       viewport: browserDefaultOpenViewport(defaults),
       profileId: browserDefaultOpenProfileId(defaults),
       ...(runtime === undefined ? {} : { runtime }),

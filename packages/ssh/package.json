@@ -1,5 +1,5 @@
 {
-  "name": "@t3tools/ssh",
+  "name": "@goat/ssh",
   "private": true,
   "type": "module",
   "exports": {
@@ -19,18 +19,22 @@
       "types": "./src/errors.ts",
       "import": "./src/errors.ts"
     },
+    "./hostKey": {
+      "types": "./src/hostKey.ts",
+      "import": "./src/hostKey.ts"
+    },
     "./tunnel": {
       "types": "./src/tunnel.ts",
       "import": "./src/tunnel.ts"
     }
   },
   "scripts": {
-    "typecheck": "tsc --noEmit",
-    "test": "vp test run --config ../../vite.config.ts --dir ."
+    "typecheck": "tsc-rs --noEmit",
+    "test": "vp test run --config ../../vite.config.ts --dir . --testTimeout 180000"
   },
   "dependencies": {
-    "@t3tools/contracts": "workspace:*",
-    "@t3tools/shared": "workspace:*",
+    "@goat/contracts": "workspace:*",
+    "@goat/shared": "workspace:*",
     "effect": "catalog:"
   },
   "devDependencies": {

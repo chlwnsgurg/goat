@@ -15,7 +15,7 @@ import {
   type ChannelIngestResult,
   type ChannelTask,
   type OrchestrationV2ProjectedTurnItem,
-} from "@t3tools/contracts";
+} from "@goat/contracts";
 import * as Schema from "effect/Schema";
 import { act, useState, useSyncExternalStore, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
@@ -27,6 +27,9 @@ const state = vi.hoisted(() => ({
     connected: boolean;
     supportsChannelLedger: boolean;
     primary: boolean;
+    label?: string;
+    homeTarget?: import("@goat/client-runtime/goatBot/home").GoatBotHomeTarget;
+    settingsSnapshot?: object | null;
   }>,
   running: null as RunId | null,
   bootstrapped: true,
@@ -68,6 +71,10 @@ function bumpTick() {
   tickVersion += 1;
   for (const listener of tickListeners) listener();
 }
+vi.mock("./useGoatBotHome", () => ({
+  useGoatBotHome: () => undefined,
+  useGoatBotHomeSettings: () => ({ moveTarget: null, busy: false, error: null }),
+}));
 vi.mock("./goatBotHooks", () => ({
   useGoatBotEnvironments: () => {
     useTick();
@@ -150,6 +157,7 @@ vi.mock("@tanstack/react-router", () => ({
     state.paramsReads();
     return {};
   },
+  useNavigate: () => () => Promise.resolve(),
   Link: ({
     to,
     params,
@@ -390,6 +398,7 @@ beforeEach(() => {
       };
     }),
     ingest: vi.fn(async (_env, input) => receipt(input.idempotencyKey)),
+    getBotStatus: vi.fn(async () => ({ bot: null, waitingCount: 0 })),
     listTasks: vi.fn(async () => ({ tasks: [] })),
     useCanSend: () => {
       useTick();
@@ -577,7 +586,9 @@ it("keeps server reply order, quotes distant input and uses readAt rather than t
     projected("user_message", "A", {
       channel: channel("input-A", { readAt: "2026-10-12T12:07:00.000Z" }),
     }),
-    projected("user_message", "B", { channel: channel("input-B") }),
+    projected("user_message", "B", {
+      channel: channel("input-B", { readAt: "2026-10-12T12:09:00.000Z" }),
+    }),
     projected("assistant_message", "Reply B", {
       channel: channel("reply-B", { kind: "receipt", inReplyToInputId: "input-B" }),
     }),
@@ -597,14 +608,11 @@ it("keeps server reply order, quotes distant input and uses readAt rather than t
   expect(rows.findIndex((row) => row?.includes("Reply B"))).toBeLessThan(
     rows.findIndex((row) => row?.includes("Reply A")),
   );
-  expect(rows.find((row) => row?.endsWith("A"))).toContain(
-    formatShortTimestamp("2026-10-12T12:07:00.000Z", "24-hour"),
-  );
-  expect(container.textContent).toContain("Read");
-  expect(container.textContent).toContain("Sent");
-  expect(container.querySelector(".border-destructive\\/32")?.textContent).toContain(
-    "Intake failed",
-  );
+  // Messages shows one receipt, under the latest outgoing bubble, timed by when the bot read it.
+  const receipt = `Read ${formatShortTimestamp("2026-10-12T12:09:00.000Z", "24-hour")}`;
+  expect(container.textContent).toContain(receipt);
+  expect(container.textContent?.split("Read ").length).toBe(2);
+  expect(container.textContent).toContain("Intake failed");
 });
 
 it("keeps target-specific offline, loading and missing history states with summaries and requester time", async () => {
@@ -658,8 +666,18 @@ it("keeps target-specific offline, loading and missing history states with summa
 
 it("renders an introduction and three actionable examples when ready and empty", async () => {
   await render();
-  expect(container.textContent).toContain("It answers here and starts the work in its own threads");
-  expect(container.querySelectorAll("ul li")).toHaveLength(3);
+  expect(container.textContent).toContain(
+    "Text it like a person. It answers here and does the work in its own threads.",
+  );
+  expect(
+    [...container.querySelectorAll("button")].filter((button) =>
+      [
+        "Fix the flaky test in my project",
+        "Review the latest changes",
+        "How is the work going?",
+      ].includes(button.textContent ?? ""),
+    ),
+  ).toHaveLength(3);
 });
 
 it("respects permission loss without disabling reading", async () => {
@@ -706,15 +724,15 @@ function task(index: number, origin: "goat" | "slack" = "goat"): ChannelTask {
   };
 }
 
-it("counts 101 GOAT waiting tasks across pages, dedupes, shares observers and preserves the last count on errors", async () => {
+it("counts 102 waiting tasks from every channel across pages, dedupes, shares observers and preserves the last count on errors", async () => {
   const page1 = Array.from({ length: 100 }, (_, index) => task(index));
   vi.mocked(port.listTasks)
     .mockResolvedValueOnce({ tasks: page1, nextCursor: "next" })
     .mockResolvedValueOnce({ tasks: [task(99), task(100), task(101, "slack")] });
   await render(true);
   expect([...container.querySelectorAll("output")].map((output) => output.textContent)).toEqual([
-    "101",
-    "101",
+    "102",
+    "102",
   ]);
   expect(port.listTasks).toHaveBeenCalledTimes(2);
   expect(port.listTasks).toHaveBeenLastCalledWith(environmentId, {
@@ -726,7 +744,7 @@ it("counts 101 GOAT waiting tasks across pages, dedupes, shares observers and pr
     .mockResolvedValueOnce({ tasks: [], nextCursor: "error" })
     .mockRejectedValueOnce(new Error("offline"));
   await act(() => window.dispatchEvent(new Event("focus")));
-  expect(container.querySelector("output")?.textContent).toBe("101");
+  expect(container.querySelector("output")?.textContent).toBe("102");
   setConnection(false);
   await render(true);
   expect(container.querySelector("output")?.textContent).toBe("unknown");
@@ -1169,4 +1187,133 @@ it("remounts the thread permission hook when the port is installed and removed",
   provided = null;
   await render(false, false, true);
   expect(textarea().disabled).toBe(true);
+});
+
+it("waits for claim readback before ensure, then ensures on the chosen home", async () => {
+  state.environments = [
+    {
+      ...state.environments[0]!,
+      homeTarget: {
+        environmentId,
+        connected: true,
+        supportsHome: true,
+        supportsBot: true,
+        settingsLoaded: true,
+        home: null,
+      },
+    },
+  ];
+  await render();
+  expect(port.ensureBot).not.toHaveBeenCalled();
+  expect(container.textContent).toContain("Connecting");
+  const claim = { environmentId, claimedAt: 100, claimId: "claim" };
+  state.environments = [
+    {
+      ...state.environments[0]!,
+      homeTarget: { ...state.environments[0]!.homeTarget!, home: claim },
+      settingsSnapshot: { goatBotHome: claim },
+    },
+  ];
+  await render();
+  expect(port.ensureBot).toHaveBeenCalledTimes(1);
+});
+
+it("does not retry not_home on unchanged snapshots, permission changes or reconnect", async () => {
+  const claim = { environmentId, claimedAt: 100, claimId: "claim" };
+  const target = {
+    environmentId,
+    connected: true,
+    supportsHome: true,
+    supportsBot: true,
+    settingsLoaded: true,
+    home: claim,
+  };
+  const settings = { goatBotHome: claim };
+  state.environments = [
+    { ...state.environments[0]!, homeTarget: target, settingsSnapshot: settings },
+  ];
+  vi.mocked(port.ensureBot).mockRejectedValueOnce(
+    new ChannelGatewayError({ reason: "not_home", homeEnvironmentId: EnvironmentId.make("other") }),
+  );
+  await render();
+  expect(port.ensureBot).toHaveBeenCalledTimes(1);
+  expect(container.textContent).toContain("Connecting");
+  await render();
+  permission = false;
+  await render();
+  permission = true;
+  await render();
+  state.environments = [
+    { ...state.environments[0]!, connected: false, homeTarget: { ...target, connected: false } },
+  ];
+  await render();
+  state.environments = [{ ...state.environments[0]!, connected: true, homeTarget: target }];
+  await render();
+  expect(port.ensureBot).toHaveBeenCalledTimes(1);
+  state.environments = [{ ...state.environments[0]!, settingsSnapshot: { ...settings } }];
+  await render();
+  expect(port.ensureBot).toHaveBeenCalledTimes(2);
+});
+
+it("shows a calm named offline home without ensuring on another environment", async () => {
+  const offlineId = EnvironmentId.make("offline-home");
+  const claim = { environmentId: offlineId, claimedAt: 100, claimId: "offline" };
+  state.environments = [
+    {
+      ...state.environments[0]!,
+      homeTarget: {
+        environmentId,
+        connected: true,
+        supportsHome: true,
+        supportsBot: true,
+        settingsLoaded: true,
+        home: claim,
+      },
+    },
+    {
+      environmentId: offlineId,
+      connected: false,
+      supportsChannelLedger: true,
+      primary: false,
+      label: "Office Mac",
+      homeTarget: {
+        environmentId: offlineId,
+        connected: false,
+        supportsHome: true,
+        supportsBot: true,
+        settingsLoaded: true,
+        home: claim,
+      },
+    },
+  ];
+  await render();
+  expect(port.ensureBot).not.toHaveBeenCalled();
+  expect(container.textContent).toContain("GOAT Bot runs on Office Mac, which isn't connected");
+});
+
+it("retries not_home when the winner changes even without a new settings object", async () => {
+  const claim = { environmentId, claimedAt: 100, claimId: "first" };
+  const settings = { goatBotHome: claim };
+  const target = {
+    environmentId,
+    connected: true,
+    supportsHome: true,
+    supportsBot: true,
+    settingsLoaded: true,
+    home: claim,
+  };
+  state.environments = [
+    { ...state.environments[0]!, homeTarget: target, settingsSnapshot: settings },
+  ];
+  vi.mocked(port.ensureBot).mockRejectedValueOnce(new ChannelGatewayError({ reason: "not_home" }));
+  await render();
+  expect(port.ensureBot).toHaveBeenCalledTimes(1);
+  state.environments = [
+    {
+      ...state.environments[0]!,
+      homeTarget: { ...target, home: { ...claim, claimId: "second", claimedAt: 101 } },
+    },
+  ];
+  await render();
+  expect(port.ensureBot).toHaveBeenCalledTimes(2);
 });

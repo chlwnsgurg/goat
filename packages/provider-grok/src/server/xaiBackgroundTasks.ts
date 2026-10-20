@@ -4,7 +4,7 @@ import {
   type ProviderRuntimeTaskProgressEvent,
   type ProviderRuntimeTaskCompletedEvent,
   type TurnId,
-} from "@t3tools/contracts";
+} from "@goat/contracts";
 
 type TaskEvent =
   | Pick<ProviderRuntimeTaskStartedEvent, "type" | "payload" | "turnId">
@@ -57,7 +57,6 @@ function lifecycle(status: unknown, exitCode: unknown) {
   }
 }
 
-/** Map Grok's discriminated tool results, including notifications after the turn ends. */
 export function buildGrokBackgroundTaskEvents(input: {
   readonly tasks: Map<string, GrokBackgroundTaskRecord>;
   readonly toolCallId: string;

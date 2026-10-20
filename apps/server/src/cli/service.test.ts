@@ -1,7 +1,7 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, expect, it } from "@effect/vitest";
-import * as HostProcess from "@t3tools/shared/HostProcess";
-import * as NetService from "@t3tools/shared/Net";
+import * as HostProcess from "@goat/shared/HostProcess";
+import * as NetService from "@goat/shared/Net";
 import * as ConfigProvider from "effect/ConfigProvider";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -26,7 +26,7 @@ const status = {
   supported: true,
   installed: true,
   current: true,
-  unitPath: "/home/me/.config/systemd/user/t3code.service",
+  unitPath: "/home/me/.config/systemd/user/goat.service",
   logPath: "/home/me/.t3/userdata/logs/boot-service.log",
 } as const;
 
@@ -36,7 +36,7 @@ it("reports the installed service version and host paths", () => {
     [
       "GOAT service",
       "  Status: installed · goat@0.0.29",
-      "  Unit: /home/me/.config/systemd/user/t3code.service",
+      "  Unit: /home/me/.config/systemd/user/goat.service",
       "  Logs: /home/me/.t3/userdata/logs/boot-service.log",
     ].join("\n"),
   );
@@ -102,6 +102,7 @@ function makeTestService(serviceStatus: BootService.BootServiceStatus) {
   const restarts: Array<true> = [];
   const service = BootService.BootService.of({
     status: Effect.succeed(serviceStatus),
+    withStopped: (operation) => operation,
     restart: Effect.sync(() => {
       restarts.push(true);
       return serviceStatus.installed;

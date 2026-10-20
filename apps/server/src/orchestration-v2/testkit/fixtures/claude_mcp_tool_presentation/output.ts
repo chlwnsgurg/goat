@@ -1,5 +1,5 @@
 import { assert } from "@effect/vitest";
-import type { ProviderReplayTranscript } from "@t3tools/contracts";
+import type { ProviderReplayTranscript } from "@goat/contracts";
 
 import type { OrchestratorV2ScenarioResult } from "../../OrchestratorScenario.ts";
 import {
@@ -11,9 +11,6 @@ import {
 } from "../shared.ts";
 import { CLAUDE_MCP_TOOL_PRESENTATION_PROMPT } from "./input.ts";
 
-// The scrape frame carries Claude Code's `tool_use_meta` as recorded. The map
-// frame's entry was removed from the recording, so it stands in for an MCP
-// tool Claude Code sends no display metadata for.
 export function assertClaudeMcpToolPresentationOutput(
   result: OrchestratorV2ScenarioResult,
   transcript: ProviderReplayTranscript,

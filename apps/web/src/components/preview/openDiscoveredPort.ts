@@ -1,8 +1,5 @@
-import type { DiscoveredLocalServer, ScopedThreadRef } from "@t3tools/contracts";
-import {
-  mapAtomCommandResult,
-  type AtomCommandResult,
-} from "@t3tools/client-runtime/state/runtime";
+import type { DiscoveredLocalServer, ScopedThreadRef } from "@goat/contracts";
+import { mapAtomCommandResult, type AtomCommandResult } from "@goat/client-runtime/state/runtime";
 
 import { resolveDiscoveredServerUrl } from "~/browser/browserTargetResolver";
 import type { BrowserSettingsReadError, OpenPreviewMutation } from "~/browser/openFileInPreview";
@@ -16,7 +13,6 @@ export async function openDiscoveredPort<E>(input: {
   readonly port: DiscoveredLocalServer;
   readonly openPreview: OpenPreviewMutation<E>;
 }): Promise<AtomCommandResult<void, E | BrowserSettingsReadError>> {
-  // A server tab runs on the environment, where loopback is already right.
   const resolvedUrl =
     previewRuntimeFor(input.threadRef.environmentId) === "server"
       ? input.port.url

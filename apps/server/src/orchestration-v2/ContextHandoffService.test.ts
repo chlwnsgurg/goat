@@ -7,13 +7,13 @@ import {
   ThreadId,
   TurnItemId,
   type OrchestrationV2TurnItem,
-} from "@t3tools/contracts";
+} from "@goat/contracts";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 
 import * as ContextHandoffService from "./ContextHandoffService.ts";
-import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
+import * as IdAllocator from "@goat/provider-core/server/IdAllocator";
 
 const layerTest = ContextHandoffService.layer.pipe(Layer.provide(IdAllocator.layer));
 
@@ -161,4 +161,34 @@ it.layer(layerTest)("ContextHandoffService legacy import", (it) => {
       assert.notInclude(handoff.summaryText, "\ufffd");
     }),
   );
+});
+
+it("summarizes handoff history with a caller header and the legacy character budget", () => {
+  const items = [
+    importedItem({ role: "user", id: "one", text: "Question?", ordinal: 1 }),
+    importedItem({ role: "assistant", id: "two", text: "Answer.", ordinal: 2 }),
+  ];
+  const legacyHeader =
+    "Imported conversation history from the previous GOAT orchestrator. Use it as context; do not repeat it unless the user asks.";
+  assert.strictEqual(
+    ContextHandoffService.summarizeConversationForHandoff(items, legacyHeader),
+    `${legacyHeader}\n\nUser:\nQuestion?\n\nAssistant:\nAnswer.`,
+  );
+  const header = "Continue on another host.";
+  const summary = ContextHandoffService.summarizeConversationForHandoff(
+    [
+      ...items,
+      importedItem({
+        role: "assistant",
+        id: "large",
+        text: `${"🧪".repeat(20_000)}LATEST_SINGLE_TOKEN`,
+        ordinal: 3,
+      }),
+    ],
+    header,
+  );
+  assert.isAtMost(summary.length, 32_000);
+  assert.isTrue(summary.startsWith(`${header}\n\nAssistant:\n... `));
+  assert.isTrue(summary.endsWith("LATEST_SINGLE_TOKEN"));
+  assert.notInclude(summary, "\ufffd");
 });

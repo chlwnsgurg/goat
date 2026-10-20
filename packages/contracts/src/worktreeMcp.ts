@@ -1,14 +1,14 @@
 import * as Schema from "effect/Schema";
 
-import { TrimmedNonEmptyString } from "./baseSchemas.ts";
+import { NonNegativeInt, ThreadId, TrimmedNonEmptyString } from "./baseSchemas.ts";
+import { OrchestrationV2ShellThreadStatus } from "./orchestrationV2.ts";
+import { OrchestratorMcpHost } from "./orchestratorMcp.ts";
 
 /**
- * Input for the `goat_worktree_handoff` MCP tool.
- *
- * Creates a git worktree for the calling agent thread and re-points the
- * thread at it. Changing the thread's workspace detaches the live provider
- * session, so the current turn ends shortly after the handoff is recorded;
- * the conversation continues inside the worktree on the thread's next run.
+ * The server picks the location in its managed worktrees folder.
+ * Changing the thread's workspace detaches the live provider session, so the
+ * current turn ends shortly after the handoff is recorded; the conversation
+ * continues inside the worktree on the thread's next run.
  */
 export const WorktreeMcpHandoffInput = Schema.Struct({
   branch: TrimmedNonEmptyString.annotate({
@@ -24,15 +24,6 @@ export const WorktreeMcpHandoffInput = Schema.Struct({
     Schema.Boolean.annotate({
       description:
         "Fetch origin and start the worktree branch from the remote-tracking commit of baseRef instead of the local ref. Defaults to the server's 'new worktrees start from origin' setting.",
-    }),
-  ),
-  path: Schema.optional(
-    TrimmedNonEmptyString.check(
-      // Absolute POSIX (/...), Windows drive (C:\ or C:/), or UNC (\\host).
-      Schema.isPattern(/^(?:[A-Za-z]:[\\/]|[\\/])/),
-    ).annotate({
-      description:
-        "Absolute filesystem path for the new worktree. Relative paths are rejected. Defaults to the server-managed worktrees directory.",
     }),
   ),
   runSetupScript: Schema.optional(
@@ -126,3 +117,129 @@ export class WorktreeMcpFailure extends Schema.TaggedError<WorktreeMcpFailure>()
     message: Schema.String,
   },
 ) {}
+
+const resultHost = Schema.optional(Schema.String).annotate({
+  description: "The SSH host this came from; absent for this environment.",
+});
+
+const RepositoryPath = TrimmedNonEmptyString.annotate({
+  description:
+    "Any checkout of one repository (its main checkout or one of its worktrees). Omit for every project repository in this environment.",
+});
+
+export const WorktreeMcpBoundThread = Schema.Struct({
+  threadId: ThreadId,
+  title: Schema.String,
+  status: OrchestrationV2ShellThreadStatus,
+  archived: Schema.Boolean,
+  busy: Schema.Boolean.annotate({
+    description:
+      "True while the thread has a run, queued turn, pending question, or background work.",
+  }),
+});
+export type WorktreeMcpBoundThread = typeof WorktreeMcpBoundThread.Type;
+
+export const WorktreeMcpInventoryEntry = Schema.Struct({
+  path: TrimmedNonEmptyString,
+  repository: TrimmedNonEmptyString.annotate({
+    description: "The repository's main checkout.",
+  }),
+  branch: Schema.NullOr(TrimmedNonEmptyString),
+  main: Schema.Boolean.annotate({ description: "True for the repository's main checkout." }),
+  missing: Schema.Boolean.annotate({
+    description: "True when git still lists the worktree but its folder is gone.",
+  }),
+  managed: Schema.Boolean.annotate({
+    description: "True when the worktree sits in GOAT's worktrees folder.",
+  }),
+  threads: Schema.Array(WorktreeMcpBoundThread),
+  dirtyCount: Schema.NullOr(NonNegativeInt).annotate({
+    description: "Uncommitted tracked and untracked files; null when the folder could not be read.",
+  }),
+  aheadCount: Schema.NullOr(NonNegativeInt).annotate({
+    description:
+      "Commits on HEAD that are on no remote-tracking branch, as of the last fetch; null when unreadable.",
+  }),
+});
+export type WorktreeMcpInventoryEntry = typeof WorktreeMcpInventoryEntry.Type;
+
+export const WorktreeMcpInventoryInput = Schema.Struct({
+  host: Schema.optional(OrchestratorMcpHost),
+  repo: Schema.optional(RepositoryPath),
+});
+export type WorktreeMcpInventoryInput = typeof WorktreeMcpInventoryInput.Type;
+
+export const WorktreeMcpInventoryResult = Schema.Struct({
+  worktrees: Schema.Array(WorktreeMcpInventoryEntry),
+  host: resultHost,
+});
+export type WorktreeMcpInventoryResult = typeof WorktreeMcpInventoryResult.Type;
+
+export const WorktreeMcpRemoveInput = Schema.Struct({
+  host: Schema.optional(OrchestratorMcpHost),
+  path: Schema.optional(
+    TrimmedNonEmptyString.annotate({
+      description:
+        "Absolute path of the worktree to remove, as goat_worktree_inventory lists it. A symlink to a worktree is refused.",
+    }),
+  ),
+  threadId: Schema.optional(
+    ThreadId.annotate({ description: "Remove the worktree this thread is bound to." }),
+  ),
+  force: Schema.optional(
+    Schema.Boolean.annotate({
+      description:
+        "Remove even with uncommitted changes or commits on no remote. Default false. Never overrides a busy thread, a main checkout, or a project folder.",
+    }),
+  ),
+  deleteBranch: Schema.optional(
+    Schema.Boolean.annotate({
+      description:
+        "Also delete the worktree's local branch. Default false. Never deletes the repository's default branch, and refuses a branch whose commits no remote, other branch, or merged pull request holds unless deleteUnsavedBranch is true. A bound thread can then no longer recreate its checkout.",
+    }),
+  ),
+  deleteUnsavedBranch: Schema.optional(
+    Schema.Boolean.annotate({
+      description:
+        "With deleteBranch, delete the branch even when its commits exist nowhere else, losing them. Default false. Separate from force, which only covers the checkout.",
+    }),
+  ),
+});
+export type WorktreeMcpRemoveInput = typeof WorktreeMcpRemoveInput.Type;
+
+export const WorktreeMcpRemoveResult = Schema.Struct({
+  path: TrimmedNonEmptyString,
+  branch: Schema.NullOr(TrimmedNonEmptyString),
+  branchDeleted: Schema.Boolean,
+  notes: Schema.Array(Schema.String),
+  host: resultHost,
+});
+export type WorktreeMcpRemoveResult = typeof WorktreeMcpRemoveResult.Type;
+
+export const WorktreeMcpCleanupInput = Schema.Struct({
+  host: Schema.optional(OrchestratorMcpHost),
+  repo: Schema.optional(RepositoryPath),
+  dryRun: Schema.optional(
+    Schema.Boolean.annotate({
+      description: "Default true: report what would be removed. Pass false to remove.",
+    }),
+  ),
+});
+export type WorktreeMcpCleanupInput = typeof WorktreeMcpCleanupInput.Type;
+
+export const WorktreeMcpCleanupEntry = Schema.Struct({
+  path: TrimmedNonEmptyString,
+  branch: Schema.NullOr(TrimmedNonEmptyString),
+  reason: Schema.String,
+});
+export type WorktreeMcpCleanupEntry = typeof WorktreeMcpCleanupEntry.Type;
+
+export const WorktreeMcpCleanupResult = Schema.Struct({
+  dryRun: Schema.Boolean,
+  removed: Schema.Array(WorktreeMcpCleanupEntry).annotate({
+    description: "Removed worktrees, or with dryRun the ones that would be removed.",
+  }),
+  kept: Schema.Array(WorktreeMcpCleanupEntry),
+  host: resultHost,
+});
+export type WorktreeMcpCleanupResult = typeof WorktreeMcpCleanupResult.Type;

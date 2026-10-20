@@ -1,4 +1,4 @@
-import type { SnapShotSource } from "@t3tools/contracts";
+import type { SnapShotSource } from "@goat/contracts";
 
 import type { ComposerFileAttachment } from "../../composerDraftStore";
 import { type ChatFileAttachment, type ChatImageAttachment, isVideoAttachment } from "../../types";
@@ -7,26 +7,27 @@ import type {
   AssetResource,
   EnvironmentId,
   ScopedThreadRef,
-} from "@t3tools/contracts";
-import { videoMimeType } from "@t3tools/shared/video";
-import { resolveMediaSource } from "@t3tools/client-runtime/media-source";
-import { resolveAssetUrl } from "@t3tools/client-runtime/state/assets";
+} from "@goat/contracts";
+import { videoMimeType } from "@goat/shared/video";
+import { resolveMediaSource } from "@goat/client-runtime/media-source";
+import { resolveAssetUrl } from "@goat/client-runtime/state/assets";
 import {
   squashAtomCommandFailure,
   type AtomCommandResult,
-} from "@t3tools/client-runtime/state/runtime";
+} from "@goat/client-runtime/state/runtime";
 import { resolveExternalWebLinkHost } from "./externalLinkContextMenu";
 import type { MediaActionSource } from "../media/MediaActions";
 import { resolveProtocolRelativeMediaUrl } from "../media/mediaContent";
 
 export interface ExpandedImageItem {
-  /** A loadable URL, or null when the dialog must mint one from `asset` first. */
   src: string | null;
   name: string;
+  mimeType?: string;
   type?: "video";
+  /** The preview created this object URL and must revoke it; other blob URLs belong to the timeline. */
+  ownsSrc?: boolean;
   source?: SnapShotSource;
   autoPlay?: boolean;
-  /** Authored remote destination to open when embedding fails, never a generated asset URL. */
   originalUrl?: string;
   srcFragment?: string;
   actionsSource?: MediaActionSource;
@@ -37,19 +38,17 @@ export interface ExpandedImagePreview {
   index: number;
 }
 
-/** Wraps navigation in either direction, including offsets beyond a complete cycle. */
 export function wrapExpandedImageIndex(index: number, imageCount: number): number {
   return imageCount > 0 ? ((index % imageCount) + imageCount) % imageCount : 0;
 }
 
-/** Resolves a chat media reference on its owning environment, without downloading its bytes. */
 export async function resolveMarkdownMediaPreview(input: {
   source: string;
   resolvedFilePath?: string | undefined;
   cwd?: string | undefined;
   threadRef?: ScopedThreadRef | undefined;
   httpBaseUrl?: string | undefined;
-  onOpenFile?: ((relativePath: string) => void) | undefined;
+  onOpenFile?: ((path: string) => void) | undefined;
   createAssetUrl: (input: {
     environmentId: EnvironmentId;
     input: { resource: AssetResource };
@@ -62,7 +61,9 @@ export async function resolveMarkdownMediaPreview(input: {
   });
   if (media === null) return null;
   const { kind, name, reference } = media;
-  const relativePath = reference?.kind === "file" ? reference.relativePath : undefined;
+  // Media outside the workspace opens in the files panel by its absolute host path.
+  const panelPath =
+    reference?.kind === "file" ? (reference.relativePath ?? reference.path) : undefined;
 
   let src: string;
   let asset: MediaActionSource["asset"];
@@ -98,8 +99,8 @@ export async function resolveMarkdownMediaPreview(input: {
           src,
           ...(reference ? { reference } : {}),
           ...(asset ? { asset } : {}),
-          ...(relativePath && input.onOpenFile
-            ? { onOpenFile: () => input.onOpenFile?.(relativePath) }
+          ...(panelPath && input.onOpenFile
+            ? { onOpenFile: () => input.onOpenFile?.(panelPath) }
             : {}),
         },
       },
@@ -110,7 +111,7 @@ export async function resolveMarkdownMediaPreview(input: {
 
 export function buildAttachmentVideoAsset(
   environmentId: EnvironmentId,
-  attachment: ChatFileAttachment,
+  attachment: Pick<ChatFileAttachment, "id" | "name" | "mimeType">,
 ): NonNullable<MediaActionSource["asset"]> {
   return {
     environmentId,
@@ -123,7 +124,6 @@ export function buildAttachmentVideoAsset(
   };
 }
 
-/** Opens a persisted video through the same signed-asset dialog used by message media. */
 export function buildAttachmentVideoPreview(
   environmentId: EnvironmentId,
   attachment: ChatFileAttachment,
@@ -172,13 +172,28 @@ export function buildExpandedImagePreview(
   const selected = images.find((image) => image.id === selectedImageId);
   if (selected?.type === "file" && selected.file && isVideoAttachment(selected)) {
     return {
-      images: [{ src: URL.createObjectURL(selected.file), name: selected.name, type: "video" }],
+      images: [
+        {
+          src: URL.createObjectURL(selected.file),
+          name: selected.name,
+          type: "video",
+          ownsSrc: true,
+        },
+      ],
       index: 0,
     };
   }
   const previewableImages = images.flatMap((image) =>
     image.type === "image" && image.previewUrl
-      ? [{ id: image.id, src: image.previewUrl, name: image.name, source: image.source }]
+      ? [
+          {
+            id: image.id,
+            src: image.previewUrl,
+            name: image.name,
+            mimeType: image.mimeType,
+            source: image.source,
+          },
+        ]
       : [],
   );
   if (previewableImages.length === 0) {
@@ -192,6 +207,7 @@ export function buildExpandedImagePreview(
     images: previewableImages.map((image) => ({
       src: image.src,
       name: image.name,
+      mimeType: image.mimeType,
       ...(image.source?.kind === "snap-shot" ? { source: image.source } : {}),
     })),
     index: selectedIndex,

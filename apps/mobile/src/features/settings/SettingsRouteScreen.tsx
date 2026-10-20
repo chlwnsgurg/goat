@@ -1,14 +1,19 @@
-import { ScreenScrollView as ScrollView } from "../../components/ScreenScrollView";
+import { GOAT_CONNECT_COMING_SOON, isGoatConnectEnabled } from "@goat/shared/goatConnect";
+import * as Dialog from "../../components/ui/Dialog";
+import { MemoryEnvironmentEntry } from "./SettingsMemoryRouteScreen";
+import { Toolbar } from "../../components/ui/Toolbar";
+import { ScreenScrollView as ScrollView } from "../../components/ui/ScreenScrollView";
 import { useAuth, useUser } from "@clerk/expo";
 import { useNavigation } from "@react-navigation/native";
-import { Platform, View } from "react-native";
-import { deriveProjectGroupLabel } from "@t3tools/client-runtime/state/project-grouping";
+import { Linking, Platform, View } from "react-native";
+import { deriveProjectGroupLabel } from "@goat/client-runtime/state/project-grouping";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 import { hasCloudPublicConfig } from "../cloud/publicConfig";
 import { useAdaptiveWorkspaceLayout } from "../layout/AdaptiveWorkspaceLayout";
-import { NativeHeaderToolbar, NativeStackScreenOptions } from "../../native/StackHeader";
+import { NativeStackScreenOptions } from "../../native/StackHeader";
 import { useSavedRemoteConnections } from "../../state/use-remote-environment-registry";
+import { useMobileGoatBotHomeSettings } from "../goat-bot/useMobileGoatBotHomeSettings";
 import { SettingsRow } from "./components/SettingsRow";
 import { SettingsSection } from "./components/SettingsSection";
 import { SettingsScreen } from "./components/SettingsScreen";
@@ -34,13 +39,13 @@ export function SettingsRouteScreen() {
       ) : null}
       {Platform.OS === "ios" && layout.usesSplitView ? (
         <>
-          <NativeHeaderToolbar placement="left">
-            <NativeHeaderToolbar.Button
+          <Toolbar placement="left">
+            <Toolbar.Button
               accessibilityLabel="Go back"
               icon="chevron.left"
               onPress={() => navigation.goBack()}
             />
-          </NativeHeaderToolbar>
+          </Toolbar>
         </>
       ) : null}
       <SettingsEnvironmentFilterHeader closeSettings />
@@ -117,6 +122,19 @@ function LocalSettingsRouteScreen() {
         }}
       >
         <SettingsSection title="Connections">
+          {!isGoatConnectEnabled() ? (
+            <SettingsRow
+              icon="globe"
+              label={`${GOAT_CONNECT_COMING_SOON.title} · ${GOAT_CONNECT_COMING_SOON.status}`}
+              value={GOAT_CONNECT_COMING_SOON.description}
+              valuePosition="below"
+              onPress={() => {
+                void Linking.openURL(GOAT_CONNECT_COMING_SOON.guideUrl).catch(() => {
+                  Dialog.alert("Could not open guide", "Try opening the Tailscale guide again.");
+                });
+              }}
+            />
+          ) : null}
           <SettingsRow
             icon="desktopcomputer"
             label="Environments"
@@ -133,6 +151,7 @@ function LocalSettingsRouteScreen() {
 }
 
 function SettingsIndexSections() {
+  const { supported: goatBotHomeSupported } = useMobileGoatBotHomeSettings();
   const { selectedTargets, projectGroups, selectedProjectKey } = useSettingsEnvironmentFilter();
   const noServerTargets = selectedTargets.length === 0;
   const selectedProject = projectGroups.find((group) => group.key === selectedProjectKey);
@@ -154,11 +173,17 @@ function SettingsIndexSections() {
       <SettingsSection title="Interface">
         <SettingsRow icon="paintbrush" label="Appearance" target="SettingsAppearance" />
         {Platform.OS === "ios" ? (
-          <SettingsRow icon="keyboard" label="Keyboard" target="SettingsKeyboard" />
+          <>
+            <SettingsRow icon="keyboard" label="Keyboard" target="SettingsKeyboard" />
+            <SettingsRow icon="mic" label="Microphone" target="SettingsMicrophone" />
+          </>
         ) : null}
       </SettingsSection>
 
       <SettingsSection title="Automations">
+        {goatBotHomeSupported ? (
+          <SettingsRow icon="text.bubble" label="GOAT Bot" target="SettingsGoatBot" />
+        ) : null}
         <SettingsRow icon="clock" label="Scheduled tasks" target="SettingsScheduledTasks" />
       </SettingsSection>
 
@@ -178,6 +203,9 @@ function SettingsIndexSections() {
       </SettingsSection>
 
       <SettingsSection title="Server settings">
+        {selectedTargets.map((target) => (
+          <MemoryEnvironmentEntry key={target.environmentId} environmentId={target.environmentId} />
+        ))}
         <SettingsRow
           icon="person.crop.circle"
           label="Provider accounts"

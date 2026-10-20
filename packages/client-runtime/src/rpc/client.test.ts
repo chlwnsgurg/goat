@@ -1,13 +1,23 @@
 import {
   DEFAULT_SERVER_SETTINGS,
+  type ServerConfig,
+  type AuthSessionState,
+  MemorySpaceId,
+  MemoryId,
   EnvironmentAuthorizationError,
   EnvironmentId,
   type RelayClientInstallProgressEvent,
   type ServerConfigStreamEvent,
   type ServerLifecycleStreamEvent,
   WS_METHODS,
-} from "@t3tools/contracts";
+} from "@goat/contracts";
 import { describe, expect, it } from "@effect/vitest";
+import { vi } from "vite-plus/test";
+import * as Layer from "effect/Layer";
+import * as Scope from "effect/Scope";
+import { AsyncResult, Atom, AtomRegistry } from "effect/reactivity";
+import { EnvironmentRegistry } from "../connection/registry.ts";
+import { createCommandPermissions } from "../state/commandPermissions.ts";
 import * as Cause from "effect/Cause";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
@@ -32,11 +42,45 @@ import * as RpcSession from "../rpc/session.ts";
 import type { WsRpcProtocolClient } from "../rpc/protocol.ts";
 import {
   EnvironmentRpcRequestObserver,
+  EnvironmentRpcSubscriptionObserver,
+  subscribeMemoryChanges,
   request,
+  requestGuarded,
+  RpcPermissionGuard,
   runStream,
   subscribe,
   subscribeDynamicWithSession,
 } from "./client.ts";
+
+vi.mock("../state/session.ts", () => ({
+  createEnvironmentSessionAtoms: () => ({ sessionStateAtom: memorySessions }),
+}));
+const memorySessions = Atom.family((_id: EnvironmentId) =>
+  Atom.make<AsyncResult.AsyncResult<AuthSessionState>>(AsyncResult.initial()),
+);
+const memoryGrant = (allowed: boolean): AuthSessionState => ({
+  authenticated: true,
+  scopes: allowed ? ["memory:read"] : [],
+  permissions: allowed ? ["memory:read"] : [],
+  auth: {
+    policy: "remote-reachable",
+    bootstrapMethods: [],
+    sessionMethods: [],
+    sessionCookieName: "synthetic",
+  },
+});
+const memoryPermissionHarness = Effect.fn(function* (allowed = true) {
+  const atoms = AtomRegistry.make();
+  yield* Effect.addFinalizer(() => Effect.sync(() => atoms.dispose()));
+  atoms.mount(memorySessions(TARGET.environmentId));
+  atoms.set(memorySessions(TARGET.environmentId), AsyncResult.success(memoryGrant(allowed)));
+  const runtime = Atom.runtime(
+    Layer.succeed(EnvironmentRegistry, {} as EnvironmentRegistry["Service"]),
+  );
+  const permissions = createCommandPermissions(runtime, WS_METHODS.memoryChanges);
+  expect(atoms.get(permissions.permissionAtom(TARGET.environmentId))).toBe(allowed);
+  return { atoms, runtime };
+});
 
 const TARGET = new PrimaryConnectionTarget({
   environmentId: EnvironmentId.make("environment-1"),
@@ -510,12 +554,10 @@ describe("environment RPC", () => {
       yield* TestClock.adjust("100 millis");
       expect(yield* Queue.take(subscriptions)).toBe(2);
       yield* Queue.take(failures);
-      // The second retry waits 200ms, so 100ms is not enough.
       yield* TestClock.adjust("100 millis");
       expect(Option.isNone(yield* Queue.poll(subscriptions))).toBe(true);
       yield* TestClock.adjust("100 millis");
       expect(yield* Queue.take(subscriptions)).toBe(3);
-      // Attempt 3 delivered a value before failing, so the delay is back to 100ms.
       yield* Queue.take(failures);
       yield* TestClock.adjust("100 millis");
       expect(yield* Queue.take(subscriptions)).toBe(4);
@@ -680,6 +722,375 @@ describe("environment RPC", () => {
       }
       expect(observations).toEqual(["input 1", "stream", "expected failure", "input 2", "defect"]);
       expect(observedDefects).toEqual([defect]);
+    }),
+  );
+});
+
+describe("staged memory RPC", () => {
+  const memorySpaceId = MemorySpaceId.make("00000000-0000-4000-8000-000000000001");
+  const memoryId = MemoryId.make("00000000-0000-4000-8000-000000000002");
+  it.effect.each([undefined, false, true])(
+    "dispatch gates caller history opt-in on selected session capability: %s",
+    (supported) =>
+      Effect.gen(function* () {
+        const h = yield* makeHarness();
+        const inputs: unknown[] = [];
+        const client = {
+          [WS_METHODS.memoryHistory]: (input: unknown) => {
+            inputs.push(input);
+            return Effect.succeed({});
+          },
+        } as unknown as WsRpcProtocolClient;
+        yield* SubscriptionRef.set(
+          h.activeSession,
+          Option.some({
+            ...session(client),
+            initialConfig: Effect.succeed({
+              environment: {
+                capabilities: {
+                  memory: {
+                    protocolVersion: 1,
+                    ...(supported === undefined ? {} : { refusedReverts: supported }),
+                  },
+                },
+              },
+            } as ServerConfig),
+          }),
+        );
+        for (const optIn of [true, false]) {
+          const input = {
+            memorySpaceId,
+            memoryId,
+            limit: 10,
+            ...(optIn ? { includeRefusedReverts: true as const } : {}),
+          };
+          yield* requestGuarded(WS_METHODS.memoryHistory, input).pipe(
+            Effect.provideService(EnvironmentSupervisor.EnvironmentSupervisor, h.supervisor),
+            Effect.provideService(RpcPermissionGuard, { authorize: () => Effect.void }),
+          );
+          expect(inputs.at(-1)).toEqual({
+            memorySpaceId,
+            memoryId,
+            limit: 10,
+            ...(supported && optIn ? { includeRefusedReverts: true } : {}),
+          });
+          expect(input).toEqual({
+            memorySpaceId,
+            memoryId,
+            limit: 10,
+            ...(optIn ? { includeRefusedReverts: true } : {}),
+          });
+        }
+      }),
+  );
+  it.effect.each([undefined, false, true] as const)(
+    "gates retained space and resolution history on the selected session: %s",
+    (supported) =>
+      Effect.gen(function* () {
+        const h = yield* makeHarness();
+        const inputs: Array<{ method: string; input: unknown }> = [];
+        const client = {
+          [WS_METHODS.memorySyncStatus]: (input: unknown) => {
+            inputs.push({ method: "sync", input });
+            return Effect.succeed({});
+          },
+          [WS_METHODS.memoryHistory]: (input: unknown) => {
+            inputs.push({ method: "history", input });
+            return Effect.succeed({});
+          },
+        } as unknown as WsRpcProtocolClient;
+        yield* SubscriptionRef.set(
+          h.activeSession,
+          Option.some({
+            ...session(client),
+            initialConfig: Effect.succeed({
+              environment: {
+                capabilities: {
+                  memory: {
+                    protocolVersion: 1,
+                    ...(supported === undefined
+                      ? {}
+                      : { resolutionInputs: supported, retainedLocalSpace: supported }),
+                  },
+                },
+              },
+            } as ServerConfig),
+          }),
+        );
+        const provide = Effect.provideService(
+          EnvironmentSupervisor.EnvironmentSupervisor,
+          h.supervisor,
+        );
+        const permit = Effect.provideService(RpcPermissionGuard, { authorize: () => Effect.void });
+        yield* requestGuarded(WS_METHODS.memorySyncStatus, {
+          includeRetainedLocalSpaceId: true,
+        }).pipe(provide, permit);
+        expect(inputs).toEqual([
+          { method: "sync", input: supported ? { includeRetainedLocalSpaceId: true } : {} },
+        ]);
+        const result = yield* requestGuarded(WS_METHODS.memoryHistory, {
+          memorySpaceId,
+          memoryId,
+          limit: 10,
+          resolutionInputsFor: "00000000-0000-4000-8000-000000000007" as never,
+        }).pipe(provide, permit, Effect.exit);
+        expect(Exit.isSuccess(result)).toBe(supported === true);
+        expect(inputs.filter((value) => value.method === "history")).toHaveLength(
+          supported ? 1 : 0,
+        );
+      }),
+  );
+  it.effect("denies a raw memory subscription without a read grant", () =>
+    Effect.gen(function* () {
+      const h = yield* makeHarness();
+      let opened = false;
+      const client = {
+        [WS_METHODS.memoryChanges]: () => {
+          opened = true;
+          return Stream.never;
+        },
+      } as unknown as WsRpcProtocolClient;
+      yield* SubscriptionRef.set(
+        h.activeSession,
+        Option.some({
+          ...session(client),
+          initialConfig: Effect.succeed({
+            environment: { capabilities: { memory: { protocolVersion: 1 } } },
+          } as ServerConfig),
+        }),
+      );
+      const failure = yield* subscribe(WS_METHODS.memoryChanges, { memorySpaceId }).pipe(
+        Stream.runDrain,
+        Effect.flip,
+        Effect.provideService(EnvironmentSupervisor.EnvironmentSupervisor, h.supervisor),
+      );
+      expect(failure._tag).toBe("EnvironmentAuthorizationError");
+      expect(opened).toBe(false);
+    }),
+  );
+  it.effect(
+    "reports an absent staged method as unavailable instead of calling a different client",
+    () =>
+      Effect.gen(function* () {
+        const h = yield* makeHarness();
+        yield* SubscriptionRef.set(
+          h.activeSession,
+          Option.some({
+            ...session({} as WsRpcProtocolClient),
+            initialConfig: Effect.succeed({
+              environment: {
+                capabilities: { memory: { protocolVersion: 1, importProvider: true } },
+              },
+            } as ServerConfig),
+          }),
+        );
+        const failure = yield* requestGuarded(WS_METHODS.memoryImportProvider, {
+          memorySpaceId,
+          action: "discover",
+          format: "claude",
+        }).pipe(
+          Effect.flip,
+          Effect.provideService(EnvironmentSupervisor.EnvironmentSupervisor, h.supervisor),
+          Effect.provideService(RpcPermissionGuard, { authorize: () => Effect.void }),
+        );
+        expect(failure._tag).toBe("EnvironmentRpcUnavailableError");
+      }),
+  );
+  it.effect(
+    "rejects import when the selected server does not advertise its import capability",
+    () =>
+      Effect.gen(function* () {
+        const h = yield* makeHarness();
+        let invoked = false;
+        const client = {
+          [WS_METHODS.memoryImportProvider]: () => {
+            invoked = true;
+            return Effect.succeed({ action: "discover", sources: [] });
+          },
+        } as unknown as WsRpcProtocolClient;
+        yield* SubscriptionRef.set(
+          h.activeSession,
+          Option.some({
+            ...session(client),
+            initialConfig: Effect.succeed({
+              environment: { capabilities: { memory: { protocolVersion: 1 } } },
+            } as ServerConfig),
+          }),
+        );
+        const failure = yield* requestGuarded(WS_METHODS.memoryImportProvider, {
+          memorySpaceId,
+          action: "discover",
+          format: "claude",
+        }).pipe(
+          Effect.flip,
+          Effect.provideService(EnvironmentSupervisor.EnvironmentSupervisor, h.supervisor),
+          Effect.provideService(RpcPermissionGuard, { authorize: () => Effect.void }),
+        );
+        expect(failure._tag).toBe("EnvironmentRpcUnavailableError");
+        expect(invoked).toBe(false);
+      }),
+  );
+  it.effect.each(["capability", "method"] as const)(
+    "rejects a missing memory stream %s before opening it",
+    (missing) =>
+      Effect.gen(function* () {
+        const h = yield* makeHarness();
+        let opened = false;
+        const client =
+          missing === "method"
+            ? {}
+            : {
+                [WS_METHODS.memoryChanges]: () => {
+                  opened = true;
+                  return Stream.never;
+                },
+              };
+        yield* SubscriptionRef.set(
+          h.activeSession,
+          Option.some({
+            ...session(client as unknown as WsRpcProtocolClient),
+            initialConfig: Effect.succeed({
+              environment: {
+                capabilities: missing === "capability" ? {} : { memory: { protocolVersion: 1 } },
+              },
+            } as ServerConfig),
+          }),
+        );
+        const failure = yield* subscribe(WS_METHODS.memoryChanges, { memorySpaceId }).pipe(
+          Stream.runDrain,
+          Effect.flip,
+          Effect.provideService(EnvironmentSupervisor.EnvironmentSupervisor, h.supervisor),
+          Effect.provideService(RpcPermissionGuard, { authorize: () => Effect.void }),
+        );
+        expect(failure._tag).toBe("MemoryRpcError");
+        expect(opened).toBe(false);
+      }),
+  );
+  it.effect.each(["capability", "method", "grant"] as const)(
+    "direct memory subscription rejects missing %s at its own boundary",
+    (missing) =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const h = yield* makeHarness();
+          const { runtime, atoms } = yield* memoryPermissionHarness(missing !== "grant");
+          let opened = false;
+          let observed = false;
+          const fixed = {
+            ...session(
+              (missing === "method"
+                ? {}
+                : {
+                    [WS_METHODS.memoryChanges]: () => {
+                      opened = true;
+                      return Stream.empty;
+                    },
+                  }) as unknown as WsRpcProtocolClient,
+            ),
+            initialConfig: Effect.succeed({
+              environment: {
+                capabilities: missing === "capability" ? {} : { memory: { protocolVersion: 1 } },
+              },
+            } as ServerConfig),
+          };
+          const result = yield* subscribeMemoryChanges(runtime, atoms, fixed, {
+            memorySpaceId,
+          }).pipe(
+            Stream.runDrain,
+            Effect.exit,
+            Effect.provideService(EnvironmentSupervisor.EnvironmentSupervisor, h.supervisor),
+            Effect.provideService(EnvironmentRpcSubscriptionObserver, {
+              observe: () =>
+                Effect.sync(() => {
+                  observed = true;
+                  return Effect.void;
+                }),
+            }),
+          );
+          expect(Exit.isFailure(result)).toBe(true);
+          if (Exit.isFailure(result)) {
+            const error = Option.getOrThrow(Cause.findErrorOption(result.cause));
+            expect(error._tag).toBe(
+              missing === "grant" ? "EnvironmentAuthorizationError" : "MemoryRpcError",
+            );
+            if (error._tag === "MemoryRpcError") expect(error.code).toBe("unsupported_operation");
+          }
+          expect(opened).toBe(false);
+          expect(observed).toBe(false);
+        }),
+      ),
+  );
+
+  it.effect("direct memory subscription completes its observer when the granted scope closes", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const h = yield* makeHarness();
+        const { runtime, atoms } = yield* memoryPermissionHarness();
+        const opened = yield* Deferred.make<void>();
+        const completed = yield* Deferred.make<void>();
+        const scope = yield* Scope.make();
+        yield* Effect.addFinalizer(() => Scope.close(scope, Exit.void));
+        const fixed = {
+          ...session({
+            [WS_METHODS.memoryChanges]: () =>
+              Stream.fromEffect(
+                Deferred.succeed(opened, undefined).pipe(Effect.andThen(Effect.never)),
+              ),
+          } as unknown as WsRpcProtocolClient),
+          initialConfig: Effect.succeed({
+            environment: { capabilities: { memory: { protocolVersion: 1 } } },
+          } as ServerConfig),
+        };
+        const observations: string[] = [];
+        yield* subscribeMemoryChanges(runtime, atoms, fixed, { memorySpaceId }).pipe(
+          Stream.runDrain,
+          Effect.provideService(EnvironmentSupervisor.EnvironmentSupervisor, h.supervisor),
+          Effect.provideService(EnvironmentRpcSubscriptionObserver, {
+            observe: ({ environmentId, method, input }) =>
+              Effect.sync(() => {
+                observations.push(`${environmentId}:${method}`);
+                expect(input).toEqual({ memorySpaceId });
+                return Deferred.succeed(completed, undefined);
+              }),
+          }),
+          Effect.forkIn(scope),
+        );
+        yield* Deferred.await(opened);
+        expect(observations).toEqual([`${TARGET.environmentId}:${WS_METHODS.memoryChanges}`]);
+        expect(yield* Deferred.isDone(completed)).toBe(false);
+        yield* Scope.close(scope, Exit.void);
+        yield* Deferred.await(completed);
+      }),
+    ),
+  );
+
+  it.effect("rejects a body query when memory capability is absent", () =>
+    Effect.gen(function* () {
+      const h = yield* makeHarness();
+      let invoked = false;
+      const client = {
+        [WS_METHODS.memoryList]: () => {
+          invoked = true;
+          return Effect.never;
+        },
+      };
+      yield* SubscriptionRef.set(
+        h.activeSession,
+        Option.some({
+          ...session(client as unknown as WsRpcProtocolClient),
+          initialConfig: Effect.succeed({ environment: { capabilities: {} } } as ServerConfig),
+        }),
+      );
+      const failure = yield* requestGuarded(WS_METHODS.memoryList, {
+        memorySpaceId,
+        includeQuarantined: false,
+        limit: 10,
+      }).pipe(
+        Effect.flip,
+        Effect.provideService(EnvironmentSupervisor.EnvironmentSupervisor, h.supervisor),
+        Effect.provideService(RpcPermissionGuard, { authorize: () => Effect.void }),
+      );
+      expect(failure._tag).toBe("EnvironmentRpcUnavailableError");
+      expect(invoked).toBe(false);
     }),
   );
 });

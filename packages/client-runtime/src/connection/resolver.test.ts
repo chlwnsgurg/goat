@@ -1,9 +1,16 @@
+import { vi } from "vite-plus/test";
+
+vi.mock("@goat/shared/goatConnect", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@goat/shared/goatConnect")>()),
+  isGoatConnectEnabled: () => true,
+}));
+
 import {
   EnvironmentId,
   ORCHESTRATION_PROTOCOL_VERSION,
   type DesktopSshEnvironmentTarget,
-} from "@t3tools/contracts";
-import { RelayClientTracer } from "@t3tools/shared/relayTracing";
+} from "@goat/contracts";
+import { RelayClientTracer } from "@goat/shared/relayTracing";
 import { describe, expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -23,6 +30,10 @@ import {
   type ConnectionProfile,
 } from "./catalog.ts";
 import * as ConnectionCredentialStore from "./credentialStore.ts";
+import {
+  EMPTY_CONNECTION_CATALOG_DOCUMENT,
+  putConnectionCredentialInCatalog,
+} from "../platform/storageDocument.ts";
 import {
   BearerConnectionTarget,
   ConnectionTransientError,
@@ -76,11 +87,13 @@ const makeDependencies = Effect.fn("TestConnectionResolver.makeDependencies")((o
   readonly profiles?: ReadonlyArray<ConnectionProfile>;
   readonly profileStore?: ConnectionProfileStore.ConnectionProfileStore["Service"];
   readonly credentials?: ReadonlyArray<readonly [string, ConnectionCredential]>;
+  readonly credentialStore?: ConnectionCredentialStore.ConnectionCredentialStore["Service"];
   readonly authorizeBearer?: RemoteEnvironmentAuthorization.RemoteEnvironmentAuthorization["Service"]["authorizeBearer"];
   readonly authorizeDpop?: RemoteEnvironmentAuthorization.RemoteEnvironmentAuthorization["Service"]["authorizeDpop"];
   readonly primaryBearerToken?: string;
   readonly prepareSsh?: ClientCapabilities.SshEnvironmentGateway["Service"]["prepare"];
   readonly descriptorProtocolVersion?: number | null | undefined;
+  readonly fetch?: typeof fetch;
 }) => {
   const profiles = new Map(
     (options?.profiles ?? []).map((profile) => [profile.connectionId, profile]),
@@ -146,26 +159,32 @@ const makeDependencies = Effect.fn("TestConnectionResolver.makeDependencies")((o
   });
 
   const layerDependencies = Layer.mergeAll(
-    RpcHttp.layerRemoteHttpClient((() =>
-      Promise.resolve(
-        Response.json({
-          environmentId: ENVIRONMENT_ID,
-          label: "Compatible environment",
-          platform: { os: "linux", arch: "x64" },
-          serverVersion: "0.0.0-test",
-          ...(options?.descriptorProtocolVersion === undefined
-            ? { orchestrationProtocolVersion: ORCHESTRATION_PROTOCOL_VERSION }
-            : options.descriptorProtocolVersion === null
-              ? {}
-              : { orchestrationProtocolVersion: options.descriptorProtocolVersion }),
-          capabilities: { repositoryIdentity: true },
-        }),
-      )) satisfies typeof fetch),
+    RpcHttp.layerRemoteHttpClient(
+      options?.fetch ??
+        ((() =>
+          Promise.resolve(
+            Response.json({
+              environmentId: ENVIRONMENT_ID,
+              label: "Compatible environment",
+              platform: { os: "linux", arch: "x64" },
+              serverVersion: "0.0.0-test",
+              ...(options?.descriptorProtocolVersion === undefined
+                ? { orchestrationProtocolVersion: ORCHESTRATION_PROTOCOL_VERSION }
+                : options.descriptorProtocolVersion === null
+                  ? {}
+                  : { orchestrationProtocolVersion: options.descriptorProtocolVersion }),
+              capabilities: { repositoryIdentity: true },
+            }),
+          )) satisfies typeof fetch),
+    ),
     Layer.succeed(
       ConnectionProfileStore.ConnectionProfileStore,
       options?.profileStore ?? profileStore,
     ),
-    Layer.succeed(ConnectionCredentialStore.ConnectionCredentialStore, credentialStore),
+    Layer.succeed(
+      ConnectionCredentialStore.ConnectionCredentialStore,
+      options?.credentialStore ?? credentialStore,
+    ),
     Layer.succeed(
       ClientCapabilities.PrimaryEnvironmentAuth,
       ClientCapabilities.PrimaryEnvironmentAuth.of({
@@ -182,10 +201,88 @@ const makeDependencies = Effect.fn("TestConnectionResolver.makeDependencies")((o
     Layer.succeed(ClientCapabilities.SshEnvironmentGateway, ssh),
   );
 
-  return Effect.succeed(ConnectionResolver.layer.pipe(Layer.provide(layerDependencies)));
+  return Effect.succeed(ConnectionResolver.layer.pipe(Layer.provideMerge(layerDependencies)));
 });
 
 describe("ConnectionResolver", () => {
+  it.effect.each(["compatible", "older-runtime", "restarted"] as const)(
+    "uses verified SSH discovery for the protocol gate (%s)",
+    (scenario) =>
+      Effect.gen(function* () {
+        let attempts = 0;
+        const target = new SshConnectionTarget({
+          environmentId: ENVIRONMENT_ID,
+          label: "SSH",
+          connectionId: "ssh-1",
+        });
+        const profile = new SshConnectionProfile({
+          connectionId: target.connectionId,
+          environmentId: ENVIRONMENT_ID,
+          label: "SSH",
+          target: SSH_TARGET,
+        });
+        const layerBroker = yield* makeDependencies({
+          fetch: () => Promise.reject(new Error("Duplicate descriptor request")),
+          prepareSsh: () =>
+            Effect.sync(() => {
+              attempts += 1;
+              return {
+                bootstrap: {
+                  target: SSH_TARGET,
+                  httpBaseUrl: ENDPOINT.httpBaseUrl,
+                  wsBaseUrl: ENDPOINT.wsBaseUrl,
+                  pairingToken: null,
+                },
+                bearerToken: "ssh-token",
+                verifiedEndpoint: {
+                  httpBaseUrl: ENDPOINT.httpBaseUrl,
+                  descriptor: {
+                    environmentId: ENVIRONMENT_ID,
+                    label: "SSH",
+                    platform: { os: "linux", arch: "arm64" },
+                    serverVersion: "0.0.0-test",
+                    instanceId: `instance-${attempts}`,
+                    ...(scenario === "older-runtime" || (scenario === "restarted" && attempts > 1)
+                      ? {}
+                      : { orchestrationProtocolVersion: ORCHESTRATION_PROTOCOL_VERSION }),
+                    capabilities: { repositoryIdentity: true },
+                  },
+                },
+              };
+            }),
+          authorizeBearer: (input) =>
+            Effect.succeed({
+              environmentId: input.expectedEnvironmentId,
+              label: "SSH",
+              httpBaseUrl: input.httpBaseUrl,
+              socketUrl: `${ENDPOINT.wsBaseUrl}/ws`,
+              httpAuthorization: { _tag: "Bearer" as const, token: input.bearerToken },
+              ...(input.verifiedSshEndpoint === undefined
+                ? {}
+                : { verifiedEndpoint: input.verifiedSshEndpoint }),
+            }),
+        });
+        const broker = yield* ConnectionResolver.ConnectionResolver.pipe(
+          Effect.provide(layerBroker),
+        );
+        const entry = catalogEntry(target, Option.some(profile));
+        if (scenario === "older-runtime") {
+          expect(yield* broker.prepare(entry).pipe(Effect.flip)).toMatchObject({
+            reason: "unsupported",
+          });
+          // The update path still receives discovery, even when normal RPC is unsupported.
+          expect((yield* broker.prepareForUpdate(entry)).descriptor.instanceId).toBe("instance-2");
+        } else {
+          expect((yield* broker.prepare(entry)).socketUrl).toContain("orchestrationProtocol=");
+          if (scenario === "restarted") {
+            expect(yield* broker.prepare(entry).pipe(Effect.flip)).toMatchObject({
+              reason: "unsupported",
+            });
+          }
+        }
+      }),
+  );
+
   it.effect("blocks an old host during discovery before opening orchestration RPC", () =>
     Effect.gen(function* () {
       const layerBroker = yield* makeDependencies({ descriptorProtocolVersion: null });
@@ -394,6 +491,7 @@ describe("ConnectionResolver", () => {
     Effect.gen(function* () {
       const preparedTargets = yield* Ref.make<ReadonlyArray<DesktopSshEnvironmentTarget>>([]);
       const connectionMethods = yield* Ref.make<ReadonlyArray<string>>([]);
+      const answered = yield* Ref.make(false);
       const target = new SshConnectionTarget({
         environmentId: ENVIRONMENT_ID,
         label: "SSH",
@@ -408,6 +506,7 @@ describe("ConnectionResolver", () => {
       const layerBroker = yield* makeDependencies({
         prepareSsh: (input) =>
           Ref.update(preparedTargets, (values) => [...values, input.target]).pipe(
+            Effect.andThen(input.onHostAnswered ?? Effect.void),
             Effect.as({
               bootstrap: {
                 target: input.target,
@@ -435,10 +534,170 @@ describe("ConnectionResolver", () => {
       const broker = yield* ConnectionResolver.ConnectionResolver.pipe(Effect.provide(layerBroker));
 
       expect(
-        (yield* broker.prepare(catalogEntry(target, Option.some(profile)))).socketUrl,
+        (yield* broker.prepare(catalogEntry(target, Option.some(profile)), Ref.set(answered, true)))
+          .socketUrl,
       ).toContain("wsTicket=bearer");
+      expect(yield* Ref.get(answered)).toBe(true);
       expect(yield* Ref.get(preparedTargets)).toEqual([SSH_TARGET]);
       expect(yield* Ref.get(connectionMethods)).toEqual(["ssh"]);
+    }),
+  );
+
+  it.effect("offers the saved SSH token on each connect and saves the one it gets back", () =>
+    Effect.gen(function* () {
+      const offeredTokens = yield* Ref.make<ReadonlyArray<string | undefined>>([]);
+      const target = new SshConnectionTarget({
+        environmentId: ENVIRONMENT_ID,
+        label: "SSH",
+        connectionId: "ssh-1",
+      });
+      const profile = new SshConnectionProfile({
+        connectionId: "ssh-1",
+        environmentId: ENVIRONMENT_ID,
+        label: "SSH",
+        target: SSH_TARGET,
+      });
+      const layerBroker = yield* makeDependencies({
+        credentials: [["ssh-1", new BearerConnectionCredential({ token: "revoked-token" })]],
+        // The host accepts only the token it paired last; anything else pairs again.
+        prepareSsh: (input) =>
+          Ref.update(offeredTokens, (tokens) => [...tokens, input.bearerToken]).pipe(
+            Effect.as({
+              bootstrap: {
+                target: input.target,
+                httpBaseUrl: "http://127.0.0.1:4010",
+                wsBaseUrl: "ws://127.0.0.1:4010",
+                pairingToken: null,
+              },
+              bearerToken: "paired-token",
+            }),
+          ),
+      });
+      const broker = yield* ConnectionResolver.ConnectionResolver.pipe(Effect.provide(layerBroker));
+      const entry = catalogEntry(target, Option.some(profile));
+
+      const first = yield* broker.prepare(entry);
+      const second = yield* broker.prepare(entry);
+
+      expect(yield* Ref.get(offeredTokens)).toEqual(["revoked-token", "paired-token"]);
+      expect(first.httpAuthorization).toMatchObject({ token: "paired-token" });
+      expect(second.httpAuthorization).toMatchObject({ token: "paired-token" });
+    }),
+  );
+
+  it.effect.each(["add", "remove"] as const)(
+    "saves a grant %s even if the SSH token stays the same",
+    (change) =>
+      Effect.gen(function* () {
+        const grant = { key: "fixture-host-runtime", scopes: ["orchestration:read"] };
+        const target = new SshConnectionTarget({
+          environmentId: ENVIRONMENT_ID,
+          label: "SSH",
+          connectionId: "ssh-1",
+        });
+        const profile = new SshConnectionProfile({
+          connectionId: target.connectionId,
+          environmentId: ENVIRONMENT_ID,
+          label: "SSH",
+          target: SSH_TARGET,
+        });
+        const layerBroker = yield* makeDependencies({
+          credentials: [
+            [
+              target.connectionId,
+              new BearerConnectionCredential({
+                token: "paired-token",
+                ...(change === "remove" ? { sshPairingGrant: grant } : {}),
+              }),
+            ],
+          ],
+          prepareSsh: () =>
+            Effect.succeed({
+              bootstrap: {
+                target: SSH_TARGET,
+                httpBaseUrl: ENDPOINT.httpBaseUrl,
+                wsBaseUrl: ENDPOINT.wsBaseUrl,
+                pairingToken: null,
+              },
+              bearerToken: "paired-token",
+              ...(change === "add" ? { sshPairingGrant: grant } : {}),
+            }),
+        });
+        const broker = yield* ConnectionResolver.ConnectionResolver.pipe(
+          Effect.provide(layerBroker),
+        );
+        yield* broker.prepare(catalogEntry(target, Option.some(profile)));
+        const credentials = yield* ConnectionCredentialStore.ConnectionCredentialStore.pipe(
+          Effect.provide(layerBroker),
+        );
+        const saved = Option.getOrThrow(yield* credentials.get(target.connectionId));
+        expect(saved.sshPairingGrant).toEqual(change === "add" ? grant : undefined);
+      }),
+  );
+
+  it.effect("does not overwrite a newer pairing when an older reconnect removes metadata", () =>
+    Effect.gen(function* () {
+      const target = new SshConnectionTarget({
+        environmentId: ENVIRONMENT_ID,
+        label: "SSH",
+        connectionId: "ssh:fixture",
+      });
+      const profile = new SshConnectionProfile({
+        connectionId: target.connectionId,
+        environmentId: ENVIRONMENT_ID,
+        label: "SSH",
+        target: SSH_TARGET,
+      });
+      const grant = { key: "fixture-host-runtime", scopes: ["orchestration:read"] };
+      const newer = new BearerConnectionCredential({
+        token: "new-fixture-token",
+        sshPairingGrant: grant,
+      });
+      let document = {
+        ...EMPTY_CONNECTION_CATALOG_DOCUMENT,
+        targets: [target],
+        credentials: [
+          {
+            connectionId: target.connectionId,
+            credential: new BearerConnectionCredential({
+              token: "old-fixture-token",
+              sshPairingGrant: grant,
+            }),
+          },
+        ],
+      };
+      const layerBroker = yield* makeDependencies({
+        credentialStore: {
+          get: () => Effect.sync(() => Option.some(document.credentials[0]!.credential)),
+          put: (connectionId, credential, expectedToken) =>
+            Effect.sync(() => {
+              const next = putConnectionCredentialInCatalog(
+                document,
+                connectionId,
+                credential,
+                expectedToken,
+              );
+              document = { ...next, targets: [target], credentials: [...next.credentials] };
+            }),
+          remove: () => Effect.die("unused"),
+        },
+        prepareSsh: () =>
+          Effect.sync(() => {
+            document.credentials = [{ connectionId: target.connectionId, credential: newer }];
+            return {
+              bootstrap: {
+                target: SSH_TARGET,
+                httpBaseUrl: ENDPOINT.httpBaseUrl,
+                wsBaseUrl: ENDPOINT.wsBaseUrl,
+                pairingToken: null,
+              },
+              bearerToken: "old-fixture-token",
+            };
+          }),
+      });
+      const broker = yield* ConnectionResolver.ConnectionResolver.pipe(Effect.provide(layerBroker));
+      yield* broker.prepare(catalogEntry(target, Option.some(profile)));
+      expect(document.credentials[0]!.credential).toEqual(newer);
     }),
   );
 

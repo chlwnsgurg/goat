@@ -59,7 +59,7 @@ describe("BrowserSession", () => {
       const browserSession = {
         clearCache: vi.fn(() => Promise.resolve()),
         clearStorageData: vi.fn(() => Promise.resolve()),
-        getUserAgent: vi.fn(() => "Mozilla/5.0 Electron/41.5.0 t3code/0.0.27"),
+        getUserAgent: vi.fn(() => "Mozilla/5.0 Electron/41.5.0 t3code/0.0.27"), // goat-rename: legacy
         setPermissionRequestHandler: vi.fn(),
         setPermissionCheckHandler: vi.fn(),
         setUserAgent: vi.fn(),
@@ -77,9 +77,22 @@ describe("BrowserSession", () => {
       const first = yield* browserSessions.getSession("scope-a");
       const second = yield* browserSessions.getSession("scope-a");
 
-      assert.strictEqual(partition, "persist:t3code-preview-f051bb2c68cb7b2fe969");
+      assert.strictEqual(partition, "persist:t3code-preview-f051bb2c68cb7b2fe969"); // goat-rename: legacy
       assert.strictEqual(first, second);
       assert.strictEqual(fromPartition.mock.calls.length, 1);
+    }).pipe(Effect.provide(layer)),
+  );
+
+  it.effect("uses GOAT names for memory-only sessions without sharing persistent cookies", () =>
+    Effect.gen(function* () {
+      const browserSessions = yield* BrowserSession.BrowserSession;
+      const ephemeral = yield* browserSessions.getPartition("scope-a", false);
+      const persistent = yield* browserSessions.getPartition("scope-a");
+      assert.strictEqual(ephemeral, "goat-preview-ephemeral-f051bb2c68cb7b2fe969");
+      assert.notStrictEqual(ephemeral, persistent);
+      assert.isTrue(browserSessions.isPartition(ephemeral));
+      yield* browserSessions.getSession("scope-a", false);
+      assert.strictEqual(fromPartition.mock.calls[0]?.[0], ephemeral);
     }).pipe(Effect.provide(layer)),
   );
 
@@ -93,14 +106,12 @@ describe("BrowserSession", () => {
       const replacementChar = yield* browserSessions.getPartition("p\ufffd");
       assert.notStrictEqual(loneSurrogate, replacementChar);
 
-      // The escape can't be forged with a literal backslash either.
       const literal = yield* browserSessions.getPartition("p\\ud800");
       assert.notStrictEqual(literal, loneSurrogate);
 
-      // And a well-formed scope still lands on its historical partition.
       assert.strictEqual(
         yield* browserSessions.getPartition("scope-a"),
-        "persist:t3code-preview-f051bb2c68cb7b2fe969",
+        "persist:t3code-preview-f051bb2c68cb7b2fe969", // goat-rename: legacy
       );
     }).pipe(Effect.provide(layer)),
   );
@@ -109,13 +120,11 @@ describe("BrowserSession", () => {
     Effect.gen(function* () {
       const browserSessions = yield* BrowserSession.BrowserSession;
 
-      // These share the same scope string: default environment `a::b`, and
-      // environment `a` with nondefault profile `b`.
       const legacyDefault = yield* browserSessions.getPartition("a::b");
       const nondefaultProfile = yield* browserSessions.getPartition("a::b", true, "profile");
 
-      assert.strictEqual(legacyDefault, "persist:t3code-preview-78f0be89237d77f7a70e");
-      assert.strictEqual(nondefaultProfile, "persist:t3code-preview-profile-78f0be89237d77f7a70e");
+      assert.strictEqual(legacyDefault, "persist:t3code-preview-78f0be89237d77f7a70e"); // goat-rename: legacy
+      assert.strictEqual(nondefaultProfile, "persist:t3code-preview-profile-78f0be89237d77f7a70e"); // goat-rename: legacy
       assert.notStrictEqual(nondefaultProfile, legacyDefault);
       assert.isTrue(browserSessions.isPartition(legacyDefault));
       assert.isTrue(browserSessions.isPartition(nondefaultProfile));
@@ -123,16 +132,14 @@ describe("BrowserSession", () => {
   );
 
   // A rewritten session UA — any variant, even ones that keep the Electron
-  // token — makes Cloudflare Turnstile loop with error 600010 (#5002), so
-  // the guest must end up with Electron's native User-Agent. The mock applies
-  // setUserAgent calls, so this fails on any reintroduced rewrite while still
-  // permitting a harmless re-set of the unchanged native string.
+  // token — makes Cloudflare Turnstile loop with error 600010 (#5002), so the
+  // guest must end up with Electron's native User-Agent.
   it.effect("keeps the guest's effective User-Agent equal to Electron's native one", () =>
     Effect.gen(function* () {
       // Electron's real UA shape: app token, then Chrome, then Electron, then
       // Safari — the token order and casing matter to any strip regex.
       const nativeUserAgent =
-        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) T3Code(Alpha)/0.0.33 Chrome/146.0.7680.216 Electron/41.5.0 Safari/537.36";
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) T3Code(Alpha)/0.0.33 Chrome/146.0.7680.216 Electron/41.5.0 Safari/537.36"; // goat-rename: legacy
       fromPartition.mockReset();
       fromPartition.mockImplementation((partition: string) => {
         let userAgent = nativeUserAgent;
@@ -186,7 +193,6 @@ describe("BrowserSession", () => {
       for (const permission of [
         "clipboard-read",
         "clipboard-sanitized-write",
-        "notifications",
         "geolocation",
         "fullscreen",
       ]) {
@@ -200,7 +206,7 @@ describe("BrowserSession", () => {
       // `clipboard-write` is not a real Electron permission — the async write API
       // uses `clipboard-sanitized-write` — so the stale name must not be granted,
       // and unrelated permissions stay denied.
-      for (const permission of ["clipboard-write", "midi"]) {
+      for (const permission of ["clipboard-write", "notifications", "midi"]) {
         assert.isFalse(requestAllows(permission), `request handler should deny ${permission}`);
         assert.isFalse(
           checkHandler(null, permission) as boolean,
@@ -242,8 +248,6 @@ describe("BrowserSession", () => {
     }).pipe(Effect.provide(layer)),
   );
 
-  // A prompt without an owner can open behind the app window, leaving the one
-  // prompt slot taken and every later link silently denied.
   it.effect("attaches the open-externally prompt to the window hosting the preview", () =>
     Effect.gen(function* () {
       const browserSessions = yield* BrowserSession.BrowserSession;
@@ -362,10 +366,6 @@ describe("BrowserSession", () => {
       const browserSessions = yield* BrowserSession.BrowserSession;
       const partition = yield* browserSessions.getPartition("scope-untouched");
 
-      // Deriving the partition string does not create the session, and the
-      // clear only walks sessions it already holds. Without loading it first
-      // this reports success and deletes nothing — which is what a user
-      // clearing a profile after a restart would get.
       assert.isUndefined(sessions.get(partition));
       yield* browserSessions.clearCookies([partition]);
       assert.isUndefined(sessions.get(partition));

@@ -1,4 +1,4 @@
-import { EnvironmentId } from "@t3tools/contracts";
+import { EnvironmentId } from "@goat/contracts";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 import { Atom, AsyncResult } from "effect/reactivity";
 import { appAtomRegistry } from "../rpc/atomRegistry";
@@ -22,7 +22,7 @@ const mocks = vi.hoisted(() => ({
   readPreparedConnection: vi.fn(),
 }));
 
-vi.mock("@t3tools/client-runtime/state/runtime", () => ({
+vi.mock("@goat/client-runtime/state/runtime", () => ({
   executeAtomQuery: mocks.executeAtomQuery,
   runAtomCommand: mocks.runAtomCommand,
   squashAtomCommandFailure: (result: { readonly error: unknown }) => result.error,
@@ -520,7 +520,6 @@ describe("attachmentUploadQueue", () => {
       });
       await Promise.resolve();
 
-      // No composer effect is subscribed; only the queue can stamp the draft.
       const settled = awaitAttachmentUploads([file.id]);
       TestXmlHttpRequest.requests[0]!.complete();
       await settled;
@@ -668,8 +667,6 @@ describe("attachmentUploadQueue", () => {
     });
 
     startAttachmentUpload({ environmentId: firstEnvironment, image: file });
-    // The verify-then-reupload path crosses several awaits before the
-    // transfer starts; drain microtasks until the XHR exists.
     for (let hop = 0; hop < 20 && TestXmlHttpRequest.requests.length === 0; hop += 1) {
       await Promise.resolve();
     }
@@ -748,8 +745,6 @@ describe("attachmentUploadQueue", () => {
         },
       ]);
 
-      // The persisted id is the only server copy of the bytes (`file` is null
-      // after a reload), so the retry must verify it again, not delete it.
       retryAttachmentUpload({
         environmentId: firstEnvironment,
         image: file,
@@ -795,9 +790,6 @@ describe("attachmentUploadQueue", () => {
     );
 
     startAttachmentUpload({ environmentId: firstEnvironment, image: file });
-    // Switching environments cancels the in-flight verification. The draft
-    // still references the upload in the first environment, so the cancel
-    // must not delete it.
     startAttachmentUpload({ environmentId: secondEnvironment, image: file });
     resolveVerification({ _tag: "Success", value: {} });
     await awaitAttachmentUploads([file.id]);
@@ -850,9 +842,6 @@ describe("attachmentUploadQueue", () => {
   });
 
   it("releases the persisted server upload when a hydrated draft is discarded after a reload", () => {
-    // After a reload the in-memory queue is empty; the draft file only carries
-    // its persisted attachment id. Discarding it must still delete the
-    // server-side pending upload.
     const file: ComposerFileAttachment = {
       ...makeFile("hydrated"),
       file: null,

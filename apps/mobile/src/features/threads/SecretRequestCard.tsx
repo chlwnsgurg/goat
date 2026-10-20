@@ -1,3 +1,4 @@
+import { useAtomValue } from "@effect/atom-react";
 import {
   SECRET_REQUEST_DEFAULT_PLACEHOLDER,
   SECRET_REQUEST_PRIVACY_NOTE,
@@ -5,26 +6,21 @@ import {
   secretRequestDisplay,
   secretRequestFailureMessage,
   type SecretRequestItem,
-} from "@t3tools/client-runtime/secret-request";
+} from "@goat/client-runtime/secret-request";
 import {
   isAtomCommandInterrupted,
   squashAtomCommandFailure,
-} from "@t3tools/client-runtime/state/runtime";
-import type { EnvironmentId, OrchestrationV2ProjectedTurnItem } from "@t3tools/contracts";
+} from "@goat/client-runtime/state/runtime";
+import type { EnvironmentId, OrchestrationV2ProjectedTurnItem } from "@goat/contracts";
 import { useRef, useState } from "react";
-import { Pressable, View, type ColorValue } from "react-native";
+import { View, type ColorValue } from "react-native";
 
-import { SymbolView, type AppSymbolName } from "../../components/AppSymbol";
-import { AppText as Text, AppTextInput as TextInput } from "../../components/AppText";
+import { SymbolView, type AppSymbolName } from "../../components/ui/AppSymbol";
+import { AppText as Text, AppTextInput as TextInput } from "../../components/ui/AppText";
 import { serverEnvironment } from "../../state/server";
 import { useAtomCommand } from "../../state/use-atom-command";
-import { RequestActionButton } from "./RequestActionButton";
+import { Button } from "../../components/ui/Button";
 
-/**
- * Feed card for a secret an agent asked the user for. The typed value lives
- * only in this component's state and the RPC payload: it is never logged,
- * alerted, or persisted, and the field clears once the answer is sent.
- */
 const LOCK_SYMBOL: AppSymbolName = { ios: "lock", android: "lock" };
 const PRIVATE_SYMBOL: AppSymbolName = { ios: "checkmark.shield", android: "lock" };
 
@@ -67,6 +63,24 @@ function PendingSecretRequestForm(props: {
   readonly iconColor: ColorValue;
 }) {
   const { item } = props;
+  const canAnswer = useAtomValue(
+    serverEnvironment.answerSecretRequest.permissionAtom(props.environmentId),
+  );
+  const open = useAtomCommand(serverEnvironment.openHandoff, {
+    label: "open secret handoff",
+    reportFailure: false,
+    reportDefect: false,
+  });
+  const opened = useRef(false);
+  const markOpened = () => {
+    if (!opened.current && item.handoff?.state === "pending" && canAnswer) {
+      opened.current = true;
+      void open({
+        environmentId: props.environmentId,
+        input: { threadId: item.threadId, handoffId: item.id },
+      });
+    }
+  };
   const answer = useAtomCommand(serverEnvironment.answerSecretRequest, {
     label: "answer secret request",
     // The failure cause holds the request; keep it out of the console.
@@ -92,7 +106,6 @@ function PendingSecretRequestForm(props: {
       setSubmitting(false);
     });
     if (result._tag === "Success") {
-      // The card switches to its answered row once the item updates.
       setSecret("");
       return;
     }
@@ -101,12 +114,10 @@ function PendingSecretRequestForm(props: {
     }
   };
 
-  // Same hierarchy as web: what is asked, why, the field, then the promise
-  // about where the value goes.
   return (
     <View className="mb-3 gap-3 rounded-[20px] border border-border bg-card-alt p-4">
       <View className="gap-1">
-        <Text className="font-t3-bold text-base text-foreground">{item.label}</Text>
+        <Text className="font-goat-bold text-base text-foreground">{item.label}</Text>
         {item.reason.trim() ? (
           <Text className="font-sans text-sm leading-5 text-foreground-muted">{item.reason}</Text>
         ) : null}
@@ -116,7 +127,8 @@ function PendingSecretRequestForm(props: {
         placeholder={item.placeholder ?? SECRET_REQUEST_DEFAULT_PLACEHOLDER}
         value={secret}
         onChangeText={setSecret}
-        editable={!submitting}
+        editable={canAnswer && !submitting}
+        onFocus={markOpened}
         secureTextEntry
         autoCorrect={false}
         autoCapitalize="none"
@@ -136,9 +148,11 @@ function PendingSecretRequestForm(props: {
           {error}
         </Text>
       ) : null}
-      <RequestActionButton
+      <Button
         label="Save securely"
-        disabled={submitting || secret.trim().length === 0}
+        tone="primary"
+        fullWidth
+        disabled={!canAnswer || submitting || secret.trim().length === 0}
         onPress={() => void send({ type: "save", secret })}
       />
       <View className="flex-row items-center justify-between gap-2">
@@ -153,17 +167,12 @@ function PendingSecretRequestForm(props: {
             {SECRET_REQUEST_PRIVACY_NOTE}
           </Text>
         </View>
-        {/* Quiet like the web card's: the field and Save are the action. */}
-        <Pressable
-          accessibilityRole="button"
-          accessibilityState={{ disabled: submitting }}
-          disabled={submitting}
-          hitSlop={8}
-          className="px-1 py-1 active:opacity-60 disabled:opacity-50"
+        <Button
+          label="Decline"
+          tone="text"
+          disabled={!canAnswer || submitting}
           onPress={() => void send({ type: "decline" })}
-        >
-          <Text className="font-sans text-xs text-foreground-muted">Decline</Text>
-        </Pressable>
+        />
       </View>
     </View>
   );

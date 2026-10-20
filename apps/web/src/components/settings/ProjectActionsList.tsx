@@ -1,5 +1,5 @@
-import type { ProjectScript, ResolvedKeybindingsConfig } from "@t3tools/contracts";
-import { SettingsIcon } from "lucide-react";
+import type { ProjectScript, ResolvedKeybindingsConfig } from "@goat/contracts";
+import { SettingsIcon } from "~/components/solar";
 import { shortcutLabelForCommand } from "../../keybindings";
 import { commandForProjectScript } from "../../projectScripts";
 import { ScriptIcon } from "../projectScriptEditor";
@@ -41,6 +41,11 @@ export function ProjectActionsList({
             {script.runOnSettle ? (
               <span className="shrink-0 rounded-sm border border-border/60 px-1.5 py-px text-2xs font-normal text-muted-foreground">
                 on settle
+              </span>
+            ) : null}
+            {script.runAsCheck ? (
+              <span className="shrink-0 rounded-sm border border-border/60 px-1.5 py-px text-2xs font-normal text-muted-foreground">
+                check
               </span>
             ) : null}
             {script.previewUrl ? (

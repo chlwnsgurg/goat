@@ -1,13 +1,6 @@
-import type { ScopedThreadRef } from "@t3tools/contracts";
-import { parseScopedThreadKey } from "@t3tools/client-runtime/environment";
-import {
-  useCallback,
-  useEffect,
-  useLayoutEffect,
-  useMemo,
-  useRef,
-  type PointerEvent as ReactPointerEvent,
-} from "react";
+import type { ScopedThreadRef } from "@goat/contracts";
+import { parseScopedThreadKey } from "@goat/client-runtime/environment";
+import { useEffect, useLayoutEffect, useRef, type PointerEvent as ReactPointerEvent } from "react";
 
 import { isMacPlatform } from "../../lib/utils";
 import { useThreadSelectionStore } from "../../threadSelectionStore";
@@ -70,11 +63,11 @@ export function useThreadContextDrag(
   useLayoutEffect(() => {
     onContextDragChangeRef.current = options.onContextDragChange;
   }, [options.onContextDragChange]);
-  const begin = useCallback((subject: ThreadContextDragSubject) => {
+  const begin = (subject: ThreadContextDragSubject) => {
     subjectRef.current = subject;
     contextDragRef.current = false;
-  }, []);
-  const move = useCallback((point: { x: number; y: number }) => {
+  };
+  const move = (point: { x: number; y: number }) => {
     const subject = subjectRef.current;
     const contextDrag = subject !== null && isOutsideList(subject.list, point);
     if (contextDragRef.current !== contextDrag) {
@@ -90,20 +83,20 @@ export function useThreadContextDrag(
       count: threadContextDragRefs(subject.key).length,
     });
     return true;
-  }, []);
-  const drop = useCallback((point: { x: number; y: number }) => {
+  };
+  const drop = (point: { x: number; y: number }) => {
     const subject = subjectRef.current;
     if (subject === null || !isOutsideList(subject.list, point)) return false;
     dropThreadContext(point, threadContextDragRefs(subject.key));
     // Releasing outside the list never sorts, whether or not a composer took the drop.
     return true;
-  }, []);
-  const end = useCallback(() => {
+  };
+  const end = () => {
     subjectRef.current = null;
     contextDragRef.current = false;
     endThreadContextDrag();
-  }, []);
-  return useMemo(() => ({ begin, move, drop, end }), [begin, drop, end, move]);
+  };
+  return { begin, move, drop, end };
 }
 
 interface ThreadContextDragPress {
@@ -154,43 +147,37 @@ export function useThreadContextDragHandle(input: {
   useEffect(() => {
     if (input.disabled) sensorRef.current?.cancel();
   }, [input.disabled]);
-  const onPointerDown = useCallback(
-    (event: ReactPointerEvent<Element>) => {
-      if (!shouldStartThreadContextDrag(event, navigator.platform)) return;
-      sensorRef.current?.cancel();
-      const { threadKey, title } = rowRef.current;
-      const list = event.currentTarget.closest(`[${LIST_ATTRIBUTE}]`);
-      // The sensor owns its document listeners from here until release or cancellation.
-      void new SidebarPointerSensor({
-        active: threadKey,
-        event: event.nativeEvent,
-        options: {
-          distance: SIDEBAR_DRAG_DISTANCE,
-          onAttach: (sensor) => {
-            sensorRef.current = sensor;
-          },
-          onFinish: () => {
-            sensorRef.current = null;
-            drag.end();
-          },
-          onMove: (point) => {
-            drag.move(point);
-            return true;
-          },
-          onDrop: drag.drop,
+  const onPointerDown = (event: ReactPointerEvent<Element>) => {
+    if (!shouldStartThreadContextDrag(event, navigator.platform)) return;
+    sensorRef.current?.cancel();
+    const { threadKey, title } = rowRef.current;
+    const list = event.currentTarget.closest(`[${LIST_ATTRIBUTE}]`);
+    // The sensor owns its document listeners from here until release or cancellation.
+    void new SidebarPointerSensor({
+      active: threadKey,
+      event: event.nativeEvent,
+      options: {
+        distance: SIDEBAR_DRAG_DISTANCE,
+        onAttach: (sensor) => {
+          sensorRef.current = sensor;
         },
-        onPending: noop,
-        onStart: () => drag.begin({ key: threadKey, title, list }),
-        onMove: noop,
-        onEnd: noop,
-        onCancel: noop,
-        onAbort: noop,
-      });
-    },
-    [drag],
-  );
-  return useMemo(
-    () => (input.disabled ? undefined : { onPointerDown }),
-    [input.disabled, onPointerDown],
-  );
+        onFinish: () => {
+          sensorRef.current = null;
+          drag.end();
+        },
+        onMove: (point) => {
+          drag.move(point);
+          return true;
+        },
+        onDrop: drag.drop,
+      },
+      onPending: noop,
+      onStart: () => drag.begin({ key: threadKey, title, list }),
+      onMove: noop,
+      onEnd: noop,
+      onCancel: noop,
+      onAbort: noop,
+    });
+  };
+  return input.disabled ? undefined : { onPointerDown };
 }

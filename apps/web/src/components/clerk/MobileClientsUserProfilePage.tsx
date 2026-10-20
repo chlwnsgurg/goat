@@ -1,5 +1,5 @@
-import type { RelayClientDeviceRecord } from "@t3tools/contracts/relay";
-import { SmartphoneIcon } from "lucide-react";
+import type { RelayClientDeviceRecord } from "@goat/contracts/relay";
+import { SmartphoneIcon } from "~/components/solar";
 
 import { useManagedRelayDevices } from "../../cloud/managedRelayState";
 import { Badge } from "../ui/badge";

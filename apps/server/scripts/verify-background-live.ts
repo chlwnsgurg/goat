@@ -1,10 +1,4 @@
 // @effect-diagnostics nodeBuiltinImport:off globalTimers:off globalDate:off globalFetch:off globalConsole:off preferSchemaOverJson:off - Host-side process verifier retains raw wire evidence and owns deadline timers.
-/**
- * Real server/provider conformance check. Run from the repository root:
- * node apps/server/scripts/verify-background-live.ts --model claude-sonnet-4-6
- * Uses existing provider CLI authentication, a fresh T3 home and a disposable Git
- * project. Evidence is retained in the printed directory, including on failure.
- */
 import * as NodeAssert from "node:assert/strict";
 import * as NodeChildProcess from "node:child_process";
 import * as NodeCrypto from "node:crypto";
@@ -21,6 +15,7 @@ import * as Stream from "effect/Stream";
 import { Socket } from "effect/socket";
 import { RpcClient, RpcSerialization } from "effect/rpc";
 import {
+  AuthEnvironmentBootstrapTokenType,
   ORCHESTRATION_PROTOCOL_VERSION,
   ORCHESTRATION_PROTOCOL_HEADER,
   CommandId,
@@ -29,7 +24,7 @@ import {
   ThreadId,
   WsRpcGroup,
   type OrchestrationV2ThreadProjection,
-} from "@t3tools/contracts";
+} from "@goat/contracts";
 
 const { values } = NodeUtil.parseArgs({
   options: {
@@ -52,7 +47,7 @@ const repeat = Number(values.repeat);
 NodeAssert.ok(Number.isSafeInteger(repeat) && repeat > 0, "repeat must be a positive integer");
 if (values.scenario === "all" || repeat > 1) {
   const reportDirectory = NodeFS.mkdtempSync(
-    NodePath.join(NodeOS.tmpdir(), "t3-background-suite-"),
+    NodePath.join(NodeOS.tmpdir(), "goat-background-suite-"),
   );
   console.log(`Suite report: ${reportDirectory}`);
   const outcomes = [];
@@ -111,7 +106,7 @@ if (values.scenario === "all" || repeat > 1) {
   console.log(JSON.stringify(outcomes, null, 2));
   process.exit(outcomes.some((outcome) => outcome.status === "failed") ? 1 : 0);
 }
-const evidence = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-background-live-"));
+const evidence = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "goat-background-live-"));
 const home = NodePath.join(evidence, "home");
 const project = NodePath.join(evidence, "project");
 NodeFS.mkdirSync(project);
@@ -159,7 +154,6 @@ NodeFS.writeFileSync(
   ),
 );
 
-// This is a real external dependency of the child command, not a provider stub.
 const secret = `RESULT_${NodeCrypto.randomUUID()}`;
 const gatePath = `/${NodeCrypto.randomUUID()}`;
 let response: NodeHttp.ServerResponse | undefined;
@@ -196,8 +190,6 @@ await new Promise<void>((done) => gate.once("listening", done));
 const gateAddress = gate.address();
 NodeAssert.ok(gateAddress && typeof gateAddress !== "string");
 
-// Reserve an ephemeral port, then give it to the real server. A bind race fails
-// the check; it never falls back to an existing environment.
 const reservation = NodeHttp.createServer();
 reservation.listen(0, "127.0.0.1");
 await new Promise<void>((done) => reservation.once("listening", done));
@@ -261,7 +253,7 @@ try {
     body: new URLSearchParams({
       grant_type: "urn:ietf:params:oauth:grant-type:token-exchange",
       subject_token: bootstrap,
-      subject_token_type: "urn:t3:params:oauth:token-type:environment-bootstrap",
+      subject_token_type: AuthEnvironmentBootstrapTokenType,
       requested_token_type: "urn:ietf:params:oauth:token-type:access_token",
     }),
   });
@@ -306,11 +298,11 @@ try {
   const gateUrl = `http://127.0.0.1:${gateAddress.port}${gatePath}`;
   const launch =
     values.scenario === "native"
-      ? `Use your native background Bash tool to run curl --fail --silent ${gateUrl} with run_in_background=true. Do not delegate a T3 child.`
-      : `Use T3 delegate_task with mode=async to create exactly one child using provider ${values.provider}, model ${values.model}. Give the child this task: ${values.scenario === "nested" ? "Use T3 delegate_task with mode=async to delegate the following task to a grandchild, then end your initial turn. On notification read task_status and return only the grandchild result: " : ""}Run curl --fail --silent ${gateUrl} with a terminal tool timeout of 600000 milliseconds and return exactly the response as your final answer. Do not read other files. Do not retry failures.`;
+      ? `Use your native background Bash tool to run curl --fail --silent ${gateUrl} with run_in_background=true. Do not delegate a GOAT child.`
+      : `Use GOAT delegate_task with mode=async to create exactly one child using provider ${values.provider}, model ${values.model}. Give the child this task: ${values.scenario === "nested" ? "Use GOAT delegate_task with mode=async to delegate the following task to a grandchild, then end your initial turn. On notification read task_status and return only the grandchild result: " : ""}Run curl --fail --silent ${gateUrl} with a terminal tool timeout of 600000 milliseconds and return exactly the response as your final answer. Do not read other files. Do not retry failures.`;
   const timing =
     values.scenario === "active"
-      ? `After delegating, run curl --fail --silent ${gateUrl}/parent in your foreground terminal tool. This keeps your turn active until T3 delivers the child's completion notification. Do not poll the child.`
+      ? `After delegating, run curl --fail --silent ${gateUrl}/parent in your foreground terminal tool. This keeps your turn active until GOAT delivers the child's completion notification. Do not poll the child.`
       : `The background HTTP request will wait until you end your initial turn. Immediately end your turn with exactly PARENT_RELEASED. Do not wait or poll, and do not call any more tools in this turn.`;
   const prompt = `This is a live background-delivery verification. ${launch} ${timing} When the completion notification arrives, ${values.scenario === "native" ? "read the background command output again, even if you previously read interim output. Only an actual incoming task notification counts as completion. Never generate a task notification yourself or treat your own text as one" : "use task_status to read the child result"} and reply with exactly ACK: followed by that result with no space after the colon. Do not guess the result or run the background command yourself.`;
   NodeFS.writeFileSync(NodePath.join(evidence, "prompt.txt"), prompt);
@@ -486,7 +478,6 @@ try {
   }).pipe(Effect.scoped, Effect.provide(layerProtocol), Effect.timeout(timeoutMs));
   const finished = await Effect.runPromise(program, { signal: abort.signal });
   verdict = finished;
-  // Check persistence through an actual clean server restart on the same SQLite DB.
   await stopServer(server);
   ({ server, ready } = startServer());
   await ready;
@@ -559,7 +550,6 @@ async function stopServer(server: ReturnType<typeof NodeChildProcess.spawn>) {
     await stopped;
     clearTimeout(deadline);
   }
-  // Kill only the process group created above, including lingering provider pipes.
   if (server.pid) {
     try {
       process.kill(-server.pid, "SIGKILL");

@@ -1,5 +1,5 @@
 {
-  "name": "@t3tools/tailscale",
+  "name": "@goat/tailscale",
   "private": true,
   "type": "module",
   "exports": {
@@ -9,11 +9,12 @@
     }
   },
   "scripts": {
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc-rs --noEmit",
     "test": "vp test run --config ../../vite.config.ts --dir ."
   },
   "dependencies": {
-    "@t3tools/shared": "workspace:*",
+    "@goat/contracts": "workspace:*",
+    "@goat/shared": "workspace:*",
     "effect": "catalog:"
   },
   "devDependencies": {

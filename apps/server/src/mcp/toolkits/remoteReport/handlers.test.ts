@@ -1,5 +1,5 @@
 import { expect, it } from "@effect/vitest";
-import type { OrchestratorMcpFailureCode } from "@t3tools/contracts";
+import type { OrchestratorMcpFailureCode } from "@goat/contracts";
 import * as Effect from "effect/Effect";
 import * as RemoteReportService from "../../../remoteReports/RemoteReportService.ts";
 import { remoteReportFailure } from "./handlers.ts";
@@ -18,6 +18,8 @@ const expected: Record<
   storage: "orchestration_error",
   unavailable: "orchestration_error",
   invalid_request: "invalid_request",
+  relay_unsupported: "invalid_request",
+  relay_queue_full: "invalid_request",
 };
 
 it.each(Object.entries(expected))("maps %s to %s", (reason, code) => {

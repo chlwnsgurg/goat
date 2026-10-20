@@ -2,6 +2,7 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import { describe, expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as Result from "effect/Result";
+import * as HostProcess from "@goat/shared/HostProcess";
 
 import {
   makeAcpClientTerminals,
@@ -49,7 +50,7 @@ describe("AcpClientTerminals", () => {
       const terminals = yield* makeAcpClientTerminals({
         defaultCwd: process.cwd(),
         environmentForSession: (sessionId) => ({
-          T3_TEST_ACP_SESSION_TOKEN: sessionId === "session-a" ? "token-a" : "token-b",
+          GOAT_TEST_ACP_SESSION_TOKEN: sessionId === "session-a" ? "token-a" : "token-b",
         }),
       });
       yield* Effect.addFinalizer(() => terminals.disposeAll);
@@ -61,7 +62,7 @@ describe("AcpClientTerminals", () => {
         const created = yield* terminals.create({
           sessionId,
           command: process.execPath,
-          args: ["-e", "process.stdout.write(process.env.T3_TEST_ACP_SESSION_TOKEN ?? '')"],
+          args: ["-e", "process.stdout.write(process.env.GOAT_TEST_ACP_SESSION_TOKEN ?? '')"],
         });
         yield* terminals.waitForExit({ sessionId, terminalId: created.terminalId });
         const output = yield* terminals.output({ sessionId, terminalId: created.terminalId });
@@ -75,13 +76,12 @@ describe("AcpClientTerminals", () => {
       const terminals = yield* makeAcpClientTerminals({
         defaultCwd: process.cwd(),
         shellCommands: true,
-        environmentForSession: () => ({ T3_ACP_MCP_NODE: "mailbox-probe" }),
+        environmentForSession: () => ({ GOAT_ACP_MCP_NODE: "mailbox-probe" }),
       });
       yield* Effect.addFinalizer(() => terminals.disposeAll);
-      // Same command-only shape as the failed production commands and live capture.
       const terminal = yield* terminals.create({
         sessionId: "devin",
-        command: 'printf "%s\\n" "$T3_ACP_MCP_NODE" | tr a-z A-Z',
+        command: 'printf "%s\\n" "$GOAT_ACP_MCP_NODE" | tr a-z A-Z',
       });
       const exit = yield* terminals.waitForExit({ sessionId: "devin", ...terminal });
       const output = yield* terminals.output({ sessionId: "devin", ...terminal });
@@ -126,7 +126,12 @@ describe("AcpClientTerminals", () => {
           terminalId: created.terminalId,
         });
         expect(exit.exitCode === 0 ? null : exit.exitCode).not.toBe(0);
-        expect(exit.signal).toBe("SIGTERM");
+        // Windows has no signals: a killed process only reports an exit code.
+        if (yield* HostProcess.isWindows) {
+          expect(exit.signal).toBeNull();
+        } else {
+          expect(exit.signal).toBe("SIGTERM");
+        }
 
         yield* terminals.release({ sessionId: "session", terminalId: created.terminalId });
         const rejected = yield* Effect.flip(
@@ -134,7 +139,6 @@ describe("AcpClientTerminals", () => {
         );
         expect(rejected.message).toContain("unknown terminal ID");
 
-        // Embedded tool-call content still renders released terminals.
         expect(terminals.readOutputSnapshot("session", created.terminalId)).toBeDefined();
       }),
     ),

@@ -1,23 +1,43 @@
 {
-  "name": "@t3tools/shared",
+  "name": "@goat/shared",
   "private": true,
   "type": "module",
   "exports": {
+    "./sshFailure": {
+      "types": "./src/sshFailure.ts",
+      "import": "./src/sshFailure.ts"
+    },
+    "./githubMarkdownLinks": {
+      "types": "./src/githubMarkdownLinks.ts",
+      "import": "./src/githubMarkdownLinks.ts"
+    },
+    "./mobileAppIdentity": {
+      "types": "./src/mobileAppIdentity.ts",
+      "import": "./src/mobileAppIdentity.ts"
+    },
+    "./mobilePairingLink": {
+      "types": "./src/mobilePairingLink.ts",
+      "import": "./src/mobilePairingLink.ts"
+    },
     "./sshRuntimeProtocol": {
       "types": "./src/sshRuntimeProtocol.ts",
       "import": "./src/sshRuntimeProtocol.ts"
+    },
+    "./windowsHostProcess": {
+      "types": "./src/windowsHostProcess.ts",
+      "import": "./src/windowsHostProcess.ts"
     },
     "./authScopeOptions": {
       "types": "./src/authScopeOptions.ts",
       "import": "./src/authScopeOptions.ts"
     },
+    "./standingInstructions": {
+      "types": "./src/standingInstructions.ts",
+      "import": "./src/standingInstructions.ts"
+    },
     "./orchestrationV2ThreadError": {
       "types": "./src/orchestrationV2ThreadError.ts",
       "import": "./src/orchestrationV2ThreadError.ts"
-    },
-    "./legacyCliLauncher": {
-      "types": "./src/legacyCliLauncher.ts",
-      "import": "./src/legacyCliLauncher.ts"
     },
     "./delimitedPreview": {
       "types": "./src/delimitedPreview.ts",
@@ -30,6 +50,14 @@
     "./themePalettes": {
       "types": "./src/themePalettes.ts",
       "import": "./src/themePalettes.ts"
+    },
+    "./goatMark": {
+      "types": "./src/goatMark.ts",
+      "import": "./src/goatMark.ts"
+    },
+    "./brandChannels": {
+      "types": "./src/brandChannels.ts",
+      "import": "./src/brandChannels.ts"
     },
     "./themePreview": {
       "types": "./src/themePreview.ts",
@@ -119,6 +147,14 @@
       "types": "./src/toolActivity.ts",
       "import": "./src/toolActivity.ts"
     },
+    "./commandActions": {
+      "types": "./src/commandActions.ts",
+      "import": "./src/commandActions.ts"
+    },
+    "./terminalOutput": {
+      "types": "./src/terminalOutput.ts",
+      "import": "./src/terminalOutput.ts"
+    },
     "./toolOutput": {
       "types": "./src/toolOutput.ts",
       "import": "./src/toolOutput.ts"
@@ -155,9 +191,9 @@
       "types": "./src/projectSettings.ts",
       "import": "./src/projectSettings.ts"
     },
-    "./t3ProjectFile": {
-      "types": "./src/t3ProjectFile.ts",
-      "import": "./src/t3ProjectFile.ts"
+    "./goatProjectFile": {
+      "types": "./src/goatProjectFile.ts",
+      "import": "./src/goatProjectFile.ts"
     },
     "./orchestrationTiming": {
       "types": "./src/orchestrationTiming.ts",
@@ -215,6 +251,10 @@
       "types": "./src/connectAuth.ts",
       "import": "./src/connectAuth.ts"
     },
+    "./goatConnect": {
+      "types": "./src/goatConnect.ts",
+      "import": "./src/goatConnect.ts"
+    },
     "./symlink": {
       "types": "./src/symlink.ts",
       "import": "./src/symlink.ts"
@@ -226,6 +266,10 @@
     "./keybindings": {
       "types": "./src/keybindings.ts",
       "import": "./src/keybindings.ts"
+    },
+    "./threadTranscript": {
+      "types": "./src/threadTranscript.ts",
+      "import": "./src/threadTranscript.ts"
     },
     "./threadReference": {
       "types": "./src/threadReference.ts",
@@ -250,6 +294,10 @@
     "./assistantCitations": {
       "types": "./src/assistantCitations.ts",
       "import": "./src/assistantCitations.ts"
+    },
+    "./promptLinks": {
+      "types": "./src/promptLinks.ts",
+      "import": "./src/promptLinks.ts"
     },
     "./threadLinks": {
       "types": "./src/threadLinks.ts",
@@ -339,6 +387,10 @@
       "types": "./src/devHome.ts",
       "import": "./src/devHome.ts"
     },
+    "./goatHome": {
+      "types": "./src/goatHome.ts",
+      "import": "./src/goatHome.ts"
+    },
     "./devProxy": {
       "types": "./src/devProxy.ts",
       "import": "./src/devProxy.ts"
@@ -379,9 +431,9 @@
       "types": "./src/orchestrationV2Timeline.ts",
       "import": "./src/orchestrationV2Timeline.ts"
     },
-    "./t3McpToolPresentation": {
-      "types": "./src/t3McpToolPresentation.ts",
-      "import": "./src/t3McpToolPresentation.ts"
+    "./goatMcpToolPresentation": {
+      "types": "./src/goatMcpToolPresentation.ts",
+      "import": "./src/goatMcpToolPresentation.ts"
     },
     "./Array": {
       "types": "./src/Array.ts",
@@ -402,6 +454,10 @@
     "./cliRelease": {
       "types": "./src/cliRelease.ts",
       "import": "./src/cliRelease.ts"
+    },
+    "./runtimeManifest": {
+      "types": "./src/runtimeManifest.ts",
+      "import": "./src/runtimeManifest.ts"
     },
     "./gitPatchPath": {
       "types": "./src/gitPatchPath.ts",
@@ -451,6 +507,10 @@
       "types": "./src/threadFindText.ts",
       "import": "./src/threadFindText.ts"
     },
+    "./markdownTextLines": {
+      "types": "./src/markdownTextLines.ts",
+      "import": "./src/markdownTextLines.ts"
+    },
     "./threadSearch": {
       "types": "./src/threadSearch.ts",
       "import": "./src/threadSearch.ts"
@@ -458,6 +518,10 @@
     "./markdownLinks": {
       "types": "./src/markdownLinks.ts",
       "import": "./src/markdownLinks.ts"
+    },
+    "./markdownImages": {
+      "types": "./src/markdownImages.ts",
+      "import": "./src/markdownImages.ts"
     },
     "./fileLinks": {
       "types": "./src/fileLinks.ts",
@@ -485,13 +549,13 @@
     }
   },
   "scripts": {
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc-rs --noEmit",
     "test": "vp test run --config ../../vite.config.ts --dir ."
   },
   "dependencies": {
+    "@goat/contracts": "workspace:*",
     "@noble/curves": "catalog:",
     "@noble/hashes": "catalog:",
-    "@t3tools/contracts": "workspace:*",
     "effect": "catalog:",
     "jose": "catalog:",
     "mdast-util-directive": "catalog:",

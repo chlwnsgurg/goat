@@ -1,4 +1,4 @@
-import { EnvironmentId } from "@t3tools/contracts";
+import { EnvironmentId } from "@goat/contracts";
 import { beforeEach, expect, it, vi } from "vite-plus/test";
 
 const state = vi.hoisted(() => ({
@@ -35,7 +35,7 @@ vi.mock("react", () => ({
 }));
 vi.mock("@effect/atom-react", () => ({ useAtomValue: () => state.presentations }));
 vi.mock("react-native", () => ({ Alert: {}, Pressable: "button", View: "div" }));
-vi.mock("../../components/AppText", () => ({ AppText: "span" }));
+vi.mock("../../components/ui/AppText", () => ({ AppText: "span" }));
 vi.mock("../../components/ProviderIcon", () => ({ ProviderIcon: () => null }));
 vi.mock("./usageProviders", () => ({ useProviderColors: () => ({}) }));
 vi.mock("../../state/presentation", () => ({
@@ -45,7 +45,7 @@ vi.mock("../../state/server", () => ({ serverEnvironment: { refreshProviders: nu
 vi.mock("../../state/use-atom-command", () => ({ useAtomCommand: () => state.refreshProviders }));
 
 import { useRefreshLimits } from "./UsageLimitsSection";
-import { refreshUsageLimits } from "@t3tools/client-runtime/state/usage";
+import { refreshUsageLimits } from "@goat/client-runtime/state/usage";
 
 beforeEach(() => {
   state.values = [];

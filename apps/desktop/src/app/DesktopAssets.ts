@@ -34,7 +34,7 @@ export class DesktopAssets extends Context.Service<
       fileName: string,
     ) => Effect.Effect<Option.Option<string>, DesktopAssetProbeError>;
   }
->()("@t3tools/desktop/app/DesktopAssets") {}
+>()("@goat/desktop/app/DesktopAssets") {}
 
 const resolveResourcePath = Effect.fn("desktop.assets.resolveResourcePath")(function* (
   fileName: string,
@@ -119,7 +119,7 @@ const resolveIconPath = Effect.fn("desktop.assets.resolveIconPath")(function* (
   return yield* resolveResourcePath(`icon.${ext}`);
 });
 
-/** @public Service construction is part of the canonical Effect module API. */
+/** @public */
 export const make = Effect.gen(function* () {
   const context = yield* Effect.context<
     FileSystem.FileSystem | DesktopEnvironment.DesktopEnvironment

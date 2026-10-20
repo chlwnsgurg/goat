@@ -4,7 +4,7 @@ import * as NodeCrypto from "node:crypto";
 
 import { vi } from "vite-plus/test";
 import { assert, describe, it } from "@effect/vitest";
-import { ManagedRelay } from "@t3tools/client-runtime/relay";
+import { ManagedRelay } from "@goat/client-runtime/relay";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import { FetchHttpClient } from "effect/http";
@@ -49,7 +49,6 @@ describe("managed relay DPoP signer", () => {
       const failed = yield* Effect.flip(signer.thumbprint);
       assert.equal(failed._tag, "ManagedRelayDpopKeyLoadError");
 
-      // The failure was not kept: the next request reads the key store again.
       const thumbprint = yield* signer.thumbprint;
       assert.equal(yield* signer.thumbprint, thumbprint);
     }).pipe(

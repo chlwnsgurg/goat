@@ -4,26 +4,92 @@ import {
   type ProviderApprovalOption,
   ProviderDriverKind,
   type RuntimeMode,
-} from "@t3tools/contracts";
+  TextGenerationError,
+} from "@goat/contracts";
+import {
+  MemoryGenerationRunnerError,
+  type MemoryOperationName,
+} from "@goat/provider-core/server/memoryGenerationRunner";
 import type { GrokSettings } from "../settings.ts";
 import * as Crypto from "effect/Crypto";
+import * as FileSystem from "effect/FileSystem";
+import * as Path from "effect/Path";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Scope from "effect/Scope";
 import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 import * as EffectAcpErrors from "effect-acp/errors";
-import * as HostProcess from "@t3tools/shared/HostProcess";
-import { normalizeModelSlug } from "@t3tools/shared/model";
+import * as HostProcess from "@goat/shared/HostProcess";
+import { normalizeModelSlug } from "@goat/shared/model";
 
-import * as AcpSessionRuntime from "@t3tools/provider-acp/server/AcpSessionRuntime";
+import * as AcpSessionRuntime from "@goat/provider-acp/server/AcpSessionRuntime";
 import { makeXAiPromptCompletionRuntime } from "./xaiAcpExtension.ts";
 
 const GROK_API_KEY_ENV = "XAI_API_KEY";
 const GROK_OAUTH2_REFERRER_ENV = "GROK_OAUTH2_REFERRER";
-const T3_CODE_OAUTH_REFERRER = "t3code";
+const GOAT_OAUTH_REFERRER = "t3code";
 const GROK_AUTH_METHOD_API_KEY = "xai.api_key";
 const GROK_AUTH_METHOD_CACHED_TOKEN = "cached_token";
 const GROK_DRIVER_KIND = ProviderDriverKind.make("grok");
+
+/** A fresh home excludes user/project hooks, plugins and MCP; policy tiers cannot be overridden. */
+export const requireGrokMemoryIsolation = Effect.fn("requireGrokMemoryIsolation")(function* (
+  operation: MemoryOperationName,
+  environment: NodeJS.ProcessEnv,
+) {
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const unavailable = new TextGenerationError({
+    operation,
+    detail: "Grok memory generation cannot isolate managed configuration or copy authentication.",
+    cause: new MemoryGenerationRunnerError({ code: "unavailable" }),
+  });
+  return yield* Effect.gen(function* () {
+    for (const file of [
+      "/etc/grok/managed_config.toml",
+      "/etc/grok/requirements.toml",
+      "/etc/grok/config.toml",
+      "/Library/Application Support/ClaudeCode/managed-settings.json",
+      "/etc/claude-code/managed-settings.json",
+    ]) {
+      if (yield* fs.exists(file)) {
+        // Policy tiers may add mandatory hooks before any ACP callback exists.
+        const info = yield* fs.stat(file);
+        if (
+          info.type !== "File" ||
+          info.size > 64_000n ||
+          (yield* fs.readFileString(file)).trim().length > 0
+        )
+          return yield* unavailable;
+      }
+    }
+    const root = yield* fs.makeTempDirectoryScoped({ prefix: "goat-grok-memory-" });
+    const home = path.join(root, "profile");
+    const cwd = path.join(root, "workspace");
+    yield* fs.makeDirectory(home);
+    yield* fs.makeDirectory(cwd);
+    const sourceHome =
+      environment.GROK_HOME ?? path.join(environment.HOME ?? process.env.HOME ?? "", ".grok");
+    const auth = path.join(sourceHome, "auth.json");
+    if (yield* fs.exists(auth)) {
+      yield* fs.copyFile(auth, path.join(home, "auth.json"));
+      yield* fs.chmod(path.join(home, "auth.json"), 0o600);
+    }
+    yield* fs.writeFileString(
+      path.join(home, "config.toml"),
+      '[permissions]\ndefaultMode = "default"\n',
+    );
+    return {
+      cwd,
+      environment: {
+        ...environment,
+        HOME: root,
+        GROK_HOME: home,
+        CLAUDE_CONFIG_DIR: path.join(root, "claude"),
+      },
+    };
+  }).pipe(Effect.mapError(() => unavailable));
+});
 
 type GrokAcpRuntimeGrokSettings = Pick<GrokSettings, "binaryPath">;
 
@@ -48,9 +114,8 @@ export const GROK_SUPPORTED_RUNTIME_MODES = [
 ] as const satisfies ReadonlyArray<RuntimeMode>;
 
 /**
- * Launch argv for a runtime mode. `--permission-mode` on the argv beats the
- * user's Grok config, so Supervised cannot inherit a configured always-approve.
- * A mode Grok does not offer launches asking.
+ * `--permission-mode` on the argv beats the user's Grok config, so Supervised
+ * cannot inherit a configured always-approve.
  */
 export function grokAcpSpawnArgs(runtimeMode?: RuntimeMode): ReadonlyArray<string> {
   switch (runtimeMode) {
@@ -77,7 +142,7 @@ export function buildGrokAcpSpawnInput(
     cwd,
     env: {
       ...environment,
-      [GROK_OAUTH2_REFERRER_ENV]: T3_CODE_OAUTH_REFERRER,
+      [GROK_OAUTH2_REFERRER_ENV]: GOAT_OAUTH_REFERRER,
     },
   };
 }
@@ -105,8 +170,7 @@ export function grokAcpRuntimeProcessOwnership(
 
 /**
  * Current Grok treats Ctrl+C cancellation as a barrier against stale
- * background-task wake prompts until the next genuine user turn. Replay sends
- * the same metadata so recorded cancels match.
+ * background-task wake prompts until the next genuine user turn.
  */
 export const GROK_ACP_CANCEL_META = { cancelTrigger: "ctrl_c" } as const;
 
@@ -114,7 +178,7 @@ export const GROK_ACP_CANCEL_META = { cancelTrigger: "ctrl_c" } as const;
  * Grok's Auto mode asks the client about an action its classifier blocks only
  * when the client declares a type that can show a prompt; the default
  * (`generic`) gets a silent denial instead. `extension` is the prompting type
- * that keeps the permission options T3 already maps (no always-approve row,
+ * that keeps the permission options GOAT already maps (no always-approve row,
  * no per-command persistent grants).
  */
 export const GROK_ACP_INITIALIZE_META = { clientType: "extension" } as const;
@@ -129,10 +193,6 @@ export const GROK_ACP_INITIALIZE_META = { clientType: "extension" } as const;
  */
 const GROK_ALLOW_EDITS_SESSION_OPTION_ID = "allow-edits-session";
 
-/**
- * The approval choices a Grok permission prompt can honor. The session choice
- * appears only where Grok's answer lasts for the session.
- */
 export function grokApprovalOptions(
   request: EffectAcpSchema.RequestPermissionRequest,
 ): ReadonlyArray<ProviderApprovalOption> {
@@ -184,8 +244,8 @@ export const makeGrokAcpRuntime = (
   });
 
 /**
- * T3's built-in Grok slug. It is the CLI's product name, not a model id the ACP accepts,
- * so selecting it means "use whatever model the Grok session currently runs on".
+ * It is the CLI's product name, not a model id the ACP accepts, so selecting it
+ * means "use whatever model the Grok session currently runs on".
  */
 export const GROK_DEFAULT_MODEL_SLUG = "grok-build";
 
@@ -246,7 +306,6 @@ export function applyGrokAcpModelSelection<E>(input: {
   readonly requestedReasoningEffort?: string | undefined;
   readonly mapError: (cause: EffectAcpErrors.AcpError) => E;
 }): Effect.Effect<string | undefined, E> {
-  // The product slug is never sent over the wire; it keeps the session's current model.
   const requestedModelId =
     input.requestedModelId === GROK_DEFAULT_MODEL_SLUG ? undefined : input.requestedModelId;
   const modelChanged = requestedModelId !== undefined && requestedModelId !== input.currentModelId;
@@ -262,11 +321,6 @@ export function applyGrokAcpModelSelection<E>(input: {
   }
   const reasoningMeta =
     reasoningProvided && reasoningEffort !== undefined ? { reasoningEffort } : undefined;
-  // When reasoning was explicitly provided but invalid (normalize => undefined), we deliberately
-  // send no meta so the invalid value is dropped rather than forwarded. When reasoning was not
-  // provided at all, we also send no meta, but we only reach this call when the model itself
-  // changed - an omitted reasoning preference must not be treated as an explicit clear of the
-  // CLI-advertised default (e.g. Extra High) on same-model reselections.
   return input.runtime
     .setSessionModel(targetModelId, reasoningMeta)
     .pipe(Effect.mapError(input.mapError), Effect.as(targetModelId));

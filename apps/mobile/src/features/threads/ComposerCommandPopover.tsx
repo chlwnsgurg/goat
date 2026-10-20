@@ -1,21 +1,22 @@
 import {
   resolveProviderSkillSourceKind,
   type ProviderSkillSourceKind,
-} from "@t3tools/client-runtime/providerSkills";
+} from "@goat/client-runtime/providerSkills";
 import type {
   PullRequestContextMetadata,
   ScopedThreadRef,
   ServerProviderSkill,
   ServerProviderSlashCommand,
-} from "@t3tools/contracts";
-import type { ComposerTriggerKind } from "@t3tools/shared/composerTrigger";
+} from "@goat/contracts";
+import type { ComposerTriggerKind } from "@goat/shared/composerTrigger";
 import { memo } from "react";
 import { Pressable, ScrollView, StyleSheet, View, type ViewStyle } from "react-native";
 
-import { SymbolView, type AppSymbolName } from "../../components/AppSymbol";
-import { AppText as Text } from "../../components/AppText";
-import { GlassSurface } from "../../components/GlassSurface";
+import { SymbolView, type AppSymbolName } from "../../components/ui/AppSymbol";
+import { AppText as Text } from "../../components/ui/AppText";
+import { GlassSurface } from "../../components/ui/GlassSurface";
 import { PierreEntryIcon } from "../../components/PierreEntryIcon";
+import { pullRequestStatus } from "../pull-requests/pullRequestStatus";
 export type ComposerCommandItem =
   | {
       readonly id: string;
@@ -99,7 +100,7 @@ const SKILL_SOURCE_SYMBOL_BY_KIND: Record<ProviderSkillSourceKind, AppSymbolName
 function itemIcon(item: ComposerCommandItem): AppSymbolName | null {
   switch (item.type) {
     case "pull-request":
-      return { ios: "arrow.triangle.pull", android: "merge" };
+      return pullRequestStatus(item.pullRequest).icon;
     case "slash-command":
     case "provider-slash-command":
       return "terminal";
@@ -166,11 +167,15 @@ const CommandRow = memo(function CommandRow(props: {
         <SymbolView
           name={iconName}
           size={14}
-          tintColorClassName={"accent-icon-subtle"}
+          tintColorClassName={
+            props.item.type === "pull-request"
+              ? pullRequestStatus(props.item.pullRequest).tint
+              : "accent-icon-subtle"
+          }
           type="monochrome"
         />
       ) : null}
-      <Text className="shrink-0 text-base font-t3-medium text-foreground" numberOfLines={1}>
+      <Text className="shrink-0 text-base font-goat-medium text-foreground" numberOfLines={1}>
         {props.isSlashSkill && props.item.type === "skill" ? (
           <>
             <Text className="text-foreground-muted">skill:</Text>
@@ -198,7 +203,7 @@ export const ComposerCommandPopover = memo(function ComposerCommandPopover(
     <PopoverSurface>
       {label ? (
         <View className="px-3.5 pt-2.5 pb-1">
-          <Text className="text-3xs font-t3-bold tracking-[0.8px] uppercase text-foreground-muted">
+          <Text className="text-3xs font-goat-bold tracking-[0.8px] uppercase text-foreground-muted">
             {label}
           </Text>
         </View>

@@ -1,5 +1,5 @@
 import { assert, describe, it } from "@effect/vitest";
-import type { DesktopUpdateState } from "@t3tools/contracts";
+import type { DesktopUpdateState } from "@goat/contracts";
 
 import {
   MAX_REMOTE_UPDATE_CHECKS,
@@ -38,6 +38,24 @@ function makeState(overrides: Partial<DesktopUpdateState> = {}): DesktopUpdateSt
 }
 
 describe("nextRemoteDesktopUpdateStep", () => {
+  it("does not install again a version that did not apply on this machine", () => {
+    const step = nextRemoteDesktopUpdateStep(
+      makeState({ status: "available", availableVersion: "1.2.4", notAppliedVersion: "1.2.4" }),
+      NO_ATTEMPTS,
+      null,
+    );
+    assert.equal(step.action, "done");
+    assert.include(step.action === "done" ? step.reason : "", "1.2.4 did not apply");
+    assert.deepEqual(
+      nextRemoteDesktopUpdateStep(
+        makeState({ status: "available", availableVersion: "1.2.5", notAppliedVersion: "1.2.4" }),
+        NO_ATTEMPTS,
+        null,
+      ),
+      { action: "download" },
+    );
+  });
+
   it("fails immediately when updates are disabled, preferring the known reason", () => {
     const state = makeState({ enabled: false, status: "disabled" });
     assert.deepEqual(nextRemoteDesktopUpdateStep(state, NO_ATTEMPTS, "dev build"), {
@@ -61,8 +79,6 @@ describe("nextRemoteDesktopUpdateStep", () => {
       ),
       { action: "install" },
     );
-    // A previous install failure keeps status "downloaded", so a remote run
-    // retries the install.
     assert.deepEqual(
       nextRemoteDesktopUpdateStep(
         makeState({
@@ -76,8 +92,6 @@ describe("nextRemoteDesktopUpdateStep", () => {
       ),
       { action: "install" },
     );
-    // A download survives an unrelated background updater error, so a run
-    // installs it instead of replaying that error.
     assert.deepEqual(
       nextRemoteDesktopUpdateStep(
         makeState({
@@ -91,8 +105,6 @@ describe("nextRemoteDesktopUpdateStep", () => {
       ),
       { action: "install" },
     );
-    // A leftover download behind a check error is not installable: fresh
-    // runs re-check, and post-check the error is terminal.
     const staleError = makeState({
       status: "error",
       downloadedVersion: "1.2.4",
@@ -158,8 +170,6 @@ describe("nextRemoteDesktopUpdateStep", () => {
   });
 
   it("re-checks stale up-to-date and error states before trusting them", () => {
-    // These states are retained from earlier/background checks; a remote
-    // request must look again instead of replaying them.
     assert.deepEqual(
       nextRemoteDesktopUpdateStep(makeState({ status: "up-to-date" }), NO_ATTEMPTS, null),
       { action: "check" },

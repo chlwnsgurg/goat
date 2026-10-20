@@ -2,7 +2,7 @@ import {
   connectionRoutes,
   routeEntry,
   type ConnectionCatalogEntry,
-} from "@t3tools/client-runtime/connection";
+} from "@goat/client-runtime/connection";
 import { savedSshWorktreeOptions } from "~/lib/sshWorktree";
 import type {
   EnvironmentId,
@@ -12,13 +12,10 @@ import type {
   GitRunStackedActionResult,
   GitStackedAction,
   VcsStatusResult,
-} from "@t3tools/contracts";
-import { isTemporaryWorktreeBranch } from "@t3tools/shared/git";
-import {
-  DEFAULT_CHANGE_REQUEST_TERMINOLOGY,
-  getChangeRequestTerminology,
-  type ChangeRequestTerminology,
-} from "../sourceControlPresentation";
+} from "@goat/contracts";
+import { isTemporaryWorktreeBranch } from "@goat/shared/git";
+import { sourceControlClients } from "@goat/client-runtime/source-control-clients";
+import type { ChangeRequestTerminology } from "@goat/client-runtime/source-control-clients";
 
 export type GitActionIconName = "commit" | "push" | "pr";
 
@@ -78,9 +75,7 @@ export function resolveGitActionResultToastTiming(
 function resolveChangeRequestTerminology(
   gitStatus: VcsStatusResult | null,
 ): ChangeRequestTerminology {
-  return gitStatus?.sourceControlProvider
-    ? getChangeRequestTerminology(gitStatus.sourceControlProvider)
-    : DEFAULT_CHANGE_REQUEST_TERMINOLOGY;
+  return sourceControlClients.get(gitStatus?.sourceControlProvider?.kind).changeRequest;
 }
 
 export function resolveGitActionProgressPresentation(input: {
@@ -139,7 +134,7 @@ export function buildGitActionProgressStages(input: {
   shouldPushBeforePr?: boolean;
   terminology?: ChangeRequestTerminology;
 }): string[] {
-  const terminology = input.terminology ?? DEFAULT_CHANGE_REQUEST_TERMINOLOGY;
+  const terminology = input.terminology ?? sourceControlClients.get(undefined).changeRequest;
   const branchStages = input.featureBranch ? ["Preparing feature ref..."] : [];
   const pushStage = input.pushTarget ? `Pushing to ${input.pushTarget}...` : "Pushing...";
   const prStages = [
@@ -221,8 +216,6 @@ export function buildMenuItems(
     dialogAction: "push",
   };
 
-  // An open change request is surfaced by the standalone attribution row, so
-  // the menu offers no change-request entry at all while one is open.
   if (hasOpenPr) {
     return [commitItem, pushItem];
   }
@@ -367,8 +360,6 @@ export function resolveQuickAction(
     };
   }
 
-  // An open change request is surfaced by the standalone attribution row in the
-  // details panel, so the action button rests in its disabled up-to-date state.
   if (hasOpenPr && gitStatus.hasUpstream) {
     return {
       label: "Commit",
@@ -416,7 +407,7 @@ export function resolveDefaultBranchActionDialogCopy(input: {
 }): DefaultBranchActionDialogCopy {
   const branchLabel = input.branchName;
   const suffix = ` on "${branchLabel}". You can continue on this ref or create a feature ref and run the same action there.`;
-  const terminology = input.terminology ?? DEFAULT_CHANGE_REQUEST_TERMINOLOGY;
+  const terminology = input.terminology ?? sourceControlClients.get(undefined).changeRequest;
 
   if (input.action === "push" || input.action === "commit_push") {
     if (input.includesCommit) {
@@ -445,6 +436,18 @@ export function resolveDefaultBranchActionDialogCopy(input: {
     description: `This action will push local commits and create a ${terminology.singular}${suffix}`,
     continueLabel: `Push & create ${terminology.shortLabel}`,
   };
+}
+
+/**
+ * Why the default-ref dialog cannot check out a feature branch, or null when it can.
+ * The server names that branch from the uncommitted changes, so a clean tree cannot use it.
+ */
+export function resolveFeatureBranchUnavailableReason(input: {
+  branchName: string;
+  hasWorkingTreeChanges: boolean;
+}): string | null {
+  if (input.hasWorkingTreeChanges) return null;
+  return `There are no changes to commit, so a feature branch can't be named. Create a branch yourself or continue on ${input.branchName}.`;
 }
 
 export function resolveThreadBranchUpdate(
@@ -499,8 +502,7 @@ export function resolveLiveThreadBranchUpdate(input: {
   };
 }
 
-// Re-export from shared for backwards compatibility in this module's exports
-export { resolveAutoFeatureBranchName } from "@t3tools/shared/git";
+export { resolveAutoFeatureBranchName } from "@goat/shared/git";
 
 export function isManagedSshProjectRoot(workspaceRoot: string): boolean {
   const segments = workspaceRoot.split("/").filter(Boolean);

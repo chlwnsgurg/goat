@@ -3,11 +3,15 @@ import {
   clientRpcRequiredScopes,
   authScopeRequiredResponse,
   type EnvironmentId,
+  type MemoryHistoryInput,
   type ClientGuardedRpcTag,
   ORCHESTRATION_V2_WS_METHODS,
   WS_METHODS,
   SLACK_CHANNEL_WS_METHODS,
-} from "@t3tools/contracts";
+  WsMemoryRpcGroup,
+  supportsMemoryProtocol,
+  MemoryRpcError,
+} from "@goat/contracts";
 import * as Cause from "effect/Cause";
 import * as Context from "effect/Context";
 import * as Duration from "effect/Duration";
@@ -16,7 +20,10 @@ import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import * as SubscriptionRef from "effect/SubscriptionRef";
-import { RpcClientError } from "effect/rpc";
+import { RpcClientError, type RpcClient } from "effect/rpc";
+import type { Atom, AtomRegistry } from "effect/reactivity";
+import { EnvironmentRegistry } from "../connection/registry.ts";
+import { createCommandPermissions } from "../state/commandPermissions.ts";
 
 import * as EnvironmentSupervisor from "../connection/supervisor.ts";
 import type { WsRpcProtocolClient } from "../rpc/protocol.ts";
@@ -39,28 +46,35 @@ export class EnvironmentRpcRequestObserver extends Context.Reference<{
   readonly observe: (
     request: EnvironmentRpcRequestObservation,
   ) => Effect.Effect<Effect.Effect<void>>;
-}>("@t3tools/client-runtime/rpc/EnvironmentRpcRequestObserver", {
+}>("@goat/client-runtime/rpc/EnvironmentRpcRequestObserver", {
   defaultValue: () => ({
     observe: () => Effect.succeed(Effect.void),
   }),
 }) {}
 
-export type EnvironmentRpcTag = keyof WsRpcProtocolClient & string;
-type RpcMethod<TTag extends EnvironmentRpcTag> = WsRpcProtocolClient[TTag];
+// Memory routes are staged separately until server integration. Missing routes
+// remain unavailable; the selected environment is never replaced by the primary.
+type EnvironmentProtocolClient = WsRpcProtocolClient &
+  RpcClient.FromGroup<typeof WsMemoryRpcGroup, RpcClientError.RpcClientError>;
+export type EnvironmentRpcTag = keyof EnvironmentProtocolClient & string;
+type RpcMethod<TTag extends EnvironmentRpcTag> = EnvironmentProtocolClient[TTag];
 
 export type EnvironmentSubscriptionRpcTag =
+  | typeof WS_METHODS.memoryChanges
   | typeof WS_METHODS.connectionCatalogServe
   | typeof WS_METHODS.codexAuthCallbackSubscribe
   | typeof WS_METHODS.providerAuthSubscribe
   | typeof WS_METHODS.providerInstallSubscribe
   | typeof ORCHESTRATION_V2_WS_METHODS.subscribeShell
   | typeof ORCHESTRATION_V2_WS_METHODS.subscribeThread
+  | typeof ORCHESTRATION_V2_WS_METHODS.subscribeCommandOutput
   | typeof ORCHESTRATION_V2_WS_METHODS.searchThreadStream
   | typeof WS_METHODS.subscribeAuthAccess
   | typeof WS_METHODS.subscribeServerConfig
   | typeof WS_METHODS.subscribeServerLifecycle
   | typeof WS_METHODS.scheduledTasksSubscribe
   | typeof WS_METHODS.serverGetStorageCleanupReport
+  | typeof WS_METHODS.serverGetDatabaseStorage
   | typeof WS_METHODS.subscribeTerminalEvents
   | typeof WS_METHODS.subscribeTerminalMetadata
   | typeof WS_METHODS.subscribePreviewEvents
@@ -97,7 +111,7 @@ export class EnvironmentRpcSubscriptionObserver extends Context.Reference<{
   readonly observe: (
     subscription: EnvironmentRpcSubscriptionObservation,
   ) => Effect.Effect<Effect.Effect<void>>;
-}>("@t3tools/client-runtime/rpc/EnvironmentRpcSubscriptionObserver", {
+}>("@goat/client-runtime/rpc/EnvironmentRpcSubscriptionObserver", {
   defaultValue: () => ({
     observe: () => Effect.succeed(Effect.void),
   }),
@@ -106,7 +120,6 @@ export class EnvironmentRpcSubscriptionObserver extends Context.Reference<{
 export const isRpcClientError = Schema.is(RpcClientError.RpcClientError);
 const isEnvironmentAuthorizationError = Schema.is(EnvironmentAuthorizationError);
 
-/** Ceiling for the doubling delay between same-session expected-failure retries. */
 const MAX_EXPECTED_FAILURE_RETRY_DELAY_MS = 30_000;
 
 export type EnvironmentRpcInput<TTag extends EnvironmentRpcTag> = Parameters<RpcMethod<TTag>>[0];
@@ -163,7 +176,7 @@ export class RpcPermissionGuard extends Context.Reference<{
     method: string,
     input: unknown,
   ) => Effect.Effect<void, EnvironmentAuthorizationError>;
-}>("@t3tools/client-runtime/rpc/RpcPermissionGuard", {
+}>("@goat/client-runtime/rpc/RpcPermissionGuard", {
   defaultValue: () => ({
     authorize: (_environmentId, method, input) => {
       const scope = clientRpcRequiredScopes(method, input)[0];
@@ -189,6 +202,13 @@ const authorizeRequest = Effect.fn("EnvironmentRpc.authorize")(function* (
   yield* guard.authorize(supervisor.target.environmentId, method, input);
 });
 
+/** Strip history extensions against the session that will actually dispatch the request. */
+function memoryHistoryDispatchInput(input: MemoryHistoryInput, refusedReverts: boolean) {
+  if (refusedReverts) return input;
+  const { includeRefusedReverts: _refused, ...legacyInput } = input;
+  return legacyInput;
+}
+
 export const requestGuarded = Effect.fn("EnvironmentRpc.request")(function* <
   TTag extends EnvironmentUnaryRpcTag,
 >(tag: TTag, input: EnvironmentRpcInput<TTag>) {
@@ -199,15 +219,61 @@ export const requestGuarded = Effect.fn("EnvironmentRpc.request")(function* <
   });
   const session = yield* currentSession();
   yield* authorizeRequest(tag, input);
+  let dispatchInput = input;
+  if (tag.startsWith("memory.")) {
+    const config = yield* session.initialConfig.pipe(
+      Effect.mapError(
+        () =>
+          new EnvironmentRpcUnavailableError({
+            environmentId: supervisor.target.environmentId,
+            message: "Memory configuration is unavailable.",
+          }),
+      ),
+    );
+    if (tag === WS_METHODS.memorySyncStatus) {
+      // Only an opted-in response may add fields unknown to a strict legacy decoder.
+      const { includeRetainedLocalSpaceId: _hint, ...legacyInput } = input as {
+        readonly includeRetainedLocalSpaceId?: true;
+      };
+      dispatchInput = {
+        ...legacyInput,
+        ...(config.environment.capabilities.memory?.retainedLocalSpace === true
+          ? { includeRetainedLocalSpaceId: true as const }
+          : {}),
+      } as EnvironmentRpcInput<TTag>;
+    }
+    if (tag === WS_METHODS.memoryHistory) {
+      dispatchInput = memoryHistoryDispatchInput(
+        input as MemoryHistoryInput,
+        config.environment.capabilities.memory?.refusedReverts === true,
+      ) as EnvironmentRpcInput<TTag>;
+    }
+    if (
+      !supportsMemoryProtocol(config.environment.capabilities) ||
+      (tag === WS_METHODS.memoryHistory &&
+        (input as MemoryHistoryInput).resolutionInputsFor !== undefined &&
+        config.environment.capabilities.memory?.resolutionInputs !== true) ||
+      ((tag === WS_METHODS.memoryHubDiagnostics || tag === WS_METHODS.memoryHubReconcile) &&
+        config.environment.capabilities.memory?.hubDiagnostics !== true) ||
+      (tag === WS_METHODS.memoryImportProvider &&
+        config.environment.capabilities.memory?.importProvider !== true) ||
+      typeof (session.client as Partial<EnvironmentProtocolClient>)[tag] !== "function"
+    ) {
+      return yield* new EnvironmentRpcUnavailableError({
+        environmentId: supervisor.target.environmentId,
+        message: "Memory is unavailable on this environment.",
+      });
+    }
+  }
   const observer = yield* EnvironmentRpcRequestObserver;
-  const method = session.client[tag] as (
+  const method = (session.client as EnvironmentProtocolClient)[tag] as (
     input: EnvironmentRpcInput<TTag>,
   ) => Effect.Effect<EnvironmentRpcSuccess<TTag>, EnvironmentRpcFailure<TTag>>;
   const completeObservation = yield* observer.observe({
     environmentId: supervisor.target.environmentId,
     method: tag,
   });
-  return yield* method(input).pipe(Effect.ensuring(completeObservation));
+  return yield* method(dispatchInput).pipe(Effect.ensuring(completeObservation));
 });
 
 export function runStreamGuarded<TTag extends EnvironmentStreamCommandRpcTag>(
@@ -224,7 +290,7 @@ export function runStreamGuarded<TTag extends EnvironmentStreamCommandRpcTag>(
     authorizeRequest(tag, input).pipe(
       Effect.andThen(currentSession()),
       Effect.map((session) => {
-        const method = session.client[tag] as (
+        const method = (session.client as EnvironmentProtocolClient)[tag] as (
           input: EnvironmentRpcInput<TTag>,
         ) => Stream.Stream<EnvironmentRpcStreamValue<TTag>, EnvironmentRpcStreamFailure<TTag>>;
         return method(input);
@@ -238,19 +304,12 @@ export function runStreamGuarded<TTag extends EnvironmentStreamCommandRpcTag>(
 }
 
 interface SubscriptionOptions<TTag extends EnvironmentSubscriptionRpcTag> {
-  /** Reports protocol or programming defects without changing their recovery policy. */
   readonly onDefect?: (
     cause: Cause.Cause<EnvironmentRpcStreamFailure<TTag>>,
   ) => Effect.Effect<void, never, never>;
   readonly onExpectedFailure?: (
     cause: Cause.Cause<EnvironmentRpcStreamFailure<TTag>>,
   ) => Effect.Effect<void, never, never>;
-  /**
-   * First delay before resubscribing on the same session after an expected
-   * failure. Each consecutive failure doubles it up to 30 seconds, and the
-   * first value from a healthy stream resets it. Authorization failures are
-   * not retried; they wait for the next session or `resubscribe` signal.
-   */
   readonly retryExpectedFailureAfter?: Duration.Input;
   readonly resubscribe?: Stream.Stream<unknown, never, never>;
 }
@@ -290,21 +349,46 @@ function subscribeDynamicMapped<TTag extends EnvironmentSubscriptionRpcTag, A>(
               const method = (
                 tag === WS_METHODS.subscribeServerConfig
                   ? session.subscribeServerConfig
-                  : session.client[tag]
+                  : (session.client as EnvironmentProtocolClient)[tag]
               ) as (
                 input: EnvironmentRpcInput<TTag>,
               ) => Stream.Stream<
                 EnvironmentRpcStreamValue<TTag>,
                 EnvironmentRpcStreamFailure<TTag>
               >;
-              // Consecutive expected-failure retries on this session. Reset by
-              // the first value a resubscribed stream delivers.
               let expectedFailureRetries = 0;
               const subscribeToSession = (): Stream.Stream<A, EnvironmentRpcStreamFailure<TTag>> =>
                 Stream.suspend(() =>
                   Stream.unwrap(
                     Effect.gen(function* () {
                       const input = yield* makeInput(session);
+                      if (tag === WS_METHODS.memoryChanges) {
+                        const config = yield* session.initialConfig.pipe(
+                          Effect.mapError(
+                            () =>
+                              new MemoryRpcError({
+                                code: "unsupported_operation",
+                              }) as EnvironmentRpcStreamFailure<TTag>,
+                          ),
+                        );
+                        if (
+                          !supportsMemoryProtocol(config.environment.capabilities) ||
+                          typeof method !== "function"
+                        ) {
+                          return Stream.fail(
+                            new MemoryRpcError({
+                              code: "unsupported_operation",
+                            }) as EnvironmentRpcStreamFailure<TTag>,
+                          );
+                        }
+                        yield* authorizeRequest(tag, input).pipe(
+                          Effect.mapError((error) => error as EnvironmentRpcStreamFailure<TTag>),
+                          Effect.provideService(
+                            EnvironmentSupervisor.EnvironmentSupervisor,
+                            supervisor,
+                          ),
+                        );
+                      }
                       const completeObservation = yield* observer.observe({
                         environmentId: supervisor.target.environmentId,
                         method: tag,
@@ -441,7 +525,6 @@ export function subscribe<TTag extends EnvironmentSubscriptionRpcTag>(
   return subscribeDynamic(tag, () => Effect.succeed(input), options);
 }
 
-/** Protected writes must go through the permission-aware command layer. */
 export const request = <TTag extends Exclude<EnvironmentUnaryRpcTag, ClientGuardedRpcTag>>(
   tag: TTag,
   input: EnvironmentRpcInput<TTag>,
@@ -453,3 +536,70 @@ export const runStream = <
   tag: TTag,
   input: EnvironmentRpcInput<TTag>,
 ) => runStreamGuarded(tag, input);
+
+export type MemoryBodyRpcTag =
+  | typeof WS_METHODS.memoryList
+  | typeof WS_METHODS.memorySearch
+  | typeof WS_METHODS.memoryRead
+  | typeof WS_METHODS.memoryHistory
+  | typeof WS_METHODS.memoryReadSource;
+
+/** Runs an ephemeral body read in the caller's interruptible atom scope. */
+export function requestMemoryQuery<R, E, T extends MemoryBodyRpcTag>(
+  runtime: Atom.AtomRuntime<EnvironmentRegistry | R, E>,
+  atoms: AtomRegistry.AtomRegistry,
+  environmentId: EnvironmentId,
+  tag: T,
+  input: EnvironmentRpcInput<T>,
+) {
+  const permissions = createCommandPermissions(runtime, tag);
+  return permissions.authorize(atoms, environmentId, input).pipe(
+    Effect.andThen(EnvironmentRegistry),
+    Effect.flatMap((environments) =>
+      environments.run(
+        environmentId,
+        requestGuarded(tag, input).pipe(
+          Effect.provideService(RpcPermissionGuard, {
+            authorize: (id, method, payload) =>
+              createCommandPermissions(runtime, method).authorize(atoms, id, payload),
+          }),
+        ),
+      ),
+    ),
+  );
+}
+
+/** One-session memory stream. Its owner closes exposure and handles session replacement. */
+export function subscribeMemoryChanges<R, E>(
+  runtime: Atom.AtomRuntime<EnvironmentRegistry | R, E>,
+  atoms: AtomRegistry.AtomRegistry,
+  session: RpcSession,
+  input: EnvironmentRpcInput<typeof WS_METHODS.memoryChanges>,
+) {
+  return Stream.unwrap(
+    Effect.gen(function* () {
+      const supervisor = yield* EnvironmentSupervisor.EnvironmentSupervisor;
+      const config = yield* session.initialConfig.pipe(
+        Effect.mapError(() => new MemoryRpcError({ code: "unsupported_operation" })),
+      );
+      const method = (session.client as Partial<EnvironmentProtocolClient>)[
+        WS_METHODS.memoryChanges
+      ];
+      if (!supportsMemoryProtocol(config.environment.capabilities) || method === undefined) {
+        return Stream.fail(new MemoryRpcError({ code: "unsupported_operation" }));
+      }
+      yield* createCommandPermissions(runtime, WS_METHODS.memoryChanges).authorize(
+        atoms,
+        supervisor.target.environmentId,
+        input,
+      );
+      const observer = yield* EnvironmentRpcSubscriptionObserver;
+      const complete = yield* observer.observe({
+        environmentId: supervisor.target.environmentId,
+        method: WS_METHODS.memoryChanges,
+        input,
+      });
+      return method(input).pipe(Stream.ensuring(complete));
+    }),
+  );
+}

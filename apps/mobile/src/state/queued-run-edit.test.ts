@@ -6,7 +6,7 @@ import {
   RunId,
   type ChatAttachment,
   type OrchestrationMessageContext,
-} from "@t3tools/contracts";
+} from "@goat/contracts";
 
 import { composerDraftEnvironmentId } from "../lib/composerAttachmentUploadQueue";
 import { isQueuedEditDraftKey, queuedEditDraftKey } from "./queued-edit-draft-key";
@@ -82,7 +82,6 @@ describe("resolveQueuedEditPayload", () => {
 
   it("drops the record of an attachment the user removed", () => {
     const payload = resolveQueuedEditPayload({
-      // "gone" was on the message and has been removed from the kept list.
       edit: edit([image("kept")]),
       draftContext: context(["kept", "gone"]),
       draftAttachments: [],

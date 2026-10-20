@@ -1,13 +1,9 @@
-export const BUILT_IN_THEME_IDS = ["t3-chat", "grove", "ocean", "ember", "iris"] as const;
+import { LEGACY_THEME_ID_ALIASES } from "@goat/contracts/legacyT3Names";
 
-/** The standard T3 Code palette, kept separate from the optional built-in theme library. */
-export const MOBILE_DEFAULT_THEME_ID = "t3-code";
+export const BUILT_IN_THEME_IDS = ["goat-chat", "grove", "ocean", "ember", "iris"] as const;
 
-/**
- * Every palette the mobile app can render. Declared here so host-side tooling
- * (the app-store screenshot harness) can validate a requested theme without
- * importing React Native application code.
- */
+export const MOBILE_DEFAULT_THEME_ID = "goat-code";
+
 export const MOBILE_THEME_IDS = [MOBILE_DEFAULT_THEME_ID, ...BUILT_IN_THEME_IDS] as const;
 
 /**
@@ -21,11 +17,11 @@ export const RESERVED_THEME_IDS: ReadonlySet<string> = new Set([
   "light",
   "dark",
   ...BUILT_IN_THEME_IDS,
-  "t3-chat-dark",
-  "t3-grove",
-  "t3-ocean",
-  "t3-ember",
-  "t3-iris",
+  ...Object.keys(LEGACY_THEME_ID_ALIASES),
+  "goat-chat-light",
+  "goat-chat-dark",
+  "goat-code-light",
+  "goat-code-dark",
 ]);
 
 /**
@@ -39,11 +35,22 @@ export const UNPUBLISHABLE_THEME_IDS: ReadonlySet<string> = new Set([
   MOBILE_DEFAULT_THEME_ID,
 ]);
 
+/** Translate saved ids while retaining the appearance hint. */
+export function normalizeThemePreference(themeId: string): string {
+  return Object.hasOwn(LEGACY_THEME_ID_ALIASES, themeId)
+    ? LEGACY_THEME_ID_ALIASES[themeId]!
+    : themeId;
+}
+
+/** Resolve a saved appearance variant to its palette id. */
+export function normalizeThemeId(themeId: string): string {
+  return normalizeThemePreference(themeId).replace(/^(goat-(?:chat|code))-(?:light|dark)$/, "$1");
+}
+
 export type BuiltInThemeId = (typeof BUILT_IN_THEME_IDS)[number];
 export type MobileThemeId = (typeof MOBILE_THEME_IDS)[number];
 export type ThemeAppearance = "light" | "dark";
 
-/** Product roles shared by web CSS, React Native tokens, and native surfaces. */
 export const THEME_COLOR_ROLES = [
   "canvas",
   "chrome",
@@ -110,6 +117,112 @@ export const THEME_COLOR_ROLES = [
 
 export type ThemeColorRole = (typeof THEME_COLOR_ROLES)[number];
 export type ThemeColors = Readonly<Record<ThemeColorRole, string>>;
+
+type Oklab = Readonly<{ l: number; a: number; b: number }>;
+
+function colorToOklab(value: string): Oklab {
+  const oklch =
+    /^oklch\(\s*([\d.]+)(%?)\s+([\d.]+)\s+(-?[\d.]+)(?:deg)?(?:\s*\/[^)]+)?\s*\)$/i.exec(value);
+  if (oklch) {
+    const hue = (Number(oklch[4]) * Math.PI) / 180;
+    return {
+      l: Number(oklch[1]) / (oklch[2] ? 100 : 1),
+      a: Number(oklch[3]) * Math.cos(hue),
+      b: Number(oklch[3]) * Math.sin(hue),
+    };
+  }
+
+  const hex = /^#([\da-f]{3}|[\da-f]{6}|[\da-f]{8})$/i.exec(value);
+  const rgb = /^rgba?\(\s*([\d.]+%?)[,\s]+([\d.]+%?)[,\s]+([\d.]+%?)(?:\s*[,/][^)]+)?\s*\)$/i.exec(
+    value,
+  );
+  let channels: number[];
+  if (hex) {
+    const digits =
+      hex[1]!.length === 3 ? [...hex[1]!].map((digit) => digit + digit).join("") : hex[1]!;
+    channels = [0, 2, 4].map(
+      (offset) => Number.parseInt(digits.slice(offset, offset + 2), 16) / 255,
+    );
+  } else if (rgb) {
+    channels = rgb
+      .slice(1, 4)
+      .map((channel) => Number.parseFloat(channel!) / (channel!.endsWith("%") ? 100 : 255));
+  } else {
+    throw new Error(`Unsupported theme color: ${value}`);
+  }
+  const [red, green, blue] = channels.map((channel) =>
+    channel <= 0.04045 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4,
+  );
+  const l = Math.cbrt(0.4122214708 * red! + 0.5363325363 * green! + 0.0514459929 * blue!);
+  const m = Math.cbrt(0.2119034982 * red! + 0.6806995451 * green! + 0.1073969566 * blue!);
+  const s = Math.cbrt(0.0883024619 * red! + 0.2817188376 * green! + 0.6299787005 * blue!);
+  return {
+    l: 0.2104542553 * l + 0.793617785 * m - 0.0040720468 * s,
+    a: 1.9779984951 * l - 2.428592205 * m + 0.4505937099 * s,
+    b: 0.0259040371 * l + 0.7827717662 * m - 0.808675766 * s,
+  };
+}
+
+/** Mix opaque palette/native colors like CSS color-mix(in oklab), then encode for React Native. */
+export function mixOklab(first: string, second: string, weightOfFirst: number): string {
+  const a = colorToOklab(first.trim());
+  const b = colorToOklab(second.trim());
+  const weightOfSecond = 1 - weightOfFirst;
+  const lightness = a.l * weightOfFirst + b.l * weightOfSecond;
+  const axisA = a.a * weightOfFirst + b.a * weightOfSecond;
+  const axisB = a.b * weightOfFirst + b.b * weightOfSecond;
+  const l = (lightness + 0.3963377774 * axisA + 0.2158037573 * axisB) ** 3;
+  const m = (lightness - 0.1055613458 * axisA - 0.0638541728 * axisB) ** 3;
+  const s = (lightness - 0.0894841775 * axisA - 1.291485548 * axisB) ** 3;
+  const channels = [
+    4.0767416621 * l - 3.3077115913 * m + 0.2309699292 * s,
+    -1.2684380046 * l + 2.6097574011 * m - 0.3413193965 * s,
+    -0.0041960863 * l - 0.7034186147 * m + 1.707614701 * s,
+  ].map((channel) => {
+    const srgb = channel <= 0.0031308 ? 12.92 * channel : 1.055 * channel ** (1 / 2.4) - 0.055;
+    return Math.round(Math.min(1, Math.max(0, srgb)) * 255)
+      .toString(16)
+      .padStart(2, "0");
+  });
+  return `#${channels.join("")}`;
+}
+
+/** Effective roles also let Android's system palette derive the same semantic tones. */
+export function deriveSemanticColorsFrom(
+  input: Pick<
+    ThemeColors,
+    "text" | "canvas" | "mutedForeground" | "messageAction" | "errorForeground"
+  > & { readonly appearance: ThemeAppearance; readonly error?: string },
+) {
+  const dark = input.appearance === "dark";
+  // Web mixes with contrast-adjusted muted text. Mobile has no contrast slider,
+  // so semantic tones use the palette's mutedForeground directly.
+  return {
+    prOpen: mixOklab(
+      dark ? "oklch(76.5% 0.177 163.223)" : "oklch(50.8% 0.118 165.612)",
+      input.mutedForeground,
+      0.55,
+    ),
+    prClosed: mixOklab(input.errorForeground, input.mutedForeground, 0.55),
+    prMerged: mixOklab(
+      dark ? "oklch(70.2% 0.183 293.541)" : "oklch(49.1% 0.27 292.581)",
+      input.mutedForeground,
+      0.55,
+    ),
+    composerSend: mixOklab(input.messageAction, "#000000", 0.86),
+    ...(input.error === undefined ? {} : { composerStop: mixOklab(input.error, "#000000", 0.86) }),
+    goatAvatar: mixOklab(input.text, input.canvas, 0.06),
+    goatAvatarBorder: mixOklab(input.text, input.canvas, 0.12),
+    goatAvatarForeground: mixOklab(input.text, input.canvas, 0.82),
+  };
+}
+
+export function deriveSemanticColors(colors: ThemeColors, appearance: ThemeAppearance) {
+  const semantic = deriveSemanticColorsFrom({ ...colors, appearance });
+  // A complete palette always supplies the solid destructive role.
+  return { ...semantic, composerStop: semantic.composerStop! };
+}
+
 export type ThemeVariants = Readonly<Partial<Record<ThemeAppearance, ThemeColors>>>;
 export type ThemeDefinition = Readonly<{
   id: string;
@@ -117,24 +230,12 @@ export type ThemeDefinition = Readonly<{
   appearance: ThemeAppearance;
   colors: ThemeColors;
   variants?: ThemeVariants;
-  /** Groups related imported variants into one library card. */
   collection?: Readonly<{ id: string; label: string }>;
-  /** Allows reviewed built-ins to render product artwork over their sidebar. */
   sidebarArtwork?: boolean;
-  /** Generated from the guided editor's canvas and accent roles. */
   managed?: boolean;
 }>;
 
-/**
- * The palette T3 Code wears with no theme installed, captured from the app's
- * stock tokens (index.css) so a draft seeded from the default look paints the
- * pixels the user is already seeing. Alpha-bearing tokens are flattened over
- * their real backdrops (canvas, or the sidebar for its rows) because theme
- * colors are stored as opaque OKLCH tokens.
- * Search uses amber across built-ins to separate matches from accent-tinted
- * inline code. The current match uses a stronger gold with dark text.
- */
-export const T3_CODE_LIGHT_THEME_COLORS: ThemeColors = {
+export const GOAT_LIGHT_THEME_COLORS: ThemeColors = {
   searchMatchBackground: "#ffde8b",
   searchMatchForeground: "#21180a",
   searchMatchActiveBackground: "#eea52b",
@@ -198,72 +299,72 @@ export const T3_CODE_LIGHT_THEME_COLORS: ThemeColors = {
   terminalScrollbarHover: "#bdbdbd",
 };
 
-export const T3_CODE_DARK_THEME_COLORS: ThemeColors = {
+export const GOAT_DARK_THEME_COLORS: ThemeColors = {
   searchMatchBackground: "#8c6c1f",
   searchMatchForeground: "#f5f5f5",
   searchMatchActiveBackground: "#eea52b",
   searchMatchActiveForeground: "#21180a",
-  canvas: "#0a0a0a",
-  chrome: "#0a0a0a",
-  toolbar: "#0a0a0a",
+  canvas: "#171717",
+  chrome: "#171717",
+  toolbar: "#171717",
   toolbarForeground: "#f5f5f5",
-  toolbarBorder: "#191919",
-  toolbarControl: "#111111",
+  toolbarBorder: "#2e2e2e",
+  toolbarControl: "#232323",
   toolbarControlForeground: "#f5f5f5",
-  toolbarControlHover: "#141414",
-  surface: "#111111",
-  surfaceRaised: "#111111",
-  surfaceOverlay: "#111111",
+  toolbarControlHover: "#252525",
+  surface: "#232323",
+  surfaceRaised: "#232323",
+  surfaceOverlay: "#232323",
   text: "#f5f5f5",
-  textMuted: "#818181",
-  border: "#191919",
-  input: "#1e1e1e",
+  textMuted: "#a1a1a1",
+  border: "#2e2e2e",
+  input: "#373737",
   focus: "#346bf1",
   accent: "#346bf1",
   accentForeground: "#ffffff",
-  secondary: "#111111",
+  secondary: "#232323",
   secondaryForeground: "#f5f5f5",
-  muted: "#111111",
-  mutedForeground: "#818181",
-  placeholder: "#818181",
-  secondaryLabel: "#818181",
-  iconMuted: "#818181",
+  muted: "#232323",
+  mutedForeground: "#a1a1a1",
+  placeholder: "#a1a1a1",
+  secondaryLabel: "#a1a1a1",
+  iconMuted: "#a1a1a1",
   error: "#fb414a",
   errorForeground: "#ff6467",
-  errorSurface: "#301214",
+  errorSurface: "#3b1d1f",
   warning: "#fe9a00",
   warningForeground: "#ffb900",
-  warningSurface: "#312108",
+  warningSurface: "#3c2c13",
   update: "#346bf1",
   updateForeground: "#51a2ff",
-  updateSurface: "#121b34",
-  accentSurface: "#141414",
+  updateSurface: "#17263c",
+  accentSurface: "#252525",
   accentSurfaceForeground: "#f5f5f5",
-  messageSurface: "#141414",
+  messageSurface: "#252525",
   messageForeground: "#f5f5f5",
   messageAction: "#346bf1",
   messageActionForeground: "#ffffff",
   messageActionHover: "#3061d9",
-  codeBackground: "#111111",
+  codeBackground: "#0f0f0f",
   codeForeground: "#f5f5f5",
-  sidebar: "#000000",
+  sidebar: "#0f0f0f",
   sidebarForeground: "#f1f3f7",
   sidebarMutedForeground: "#a3a3a3",
-  sidebarControlSurface: "#0a0a0a",
-  sidebarRowHover: "#131313",
-  sidebarRowActive: "#1a1b1b",
-  sidebarRowSelected: "#111111",
-  sidebarBorder: "#141414",
-  terminalBackground: "#0a0a0a",
+  sidebarControlSurface: "#1a1a1a",
+  sidebarRowHover: "#202020",
+  sidebarRowActive: "#272828",
+  sidebarRowSelected: "#1e1e1e",
+  sidebarBorder: "#2c2c2c",
+  terminalBackground: "#171717",
   terminalForeground: "#f5f5f5",
   terminalCursor: "#b4cbff",
-  terminalSelection: "#343a47",
-  terminalScrollbar: "#222222",
-  terminalScrollbarHover: "#363636",
+  terminalSelection: "#3e4451",
+  terminalScrollbar: "#2f2f2f",
+  terminalScrollbarHover: "#434343",
 };
 
-export const T3_CHAT_THEME: ThemeDefinition = {
-  id: "t3-chat",
+export const GOAT_CHAT_THEME: ThemeDefinition = {
+  id: "goat-chat",
   label: "T3 Chat",
   appearance: "light",
   colors: {
@@ -938,7 +1039,7 @@ export const IRIS_THEME: ThemeDefinition = {
 };
 
 export const BUILT_IN_THEMES: ReadonlyArray<ThemeDefinition> = [
-  T3_CHAT_THEME,
+  GOAT_CHAT_THEME,
   GROVE_THEME,
   OCEAN_THEME,
   EMBER_THEME,

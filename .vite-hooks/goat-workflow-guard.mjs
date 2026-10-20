@@ -10,18 +10,20 @@ const root = NodePath.resolve(NodePath.dirname(NodeURL.fileURLToPath(import.meta
 const [sha, ref] = NodeProcess.argv.slice(2);
 const workflowPath = ".github/workflows/goat-ci.yml";
 const nightlyPath = ".github/workflows/goat-nightly.yml";
+const closeOutsidePrsPath = ".github/workflows/close-outside-prs.yml";
 const disabled = new Set((NodeProcess.env.GOAT_DISABLED_WORKFLOWS ?? "").split("\n"));
 const labels = new Set(["self-hosted", "linux", "x64", "goat", "epyc"]);
-const actions = new Set([
-  "actions/checkout@v6",
-  "voidzero-dev/setup-vp@v1",
-  "actions/upload-artifact@v4",
-]);
+// goat-ci jobs run on a pinned GitHub-hosted image or on EPYC, never on a moving label.
+const goatCiHostedRunner = "ubuntu-24.04";
+// goat-scope picks the matrix, ci runs it, goat-ci-result aggregates.
+const goatCiJobs = new Set(["scope", "ci", "screenshot-gate", "result"]);
+// No Actions artifacts anywhere: goat-si is on the free plan and a full artifact
+// quota fails every upload. goat-nightly hands off through a staging draft release.
+const actions = new Set(["actions/checkout@v6", "voidzero-dev/setup-vp@v1"]);
 // goat-nightly.yml signs on the Mac Studio and publishes with the goat-releases App,
-// so it may only run after a successful dev push of goat-ci, never from a pull request.
+// so it may only run after a successful manual goat-ci run on dev, never from a pull request.
 const nightlyActions = new Set([
   ...actions,
-  "actions/download-artifact@v4",
   "actions/create-github-app-token@v2",
   "dtolnay/rust-toolchain@stable",
 ]);
@@ -36,7 +38,7 @@ const selfHostedRunners = [
   ["self-hosted", "macos", "arm64", "goat", "mac-studio"],
 ];
 const prepareGate =
-  "github.repository == 'goat-si/goat' && (github.event_name == 'workflow_dispatch' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push' && github.event.workflow_run.head_branch == 'dev' && github.event.workflow_run.head_repository.full_name == 'goat-si/goat'))";
+  "github.repository == 'goat-si/goat' && (github.event_name == 'workflow_dispatch' || (vars.GOAT_RELEASES_PUBLISH == 'true' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'workflow_dispatch' && github.event.workflow_run.display_title == 'goat-ci all on dev' && github.event.workflow_run.head_branch == 'dev' && github.event.workflow_run.head_repository.full_name == 'goat-si/goat'))";
 const downstreamGate = "needs.prepare.result == 'success' && needs.prepare.outputs.skip == 'false'";
 const verifiedRef = "${{ needs.prepare.outputs.sha }}";
 const prepareRef = "${{ steps.resolve.outputs.sha }}";
@@ -119,38 +121,57 @@ function validateWorkflow(source, yaml) {
   }
   if (
     !isMapping(workflow.jobs) ||
-    Object.keys(workflow.jobs).length !== 1 ||
-    !Object.hasOwn(workflow.jobs, "ci")
+    !Object.hasOwn(workflow.jobs, "ci") ||
+    Object.keys(workflow.jobs).some((name) => !goatCiJobs.has(name))
   ) {
-    return refuse("jobs must contain exactly ci");
+    return refuse("jobs must contain ci and optionally scope, screenshot-gate, result");
   }
-  const job = workflow.jobs.ci;
-  if (!isMapping(job)) return refuse("jobs.ci must be a mapping");
-  if (Object.hasOwn(job, "uses")) return refuse("jobs.ci.uses is forbidden");
-  if (Object.hasOwn(job, "container") || Object.hasOwn(job, "services")) {
-    return refuse("jobs.ci.container and jobs.ci.services are forbidden");
-  }
-  const runners = job["runs-on"];
-  if (
-    !Array.isArray(runners) ||
-    runners.length !== 5 ||
-    new Set(runners).size !== 5 ||
-    runners.some((label) => typeof label !== "string" || !labels.has(label))
-  ) {
-    return refuse("jobs.ci.runs-on must contain exactly self-hosted, linux, x64, goat, epyc");
-  }
-  if (
-    !Array.isArray(job.steps) ||
-    job.steps.length === 0 ||
-    job.steps.some((step) => !isMapping(step))
-  ) {
-    return refuse("jobs.ci.steps must be a nonempty array of mappings");
-  }
-  for (const [index, step] of job.steps.entries()) {
-    if (Object.hasOwn(step, "run") === Object.hasOwn(step, "uses")) {
-      refuse(`step ${index} must contain exactly one of run or uses`);
-    } else if (Object.hasOwn(step, "uses") && !actions.has(step.uses)) {
-      refuse(`step ${index}.uses is not an allowed action`);
+  for (const [name, job] of Object.entries(workflow.jobs)) {
+    if (!isMapping(job)) return refuse(`jobs.${name} must be a mapping`);
+    if (name === "screenshot-gate") {
+      const permissions = job.permissions;
+      if (
+        !isMapping(permissions) ||
+        Object.keys(permissions).length !== 4 ||
+        permissions.contents !== "read" ||
+        permissions.issues !== "read" ||
+        permissions["pull-requests"] !== "read" ||
+        permissions.checks !== "write"
+      ) {
+        return refuse(
+          "jobs.screenshot-gate.permissions must grant only contents/issues/pull-requests: read and checks: write",
+        );
+      }
+    }
+    if (Object.hasOwn(job, "uses")) return refuse(`jobs.${name}.uses is forbidden`);
+    if (Object.hasOwn(job, "container") || Object.hasOwn(job, "services")) {
+      return refuse(`jobs.${name}.container and jobs.${name}.services are forbidden`);
+    }
+    const runners = job["runs-on"];
+    if (
+      runners !== goatCiHostedRunner &&
+      (!Array.isArray(runners) ||
+        runners.length !== 5 ||
+        new Set(runners).size !== 5 ||
+        runners.some((label) => typeof label !== "string" || !labels.has(label)))
+    ) {
+      return refuse(
+        `jobs.${name}.runs-on must be ${goatCiHostedRunner} or exactly self-hosted, linux, x64, goat, epyc`,
+      );
+    }
+    if (
+      !Array.isArray(job.steps) ||
+      job.steps.length === 0 ||
+      job.steps.some((step) => !isMapping(step))
+    ) {
+      return refuse(`jobs.${name}.steps must be a nonempty array of mappings`);
+    }
+    for (const [index, step] of job.steps.entries()) {
+      if (Object.hasOwn(step, "run") === Object.hasOwn(step, "uses")) {
+        refuse(`step ${index} must contain exactly one of run or uses`);
+      } else if (Object.hasOwn(step, "uses") && !actions.has(step.uses)) {
+        refuse(`step ${index}.uses is not an allowed action`);
+      }
     }
   }
 }
@@ -282,12 +303,27 @@ function validateNightlyWorkflow(source, yaml) {
     ) {
       fail(`jobs.${name} must not use uses, container or services`);
     }
-    if (JSON.stringify(job.permissions ?? {}).includes("write")) {
-      fail(`jobs.${name} must not request write permissions`);
+    // The staging hand-off (scripts/nightly-staging.ts) reads and writes a draft
+    // release in goat-si/goat, which needs contents: write and nothing else.
+    // prepare verifies the commit and never needs it.
+    if (Object.hasOwn(job, "permissions")) {
+      const permissions = job.permissions;
+      const contentsWrite =
+        isMapping(permissions) &&
+        Object.keys(permissions).length === 1 &&
+        permissions.contents === "write";
+      const readOnly = !JSON.stringify(permissions ?? {}).includes("write");
+      if (name === "prepare" ? !readOnly : !(contentsWrite || readOnly)) {
+        fail(
+          name === "prepare"
+            ? "jobs.prepare must not request write permissions"
+            : `jobs.${name} may only request contents: write`,
+        );
+      }
     }
     if (name === "prepare") {
       if (normalizeExpression(job.if) !== prepareGate)
-        fail("jobs.prepare.if must be the dev-push gate");
+        fail("jobs.prepare.if must be the manual dev run gate");
       if (Object.hasOwn(job, "needs")) fail("jobs.prepare must not need other jobs");
       // Downstream checkouts trust needs.prepare.outputs.sha, so it must come from
       // the resolve step that checks the commit against dev.
@@ -408,6 +444,58 @@ function isPinnedResolve(step) {
   return NodeCrypto.createHash("sha256").update(pinned).digest("hex") === pinnedResolveSha256;
 }
 
+// close-outside-prs.yml stays active on goat-si/goat on purpose (#426, #430). It runs on
+// pull_request_target with a write token from the default branch (main), so it must never check out or
+// run pull request code. A blocklist of commands cannot promise that, so the reviewed job is
+// pinned whole: any change to it, including step names, scripts and env, means reviewing it
+// again and updating this hash on purpose.
+const pinnedCloseOutsideJobSha256 =
+  "1f8e3fb2ec56cb45493b0a0a6758252f5f119cf9f749bd857546370b3d585e5b";
+
+function validateCloseOutsidePrsWorkflow(source, yaml) {
+  const fail = (reason) => refuse(reason, closeOutsidePrsPath);
+  const workflow = parseWorkflow(source, yaml);
+  if (workflow === undefined) return fail("invalid YAML");
+  if (!isMapping(workflow)) return fail("root must be a mapping");
+  const trigger = isMapping(workflow.on) ? workflow.on.pull_request_target : undefined;
+  if (
+    !isMapping(workflow.on) ||
+    Object.keys(workflow.on).length !== 1 ||
+    !isMapping(trigger) ||
+    Object.keys(trigger).length !== 1 ||
+    !Array.isArray(trigger.types) ||
+    trigger.types.length !== 2 ||
+    trigger.types[0] !== "opened" ||
+    trigger.types[1] !== "reopened"
+  ) {
+    return fail("on must be exactly pull_request_target with types [opened, reopened]");
+  }
+  if (
+    !isMapping(workflow.permissions) ||
+    Object.keys(workflow.permissions).length !== 1 ||
+    workflow.permissions["pull-requests"] !== "write"
+  ) {
+    return fail("permissions must be exactly pull-requests: write");
+  }
+  if (Object.keys(workflow).some((key) => !["name", "on", "permissions", "jobs"].includes(key))) {
+    return fail("only name, on, permissions and jobs are allowed at the workflow level");
+  }
+  if (typeof workflow.name !== "undefined" && typeof workflow.name !== "string") {
+    return fail("name must be a string");
+  }
+  if (workflow.name?.includes("${{")) return fail("name must not contain expressions");
+  const job = isMapping(workflow.jobs) ? workflow.jobs.close : undefined;
+  if (Object.keys(workflow.jobs ?? {}).length !== 1 || !isMapping(job)) {
+    return fail("jobs must be exactly close");
+  }
+  const digest = NodeCrypto.createHash("sha256")
+    .update(JSON.stringify(canonical(job)))
+    .digest("hex");
+  if (digest !== pinnedCloseOutsideJobSha256) {
+    return fail("jobs.close must match the reviewed job; review it and update the pinned hash");
+  }
+}
+
 let paths;
 try {
   paths = NodeChildProcess.execFileSync(
@@ -427,6 +515,7 @@ for (const path of paths) {
   if (
     path !== workflowPath &&
     path !== nightlyPath &&
+    path !== closeOutsidePrsPath &&
     /\.ya?ml$/.test(path) &&
     !disabled.has(path)
   ) {
@@ -434,7 +523,7 @@ for (const path of paths) {
     status = 1;
   }
 }
-for (const path of [workflowPath, nightlyPath]) {
+for (const path of [workflowPath, nightlyPath, closeOutsidePrsPath]) {
   if (!paths.includes(path)) continue;
   let source;
   try {
@@ -461,6 +550,7 @@ for (const path of [workflowPath, nightlyPath]) {
     NodeProcess.exit(1);
   }
   if (path === workflowPath) validateWorkflow(source, yaml);
-  else validateNightlyWorkflow(source, yaml);
+  else if (path === nightlyPath) validateNightlyWorkflow(source, yaml);
+  else validateCloseOutsidePrsWorkflow(source, yaml);
 }
 if (status !== 0) NodeProcess.exit(status);

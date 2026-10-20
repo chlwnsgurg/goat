@@ -6,7 +6,6 @@ export function resolveProtocolRelativeMediaUrl(src: string): string {
   return `${protocol}${src}`;
 }
 
-/** Reads media only for an explicit save/copy action; remote hosts must allow browser CORS. */
 async function readMediaBlob(src: string): Promise<Blob> {
   let response: Response;
   try {
@@ -25,7 +24,6 @@ async function readMediaBlob(src: string): Promise<Blob> {
   return blob;
 }
 
-/** Downloads the original bytes with their original filename, without changing playback URLs. */
 export async function downloadMedia(src: string, name: string): Promise<void> {
   const url = URL.createObjectURL(await readMediaBlob(src));
   try {
@@ -38,7 +36,6 @@ export async function downloadMedia(src: string, name: string): Promise<void> {
   }
 }
 
-/** Converts browser-decodable images, including SVG, into the clipboard's portable PNG format. */
 export async function readMediaPng(src: string): Promise<Blob> {
   const blob = await readMediaBlob(src);
   if (blob.type.split(";", 1)[0] === "image/png") return blob;
@@ -78,5 +75,21 @@ export async function readMediaPng(src: string): Promise<Blob> {
     });
   } finally {
     URL.revokeObjectURL(url);
+  }
+}
+
+/** Checks a failed decoder's source without downloading the file again. HTTP errors are load failures. */
+export async function isMediaSourceAvailable(src: string, signal: AbortSignal): Promise<boolean> {
+  try {
+    const url = resolveProtocolRelativeMediaUrl(src);
+    // Blob URLs only accept GET. Their bytes are already local; inspect headers and cancel the body.
+    const isBlob = url.startsWith("blob:");
+    const response = await fetch(url, { method: isBlob ? "GET" : "HEAD", signal });
+    if (isBlob) await response.body?.cancel();
+    const mimeType = response.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase();
+    return response.ok && mimeType !== "text/html";
+  } catch {
+    // Missing CORS access and a dead connection cannot establish a format failure.
+    return false;
   }
 }

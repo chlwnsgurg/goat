@@ -4,7 +4,7 @@ import * as Layer from "effect/Layer";
 import * as SqlClient from "effect/sql/SqlClient";
 
 import { runMigrations } from "../Migrations.ts";
-import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
+import * as NodeSqliteClient from "@goat/shared/nodeSqliteClient";
 
 const layer = it.layer(Layer.mergeAll(NodeSqliteClient.layer({ filename: ":memory:" })));
 
@@ -15,7 +15,6 @@ layer("016_CanonicalizeModelSelections", (it) => {
       Effect.gen(function* () {
         const sql = yield* SqlClient.SqlClient;
 
-        // Setup base state
         {
           yield* runMigrations({ toMigrationInclusive: 15 });
 
@@ -202,10 +201,8 @@ layer("016_CanonicalizeModelSelections", (it) => {
       `;
         }
 
-        // Execute migration under test
         yield* runMigrations({ toMigrationInclusive: 16 });
 
-        // Assert expected state
         {
           const projectRows = yield* sql<{
             readonly projectId: string;

@@ -1,15 +1,15 @@
-import { type EnvironmentShellSummary } from "@t3tools/client-runtime/state/shell";
-import type { EnvironmentId, ServerConfig } from "@t3tools/contracts";
+import { type EnvironmentShellSummary } from "@goat/client-runtime/state/shell";
+import type { EnvironmentId, ServerConfig } from "@goat/contracts";
 
 import {
   type EnvironmentConnectionPhase,
   type NetworkStatus,
-} from "@t3tools/client-runtime/connection";
+} from "@goat/client-runtime/connection";
 
-import type { EnvironmentConnectionSummary as WorkspaceEnvironment } from "@t3tools/client-runtime/state/presentation";
+import type { EnvironmentConnectionSummary as WorkspaceEnvironment } from "@goat/client-runtime/state/presentation";
 
-export { projectEnvironmentConnectionSummary as projectWorkspaceEnvironment } from "@t3tools/client-runtime/state/presentation";
-export type { EnvironmentConnectionSummary as WorkspaceEnvironment } from "@t3tools/client-runtime/state/presentation";
+export { projectEnvironmentConnectionSummary as projectWorkspaceEnvironment } from "@goat/client-runtime/state/presentation";
+export type { EnvironmentConnectionSummary as WorkspaceEnvironment } from "@goat/client-runtime/state/presentation";
 
 export interface WorkspaceConnectionState {
   readonly isLoadingConnections: boolean;
@@ -64,8 +64,6 @@ export function projectWorkspaceConnectionState(input: {
   readonly networkStatus: NetworkStatus;
   readonly environments: ReadonlyArray<WorkspaceEnvironment>;
 }): WorkspaceConnectionState {
-  // Switched-off environments still count as saved connections, but they do
-  // not drive the overall connection state or surface their last error.
   const activeEnvironments = input.environments.filter((environment) => environment.isEnabled);
   const connectingEnvironments = activeEnvironments.filter(
     (environment) =>

@@ -1,7 +1,7 @@
-import { bootstrapRemoteBearerSession } from "@t3tools/client-runtime/authorization";
-import type { RemoteEnvironmentRequestError } from "@t3tools/client-runtime/rpc";
-import { PRIMARY_LOCAL_ENVIRONMENT_ID } from "@t3tools/contracts";
-import { currentDesktopBootstrapToken } from "@t3tools/shared/desktopBootstrapToken";
+import { bootstrapRemoteBearerSession } from "@goat/client-runtime/authorization";
+import type { RemoteEnvironmentRequestError } from "@goat/client-runtime/rpc";
+import { PRIMARY_LOCAL_ENVIRONMENT_ID } from "@goat/contracts";
+import { currentDesktopBootstrapToken } from "@goat/shared/desktopBootstrapToken";
 import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
 import * as Duration from "effect/Duration";
@@ -16,10 +16,6 @@ import * as HttpClient from "effect/http/HttpClient";
 
 import * as DesktopBackendPool from "./DesktopBackendPool.ts";
 
-// A loopback /oauth/token exchange can fail transiently while the backend
-// settles (a 502-504, a refused or reset connection, a timeout). Retry those
-// for as long as the renderer's own bootstrap does; a rejected credential or a
-// server error is final.
 const BOOTSTRAP_TRANSIENT_RETRY_TIMEOUT = Duration.seconds(15);
 const BOOTSTRAP_TRANSIENT_RETRY_INTERVAL = Duration.millis(500);
 const TRANSIENT_BOOTSTRAP_STATUS_CODES = new Set([502, 503, 504]);
@@ -65,7 +61,7 @@ export class DesktopLocalEnvironmentAuth extends Context.Service<
   {
     readonly getBearerToken: Effect.Effect<string, DesktopLocalEnvironmentAuthError>;
   }
->()("@t3tools/desktop/backend/DesktopLocalEnvironmentAuth") {}
+>()("@goat/desktop/backend/DesktopLocalEnvironmentAuth") {}
 
 /** @public Service construction is part of the canonical Effect module API. */
 export const make = Effect.gen(function* () {
@@ -113,7 +109,6 @@ export const make = Effect.gen(function* () {
             while: isTransientBearerBootstrapError,
             schedule: Schedule.spaced(BOOTSTRAP_TRANSIENT_RETRY_INTERVAL),
           }),
-          // Bounds the attempts and any request still in flight at the deadline.
           Effect.timeout(BOOTSTRAP_TRANSIENT_RETRY_TIMEOUT),
           Effect.mapError(
             (cause) =>

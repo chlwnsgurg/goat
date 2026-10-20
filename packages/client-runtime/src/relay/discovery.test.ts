@@ -1,8 +1,15 @@
-import { EnvironmentId } from "@t3tools/contracts";
+import { vi } from "vite-plus/test";
+
+vi.mock("@goat/shared/goatConnect", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@goat/shared/goatConnect")>()),
+  isGoatConnectEnabled: () => true,
+}));
+
+import { EnvironmentId } from "@goat/contracts";
 import type {
   RelayClientEnvironmentRecord,
   RelayEnvironmentStatusResponse,
-} from "@t3tools/contracts/relay";
+} from "@goat/contracts/relay";
 import { describe, expect, it } from "@effect/vitest";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
@@ -365,8 +372,6 @@ describe("RelayEnvironmentDiscovery", () => {
         // a real sign-in which always happens long after service start.
         yield* Effect.yieldNow;
 
-        // Sign-in activates the session and emits credentials-changed; the
-        // list must populate without any screen having asked for a refresh.
         yield* harness.wake("credentials-changed");
         const populated = yield* SubscriptionRef.changes(discovery.state).pipe(
           Stream.filter(

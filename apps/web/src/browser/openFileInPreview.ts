@@ -5,12 +5,9 @@ import type {
   PreviewOpenInput,
   PreviewSessionSnapshot,
   ScopedThreadRef,
-} from "@t3tools/contracts";
-import { mediaFileReference } from "@t3tools/client-runtime/media-reference";
-import {
-  type AtomCommandResult,
-  mapAtomCommandResult,
-} from "@t3tools/client-runtime/state/runtime";
+} from "@goat/contracts";
+import { mediaFileReference } from "@goat/client-runtime/media-reference";
+import { type AtomCommandResult, mapAtomCommandResult } from "@goat/client-runtime/state/runtime";
 import * as Cause from "effect/Cause";
 import * as Data from "effect/Data";
 import { AsyncResult } from "effect/reactivity";
@@ -58,9 +55,7 @@ export async function openUrlInPreview<E>(input: {
   readonly threadRef: ScopedThreadRef;
   readonly url: string;
   readonly openPreview: OpenPreviewMutation<E>;
-  /** Profile to open under; omit for the configured default. */
   readonly profileId?: PreviewOpenInput["profileId"];
-  /** Open the tab without switching the thread to it. */
   readonly background?: boolean;
 }): Promise<AtomCommandResult<void, E | BrowserSettingsReadError>> {
   const defaults = await resolveBrowserDefaults().catch(
@@ -82,9 +77,6 @@ export async function openUrlInPreview<E>(input: {
     input: {
       threadId: input.threadRef.threadId,
       url: input.url,
-      // Built here rather than via `openPreviewSession` because this path
-      // maps the result differently, so the configured defaults have to be
-      // applied explicitly or file/link opens would ignore them.
       viewport: browserDefaultOpenViewport(defaults),
       profileId: input.profileId ?? browserDefaultOpenProfileId(defaults),
       ...(runtime === undefined ? {} : { runtime }),
@@ -110,10 +102,6 @@ export async function openUrlInPreview<E>(input: {
   });
 }
 
-/**
- * Opens a browser document in the integrated browser. Inside the workspace the
- * page may load sibling assets; a file outside it is served on its own.
- */
 export async function openFileInPreview<AssetError, PreviewError>(input: {
   readonly threadRef: ScopedThreadRef;
   readonly filePath: string;

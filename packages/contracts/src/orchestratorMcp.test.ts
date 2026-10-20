@@ -11,6 +11,9 @@ import {
   OrchestratorMcpThreadWaitResult,
   OrchestratorMcpDelegateTaskInput,
   OrchestratorMcpDelegateTaskResult,
+  OrchestratorMcpReviewFindingsRecordInput,
+  OrchestratorMcpReviewFindingsRecordResult,
+  OrchestratorMcpReviewFindingsExportInput,
   OrchestratorMcpThreadInterruptInput,
   OrchestratorMcpThreadListInput,
   OrchestratorMcpThreadReadInput,
@@ -34,6 +37,12 @@ const decodeLaunchedQuestionsResult = Schema.decodeUnknownSync(
   OrchestratorMcpLaunchedQuestionsResult,
 );
 const decodeThreadWaitResult = Schema.decodeUnknownSync(OrchestratorMcpThreadWaitResult);
+const decodeReviewFindingsRecordResult = Schema.decodeUnknownSync(
+  OrchestratorMcpReviewFindingsRecordResult,
+);
+const decodeReviewFindingsExportInput = Schema.decodeUnknownSync(
+  OrchestratorMcpReviewFindingsExportInput,
+);
 const decodeCreateThreadsInput = Schema.decodeUnknownSync(OrchestratorMcpCreateThreadsInput);
 const decodeStrictCreateThreadsInput = Schema.decodeUnknownSync(OrchestratorMcpCreateThreadsInput, {
   onExcessProperty: "error",
@@ -67,6 +76,13 @@ it("bounds explicit question hosts and ignored wait request IDs", () => {
 });
 
 describe("orchestrator MCP contracts", () => {
+  it("accepts explicit worktree isolation and keeps shared delegation as the default", () => {
+    expect(decodeDelegateTaskInput({ task: "Review changes" }).isolation).toBeUndefined();
+    expect(
+      decodeDelegateTaskInput({ task: "Review changes", isolation: "worktree" }).isolation,
+    ).toBe("worktree");
+    expect(() => decodeDelegateTaskInput({ task: "Review changes", isolation: "copy" })).toThrow();
+  });
   it("decodes cross-provider delegated task requests and durable results", () => {
     const request = decodeDelegateTaskInput({
       task: "Inspect the workspace and report the result.",
@@ -96,6 +112,7 @@ describe("orchestrator MCP contracts", () => {
       latestTerminalStatus: "completed",
       latestTerminalSummary: "Workspace inspected.",
       latestTerminalResultContextTransferId: "context-transfer-result-1",
+      hasPendingQuestion: false,
       waitTimedOut: false,
     });
 
@@ -145,7 +162,6 @@ describe("orchestrator MCP contracts", () => {
         target: {
           providerInstanceId: "codex",
           model: "gpt-5.6-luna",
-          // Must fail loudly instead of being dropped like legacy persistence.
           options: { reasoning: 3 },
         },
       }),
@@ -248,9 +264,28 @@ describe("orchestrator MCP contracts", () => {
       latestTerminalStatus: "failed",
       latestTerminalSummary: "launch outcome unknown",
       latestTerminalResultContextTransferId: null,
+      hasPendingQuestion: false,
       waitTimedOut: false,
     });
     expect(result.childThreadId).toBeNull();
+    expect(result.reviewLedger).toBeUndefined();
+    const reviewLedger = [
+      {
+        kind: "decision",
+        entryId: "entry",
+        findingId: "finding",
+        severity: "low",
+        cites: null,
+        summary: "Review finding",
+        decision: "accepted",
+        evidence: null,
+        recordedAt: "2026-10-17T00:00:00.000Z",
+        recordedByRunId: null,
+      },
+    ];
+    expect(decodeDelegateTaskResult({ ...result, reviewLedger }).reviewLedger).toEqual(
+      reviewLedger,
+    );
     expect(() =>
       decodeDelegateTaskInput({
         task: "Inspect",
@@ -280,6 +315,52 @@ it("advertises host only for delegation targets, not create_threads", () => {
   ).toThrow();
 });
 
+it.each(["", " \n\t"])("explains how to fix a blank pending response reason (%j)", (reason) => {
+  expect(() =>
+    decodePendingRequestRespondInput({
+      requestId: "request",
+      answers: { q: "Yes" },
+      reason,
+    }),
+  ).toThrow("Send reason with 1–2000 characters including non-whitespace text");
+});
+
+it("keeps single select, multi select, free text and provider-specific answer values unchanged", () => {
+  const args = {
+    requestId: "request",
+    reason: "The user chose these settings.",
+    answers: {
+      color: "Blue",
+      features: ["Fast", "Quiet"],
+      notes: "  exact text\n",
+      count: 2,
+      enabled: true,
+    },
+  };
+  expect(decodePendingRequestRespondInput(args)).toEqual(args);
+  const jsonSchema = JSON.stringify(
+    Schema.toJsonSchemaDocument(OrchestratorMcpPendingRequestRespondInput),
+  );
+  expect(jsonSchema).toContain("Answers keyed by question id");
+  expect(jsonSchema).toContain("Required provenance shown to the user");
+});
+
+it("accepts only boolean relay claims and advertises them to MCP callers", () => {
+  const args = { requestId: "request", answers: { q: "Yes" }, reason: "The user decided." };
+  for (const relayedFromUser of [true, false]) {
+    expect(decodePendingRequestRespondInput({ ...args, relayedFromUser })).toEqual({
+      ...args,
+      relayedFromUser,
+    });
+  }
+  expect(decodePendingRequestRespondInput(args)).not.toHaveProperty("relayedFromUser");
+  for (const relayedFromUser of ["true", 1, null]) {
+    expect(() => decodePendingRequestRespondInput({ ...args, relayedFromUser })).toThrow();
+  }
+  expect(
+    JSON.stringify(Schema.toJsonSchemaDocument(OrchestratorMcpPendingRequestRespondInput)),
+  ).toContain("Set true when your answer relays the user's own decision.");
+});
 it("decodes pending tools and optional legacy result fields", () => {
   const args = {
     threadId: "thread",
@@ -365,4 +446,54 @@ it("decodes optional question wait IDs without changing run status", () => {
     decode({ threadId: "thread", runId: "run", status: "completed", timedOut: false })
       .pendingRequestIds,
   ).toBeUndefined();
+});
+
+it("decodes review history without accepting server-owned outcome fields as input", () => {
+  const decode = Schema.decodeUnknownSync(OrchestratorMcpReviewFindingsRecordInput, {
+    onExcessProperty: "error",
+  });
+  const decision = {
+    kind: "decision",
+    findingId: "finding",
+    severity: "critical",
+    cites: "a.ts:1",
+    summary: "Guard the edge",
+    decision: "accepted",
+    evidence: null,
+  };
+  expect(decode({ taskId: "review", entries: [decision] }).entries).toEqual([decision]);
+  expect(() => decode({ taskId: "review", entries: [] })).toThrow();
+  expect(() =>
+    decode({ taskId: "review", entries: [{ ...decision, entryId: "forged" }] }),
+  ).toThrow();
+  const outcome = {
+    kind: "outcome",
+    findingId: "finding",
+    link: { kind: "test", ref: "failure.test.ts" },
+  };
+  expect(decode({ taskId: "review", entries: [outcome] }).entries).toEqual([outcome]);
+  expect(() =>
+    decode({ taskId: "review", entries: [{ ...outcome, outcome: "unneeded" }] }),
+  ).toThrow();
+  const recorded = {
+    ...decision,
+    entryId: "entry",
+    recordedAt: "2026-10-17T00:00:00.000Z",
+    recordedByRunId: null,
+  };
+  expect(
+    decodeReviewFindingsRecordResult({
+      taskId: "review",
+      reviewLedger: [recorded],
+      findings: [{ decision: recorded, latestOutcome: null }],
+    }).reviewLedger,
+  ).toEqual([recorded]);
+  const exportInput = decodeReviewFindingsExportInput;
+  expect(
+    exportInput({ from: "2026-10-16T00:00:00.000Z", to: "2026-10-17T00:00:00.000Z", limit: 1 })
+      .limit,
+  ).toBe(1);
+  expect(() =>
+    exportInput({ from: "2026-10-16T00:00:00.000Z", to: "2026-10-17T00:00:00.000Z", limit: 1_001 }),
+  ).toThrow();
 });

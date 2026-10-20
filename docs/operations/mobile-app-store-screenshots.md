@@ -1,8 +1,8 @@
 # Mobile app-store screenshot harness
 
-> For maintainers. Using T3 Code? See [docs/user](../user/).
+> For maintainers. Using GOAT? See [docs/user](../user/).
 
-The screenshot harness runs the real mobile application against three disposable local T3
+The screenshot harness runs the real mobile application against three disposable local GOAT
 environments. It creates an isolated base directory and server for each environment, real Git
 projects with deterministic content, seeded orchestration projections, and persisted terminal
 history. The app pairs with every server through its normal connection flow and React Navigation
@@ -124,7 +124,7 @@ Download `app-store-connect-screenshots` and `google-play-screenshots` from the 
 Artifacts section. Artifacts are retained for 14 days.
 
 The workflow uses the same checked-in device and scene matrix as local capture. Android remains
-ARM64 by default for local Apple Silicon development; CI sets `T3_SHOWCASE_ANDROID_ABI=x86_64` so the
+ARM64 by default for local Apple Silicon development; CI sets `GOAT_SHOWCASE_ANDROID_ABI=x86_64` so the
 debug APK matches its accelerated emulator.
 
 ## Fast iteration
@@ -160,7 +160,7 @@ Then run the capture from the repository root:
 
     pnpm screenshots:mobile --skip-build --skip-metro --device iphone-6.9
 
-`pnpm --filter @t3tools/mobile showcase` starts Expo on its normal port, so it is not compatible with
+`pnpm --filter @goat/mobile showcase` starts Expo on its normal port, so it is not compatible with
 the harness's `--skip-metro` mode.
 
 List the matrix and flags:

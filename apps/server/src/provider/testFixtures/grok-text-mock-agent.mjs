@@ -1,4 +1,3 @@
-// Native Grok's v1 model-selection wire contract, kept independent of the v2 mock.
 import * as NodeFS from "node:fs";
 import * as NodeReadline from "node:readline";
 
@@ -9,8 +8,8 @@ const write = (message) => process.stdout.write(`${JSON.stringify(message)}\n`);
 
 for await (const line of NodeReadline.createInterface({ input: process.stdin })) {
   const request = JSON.parse(line);
-  if (process.env.T3_ACP_REQUEST_LOG_PATH) {
-    NodeFS.appendFileSync(process.env.T3_ACP_REQUEST_LOG_PATH, `${line}\n`);
+  if (process.env.GOAT_ACP_REQUEST_LOG_PATH) {
+    NodeFS.appendFileSync(process.env.GOAT_ACP_REQUEST_LOG_PATH, `${line}\n`);
   }
   if (request.id === undefined) continue;
   let result;
@@ -51,7 +50,7 @@ for await (const line of NodeReadline.createInterface({ input: process.stdin }))
           sessionId,
           update: {
             sessionUpdate: "agent_message_chunk",
-            content: { type: "text", text: process.env.T3_ACP_PROMPT_RESPONSE_TEXT ?? "" },
+            content: { type: "text", text: process.env.GOAT_ACP_PROMPT_RESPONSE_TEXT ?? "" },
           },
         },
       });

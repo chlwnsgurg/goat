@@ -1,14 +1,9 @@
 /**
- * Redeeming a reset credit is an account-level action: instances that share
- * the directory holding a provider's login share the credit, so their
- * redemptions must serialise on that directory, not the instance. This
- * service keeps one lock and one pending idempotency key per account key so
- * overlapping confirmations from any instance queue rather than spending two
- * credits, and a retry after a timeout re-sends the same attempt.
- *
- * @module provider/resetCreditCoordinator
+ * Redeeming a reset credit is an account-level action: instances that share the
+ * directory holding a provider's login share the credit, so their redemptions
+ * must serialise on that directory, not the instance.
  */
-import type { ProviderConsumeResetCreditOutcome } from "@t3tools/contracts";
+import type { ProviderConsumeResetCreditOutcome } from "@goat/contracts";
 import * as Context from "effect/Context";
 import * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
@@ -26,11 +21,10 @@ export class ResetCreditCoordinator extends Context.Service<
   ResetCreditCoordinator,
   {
     /**
-     * Run `consume` under the account's lock with a stable idempotency key.
      * The key is cleared when the provider reports an outcome, or when
-     * `isSettled` says a failure was a final answer (such as a cooldown).
-     * Any other failure (timeout included) keeps it so the next attempt is
-     * the same attempt.
+     * `isSettled` says a failure was a final answer (such as a cooldown). Any
+     * other failure (timeout included) keeps it so the next attempt is the same
+     * attempt.
      */
     readonly redeem: <E, R>(
       accountKey: string,
@@ -38,8 +32,9 @@ export class ResetCreditCoordinator extends Context.Service<
       isSettled?: (error: E) => boolean,
     ) => Effect.Effect<ProviderConsumeResetCreditOutcome, E | PlatformError.PlatformError, R>;
   }
->()("t3/provider/resetCreditCoordinator") {}
+>()("goat/provider/resetCreditCoordinator") {}
 
+/** @public */
 /** @public Service construction is part of the canonical Effect module API. */
 export const make = Effect.gen(function* () {
   const crypto = yield* Crypto.Crypto;
@@ -69,7 +64,7 @@ export const make = Effect.gen(function* () {
       return yield* state.lock.withPermits(1)(
         Effect.gen(function* () {
           const existing = yield* Ref.get(state.pendingKey);
-          const idempotencyKey = existing ?? (yield* crypto.randomUUIDv4);
+          const idempotencyKey = existing ?? (yield* crypto.randomUUIDv4());
           yield* Ref.set(state.pendingKey, idempotencyKey);
           const outcome = yield* consume(idempotencyKey).pipe(
             Effect.tapError((error) =>
@@ -87,10 +82,6 @@ export const make = Effect.gen(function* () {
 
 export const layer = Layer.effect(ResetCreditCoordinator, make);
 
-/**
- * Self-contained for tests: a counter-backed Crypto so keys are deterministic
- * and distinct without the platform layer.
- */
 export const layerTest = Layer.effect(
   ResetCreditCoordinator,
   Effect.gen(function* () {

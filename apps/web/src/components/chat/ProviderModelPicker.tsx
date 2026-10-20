@@ -1,10 +1,12 @@
 import {
   ANTIGRAVITY_DEFAULT_MODEL,
+  AuthProvidersManageScope,
   type ProviderInstanceId,
+  type EnvironmentId,
   type ProviderDriverKind,
   type ResolvedKeybindingsConfig,
-} from "@t3tools/contracts";
-import { memo, useEffect, useMemo, useState } from "react";
+} from "@goat/contracts";
+import { lazy, memo, Suspense, useEffect, useState } from "react";
 import { Badge } from "../ui/badge";
 import { Popover, PopoverPopup, PopoverTrigger } from "../ui/popover";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
@@ -25,19 +27,24 @@ import {
 } from "./ComposerControl";
 import { useComposerMenuProps } from "./composerEventScope";
 import { shortcutLabelForCommand } from "../../keybindings";
+import { useEnvironment } from "../../state/environments";
+import { useEnvironmentScope } from "../../state/session";
+
+// The wizard only loads once someone presses "Add provider" in the rail.
+const AddProviderInstanceDialog = lazy(() =>
+  import("../settings/AddProviderInstanceDialog").then((module) => ({
+    default: module.AddProviderInstanceDialog,
+  })),
+);
 
 export const ProviderModelPicker = memo(function ProviderModelPicker(props: {
-  /**
-   * The instance currently selected in the composer. Drives the trigger
-   * icon, label and the default-highlighted combobox row.
-   */
+  environmentId: EnvironmentId | null;
   activeInstanceId: ProviderInstanceId;
   model: string;
   selectedModels?: ReadonlyArray<{ instanceId: ProviderInstanceId; model: string }>;
   onToggleModel?: (instanceId: ProviderInstanceId, model: string) => void;
   lockedProvider: ProviderDriverKind | null;
   lockedContinuationGroupKey?: string | null;
-  /** Instance entries rendered in the sidebar + used to resolve display name. */
   instanceEntries: ReadonlyArray<ProviderInstanceEntry>;
   keybindings?: ResolvedKeybindingsConfig;
   modelOptionsByInstance: ReadonlyMap<ProviderInstanceId, ReadonlyArray<ModelEsque>>;
@@ -52,7 +59,6 @@ export const ProviderModelPicker = memo(function ProviderModelPicker(props: {
   triggerClassName?: string;
   /** Which trigger edge the picker popup lines up with. */
   popupAlign?: "start" | "end";
-  /** Aggregate settings can show a neutral value without claiming one provider is selected. */
   triggerLabel?: string;
   triggerAriaLabel?: string;
   onOpenChange?: (open: boolean) => void;
@@ -64,19 +70,21 @@ export const ProviderModelPicker = memo(function ProviderModelPicker(props: {
   const [uncontrolledIsMenuOpen, setUncontrolledIsMenuOpen] = useState(false);
   const isMenuOpen = props.open ?? uncontrolledIsMenuOpen;
   const size = props.size ?? "sm";
+  // Only the composer's picker offers "Add provider"; settings pickers already sit next to provider settings.
+  const addProviderEnvironmentId = props.isComposerOwned ? props.environmentId : null;
+  const canManageProviders = useEnvironmentScope(
+    addProviderEnvironmentId,
+    AuthProvidersManageScope,
+  );
+  const environmentLabel = useEnvironment(addProviderEnvironmentId)?.label ?? "this environment";
+  const [isAddProviderOpen, setIsAddProviderOpen] = useState(false);
+  const [addedInstanceId, setAddedInstanceId] = useState<ProviderInstanceId | null>(null);
 
-  // Resolve the active instance entry by exact routing key. The composer
-  // resolves fallbacks before rendering this component; if the selected
-  // instance disappears, do not infer a replacement from its driver kind.
-  const activeEntry = useMemo(() => {
-    return (
-      props.instanceEntries.find((entry) => entry.instanceId === props.activeInstanceId) ?? null
-    );
-  }, [props.activeInstanceId, props.instanceEntries]);
+  const activeEntry =
+    props.instanceEntries.find((entry) => entry.instanceId === props.activeInstanceId) ?? null;
 
   const activeInstanceId = props.activeInstanceId;
   const selectedInstanceOptions = props.modelOptionsByInstance.get(activeInstanceId) ?? [];
-  // Account-specific catalogs must keep the selected model label while unavailable.
   const selectedModel =
     resolveModelPickerSelectedModel({
       driverKind: activeEntry?.driverKind,
@@ -98,10 +106,22 @@ export const ProviderModelPicker = memo(function ProviderModelPicker(props: {
     activeEntry !== null && shouldShowInstanceBadge(activeEntry, props.instanceEntries);
 
   const setIsMenuOpen = (open: boolean) => {
+    if (!open) setAddedInstanceId(null);
     props.onOpenChange?.(open);
     if (props.open === undefined) {
       setUncontrolledIsMenuOpen(open);
     }
+  };
+
+  // The picker closes while the dialog is open so its window shortcuts and outside-press
+  // handling stay out of the wizard, then reopens on whatever the person added.
+  const openAddProvider = () => {
+    setIsMenuOpen(false);
+    setIsAddProviderOpen(true);
+  };
+  const closeAddProvider = () => {
+    setIsAddProviderOpen(false);
+    if (!props.disabled) setIsMenuOpen(true);
   };
 
   useEffect(() => {
@@ -293,8 +313,10 @@ export const ProviderModelPicker = memo(function ProviderModelPicker(props: {
         align={props.popupAlign ?? "start"}
         className="before:hidden"
         padding="none"
+        touchBackdrop
       >
         <ModelPickerContent
+          environmentId={props.environmentId}
           activeInstanceId={activeInstanceId}
           model={props.model}
           {...(props.selectedModels !== undefined ? { selectedModels: props.selectedModels } : {})}
@@ -312,6 +334,15 @@ export const ProviderModelPicker = memo(function ProviderModelPicker(props: {
           modelOptionsByInstance={props.modelOptionsByInstance}
           terminalOpen={props.terminalOpen ?? false}
           onRequestClose={() => setIsMenuOpen(false)}
+          {...(addProviderEnvironmentId
+            ? {
+                onAddProvider: openAddProvider,
+                addProviderDisabledReason: canManageProviders
+                  ? null
+                  : `You don't have permission to manage providers on ${environmentLabel}.`,
+                initialSelectedInstanceId: addedInstanceId,
+              }
+            : {})}
           {...(props.onOpenProviderSetup ? { onOpenProviderSetup: props.onOpenProviderSetup } : {})}
           {...(props.getModelDisabledReason
             ? { getModelDisabledReason: props.getModelDisabledReason }
@@ -322,6 +353,19 @@ export const ProviderModelPicker = memo(function ProviderModelPicker(props: {
           <ChatGptSharingControl provider={activeEntry?.snapshot ?? null} />
         ) : null}
       </PopoverPopup>
+      {addProviderEnvironmentId && isAddProviderOpen && canManageProviders ? (
+        <Suspense fallback={null}>
+          <AddProviderInstanceDialog
+            open
+            environmentId={addProviderEnvironmentId}
+            environmentLabel={environmentLabel}
+            onOpenChange={(open) => {
+              if (!open) closeAddProvider();
+            }}
+            onFinished={({ instanceId }) => setAddedInstanceId(instanceId)}
+          />
+        </Suspense>
+      ) : null}
     </Popover>
   );
 });

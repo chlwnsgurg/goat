@@ -1,12 +1,13 @@
 import { describe, expect, it } from "vite-plus/test";
 
-import { ThreadId, TurnItemId, type OrchestrationV2TurnItem } from "@t3tools/contracts";
+import { ThreadId, TurnItemId, type OrchestrationV2TurnItem } from "@goat/contracts";
 import * as DateTime from "effect/DateTime";
-import { T3_MCP_TOOL_NAMES } from "@t3tools/shared/t3McpToolPresentation";
+import { GOAT_MCP_TOOL_NAMES } from "@goat/shared/goatMcpToolPresentation";
 
 import {
   commandDetailRepeatsCommand,
   extractCommandOutputText,
+  formatCommandActionsLabel,
   liveThoughtLine,
   resolveViewedImageAsset,
   resolveWorkEntryToolPresentation,
@@ -77,6 +78,19 @@ describe("workEntryIndicatesToolFailure", () => {
       expect(JSON.stringify(toolItemForDisplay(structuredPayload))).not.toContain('"output":');
     },
   );
+
+  it("ignores failure phrases in reasoning text", () => {
+    const entry: WorkLogPresentationEntry = {
+      ...base,
+      label: "Thinking",
+      tone: "thinking",
+      itemType: "reasoning",
+      toolLifecycleStatus: "completed",
+      detail: "That exit code 2 is just from listing the deleted directory, which is expected.",
+    };
+    expect(workEntryIndicatesToolFailure(entry)).toBe(false);
+    expect(workEntryDisplayIndicatesToolFailure(entry)).toBe(false);
+  });
 
   it("is true for error tone", () => {
     expect(
@@ -151,7 +165,7 @@ describe("workEntryIndicatesToolFailure", () => {
     } satisfies WorkLogPresentationEntry;
 
     expect(workEntryDisplayIndicatesToolFailure(entry)).toBe(false);
-    // Older activities can store output in this field, so that path stays separate.
+
     expect(workEntryIndicatesToolFailure(entry)).toBe(true);
     expect(workEntryDisplayIndicatesToolFailure({ ...entry, detail: "File not found" })).toBe(true);
   });
@@ -253,6 +267,28 @@ describe("summarizeToolGroup", () => {
     ).toBe("Used Chrome integration and ran 1 command");
   });
 
+  it.each([
+    [["Foo", "Foo"], "Used Foo integration and ran 1 command"],
+    [["Foo", "Bar", "Foo"], "Used Foo and Bar integrations and ran 1 command"],
+  ] as const)(
+    "uses the displayed source names for integration plurality: %j",
+    (names, expected) => {
+      expect(
+        summarizeToolGroup([
+          ...names.map((name, index) =>
+            entry(`integration-${index}`, {
+              toolSource: { key: `integration-${index}`, name, kind: "integration" },
+            }),
+          ),
+          entry("command", {
+            itemType: "command_execution",
+            command: "git status",
+          }),
+        ]).summary,
+      ).toBe(expected);
+    },
+  );
+
   it("omits the integration suffix for special browser and computer sources", () => {
     expect(
       summarizeToolGroup([
@@ -267,11 +303,30 @@ describe("summarizeToolGroup", () => {
       ]).summary,
     ).toBe("Used Browser and Computer Use");
   });
+
+  it("names Computer Use once when native-app and fallback sources share its label", () => {
+    expect(
+      summarizeToolGroup([
+        entry("inspect-app", {
+          label: "Inspect app",
+          toolSource: {
+            key: "native-app:com.t3tools.t3code",
+            name: "Computer Use",
+            kind: "computer",
+          },
+        }),
+        entry("failed-sky", {
+          label: "Restrict the breakpoint to Git actions",
+          toolSource: { key: "computer-use", name: "Computer Use", kind: "computer" },
+        }),
+      ]).summary,
+    ).toBe("Used Computer Use");
+  });
 });
 
 describe("resolveWorkEntryToolPresentation", () => {
   it("presents and summarizes every T3 tool using the same structured identity", () => {
-    for (const tool of T3_MCP_TOOL_NAMES) {
+    for (const tool of GOAT_MCP_TOOL_NAMES) {
       const entry: WorkLogPresentationEntry = {
         id: tool,
         createdAt: "2026-09-19T00:00:00.000Z",
@@ -308,6 +363,7 @@ describe("resolveWorkEntryToolPresentation", () => {
     ["goat_thread_fork", "Forking this thread", "Requested a fork of this thread"],
     ["goat_thread_send_attachments", "Sending attachments", "Sent attachments"],
     ["run_scheduled_task_now", "Running a scheduled task", "Requested a run of a scheduled task"],
+    ["goat_workflow_stop", "Stopping a workflow", "Requested a stop for a workflow"],
   ])("labels %s through its lifecycle", (tool, running, completed) => {
     expect(resolveWorkEntryToolPresentation({ label: `T3-code.${tool}` })?.displayName).toBe(
       running,
@@ -318,6 +374,47 @@ describe("resolveWorkEntryToolPresentation", () => {
         toolLifecycleStatus: "completed",
       })?.displayName,
     ).toBe(completed);
+  });
+
+  it("summarizes workflow stop targets separately from their parent thread", () => {
+    const entry = {
+      id: "workflow-stop",
+      createdAt: "2026-10-07T00:00:00.000Z",
+      tone: "tool",
+      label: "Custom title",
+      itemType: "dynamic_tool",
+      toolLifecycleStatus: "completed",
+      toolData: {
+        server: "goat",
+        tool: "goat_workflow_stop",
+        arguments: { threadId: "parent", subagentId: "workflow-1" },
+        result: {},
+      },
+    } satisfies WorkLogPresentationEntry;
+    expect(
+      summarizeToolGroup([
+        entry,
+        entry,
+        {
+          ...entry,
+          toolData: {
+            ...entry.toolData,
+            arguments: { threadId: "parent", subagentId: "workflow-2" },
+          },
+        },
+        {
+          ...entry,
+          toolData: {
+            ...entry.toolData,
+            tool: "goat_thread_interrupt",
+            arguments: { threadId: "parent" },
+          },
+        },
+      ]),
+    ).toEqual({
+      summary: "Requested stops for 2 workflows and requested interrupts for 1 thread",
+      hasFailure: false,
+    });
   });
 
   it("summarizes project tools from MCP arguments and results without claiming failed effects", () => {
@@ -996,5 +1093,122 @@ describe("liveThoughtLine", () => {
       "This is really not fine in snake_case_names.",
     );
     expect(liveThoughtLine("   ")).toBe("");
+  });
+});
+
+describe("commands that only inspect files", () => {
+  const entry = (
+    id: string,
+    input: string,
+    commandActions: Extract<
+      OrchestrationV2TurnItem,
+      { type: "command_execution" }
+    >["commandActions"],
+  ): WorkLogPresentationEntry => ({
+    id,
+    createdAt: "2026-01-01T00:00:00.000Z",
+    label: "Ran command",
+    tone: "tool",
+    command: input,
+    itemType: "command_execution",
+    toolLifecycleStatus: "completed",
+    structuredPayload: commandItem({ input, ...(commandActions ? { commandActions } : {}) }),
+  });
+
+  it("takes the row kind from the command's actions and keeps real commands as commands", () => {
+    expect(toolGroupAction(entry("r", "cat a.ts", [{ type: "read", path: "a.ts" }]))).toBe("read");
+    expect(toolGroupAction(entry("l", "ls src", [{ type: "list", path: "src" }]))).toBe("list");
+    expect(toolGroupAction(entry("s", "rg foo", [{ type: "search", query: "foo" }]))).toBe(
+      "code-search",
+    );
+    expect(
+      toolGroupAction(
+        entry("m", "rg foo && cat a.ts", [
+          { type: "search", query: "foo" },
+          { type: "read", path: "a.ts" },
+        ]),
+      ),
+    ).toBe("code-search");
+    expect(toolGroupAction(entry("c", "vp test run", []))).toBe("command");
+    expect(toolGroupAction(entry("u", "vp test run", undefined))).toBe("command");
+  });
+
+  it("labels each kind with its file or query", () => {
+    expect(formatCommandActionsLabel([{ type: "read", path: "src/a.ts" }])).toBe("Read src/a.ts");
+    expect(
+      formatCommandActionsLabel([
+        { type: "read", path: "a.ts" },
+        { type: "read", path: "b.ts" },
+      ]),
+    ).toBe("Read a.ts +1 more");
+    expect(formatCommandActionsLabel([{ type: "list", path: "apps/web" }])).toBe("Listed apps/web");
+    expect(formatCommandActionsLabel([{ type: "list", path: "." }])).toBe("Listed files");
+    expect(
+      formatCommandActionsLabel([{ type: "list", path: "provider" }], {
+        formatPath: (path) => `repo/${path}`,
+      }),
+    ).toBe("Listed provider");
+    expect(
+      formatCommandActionsLabel([{ type: "search", query: "useEffect", path: "apps/web/src" }]),
+    ).toBe("Searched useEffect in src");
+    expect(
+      formatCommandActionsLabel(
+        [
+          { type: "search", query: "foo", path: "src" },
+          { type: "read", path: "/repo/src/a.ts" },
+        ],
+        { active: true, formatPath: (path) => path.replace("/repo/", "") },
+      ),
+    ).toBe("Searching foo in src, reading src/a.ts");
+  });
+
+  it("summarizes reads by distinct file and merges exploration kinds", () => {
+    const reads = [
+      entry("r1", "cat a.ts", [{ type: "read", path: "a.ts" }]),
+      entry("r2", "sed -n 1,40p a.ts", [{ type: "read", path: "a.ts" }]),
+      entry("r3", "cat b.ts c.ts", [
+        { type: "read", path: "b.ts" },
+        { type: "read", path: "c.ts" },
+      ]),
+    ];
+    expect(summarizeToolGroup(reads).summary).toBe("Read 3 files");
+    expect(toolGroupSummaryKind(reads)).toBe("read");
+    expect(
+      summarizeToolGroup([
+        ...reads,
+        entry("l1", "ls", [{ type: "list" }]),
+        entry("s1", "rg foo", [{ type: "search", query: "foo" }]),
+        entry("c1", "vp test run", []),
+      ]).summary,
+    ).toBe("Explored 3 files, 1 search, 1 list and ran 1 command");
+    expect(
+      toolGroupSummaryKind([...reads, entry("s2", "rg foo", [{ type: "search", query: "foo" }])]),
+    ).toBe("code-search");
+  });
+
+  it("counts each kind a mixed command ran without counting the command twice", () => {
+    const listAndRead = entry("m1", "ls src && cat a.ts", [
+      { type: "list", path: "src" },
+      { type: "read", path: "a.ts" },
+    ]);
+    expect(summarizeToolGroup([listAndRead]).summary).toBe("Explored 1 file, 1 list");
+    expect(
+      summarizeToolGroup([
+        listAndRead,
+        entry("s1", "rg foo src && rg bar src", [
+          { type: "search", query: "foo", path: "src" },
+          { type: "search", query: "bar", path: "src" },
+        ]),
+        entry("c1", "vp test run", []),
+        entry("c2", "git status", []),
+        {
+          id: "w1",
+          createdAt: "2026-01-01T00:00:00.000Z",
+          label: "Search",
+          tone: "tool",
+          itemType: "web_search",
+        },
+      ]).summary,
+    ).toBe("Explored 1 file, 2 searches, 1 list, ran 2 commands, and performed 1 other action");
   });
 });

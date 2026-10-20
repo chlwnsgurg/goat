@@ -1,6 +1,6 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
-import * as HostProcess from "@t3tools/shared/HostProcess";
+import * as HostProcess from "@goat/shared/HostProcess";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
@@ -94,7 +94,6 @@ describe("OpenCode2Server.verifyServer", () => {
     }),
   );
 
-  // 1.x (and the 2.x web UI on unknown paths) answers /api/info with 200 HTML.
   it.effect("rejects a server that answers with the web UI's HTML", () =>
     Effect.gen(function* () {
       const error = yield* verify(
@@ -113,8 +112,6 @@ describe("OpenCode2Server.verifyServer", () => {
 });
 
 describe("OpenCode2Server error details", () => {
-  // `detail` reaches clients through the provider status message, and a
-  // `serverUrl` can carry credentials in its userinfo or query.
   const serverUrl = "http://user:url-secret@127.0.0.1:1/?token=query-secret";
   const detailFor = (httpClient: Layer.Layer<HttpClient.HttpClient>) =>
     Effect.gen(function* () {
@@ -190,9 +187,6 @@ describe("OpenCode2Server passwords", () => {
   });
 });
 
-// Serves /api/info only with the password from OPENCODE_PASSWORD, like 2.x, and
-// prints the 2.x banner (plus the generated-password line 2.x prints when no
-// password is set, which T3 must never need).
 const FAKE_SERVER = `import { createServer } from "node:http";
 const expected = "Basic " + Buffer.from("opencode:" + process.env.OPENCODE_PASSWORD).toString("base64");
 const server = createServer((request, response) => {
@@ -218,7 +212,7 @@ describe("OpenCode2Server spawned server", () => {
         const fs = yield* FileSystem.FileSystem;
         const path = yield* Path.Path;
         const platform = yield* HostProcess.Platform;
-        const directory = yield* fs.makeTempDirectoryScoped({ prefix: "t3-opencode2-fake-" });
+        const directory = yield* fs.makeTempDirectoryScoped({ prefix: "goat-opencode2-fake-" });
         const isWindows = platform === "win32";
         const binaryPath = path.join(directory, isWindows ? "opencode.cmd" : "opencode");
         const scriptPath = path.join(directory, "opencode.mjs");

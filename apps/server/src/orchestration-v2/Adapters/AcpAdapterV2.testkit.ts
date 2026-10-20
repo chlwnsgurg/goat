@@ -2,7 +2,7 @@ import {
   ProviderDriverKind,
   ProviderReplayEntry,
   type ProviderReplayTranscript,
-} from "@t3tools/contracts";
+} from "@goat/contracts";
 import * as Effect from "effect/Effect";
 import * as Crypto from "effect/Crypto";
 import * as FileSystem from "effect/FileSystem";
@@ -13,9 +13,9 @@ import * as Stream from "effect/Stream";
 import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 import * as EffectAcpErrors from "effect-acp/errors";
 
-import * as AcpSessionRuntime from "@t3tools/provider-acp/server/AcpSessionRuntime";
-import type { ProviderReplayGate } from "@t3tools/provider-testing/replayGate";
-import { ACP_PROTOCOL, type AcpAdapterV2RuntimeInput } from "@t3tools/provider-acp/server/adapter";
+import * as AcpSessionRuntime from "@goat/provider-acp/server/AcpSessionRuntime";
+import type { ProviderReplayGate } from "@goat/provider-testing/replayGate";
+import { ACP_PROTOCOL, type AcpAdapterV2RuntimeInput } from "@goat/provider-acp/server/adapter";
 
 export const AcpReplayTranscript = Schema.Struct({
   provider: ProviderDriverKind,
@@ -153,12 +153,6 @@ function acpReplayAgentArgs(scriptPath: string): ReadonlyArray<string> {
   return ["--experimental-strip-types", scriptPath];
 }
 
-/**
- * Holds the replay agent's inbound lines at a gate the scenario releases.
- * The agent writes one line per `emit_inbound` entry in transcript order, so
- * the Nth line it writes belongs to the Nth inbound entry and carries its
- * label. Lines after a held one wait with it, which keeps wire order.
- */
 function holdGatedReplayLines(
   transcript: AcpReplayTranscript,
   replayGate: ProviderReplayGate,
@@ -222,9 +216,9 @@ export function makeAcpReplayRuntime(input: {
             cwd: runtimeInput.cwd,
             env: {
               ...process.env,
-              T3_ACP_REPLAY_TRANSCRIPT_PATH: transcriptPath,
-              T3_ACP_REPLAY_STATUS_PATH: input.statusPath,
-              T3_ACP_REPLAY_WORKSPACE: runtimeInput.cwd,
+              GOAT_ACP_REPLAY_TRANSCRIPT_PATH: transcriptPath,
+              GOAT_ACP_REPLAY_STATUS_PATH: input.statusPath,
+              GOAT_ACP_REPLAY_WORKSPACE: runtimeInput.cwd,
             },
           },
           authMethodId: "replay",

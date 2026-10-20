@@ -1,0 +1,198 @@
+import { deriveGoatBotModelSettings } from "@goat/client-runtime/goatBot";
+import { AuthSettingsWriteScope, type EnvironmentId, type ModelSelection } from "@goat/contracts";
+import { useState } from "react";
+import { Text } from "react-native";
+
+import { ScreenScrollView } from "../../components/ui/ScreenScrollView";
+import { useEnvironmentServerConfig } from "../../state/entities";
+import { serverEnvironment } from "../../state/server";
+import { readEnvironmentScope } from "../../state/session";
+import { useAtomCommand } from "../../state/use-atom-command";
+import { useMobileGoatBotHomeSettings } from "../goat-bot/useMobileGoatBotHomeSettings";
+import { SettingsChoiceRow } from "./components/SettingsChoiceRow";
+import { SettingsRow } from "./components/SettingsRow";
+import { SettingsScreen } from "./components/SettingsScreen";
+import { SettingsSection } from "./components/SettingsSection";
+/** The home belongs to the cluster, independent of the Settings environment filter. */
+export function SettingsGoatBotRouteScreen() {
+  const { supported, resolution, targets, environments, writableIds, busy, error, changeHome } =
+    useMobileGoatBotHomeSettings();
+  const claim = resolution.state === "claimed" ? resolution.claim : null;
+  const label = (environmentId: EnvironmentId) =>
+    environments.find((entry) => entry.environmentId === environmentId)?.label ?? environmentId;
+  const status =
+    resolution.state === "unknown"
+      ? "Loading…"
+      : claim === null
+        ? "Not chosen yet"
+        : resolution.state === "claimed" && !resolution.homeKnown
+          ? `Not connected (${claim.environmentId.slice(0, 8)})`
+          : resolution.state === "claimed" && !resolution.homeConnected
+            ? `Waiting for ${label(claim.environmentId)}`
+            : label(claim.environmentId);
+  return (
+    <SettingsScreen title="GOAT Bot">
+      <ScreenScrollView
+        contentInsetAdjustmentBehavior="automatic"
+        contentContainerClassName="gap-4 px-5 pt-4 pb-8"
+      >
+        {!supported ? (
+          <Text className="text-foreground-muted">
+            Update a connected server to choose where GOAT Bot runs.
+          </Text>
+        ) : (
+          <>
+            <Text className="text-foreground-muted">
+              The computer where GOAT Bot answers and receives work.
+            </Text>
+            <Text accessibilityLiveRegion="polite" className="text-foreground">
+              {busy ? "Saving…" : status}
+            </Text>
+            {error ? (
+              <Text accessibilityRole="alert" className="text-danger-foreground">
+                {error}
+              </Text>
+            ) : null}
+            <SettingsSection title="Computers">
+              {targets
+                .filter((target) => target.supportsHome && target.supportsBot)
+                .map((target) => (
+                  <SettingsRow
+                    key={target.environmentId}
+                    icon="desktopcomputer"
+                    label={label(target.environmentId)}
+                    value={
+                      target.environmentId === claim?.environmentId
+                        ? "Current home"
+                        : !target.connected
+                          ? "Offline"
+                          : !writableIds.has(target.environmentId)
+                            ? "Permission required"
+                            : undefined
+                    }
+                    disabled={
+                      busy ||
+                      resolution.state === "unknown" ||
+                      !target.connected ||
+                      !writableIds.has(target.environmentId)
+                    }
+                    onPress={() => changeHome(target.environmentId)}
+                  />
+                ))}
+            </SettingsSection>
+            {resolution.state === "claimed" && resolution.homeConnected ? (
+              <GoatBotModelSection
+                key={resolution.claim.environmentId}
+                environmentId={resolution.claim.environmentId}
+                canWrite={writableIds.has(resolution.claim.environmentId)}
+              />
+            ) : null}
+          </>
+        )}
+      </ScreenScrollView>
+    </SettingsScreen>
+  );
+}
+
+function GoatBotModelSection({
+  environmentId,
+  canWrite,
+}: {
+  readonly environmentId: EnvironmentId;
+  readonly canWrite: boolean;
+}) {
+  const config = useEnvironmentServerConfig(environmentId);
+  const updateSettings = useAtomCommand(serverEnvironment.updateSettings, {
+    label: "environment settings update",
+    reportFailure: false,
+  });
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  if (!config) return null;
+
+  const modelState = deriveGoatBotModelSettings({
+    settings: config.settings,
+    providers: config.providers,
+  });
+  const allowed = canWrite && !saving;
+
+  function save(goatBotModelSelection: ModelSelection | null) {
+    if (saving || !readEnvironmentScope(environmentId, AuthSettingsWriteScope)) return;
+    setSaving(true);
+    setError(null);
+    void updateSettings({
+      environmentId,
+      input: { patch: { goatBotModelSelection } },
+    })
+      .then((result) => {
+        setError(result._tag === "Success" ? null : "Could not update GOAT Bot's model.");
+      })
+      .catch(() => {
+        setError("Could not update GOAT Bot's model.");
+      })
+      .finally(() => setSaving(false));
+  }
+
+  return (
+    <>
+      <SettingsSection title="Model">
+        <SettingsRow
+          icon="sparkles"
+          label="GOAT Bot model"
+          value={saving ? "Saving…" : modelState.summaryLabel}
+          disabled={!allowed}
+          onPress={() => setPickerOpen((open) => !open)}
+        />
+        {pickerOpen ? (
+          <>
+            <SettingsChoiceRow
+              label="Automatic"
+              description={modelState.automaticDescription}
+              selected={!modelState.separate}
+              separated
+              disabled={!allowed}
+              onPress={() => {
+                setPickerOpen(false);
+                if (modelState.separate) save(null);
+              }}
+            />
+            {modelState.choices.map((choice) => (
+              <SettingsChoiceRow
+                key={choice.key}
+                label={choice.label}
+                description={choice.providerLabel}
+                selected={
+                  modelState.separate &&
+                  modelState.selection.instanceId === choice.instanceId &&
+                  modelState.selection.model === choice.model
+                }
+                separated
+                disabled={!allowed}
+                onPress={() => {
+                  setPickerOpen(false);
+                  if (
+                    !modelState.separate ||
+                    modelState.selection.instanceId !== choice.instanceId ||
+                    modelState.selection.model !== choice.model
+                  ) {
+                    save(choice.selection);
+                  }
+                }}
+              />
+            ))}
+          </>
+        ) : null}
+      </SettingsSection>
+      <Text className="text-foreground-muted">
+        The model GOAT Bot uses when it looks into something itself. Automatic follows the default
+        model for new threads.
+      </Text>
+      {error ? (
+        <Text accessibilityRole="alert" className="text-danger-foreground">
+          {error}
+        </Text>
+      ) : null}
+    </>
+  );
+}

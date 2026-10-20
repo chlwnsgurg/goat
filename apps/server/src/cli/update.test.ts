@@ -9,21 +9,26 @@ import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
 import { TestClock } from "effect/testing";
 import { FetchHttpClient } from "effect/http";
-import { CLI_RELEASE_REPOSITORY } from "@t3tools/shared/cliRelease";
+import { CLI_RELEASE_REPOSITORY } from "@goat/shared/cliRelease";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
-import * as HostProcess from "@t3tools/shared/HostProcess";
+import * as HostProcess from "@goat/shared/HostProcess";
 
-import { repointLauncher, resolveLauncherPath, resolveNewestVersion } from "./update.ts";
+import {
+  repointLauncher,
+  resolveLauncherPath,
+  resolveNewestRelease,
+  resolveNewestVersion,
+} from "./update.ts";
 
 it.layer(NodeServices.layer)("t3 update launcher", (it) => {
   it.effect("repoints a symlink that lives in a runtime versions tree", () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
-      const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-update-" });
+      const root = yield* fs.makeTempDirectoryScoped({ prefix: "goat-update-" });
       const oldExe = path.join(root, "runtime/goat/versions/1.0.0/goat");
       const newExe = path.join(root, "runtime/goat/versions/2.0.0/goat");
       const launcher = path.join(root, "bin/goat");
@@ -49,12 +54,11 @@ it.layer(NodeServices.layer)("t3 update launcher", (it) => {
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
-      const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-update-" });
+      const root = yield* fs.makeTempDirectoryScoped({ prefix: "goat-update-" });
       const newExe = path.join(root, "runtime/goat/versions/2.0.0/goat");
       const copy = path.join(root, "copy/goat");
       const foreign = path.join(root, "foreign/goat");
       const elsewhere = path.join(root, "elsewhere/goat");
-      // Another install's versions tree: same shape, different home.
       const otherHome = path.join(root, "other/runtime/goat/versions/1.0.0/goat");
       const otherLauncher = path.join(root, "other/bin/goat");
       for (const file of [newExe, copy, elsewhere, otherHome]) {
@@ -83,7 +87,7 @@ it.layer(NodeServices.layer)("t3 update launcher", (it) => {
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
-      const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-update-" });
+      const root = yield* fs.makeTempDirectoryScoped({ prefix: "goat-update-" });
       const launcher = path.join(root, "bin/goat");
       yield* fs.makeDirectory(path.dirname(launcher), { recursive: true });
       yield* fs.writeFileString(launcher, "");
@@ -136,6 +140,56 @@ function releaseIndexHarness(
 }
 
 it.layer(NodeServices.layer)("goat release index", (it) => {
+  it.effect(
+    "preserves publication metadata from HTTP and cache while keeping version-only callers",
+    () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const baseDir = yield* fs.makeTempDirectoryScoped({ prefix: "goat-release-index-" });
+        const publishedAt = "2026-10-01T00:00:00Z";
+        const h = releaseIndexHarness(() =>
+          Response.json([{ tag_name: `v${stableRelease}`, published_at: publishedAt }]),
+        );
+        const lookup = resolveNewestRelease({ baseDir, channel: "stable" }).pipe(
+          Effect.provide(h.layer),
+        );
+        assert.deepEqual(yield* lookup, { version: stableRelease, publishedAt });
+        assert.deepEqual(yield* lookup, { version: stableRelease, publishedAt });
+        assert.equal(
+          yield* resolveNewestVersion({ baseDir, channel: "stable" }).pipe(Effect.provide(h.layer)),
+          stableRelease,
+        );
+        assert.equal(h.requests.length, 1);
+      }),
+  );
+
+  it.effect("accepts old cache entries without published_at", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const baseDir = yield* fs.makeTempDirectoryScoped({ prefix: "goat-release-index-" });
+      yield* fs.makeDirectory(`${baseDir}/cache`);
+      yield* fs.writeFileString(
+        `${baseDir}/cache/release-index.json`,
+        encodeJson([
+          {
+            repository: CLI_RELEASE_REPOSITORY,
+            channel: "stable",
+            cachedAt: yield* Clock.currentTimeMillis,
+            releases: [{ tag_name: `v${stableRelease}` }],
+          },
+        ]),
+      );
+      const h = releaseIndexHarness(() => {
+        throw new Error("old cache should be reused");
+      });
+      assert.deepEqual(
+        yield* resolveNewestRelease({ baseDir, channel: "stable" }).pipe(Effect.provide(h.layer)),
+        { version: stableRelease, publishedAt: undefined },
+      );
+      assert.equal(h.requests.length, 0);
+    }),
+  );
+
   it.effect.each([500, 502, 503, 403, 429, "network"] as const)(
     "retries transient %s twice with exponential backoff",
     (failure) =>
@@ -187,7 +241,7 @@ it.layer(NodeServices.layer)("goat release index", (it) => {
       if (Result.isFailure(result)) {
         assert.equal(result.failure.status, 503);
         assert.include(result.failure.message, "HTTP 503");
-        assert.include(result.failure.message, "T3CODE_VERSION");
+        assert.include(result.failure.message, "GOAT_VERSION");
       }
       assert.equal(h.requests.length, 3);
       assert.isFalse(yield* fs.exists(`${baseDir}/cache/release-index.json`));

@@ -1,7 +1,8 @@
-import * as OtelEnvironment from "@t3tools/shared/otelEnvironment";
-import { DEFAULT_SIGNAL_EXPORT } from "@t3tools/shared/observability";
+import * as MemoryDerivedCache from "../../memory/MemoryDerivedCache.ts";
+import * as OtelEnvironment from "@goat/shared/otelEnvironment";
+import { DEFAULT_SIGNAL_EXPORT } from "@goat/shared/observability";
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import { type ProviderReplayTranscript } from "@t3tools/contracts";
+import { type ProviderReplayTranscript } from "@goat/contracts";
 import * as CodexClient from "effect-codex-app-server/client";
 import type * as CodexError from "effect-codex-app-server/errors";
 import * as CodexReplay from "effect-codex-app-server/replay";
@@ -10,16 +11,17 @@ import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
 import * as PlatformError from "effect/PlatformError";
+import type * as Scope from "effect/Scope";
 import * as Predicate from "effect/Predicate";
 import * as Schema from "effect/Schema";
 
 import * as ServerConfig from "../../config.ts";
-import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
-import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
-import { ProviderAdapterDriverCreateError } from "@t3tools/provider-core/server/adapterDriver";
+import * as IdAllocator from "@goat/provider-core/server/IdAllocator";
+import * as ProviderAdapter from "@goat/provider-core/server/ProviderAdapter";
+import { ProviderAdapterDriverCreateError } from "@goat/provider-core/server/adapterDriver";
 import * as ProviderAdapterRegistry from "../ProviderAdapterRegistry.ts";
 import type { OrchestratorV2ProviderReplayHarness } from "../testkit/ProviderReplayHarness.ts";
-import type { ProviderReplayGate } from "@t3tools/provider-testing/replayGate";
+import type { ProviderReplayGate } from "@goat/provider-testing/replayGate";
 import * as CodexAdapterV2 from "./CodexAdapterV2.ts";
 
 export class CodexReplayTranscriptDecodeError extends Schema.TaggedError<CodexReplayTranscriptDecodeError>()(
@@ -99,13 +101,13 @@ export function makeReplayServerConfig(
 ): Effect.Effect<
   ServerConfig.ServerConfig["Service"],
   PlatformError.PlatformError,
-  FileSystem.FileSystem | Path.Path
+  FileSystem.FileSystem | Path.Path | Scope.Scope
 > {
   return Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
-    const baseDir = yield* fs.makeTempDirectory({
-      prefix: `t3-orchestration-v2-codex-${scenario}-`,
+    const baseDir = yield* fs.makeTempDirectoryScoped({
+      prefix: `goat-orchestration-v2-codex-${scenario}-`,
     });
     const stateDir = path.join(baseDir, "userdata");
     const logsDir = path.join(stateDir, "logs");
@@ -222,6 +224,7 @@ export function layer(input: {
   }).pipe(
     Layer.provide(
       Layer.mergeAll(
+        MemoryDerivedCache.layer,
         layerReplayClientFactory,
         layerServerConfig,
         NodeServices.layer,

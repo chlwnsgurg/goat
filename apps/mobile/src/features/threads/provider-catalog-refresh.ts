@@ -1,16 +1,15 @@
-import type { EnvironmentId } from "@t3tools/contracts";
-import type { AtomCommandResult } from "@t3tools/client-runtime/state/runtime";
+import type { EnvironmentId } from "@goat/contracts";
+import type { AtomCommandResult } from "@goat/client-runtime/state/runtime";
 import {
   isAtomCommandInterrupted,
   squashAtomCommandFailure,
-} from "@t3tools/client-runtime/state/runtime";
+} from "@goat/client-runtime/state/runtime";
 
 type RefreshProvidersTarget = {
   readonly environmentId: EnvironmentId;
   readonly input: { readonly refreshModels: true };
 };
 
-/** Pull-to-refresh in the model picker shares any pending discovery. */
 export function createProviderCatalogRefreshRunner<Result>(
   refreshProviders: (target: RefreshProvidersTarget) => Promise<Result>,
 ) {

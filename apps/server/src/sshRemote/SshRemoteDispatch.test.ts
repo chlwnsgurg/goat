@@ -1,6 +1,8 @@
 import * as Queue from "effect/Queue";
 import * as Stream from "effect/Stream";
 import {
+  NodeId,
+  RunId,
   EnvironmentId,
   ProviderInstanceId,
   ProjectId,
@@ -11,7 +13,7 @@ import {
   type ChatFileAttachment,
   type ChatImageAttachment,
   type DesktopSshEnvironmentTarget,
-} from "@t3tools/contracts";
+} from "@goat/contracts";
 import * as Schema from "effect/Schema";
 import { McpSchema, McpServer, Tool, Toolkit } from "effect/ai";
 import * as McpHttpServer from "../mcp/McpHttpServer.ts";
@@ -30,16 +32,27 @@ import * as TestClock from "effect/testing/TestClock";
 import { resolveAttachmentPath } from "../attachmentStore.ts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { describe, expect, it, vi } from "@effect/vitest";
-import * as SshConfig from "@t3tools/ssh/config";
-import { SshCommandError } from "@t3tools/ssh/errors";
-import * as SshTunnel from "@t3tools/ssh/tunnel";
+import * as SshConfig from "@goat/ssh/config";
+import { SshCommandError, SshLaunchError } from "@goat/ssh/errors";
+import * as SshTunnel from "@goat/ssh/tunnel";
 
 import * as ConfigProvider from "effect/ConfigProvider";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import { FetchHttpClient, HttpClient } from "effect/http";
-import { buildRemoteT3RunnerScript } from "@t3tools/ssh/tunnel";
+import { buildRemoteGoatRunnerScript } from "@goat/ssh/tunnel";
 
+import * as NodeSqliteClient from "@goat/shared/nodeSqliteClient";
+import * as SqlClient from "effect/sql/SqlClient";
+import * as Coordinator from "../remoteReports/RemoteDispatchCoordinator.ts";
+import * as LaunchWatchService from "../mcp/LaunchWatchService.ts";
+import Migration0062 from "../persistence/Migrations/066_RemoteReports.ts";
+import Migration0063 from "../persistence/Migrations/067_RemoteDispatches.ts";
+import Migration0065 from "../persistence/Migrations/069_RemoteDispatchQuestions.ts";
+import Migration0068 from "../persistence/Migrations/071_RemoteReportRelay.ts";
+import Migration0073 from "../persistence/Migrations/076_MemoryTaskGrantCeiling.ts";
+
+import packageJson from "../../package.json" with { type: "json" };
 import * as ServerConfig from "../config.ts";
 import { hostFailure } from "../mcp/hostFailure.ts";
 import * as SshRemoteDispatch from "./SshRemoteDispatch.ts";
@@ -112,6 +125,7 @@ describe("SSH dispatch tool compatibility", () => {
         }
       });
       const manager = SshTunnel.SshEnvironmentManager.of({
+        status: () => Effect.die("Unexpected runtime status"),
         ensureEnvironment: () =>
           Effect.succeed({
             target,
@@ -119,6 +133,11 @@ describe("SSH dispatch tool compatibility", () => {
             wsBaseUrl: "ws://legacy-host:3773/",
             pairingToken: null,
           }),
+        readyEnvironment: () => Effect.die("Unexpected ready environment"),
+        beginSetupOperation: () => Effect.die("Unexpected setup operation"),
+        publishSetupOutcome: () => Effect.succeed(true),
+        publishProviderDiagnosis: () => Effect.die("Unexpected provider publication"),
+        forgetEnvironment: () => Effect.die("Unexpected forget"),
         disconnectEnvironment: () => Effect.die("Unexpected SSH disconnect"),
         revalidateTunnels: () => Effect.void,
         issueMcpClientSession: () =>
@@ -263,6 +282,30 @@ describe("matchRemoteProject", () => {
     ).toBe(project);
   });
 
+  it.each([
+    "C:\\Users\\super\\Developer\\goat",
+    "c:\\users\\super\\developer\\goat\\",
+    "C:/Users/super/Developer/goat",
+    "/c/Users/super/Developer/goat",
+  ])("matches a linked Windows host's project by Windows rules: %s", (cwd) => {
+    // A linked host reports no OS; its native project roots show it is Windows.
+    const windows = { id: "windows", workspaceRoot: "C:\\Users\\super\\Developer\\goat" };
+    expect(matchRemoteProject([project, windows], { path: cwd, realPath: cwd, os: null })).toBe(
+      windows,
+    );
+  });
+
+  it("never folds a POSIX project root on a host without an OS", () => {
+    const posix = { id: "posix", workspaceRoot: "/c/Users/super/goat" };
+    expect(
+      matchRemoteProject([posix], {
+        path: "C:/Users/super/goat",
+        realPath: "C:/Users/super/goat",
+        os: null,
+      }),
+    ).toBeUndefined();
+  });
+
   it.each(["Linux", "Windows_NT", "darwin", null])("keeps case-sensitive matching on %s", (os) => {
     expect(
       matchRemoteProject([project], {
@@ -299,6 +342,40 @@ describe("matchRemoteProject", () => {
     const folder = { path: "/", realPath: "/", os: "Linux" };
     expect(matchRemoteProject([root], folder)).toBe(root);
     expect(matchRemoteProject([], folder)).toBeUndefined();
+  });
+
+  it.each([
+    "C:\\Users\\super\\Developer\\goat",
+    "c:\\users\\SUPER\\developer\\goat\\",
+    "C:/Users/super/Developer/goat",
+    "/c/Users/super/Developer/goat/",
+    "/cygdrive/c/Users/super/Developer/goat",
+  ])("matches %s on a Git Bash host by either shell form, slash, and case", (workspaceRoot) => {
+    const windows = { id: "windows", workspaceRoot };
+    expect(
+      matchRemoteProject([windows], {
+        path: "C:\\Users\\super\\Developer\\goat",
+        realPath: "C:\\Users\\super\\Developer\\goat",
+        os: "MINGW64_NT-10.0-26200",
+      }),
+    ).toBe(windows);
+  });
+
+  it("keeps drives and sibling folders apart on a Git Bash host", () => {
+    const folder = {
+      path: "C:\\Users\\super\\Developer\\goat",
+      realPath: "C:\\Users\\super\\Developer\\goat",
+      os: "CYGWIN_NT-10.0",
+    };
+    expect(
+      matchRemoteProject(
+        [
+          { id: "d", workspaceRoot: "D:\\Users\\super\\Developer\\goat" },
+          { id: "sibling", workspaceRoot: "C:\\Users\\super\\Developer\\goat-other" },
+        ],
+        folder,
+      ),
+    ).toBeUndefined();
   });
 });
 
@@ -374,15 +451,15 @@ describe("SSH dispatch release mirror", () => {
         Effect.provideService(
           ConfigProvider.ConfigProvider,
           ConfigProvider.fromEnvRecord({
-            T3CODE_RELEASE_BASE_URL: "  https://mirror.example/goat/  ",
+            GOAT_RELEASE_BASE_URL: "  https://mirror.example/goat/  ",
           }),
         ),
       );
-      const script = buildRemoteT3RunnerScript(runner);
-      expect(script).toContain("T3_RELEASE_BASE_URL='https://mirror.example/goat'");
+      const script = buildRemoteGoatRunnerScript(runner);
+      expect(script).toContain("GOAT_RELEASE_BASE_URL='https://mirror.example/goat'");
       expect(script).not.toContain("github.com/goat-si/goat-releases/releases/download");
       expect(runner.archiveDirectory).toBe("/fixture/home/runtime/archives");
-      expect(runner.keepExistingRunner).toBe(true);
+      expect(runner.refreshOwnedRuntimeOnFirstConnection).toBe(true);
     }),
   );
 
@@ -394,14 +471,14 @@ describe("SSH dispatch release mirror", () => {
           Effect.provideService(
             ConfigProvider.ConfigProvider,
             ConfigProvider.fromEnvRecord(
-              { T3CODE_RELEASE_BASE_URL: value },
+              { GOAT_RELEASE_BASE_URL: value },
               { preserveEmptyStrings: true },
             ),
           ),
         );
         expect("releaseBaseUrl" in runner).toBe(false);
-        expect(buildRemoteT3RunnerScript(runner)).toContain(
-          "T3_RELEASE_BASE_URL='https://github.com/goat-si/goat-releases/releases/download'",
+        expect(buildRemoteGoatRunnerScript(runner)).toContain(
+          "GOAT_RELEASE_BASE_URL='https://github.com/goat-si/goat-releases/releases/download'",
         );
         // The library's blank-mirror behavior test separately proves gh acquisition,
         // since running the generated shell directly is outside the guarded path.
@@ -416,9 +493,9 @@ describe("SSH dispatch packaged runtime", () => {
         Effect.provideService(
           ConfigProvider.ConfigProvider,
           ConfigProvider.fromEnvRecord({
-            T3CODE_SSH_BUNDLED_RUNTIME_ARCHIVE_DIR:
+            GOAT_SSH_BUNDLED_RUNTIME_ARCHIVE_DIR:
               "  /Applications/GOAT.app/Contents/Resources/ssh-runtime/archives  ",
-            T3CODE_SSH_RUNTIME_ARCHIVE_DIR: "/fixture/user-cache",
+            GOAT_SSH_RUNTIME_ARCHIVE_DIR: "/fixture/user-cache",
           }),
         ),
       );
@@ -426,7 +503,7 @@ describe("SSH dispatch packaged runtime", () => {
         "/Applications/GOAT.app/Contents/Resources/ssh-runtime/archives",
       );
       expect(runner.archiveDirectory).toBe("/fixture/user-cache");
-      expect(runner.keepExistingRunner).toBe(true);
+      expect(runner.refreshOwnedRuntimeOnFirstConnection).toBe(true);
     }),
   );
   it.effect.each([undefined, "", "  "])("omits empty bundle %s", (value) =>
@@ -436,7 +513,7 @@ describe("SSH dispatch packaged runtime", () => {
           ConfigProvider.ConfigProvider,
           ConfigProvider.fromEnvRecord(
             {
-              T3CODE_SSH_BUNDLED_RUNTIME_ARCHIVE_DIR: value,
+              GOAT_SSH_BUNDLED_RUNTIME_ARCHIVE_DIR: value,
             },
             { preserveEmptyStrings: true },
           ),
@@ -464,14 +541,26 @@ describe("SshRemoteDispatch.callHostTool", () => {
    */
   const withRemote = <A, E>(
     options: {
-      readonly answer: (request: { readonly method: string; readonly tool?: string }) => ToolAnswer;
+      readonly answer: (request: {
+        readonly method: string;
+        readonly tool?: string;
+        readonly authorization: string | null;
+      }) => ToolAnswer | Promise<ToolAnswer>;
+      readonly beforeSessionIssue?: (attempt: number) => Effect.Effect<void, SshCommandError>;
       readonly ensureFails?: boolean;
       readonly ceilingApplied?: boolean;
+      /** The remote CLI cannot grant orchestration:approve. */
+      readonly approvalsFail?: boolean;
     },
     body: Effect.Effect<A, E, SshRemoteDispatch.SshRemoteDispatch>,
   ) =>
     Effect.gen(function* () {
-      const record = { toolCalls: [] as string[], sessionsIssued: 0, requests: 0 };
+      const record = {
+        toolCalls: [] as string[],
+        sessionsIssued: 0,
+        requests: 0,
+        sessionRequests: [] as Array<boolean>,
+      };
       const fetchEndpoint = vi.fn(async (_url: string, init?: RequestInit) => {
         record.requests += 1;
         const request = JSON.parse(String(init?.body)) as {
@@ -480,8 +569,9 @@ describe("SshRemoteDispatch.callHostTool", () => {
           params?: { name?: string };
         };
         if (request.method === "tools/call") record.toolCalls.push(request.params?.name ?? "");
-        const answer = options.answer({
+        const answer = await options.answer({
           method: request.method,
+          authorization: new Headers(init?.headers).get("authorization"),
           ...(request.params?.name === undefined ? {} : { tool: request.params.name }),
         });
         if ("throws" in answer) throw new TypeError(answer.throws);
@@ -499,6 +589,7 @@ describe("SshRemoteDispatch.callHostTool", () => {
         return Response.json({ jsonrpc: "2.0", id: request.id, result: answer.result });
       });
       const manager = SshTunnel.SshEnvironmentManager.of({
+        status: () => Effect.die("Unexpected runtime status"),
         ensureEnvironment: () =>
           options.ensureFails === true
             ? Effect.fail(
@@ -515,17 +606,34 @@ describe("SshRemoteDispatch.callHostTool", () => {
                 wsBaseUrl: "ws://127.0.0.1:41000/",
                 pairingToken: null,
               }),
+        readyEnvironment: () => Effect.die("Unexpected ready environment"),
+        beginSetupOperation: () => Effect.die("Unexpected setup operation"),
+        publishSetupOutcome: () => Effect.succeed(true),
+        publishProviderDiagnosis: () => Effect.die("Unexpected provider publication"),
+        forgetEnvironment: () => Effect.die("Unexpected forget"),
         disconnectEnvironment: () => Effect.die("Unexpected SSH disconnect"),
         revalidateTunnels: () => Effect.void,
-        issueMcpClientSession: () =>
-          Effect.sync(() => {
-            record.sessionsIssued += 1;
-            return {
-              token: `session-${record.sessionsIssued}`,
-              expiresAt: null,
-              runtimeModeCeilingApplied: options.ceilingApplied ?? true,
-            };
-          }),
+        issueMcpClientSession: (_target, sessionOptions) => {
+          record.sessionRequests.push(sessionOptions.approvals === true);
+          return sessionOptions.approvals === true && options.approvalsFail === true
+            ? Effect.fail(
+                new SshCommandError({
+                  message: "unknown option value: orchestration:approve",
+                  command: ["ssh", host],
+                  exitCode: 2,
+                  stderr: "",
+                }),
+              )
+            : Effect.gen(function* () {
+                yield* options.beforeSessionIssue?.(record.sessionRequests.length) ?? Effect.void;
+                record.sessionsIssued += 1;
+                return {
+                  token: `session-${record.sessionsIssued}`,
+                  expiresAt: null,
+                  runtimeModeCeilingApplied: options.ceilingApplied ?? true,
+                };
+              });
+        },
         runRemoteScript: () => Effect.die("Unexpected remote script"),
       });
       const discoverHosts = vi
@@ -582,6 +690,39 @@ describe("SshRemoteDispatch.callHostTool", () => {
       );
       return { value, connected: yield* dispatch.connectedHosts };
     });
+
+  it.effect("fails instead of issuing a narrower session when approvals cannot be granted", () =>
+    Effect.gen(function* () {
+      const approvalCall = Effect.gen(function* () {
+        const dispatch = yield* SshRemoteDispatch.SshRemoteDispatch;
+        return yield* dispatch.callHostTool(
+          {
+            host,
+            tool: "goat_pending_request_respond",
+            arguments: { threadId: "thread-1" },
+            timeoutMs: 5_000,
+            writes: true,
+            approvals: true,
+          },
+          Effect.succeed("full-access" as const),
+        );
+      });
+      const { result, record } = yield* withRemote(
+        { answer: (request) => initialize(request) ?? { result: {} }, approvalsFail: true },
+        approvalCall,
+      );
+      expect(result).toMatchObject({
+        _tag: "Failure",
+        failure: {
+          reason: "remote_refused",
+          message: expect.stringContaining("may answer approvals"),
+        },
+      });
+      expect(record.sessionRequests).toEqual([true]);
+      expect(record.sessionsIssued).toBe(0);
+      expect(record.toolCalls).toEqual([]);
+    }),
+  );
 
   it.effect("returns the remote result and remembers the host as connected", () =>
     Effect.gen(function* () {
@@ -654,6 +795,247 @@ describe("SshRemoteDispatch.callHostTool", () => {
         readCall(),
       );
       expect(result._tag === "Failure" && result.failure.reason).toBe("remote_refused");
+    }),
+  );
+
+  it.effect("names an older remote that lacks the tool, in the form status fallback matches", () =>
+    Effect.gen(function* () {
+      const statusCall = Effect.gen(function* () {
+        const dispatch = yield* SshRemoteDispatch.SshRemoteDispatch;
+        return yield* dispatch.callHostTool(
+          {
+            host,
+            tool: "goat_thread_status",
+            arguments: { threadId: "thread-1" },
+            timeoutMs: 5_000,
+            writes: false,
+          },
+          Effect.succeed("full-access" as const),
+        );
+      });
+      const { result } = yield* withRemote(
+        {
+          answer: (request) =>
+            initialize(request) ?? { rpcError: "Tool 'goat_thread_status' not found" },
+        },
+        statusCall,
+      );
+      expect(result).toMatchObject({
+        _tag: "Failure",
+        failure: {
+          reason: "remote_refused",
+          message: expect.stringContaining(
+            `GOAT on ${host} ${SshRemoteDispatch.REMOTE_THREAD_STATUS_UNSUPPORTED}; it runs an older build`,
+          ),
+        },
+      });
+    }),
+  );
+
+  it.effect("shares one in-flight session issuance for concurrent calls with the same key", () =>
+    Effect.gen(function* () {
+      const started = yield* Deferred.make<void>();
+      const release = yield* Deferred.make<void>();
+      const { result, record } = yield* withRemote(
+        {
+          beforeSessionIssue: () =>
+            Deferred.succeed(started, undefined).pipe(Effect.andThen(Deferred.await(release))),
+          answer: (request) =>
+            initialize(request) ?? {
+              result: { structuredContent: { authorization: request.authorization } },
+            },
+        },
+        Effect.gen(function* () {
+          const first = yield* Effect.forkChild(readCall(), { startImmediately: true });
+          yield* Deferred.await(started);
+          // Run the second caller up to its lock wait before releasing the issuer.
+          const second = yield* Effect.forkChild(readCall(), { startImmediately: true });
+          yield* Deferred.succeed(release, undefined);
+          return [yield* Fiber.join(first), yield* Fiber.join(second)];
+        }),
+      );
+      expect(result).toMatchObject({
+        _tag: "Success",
+        success: [
+          { value: { authorization: "Bearer session-1" } },
+          { value: { authorization: "Bearer session-1" } },
+        ],
+      });
+      expect(record.sessionRequests).toEqual([false]);
+      expect(record.sessionsIssued).toBe(1);
+    }),
+  );
+
+  it.effect.each(["runtime ceiling", "approvals"] as const)(
+    "issues independently for concurrent calls with different %s keys",
+    (differentKey) =>
+      Effect.gen(function* () {
+        const firstStarted = yield* Deferred.make<void>();
+        const secondStarted = yield* Deferred.make<void>();
+        const release = yield* Deferred.make<void>();
+        const { result, record } = yield* withRemote(
+          {
+            beforeSessionIssue: (attempt) =>
+              Deferred.succeed(attempt === 1 ? firstStarted : secondStarted, undefined).pipe(
+                Effect.andThen(Deferred.await(release)),
+              ),
+            answer: (request) => initialize(request) ?? { result: { structuredContent: {} } },
+          },
+          Effect.gen(function* () {
+            const dispatch = yield* SshRemoteDispatch.SshRemoteDispatch;
+            const first = yield* Effect.forkChild(readCall(), { startImmediately: true });
+            yield* Deferred.await(firstStarted);
+            const second = yield* Effect.forkChild(
+              dispatch.callHostTool(
+                {
+                  host,
+                  tool: "goat_thread_read",
+                  arguments: { threadId: "thread-2" },
+                  timeoutMs: 5_000,
+                  writes: false,
+                  approvals: differentKey === "approvals",
+                },
+                Effect.succeed(
+                  differentKey === "runtime ceiling" ? "approval-required" : "full-access",
+                ),
+              ),
+              { startImmediately: true },
+            );
+            yield* Deferred.await(secondStarted);
+            yield* Deferred.succeed(release, undefined);
+            yield* Fiber.join(first);
+            yield* Fiber.join(second);
+          }),
+        );
+        expect(result._tag).toBe("Success");
+        expect(record.sessionsIssued).toBe(2);
+        expect(record.sessionRequests).toEqual([false, differentKey === "approvals"]);
+      }),
+  );
+
+  it.effect("retries session issuance after a failed in-flight attempt", () =>
+    Effect.gen(function* () {
+      const started = yield* Deferred.make<void>();
+      const release = yield* Deferred.make<void>();
+      const { result, record } = yield* withRemote(
+        {
+          beforeSessionIssue: (attempt) =>
+            attempt === 1
+              ? Deferred.succeed(started, undefined).pipe(
+                  Effect.andThen(Deferred.await(release)),
+                  Effect.andThen(
+                    Effect.fail(
+                      new SshCommandError({
+                        message: "fixture issuance failed",
+                        command: ["ssh", host],
+                        exitCode: 255,
+                        stderr: "",
+                      }),
+                    ),
+                  ),
+                )
+              : Effect.void,
+          answer: (request) => initialize(request) ?? { result: { structuredContent: {} } },
+        },
+        Effect.gen(function* () {
+          const first = yield* Effect.forkChild(readCall().pipe(Effect.result));
+          yield* Deferred.await(started);
+          yield* Deferred.succeed(release, undefined);
+          expect((yield* Fiber.join(first))._tag).toBe("Failure");
+          yield* readCall();
+          yield* readCall();
+        }),
+      );
+      expect(result._tag).toBe("Success");
+      expect(record.sessionRequests).toEqual([false, false]);
+      expect(record.sessionsIssued).toBe(1);
+    }),
+  );
+
+  it.effect("shares one refresh when concurrent calls enter the ten-minute expiry margin", () =>
+    Effect.gen(function* () {
+      const started = yield* Deferred.make<void>();
+      const release = yield* Deferred.make<void>();
+      const { result, record } = yield* withRemote(
+        {
+          beforeSessionIssue: (attempt) =>
+            attempt === 1
+              ? Effect.void
+              : Deferred.succeed(started, undefined).pipe(Effect.andThen(Deferred.await(release))),
+          answer: (request) => initialize(request) ?? { result: { structuredContent: {} } },
+        },
+        Effect.gen(function* () {
+          yield* readCall();
+          yield* TestClock.adjust((11 * 60 + 49) * 60 * 1000);
+          yield* readCall();
+          yield* TestClock.adjust("1 minute");
+          const first = yield* Effect.forkChild(readCall(), { startImmediately: true });
+          yield* Deferred.await(started);
+          const second = yield* Effect.forkChild(readCall(), { startImmediately: true });
+          yield* Deferred.succeed(release, undefined);
+          yield* Fiber.join(first);
+          yield* Fiber.join(second);
+        }),
+      );
+      expect(result._tag).toBe("Success");
+      expect(record.sessionsIssued).toBe(2);
+      expect(record.sessionRequests).toEqual([false, false]);
+    }),
+  );
+
+  it.effect("reuses the fresh session after a delayed concurrent 401 for the old bearer", () =>
+    Effect.gen(function* () {
+      const firstRejected = yield* Deferred.make<(answer: ToolAnswer) => void>();
+      const secondRejected = yield* Deferred.make<(answer: ToolAnswer) => void>();
+      const refreshStarted = yield* Deferred.make<void>();
+      const releaseRefresh = yield* Deferred.make<void>();
+      let rejected = 0;
+      const { result, record } = yield* withRemote(
+        {
+          beforeSessionIssue: (attempt) =>
+            attempt === 1
+              ? Effect.void
+              : Deferred.succeed(refreshStarted, undefined).pipe(
+                  Effect.andThen(Deferred.await(releaseRefresh)),
+                ),
+          answer: (request) => {
+            if (request.method === "initialize" && request.authorization === "Bearer session-1") {
+              rejected += 1;
+              const pending = rejected === 1 ? firstRejected : secondRejected;
+              return new Promise<ToolAnswer>((resolve) => {
+                Deferred.doneUnsafe(pending, Effect.succeed(resolve));
+              });
+            }
+            return (
+              initialize(request) ?? {
+                result: { structuredContent: { authorization: request.authorization } },
+              }
+            );
+          },
+        },
+        Effect.gen(function* () {
+          const first = yield* Effect.forkChild(readCall());
+          const rejectFirst = yield* Deferred.await(firstRejected);
+          const second = yield* Effect.forkChild(readCall());
+          const rejectSecond = yield* Deferred.await(secondRejected);
+          rejectFirst({ status: 401 });
+          yield* Deferred.await(refreshStarted);
+          yield* Deferred.succeed(releaseRefresh, undefined);
+          const firstResult = yield* Fiber.join(first);
+          // The old request arrives after the replacement has already been cached.
+          rejectSecond({ status: 401 });
+          return [firstResult, yield* Fiber.join(second)];
+        }),
+      );
+      expect(result).toMatchObject({
+        _tag: "Success",
+        success: [
+          { value: { authorization: "Bearer session-2" } },
+          { value: { authorization: "Bearer session-2" } },
+        ],
+      });
+      expect(record.sessionsIssued).toBe(2);
+      expect(record.sessionRequests).toEqual([false, false]);
     }),
   );
 
@@ -827,7 +1209,12 @@ const withLaunchRemote = <A, E>(
     refusal?: boolean;
     projectReply?: unknown;
     broad?: boolean;
+    /** What the browse script prints, in place of a Linux listing of launchInput.cwd. */
+    browseStdout?: string;
+    projects?: ReadonlyArray<{ id: string; workspaceRoot: string }>;
     registrationAccess?: boolean;
+    declaresMemoryCeiling?: boolean;
+    beforeSessionIssue?: (scopes: ReadonlyArray<string>) => Effect.Effect<void, SshCommandError>;
   },
   body: (record: {
     tools: { name: string; args: Record<string, unknown>; authorization: string | null }[];
@@ -842,6 +1229,7 @@ const withLaunchRemote = <A, E>(
       sessions: [] as { target: DesktopSshEnvironmentTarget; ceiling: RuntimeMode }[],
     };
     const manager = SshTunnel.SshEnvironmentManager.of({
+      status: () => Effect.die("Unexpected runtime status"),
       ensureEnvironment: (target) =>
         Effect.sync(() => {
           record.targets.push(target);
@@ -852,10 +1240,16 @@ const withLaunchRemote = <A, E>(
             pairingToken: null,
           };
         }),
+      readyEnvironment: () => Effect.die("Unexpected ready environment"),
+      beginSetupOperation: () => Effect.die("Unexpected setup operation"),
+      publishSetupOutcome: () => Effect.succeed(true),
+      publishProviderDiagnosis: () => Effect.die("Unexpected provider publication"),
+      forgetEnvironment: () => Effect.die("Unexpected forget"),
       disconnectEnvironment: () => Effect.void,
       revalidateTunnels: () => Effect.void,
       issueMcpClientSession: (target, opts) =>
-        Effect.sync(() => {
+        Effect.gen(function* () {
+          yield* options.beforeSessionIssue?.(opts.memoryScopes ?? []) ?? Effect.void;
           record.sessions.push({ target, ceiling: opts.runtimeModeCeiling as RuntimeMode });
           return {
             token: `token-${record.sessions.length}`,
@@ -868,7 +1262,9 @@ const withLaunchRemote = <A, E>(
           record.targets.push(target);
           const path = options.broad ? "/home/agent" : launchInput.cwd;
           return {
-            stdout: `T3B\t1\nHOME\t/home/agent\nOS\tLinux\nPATH\t${path}\nREAL\t${path}\nGITROOT\t${path}\n`,
+            stdout:
+              options.browseStdout ??
+              `T3B\t1\nHOME\t/home/agent\nOS\tLinux\nPATH\t${path}\nREAL\t${path}\nGITROOT\t${path}\n`,
             stderr: "",
           };
         }),
@@ -916,7 +1312,18 @@ const withLaunchRemote = <A, E>(
             "goat_thread_launch",
             "goat_environment_read",
             "orchestrator_capabilities",
-          ].map((name) => ({ name })),
+          ].map((name) => ({
+            name,
+            // Memory admission lists strictly, which requires an input schema on every tool.
+            ...(options.declaresMemoryCeiling === true
+              ? {
+                  inputSchema: {
+                    type: "object",
+                    properties: name === "goat_thread_launch" ? { memoryGrantCeiling: {} } : {},
+                  },
+                }
+              : {}),
+          })),
         };
       else {
         const name = req.params?.name ?? "";
@@ -941,9 +1348,9 @@ const withLaunchRemote = <A, E>(
           const value =
             name === "goat_project_list"
               ? {
-                  projects: options.existing
-                    ? [{ id: "existing", workspaceRoot: launchInput.cwd }]
-                    : [],
+                  projects:
+                    options.projects ??
+                    (options.existing ? [{ id: "existing", workspaceRoot: launchInput.cwd }] : []),
                   nextCursor: null,
                 }
               : name === "goat_project_create"
@@ -1005,6 +1412,44 @@ it.effect("alias launch remains compatible", () =>
     }),
   ),
 );
+it.effect("issues independently for concurrent launches with different memory grant keys", () =>
+  Effect.gen(function* () {
+    const firstStarted = yield* Deferred.make<void>();
+    const secondStarted = yield* Deferred.make<void>();
+    const release = yield* Deferred.make<void>();
+    const scopes: ReadonlyArray<string>[] = [];
+    yield* withLaunchRemote(
+      {
+        declaresMemoryCeiling: true,
+        beforeSessionIssue: (requested) => {
+          scopes.push(requested);
+          return Deferred.succeed(
+            scopes.length === 1 ? firstStarted : secondStarted,
+            undefined,
+          ).pipe(Effect.andThen(Deferred.await(release)));
+        },
+      },
+      (record) =>
+        Effect.gen(function* () {
+          const dispatch = yield* SshRemoteDispatch.SshRemoteDispatch;
+          const first = yield* Effect.forkChild(
+            dispatch.launchThread({ ...launchInput, memoryGrantCeiling: "none" }, Effect.void),
+          );
+          yield* Deferred.await(firstStarted);
+          const second = yield* Effect.forkChild(
+            dispatch.launchThread({ ...launchInput, memoryGrantCeiling: "read" }, Effect.void),
+          );
+          yield* Deferred.await(secondStarted);
+          expect(scopes).toEqual([[], ["memory:read"]]);
+          yield* Deferred.succeed(release, undefined);
+          yield* Fiber.join(first);
+          yield* Fiber.join(second);
+          expect(record.sessions).toHaveLength(2);
+          expect(new Set(record.tools.map((call) => call.authorization)).size).toBe(2);
+        }),
+    );
+  }),
+);
 it.effect("same alias different user or port gets a separate session", () =>
   withLaunchRemote({}, (record) =>
     Effect.gen(function* () {
@@ -1055,6 +1500,68 @@ it.effect("scripts reach new remote project creation", () =>
     }),
   ),
 );
+
+const gitBashBrowse = [
+  "T3B\t1",
+  "HOME\t/c/Users/super",
+  "OS\tMINGW64_NT-10.0-26200",
+  "PATH\t/c/Users/super/Developer/goat",
+  "REAL\t/c/Users/super/Developer/goat",
+  "GITROOT\tC:/Users/super/Developer/goat",
+  "BRANCH\tdev",
+  "",
+].join("\n");
+it.effect("a Git Bash host gets its new project and worktree paths in native Windows form", () =>
+  withLaunchRemote({ browseStdout: gitBashBrowse }, (record) =>
+    Effect.gen(function* () {
+      const dispatch = yield* SshRemoteDispatch.SshRemoteDispatch;
+      const result = yield* dispatch.launchThread(
+        {
+          ...launchInput,
+          cwd: "/c/Users/super/Developer/goat",
+          workspace: {
+            type: "existing_worktree",
+            worktreePath: "/c/Users/super/.goat/worktrees/goat/x/",
+          },
+        },
+        Effect.void,
+      );
+      expect(record.tools.find((call) => call.name === "goat_project_create")?.args).toMatchObject({
+        title: "goat",
+        workspaceRoot: "C:\\Users\\super\\Developer\\goat",
+      });
+      expect(
+        record.tools.find((call) => call.name === "goat_thread_launch")?.args.workspaceStrategy,
+      ).toEqual({
+        type: "existing_worktree",
+        worktreePath: "C:\\Users\\super\\.goat\\worktrees\\goat\\x",
+      });
+      expect(result.cwd).toBe("C:\\Users\\super\\Developer\\goat");
+    }),
+  ),
+);
+it.effect("a Git Bash host reuses its project stored in Windows form", () =>
+  withLaunchRemote(
+    {
+      browseStdout: gitBashBrowse,
+      projects: [{ id: "windows", workspaceRoot: "c:\\users\\Super\\Developer\\goat\\" }],
+    },
+    (record) =>
+      Effect.gen(function* () {
+        const dispatch = yield* SshRemoteDispatch.SshRemoteDispatch;
+        const result = yield* dispatch.launchThread(
+          { ...launchInput, cwd: "C:\\Users\\super\\Developer\\goat" },
+          Effect.void,
+        );
+        expect(result.projectId).toBe("windows");
+        expect(record.tools.map((call) => call.name)).toEqual([
+          "goat_project_list",
+          "goat_thread_launch",
+        ]);
+      }),
+  ),
+);
+
 it.effect("existing remote project retains scripts", () =>
   withLaunchRemote({ existing: true }, (record) =>
     Effect.gen(function* () {
@@ -1215,7 +1722,37 @@ describe("SSH dispatch launch lineage", () => {
   /** Launches against a fake remote and returns the arguments goat_thread_launch received. */
   const launchAgainst = (remote: {
     readonly declaresLaunchedBy: boolean;
+    readonly coordinatorKind?: "thread" | "task";
+    readonly refuseLaunchedBy?: boolean;
+    readonly afterLaunchedByRefusal?: {
+      readonly advertisesMemory: boolean;
+      readonly declaresMemoryCeiling: boolean;
+      readonly listFailure?: "failed" | "timeout" | "malformed" | "malformed-entry";
+    };
+    readonly callerRuntimeMode?: SshRemoteDispatch.SshLaunchInput["callerRuntimeMode"];
+    readonly standingInstructions?: false;
+    readonly refuseReport?: boolean;
+    readonly afterReportRefusal?: {
+      readonly advertisesMemory: boolean;
+      readonly declaresMemoryCeiling: boolean;
+      readonly listFailure?: "failed" | "timeout" | "malformed" | "malformed-entry";
+    };
+    readonly afterFirstLaunch?: {
+      readonly advertisesMemory: boolean;
+      readonly declaresMemoryCeiling: boolean;
+      readonly listFailure?: "failed" | "timeout" | "malformed" | "malformed-entry";
+    };
+    readonly declaresStandingInstructions?: boolean;
+    readonly listFailure?: "failed" | "timeout" | "malformed" | "malformed-entry";
+    readonly onList?: () => void;
+    readonly memoryCeilings?: ReadonlyArray<import("@goat/contracts").MemoryTaskGrantCeiling>;
+    readonly declaresMemoryCeiling?: boolean;
+    readonly advertisesMemory?: boolean;
+    readonly onMemoryLaunch?: () => void;
     readonly declaresReport?: boolean;
+    readonly declaresNotifyOnCompletion?: boolean;
+    /** Launch for an outside client, with no launching thread. */
+    readonly outside?: boolean;
     /** Launch with a report binding and its agent note. */
     readonly withReport?: boolean;
     /** Launch twice through one dispatch service; the remote declares report from the second. */
@@ -1228,7 +1765,11 @@ describe("SSH dispatch launch lineage", () => {
       const host = "lineage-host";
       const target = { alias: host, hostname: host, username: null, port: null };
       const launches: Array<Record<string, unknown>> = [];
+      const memorySessions: Array<ReadonlyArray<string>> = [];
+      const presentedTokens: Array<string | null> = [];
       let declaresReport = remote.declaresReport === true;
+      let reportRefused = false;
+      let launchedByRefused = false;
       const fetchEndpoint = vi.fn(async (_url: string, init?: RequestInit) => {
         const request = JSON.parse(String(init?.body)) as {
           id?: string;
@@ -1248,10 +1789,34 @@ describe("SSH dispatch launch lineage", () => {
             });
           case "notifications/initialized":
             return new Response(null, { status: 202 });
-          case "tools/list":
+          case "tools/list": {
+            remote.onList?.();
+            const catalog =
+              launchedByRefused && remote.afterLaunchedByRefusal !== undefined
+                ? remote.afterLaunchedByRefusal
+                : reportRefused && remote.afterReportRefusal !== undefined
+                  ? remote.afterReportRefusal
+                  : launches.length > 0 && remote.afterFirstLaunch !== undefined
+                    ? remote.afterFirstLaunch
+                    : remote;
+            const listFailure = "listFailure" in catalog ? catalog.listFailure : undefined;
+            if (listFailure === "failed") return new Response(null, { status: 500 });
+            if (listFailure === "malformed" || listFailure === "malformed-entry")
+              return Response.json({
+                jsonrpc: "2.0",
+                id: request.id,
+                result: { tools: listFailure === "malformed" ? {} : [null] },
+              });
             if (remote.listFails === true) return new Response(null, { status: 500 });
-            if (remote.onListStalled !== undefined) {
-              remote.onListStalled();
+            if (
+              listFailure === "timeout" ||
+              (remote.onListStalled !== undefined &&
+                remote.listFailure === undefined &&
+                remote.afterReportRefusal?.listFailure === undefined &&
+                remote.afterLaunchedByRefusal?.listFailure === undefined &&
+                remote.afterFirstLaunch?.listFailure === undefined)
+            ) {
+              remote.onListStalled?.();
               return new Promise<Response>((_resolve, reject) =>
                 init?.signal?.addEventListener("abort", () => reject(new Error("aborted"))),
               );
@@ -1261,27 +1826,78 @@ describe("SSH dispatch launch lineage", () => {
               id: request.id,
               result: {
                 tools: [
+                  ...(catalog.advertisesMemory
+                    ? [{ name: "memory_search", inputSchema: { type: "object", properties: {} } }]
+                    : []),
                   {
                     name: "goat_thread_launch",
                     inputSchema: {
                       type: "object",
                       properties: {
                         title: { type: "string" },
+                        ...(catalog.declaresMemoryCeiling
+                          ? { memoryGrantCeiling: { type: "string" } }
+                          : {}),
                         ...(remote.declaresLaunchedBy ? { launchedBy: { type: "object" } } : {}),
                         ...(declaresReport ? { report: { type: "object" } } : {}),
+                        ...(remote.declaresStandingInstructions
+                          ? { standingInstructions: { type: "boolean" } }
+                          : {}),
+                        ...(remote.declaresNotifyOnCompletion === true
+                          ? { notifyOnCompletion: { type: "boolean" } }
+                          : {}),
                       },
                     },
                   },
                 ],
               },
             });
+          }
           case "tools/call": {
             if (request.params?.name === "goat_thread_launch") {
+              remote.onMemoryLaunch?.();
+              presentedTokens.push(new Headers(init?.headers).get("authorization"));
               launches.push(request.params.arguments ?? {});
+            }
+            if (
+              remote.refuseLaunchedBy &&
+              request.params?.name === "goat_thread_launch" &&
+              request.params.arguments?.launchedBy !== undefined
+            ) {
+              launchedByRefused = true;
+              return Response.json({
+                jsonrpc: "2.0",
+                id: request.id,
+                result: {
+                  isError: true,
+                  content: [
+                    {
+                      type: "text",
+                      text: "goat_thread_launch does not take launchedBy, so nothing ran",
+                    },
+                  ],
+                },
+              });
             }
             const report = request.params?.arguments?.report as
               | { readonly correlationId: string }
               | undefined;
+            if (remote.refuseReport && report !== undefined) {
+              reportRefused = true;
+              return Response.json({
+                jsonrpc: "2.0",
+                id: request.id,
+                result: {
+                  isError: true,
+                  content: [
+                    {
+                      type: "text",
+                      text: "goat_thread_launch does not take report, so nothing ran.",
+                    },
+                  ],
+                },
+              });
+            }
             return Response.json({
               jsonrpc: "2.0",
               id: request.id,
@@ -1302,6 +1918,7 @@ describe("SSH dispatch launch lineage", () => {
         }
       });
       const manager = SshTunnel.SshEnvironmentManager.of({
+        status: () => Effect.die("Unexpected runtime status"),
         ensureEnvironment: () =>
           Effect.succeed({
             target,
@@ -1309,13 +1926,21 @@ describe("SSH dispatch launch lineage", () => {
             wsBaseUrl: "ws://lineage-host:3773/",
             pairingToken: null,
           }),
+        readyEnvironment: () => Effect.die("Unexpected ready environment"),
+        beginSetupOperation: () => Effect.die("Unexpected setup operation"),
+        publishSetupOutcome: () => Effect.succeed(true),
+        publishProviderDiagnosis: () => Effect.die("Unexpected provider publication"),
+        forgetEnvironment: () => Effect.die("Unexpected forget"),
         disconnectEnvironment: () => Effect.die("Unexpected SSH disconnect"),
         revalidateTunnels: () => Effect.void,
-        issueMcpClientSession: () =>
-          Effect.succeed({
-            token: "fixture-session",
-            expiresAt: null,
-            runtimeModeCeilingApplied: true,
+        issueMcpClientSession: (_target, options) =>
+          Effect.sync(() => {
+            memorySessions.push(options.memoryScopes ?? []);
+            return {
+              token: `fixture-session-${memorySessions.length}`,
+              expiresAt: null,
+              runtimeModeCeilingApplied: true,
+            };
           }),
         runRemoteScript: () =>
           Effect.succeed({
@@ -1334,25 +1959,83 @@ describe("SSH dispatch launch lineage", () => {
       try {
         const result = yield* Effect.gen(function* () {
           const dispatch = yield* SshRemoteDispatch.SshRemoteDispatch;
-          const launch = dispatch.launchThread(
-            {
+          const launch = (
+            memoryGrantCeiling?: import("@goat/contracts").MemoryTaskGrantCeiling,
+          ) => {
+            const input: SshRemoteDispatch.SshLaunchInput = {
               host,
               cwd: "/home/agent/repo",
               workspace: { type: "cwd" },
               title: "Lineage probe",
+              ...(memoryGrantCeiling === undefined ? {} : { memoryGrantCeiling }),
               runtimeMode: "approval-required",
-              callerRuntimeMode: "approval-required",
-              launchedBy: launcher,
+              callerRuntimeMode: remote.callerRuntimeMode ?? "approval-required",
+              ...(remote.standingInstructions === false ? { standingInstructions: false } : {}),
+              ...(remote.outside === true ? {} : { launchedBy: launcher }),
               ...(remote.withReport === true
                 ? { message: "Do the work", report: reportBinding, reportNote: "Report back." }
                 : {}),
-            },
-            Effect.void,
-          );
-          if (remote.upgradeBetweenLaunches !== true) return yield* launch;
-          yield* launch;
+            };
+            if (remote.coordinatorKind === undefined)
+              return dispatch.launchThread(input, Effect.void);
+            return Effect.gen(function* () {
+              const sql = yield* SqlClient.SqlClient;
+              yield* Migration0062;
+              yield* Migration0063;
+              yield* Migration0065;
+              yield* Migration0068;
+              yield* sql`CREATE TABLE scheduled_tasks (task_id TEXT PRIMARY KEY)`;
+              yield* Migration0073;
+              return yield* Effect.gen(function* () {
+                const coordinator = yield* Coordinator.RemoteDispatchCoordinator;
+                const launched = yield* coordinator.launch(
+                  {
+                    kind: remote.coordinatorKind!,
+                    originThreadId: launcher.threadId,
+                    delivery: "notify_only",
+                    launch: input,
+                    ...(remote.coordinatorKind === "task"
+                      ? {
+                          task: {
+                            taskId: NodeId.make("fixture-task"),
+                            parentRunId: RunId.make("fixture-parent-run"),
+                          },
+                        }
+                      : {}),
+                  },
+                  Effect.void,
+                );
+                const stored = yield* coordinator.get(launched.correlationId);
+                expect(stored?.memoryGrantCeiling).toBe(memoryGrantCeiling ?? "none");
+                return launched.launch;
+              }).pipe(
+                Effect.provide(
+                  Coordinator.layer.pipe(
+                    Layer.provide(
+                      Layer.mergeAll(
+                        Layer.succeed(SqlClient.SqlClient, sql),
+                        Layer.succeed(SshRemoteDispatch.SshRemoteDispatch, dispatch),
+                        Layer.mock(ThreadManagement.ThreadManagementService)({
+                          getThreadShell: () => Effect.succeed(null),
+                          dispatch: () => Effect.succeed({ sequence: 1, storedEvents: [] }),
+                        }),
+                        Layer.mock(LaunchWatchService.LaunchWatchService)({}),
+                      ),
+                    ),
+                  ),
+                ),
+              );
+            }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" })));
+          };
+          if (remote.memoryCeilings !== undefined) {
+            let result;
+            for (const ceiling of remote.memoryCeilings) result = yield* launch(ceiling);
+            return result!;
+          }
+          if (remote.upgradeBetweenLaunches !== true) return yield* launch();
+          yield* launch();
           declaresReport = true;
-          return yield* launch;
+          return yield* launch();
         }).pipe(
           Effect.provide(
             SshRemoteDispatch.layer.pipe(
@@ -1362,13 +2045,453 @@ describe("SSH dispatch launch lineage", () => {
             ),
           ),
         );
-        return { result, launches };
+        return { result, launches, memorySessions, presentedTokens };
       } finally {
         vi.unstubAllGlobals();
         managerLayer.mockRestore();
         discoverHosts.mockRestore();
       }
     });
+
+  it.effect("issues and reuses SSH sessions only within a task memory ceiling in both orders", () =>
+    Effect.gen(function* () {
+      for (const ceilings of [
+        ["none", "read_write", "read", "none", "read_write", "read"],
+        ["read", "read_write", "none", "read", "read_write", "none"],
+      ] as const) {
+        const { launches, memorySessions, presentedTokens } = yield* launchAgainst({
+          declaresLaunchedBy: true,
+          declaresMemoryCeiling: true,
+          advertisesMemory: true,
+          memoryCeilings: ceilings,
+        });
+        expect(launches.map((launch) => launch.memoryGrantCeiling)).toEqual(ceilings);
+        const scopes = (ceiling: string) =>
+          ceiling === "none"
+            ? []
+            : ceiling === "read"
+              ? ["memory:read"]
+              : ["memory:read", "memory:write"];
+        expect(memorySessions).toEqual(ceilings.slice(0, 3).map(scopes));
+        expect(presentedTokens).toEqual([
+          "Bearer fixture-session-1",
+          "Bearer fixture-session-2",
+          "Bearer fixture-session-3",
+          "Bearer fixture-session-1",
+          "Bearer fixture-session-2",
+          "Bearer fixture-session-3",
+        ]);
+      }
+    }),
+  );
+
+  it.effect("refuses a memory-advertising destination that lacks ceiling admission", () =>
+    Effect.gen(function* () {
+      let attempts = 0;
+      const result = yield* launchAgainst({
+        declaresLaunchedBy: true,
+        advertisesMemory: true,
+        onMemoryLaunch: () => {
+          attempts += 1;
+        },
+      }).pipe(Effect.result);
+      expect(result._tag).toBe("Failure");
+      expect(attempts).toBe(0);
+      if (result._tag === "Failure")
+        expect(result.failure).toMatchObject({
+          reason: "remote_refused",
+          remoteCode: SshRemoteDispatch.MEMORY_CEILING_UNSUPPORTED,
+        });
+    }),
+  );
+
+  it.effect("allows explicit none without adding memory scope on a legacy destination", () =>
+    Effect.gen(function* () {
+      const { launches, memorySessions } = yield* launchAgainst({
+        declaresLaunchedBy: true,
+        memoryCeilings: ["none"],
+      });
+      expect(launches).toHaveLength(1);
+      expect(launches[0]).not.toHaveProperty("memoryGrantCeiling");
+      expect(memorySessions).toEqual([[]]);
+    }),
+  );
+
+  it.effect.each([
+    ["ordinary omitted", "thread", undefined, false, false, true],
+    ["task none", "task", "none", false, false, true],
+    ["task none with admission without memory", "task", "none", false, true, true],
+    ["ordinary omitted memory without admission", "thread", undefined, true, false, false],
+    ["task read", "task", "read", false, false, false],
+    ["task read with admission without memory", "task", "read", false, true, true],
+    ["task read_write", "task", "read_write", false, false, false],
+    ["memory without admission none", "task", "none", true, false, false],
+    ["memory without admission read", "task", "read", true, false, false],
+    ["memory with admission none", "task", "none", true, true, true],
+    ["memory with admission read", "task", "read", true, true, true],
+  ] as const)("coordinator → SSH consumer: %s", ([, kind, ceiling, memory, admission, allowed]) =>
+    Effect.gen(function* () {
+      let attempts = 0;
+      const result = yield* launchAgainst({
+        declaresLaunchedBy: true,
+        coordinatorKind: kind,
+        ...(ceiling === undefined ? {} : { memoryCeilings: [ceiling] }),
+        advertisesMemory: memory,
+        declaresMemoryCeiling: admission,
+        onMemoryLaunch: () => {
+          attempts += 1;
+        },
+      }).pipe(Effect.result);
+      expect(attempts).toBe(allowed ? 1 : 0);
+      expect(result._tag).toBe(allowed ? "Success" : "Failure");
+      if (result._tag === "Failure") {
+        expect(result.failure).toMatchObject({
+          reason: "remote_refused",
+          remoteCode: SshRemoteDispatch.MEMORY_CEILING_UNSUPPORTED,
+        });
+      } else {
+        expect(result.success.memorySessions).toEqual([ceiling === "read" ? ["memory:read"] : []]);
+        if (admission && (memory || ceiling === "read"))
+          expect(result.success.launches[0]?.memoryGrantCeiling).toBe(ceiling);
+        else expect(result.success.launches[0]).not.toHaveProperty("memoryGrantCeiling");
+      }
+    }),
+  );
+
+  it.effect.each([
+    ["ordinary omitted legacy", "thread", undefined, false, false, true],
+    ["task none legacy", "task", "none", false, false, true],
+    ["task read loses admission", "task", "read", false, false, false],
+    ["memory none loses admission", "task", "none", true, false, false],
+    ["memory read loses admission", "task", "read", true, false, false],
+    ["memory none keeps admission", "task", "none", true, true, true],
+    ["memory read keeps admission", "task", "read", true, true, true],
+  ] as const)(
+    "coordinator report fallback → SSH consumer: %s",
+    ([, kind, ceiling, memory, admission, allowed]) =>
+      Effect.gen(function* () {
+        let attempts = 0;
+        const result = yield* launchAgainst({
+          declaresLaunchedBy: true,
+          coordinatorKind: kind,
+          ...(ceiling === undefined ? {} : { memoryCeilings: [ceiling] }),
+          declaresMemoryCeiling: ceiling === "read",
+          declaresReport: true,
+          refuseReport: true,
+          declaresStandingInstructions: true,
+          afterReportRefusal: { advertisesMemory: memory, declaresMemoryCeiling: admission },
+          onMemoryLaunch: () => {
+            attempts += 1;
+          },
+        }).pipe(Effect.result);
+        expect(attempts).toBe(allowed ? 2 : 1);
+        expect(result._tag).toBe(allowed ? "Success" : "Failure");
+        if (result._tag === "Failure") {
+          expect(result.failure).toMatchObject({
+            reason: "remote_refused",
+            remoteCode: SshRemoteDispatch.MEMORY_CEILING_UNSUPPORTED,
+          });
+        } else {
+          const launches = result.success.launches;
+          expect(launches[0]).toHaveProperty("report");
+          expect(launches[1]).not.toHaveProperty("report");
+          if (admission) expect(launches[1]?.memoryGrantCeiling).toBe(ceiling);
+          else
+            for (const launch of launches) expect(launch).not.toHaveProperty("memoryGrantCeiling");
+          expect(result.success.memorySessions).toEqual([
+            ceiling === "read" ? ["memory:read"] : [],
+          ]);
+        }
+      }),
+  );
+
+  it.effect.each([
+    ["memory false → true with admission", false, true, true, true, true],
+    ["memory false → true without admission", false, true, true, false, false],
+    ["admission lost", true, true, true, false, false],
+    ["memory true → false", true, true, false, false, true],
+  ] as const)(
+    "fresh cached catalog: %s",
+    ([, initialMemory, initialAdmission, memory, admission, allowed]) =>
+      Effect.gen(function* () {
+        for (const fallback of [false, true]) {
+          let attempts = 0;
+          let lists = 0;
+          const updated = { advertisesMemory: memory, declaresMemoryCeiling: admission };
+          const result = yield* launchAgainst({
+            declaresLaunchedBy: true,
+            coordinatorKind: "task",
+            memoryCeilings: fallback ? ["none"] : ["none", "none"],
+            advertisesMemory: initialMemory,
+            declaresMemoryCeiling: initialAdmission,
+            declaresReport: true,
+            declaresStandingInstructions: true,
+            ...(fallback
+              ? { refuseReport: true, afterReportRefusal: updated }
+              : { afterFirstLaunch: updated }),
+            onList: () => {
+              lists += 1;
+            },
+            onMemoryLaunch: () => {
+              attempts += 1;
+            },
+          }).pipe(Effect.result);
+          expect(lists).toBe(2);
+          expect(attempts).toBe(allowed ? 2 : 1);
+          expect(result._tag).toBe(allowed ? "Success" : "Failure");
+          if (result._tag === "Failure") {
+            expect(result.failure).toMatchObject({
+              reason: "remote_refused",
+              remoteCode: SshRemoteDispatch.MEMORY_CEILING_UNSUPPORTED,
+            });
+          } else {
+            expect(result.success.memorySessions).toEqual([[]]);
+            expect(new Set(result.success.presentedTokens).size).toBe(1);
+            if (memory) expect(result.success.launches[1]?.memoryGrantCeiling).toBe("none");
+            else expect(result.success.launches[1]).not.toHaveProperty("memoryGrantCeiling");
+          }
+        }
+      }),
+  );
+
+  it.effect.each(["failed", "timeout", "malformed", "malformed-entry"] as const)(
+    "catalog %s refuses explicit ceilings before first launch and fallback",
+    (listFailure) =>
+      Effect.gen(function* () {
+        for (const ceiling of ["none", "read"] as const) {
+          for (const fallback of [false, true]) {
+            let attempts = 0;
+            let lists = 0;
+            let listStalled!: () => void;
+            const stalled = new Promise<void>((resolve) => {
+              listStalled = resolve;
+            });
+            const operation = launchAgainst({
+              declaresLaunchedBy: true,
+              coordinatorKind: "task",
+              memoryCeilings: [ceiling],
+              advertisesMemory: true,
+              declaresMemoryCeiling: true,
+              declaresReport: true,
+              declaresStandingInstructions: true,
+              ...(fallback
+                ? {
+                    refuseReport: true,
+                    afterReportRefusal: {
+                      advertisesMemory: true,
+                      declaresMemoryCeiling: true,
+                      listFailure,
+                    },
+                  }
+                : { listFailure }),
+              onList: () => {
+                lists += 1;
+              },
+              ...(listFailure === "timeout" ? { onListStalled: listStalled } : {}),
+              onMemoryLaunch: () => {
+                attempts += 1;
+              },
+            }).pipe(Effect.result);
+            const fiber = yield* Effect.forkChild(operation);
+            if (listFailure === "timeout") {
+              yield* Effect.promise(() => stalled);
+              yield* TestClock.adjust(SshRemoteDispatch.LAUNCH_LINEAGE_PROBE_TIMEOUT);
+            }
+            const result = yield* Fiber.join(fiber);
+            expect(result._tag).toBe("Failure");
+            if (result._tag === "Failure")
+              expect(result.failure).toMatchObject({
+                reason: "remote_refused",
+                remoteCode: SshRemoteDispatch.MEMORY_CEILING_UNSUPPORTED,
+              });
+            expect(attempts).toBe(fallback ? 1 : 0);
+            expect(lists).toBe(fallback ? 2 : 1);
+          }
+        }
+      }),
+  );
+
+  it.effect.each(["failed", "timeout", "malformed", "malformed-entry"] as const)(
+    "ordinary coordinator omitted ceiling preserves compatibility on catalog %s",
+    (listFailure) =>
+      Effect.gen(function* () {
+        let listStalled!: () => void;
+        const stalled = new Promise<void>((resolve) => {
+          listStalled = resolve;
+        });
+        const fiber = yield* Effect.forkChild(
+          launchAgainst({
+            declaresLaunchedBy: true,
+            coordinatorKind: "thread",
+            listFailure,
+            ...(listFailure === "timeout" ? { onListStalled: listStalled } : {}),
+          }),
+        );
+        if (listFailure === "timeout") {
+          yield* Effect.promise(() => stalled);
+          yield* TestClock.adjust(SshRemoteDispatch.LAUNCH_LINEAGE_PROBE_TIMEOUT);
+        }
+        const { launches, memorySessions } = yield* Fiber.join(fiber);
+        expect(launches).toHaveLength(1);
+        expect(launches[0]).not.toHaveProperty("memoryGrantCeiling");
+        expect(memorySessions).toEqual([[]]);
+      }),
+  );
+
+  it.effect.each([
+    ["none, memory false → true with admission", "none", false, true, true, true],
+    ["none, memory false → true without admission", "none", false, true, false, false],
+    ["read, admission lost", "read", true, true, false, false],
+  ] as const)(
+    "launchedBy retry fresh admission: %s",
+    ([, ceiling, initialMemory, memory, admission, allowed]) =>
+      Effect.gen(function* () {
+        let lists = 0;
+        let attempts = 0;
+        const result = yield* launchAgainst({
+          declaresLaunchedBy: true,
+          memoryCeilings: [ceiling],
+          advertisesMemory: initialMemory,
+          declaresMemoryCeiling: true,
+          declaresReport: true,
+          declaresStandingInstructions: true,
+          refuseLaunchedBy: true,
+          afterLaunchedByRefusal: { advertisesMemory: memory, declaresMemoryCeiling: admission },
+          onList: () => {
+            lists += 1;
+          },
+          onMemoryLaunch: () => {
+            attempts += 1;
+          },
+        }).pipe(Effect.result);
+        expect(lists).toBe(2);
+        expect(attempts).toBe(allowed ? 2 : 1);
+        expect(result._tag).toBe(allowed ? "Success" : "Failure");
+        if (result._tag === "Failure") {
+          expect(result.failure).toMatchObject({
+            reason: "remote_refused",
+            remoteCode: SshRemoteDispatch.MEMORY_CEILING_UNSUPPORTED,
+          });
+        } else {
+          expect(result.success.memorySessions).toEqual([[]]);
+          expect(new Set(result.success.presentedTokens).size).toBe(1);
+          expect(result.success.launches[0]).toHaveProperty("launchedBy");
+          expect(result.success.launches[0]).not.toHaveProperty("memoryGrantCeiling");
+          expect(result.success.launches[1]).not.toHaveProperty("launchedBy");
+          expect(result.success.launches[1]?.memoryGrantCeiling).toBe("none");
+        }
+      }),
+  );
+
+  it.effect.each(["failed", "timeout", "malformed", "malformed-entry"] as const)(
+    "launchedBy retry catalog %s gates explicit ceilings and preserves omission",
+    (listFailure) =>
+      Effect.gen(function* () {
+        for (const ceiling of ["none", "read", undefined] as const) {
+          let lists = 0;
+          let attempts = 0;
+          let listStalled!: () => void;
+          const stalled = new Promise<void>((resolve) => {
+            listStalled = resolve;
+          });
+          const fiber = yield* Effect.forkChild(
+            launchAgainst({
+              declaresLaunchedBy: true,
+              ...(ceiling === undefined ? {} : { memoryCeilings: [ceiling] }),
+              advertisesMemory: ceiling !== undefined,
+              declaresMemoryCeiling: true,
+              declaresReport: true,
+              declaresStandingInstructions: true,
+              refuseLaunchedBy: true,
+              afterLaunchedByRefusal: {
+                advertisesMemory: true,
+                declaresMemoryCeiling: true,
+                listFailure,
+              },
+              onList: () => {
+                lists += 1;
+              },
+              onMemoryLaunch: () => {
+                attempts += 1;
+              },
+              ...(listFailure === "timeout" ? { onListStalled: listStalled } : {}),
+            }).pipe(Effect.result),
+          );
+          if (listFailure === "timeout") {
+            yield* Effect.promise(() => stalled);
+            yield* TestClock.adjust(SshRemoteDispatch.LAUNCH_LINEAGE_PROBE_TIMEOUT);
+          }
+          const result = yield* Fiber.join(fiber);
+          expect(lists).toBe(2);
+          expect(attempts).toBe(ceiling === undefined ? 2 : 1);
+          expect(result._tag).toBe(ceiling === undefined ? "Success" : "Failure");
+          if (result._tag === "Failure") {
+            expect(result.failure).toMatchObject({
+              reason: "remote_refused",
+              remoteCode: SshRemoteDispatch.MEMORY_CEILING_UNSUPPORTED,
+            });
+          } else {
+            expect(result.success.memorySessions).toEqual([[]]);
+            expect(new Set(result.success.presentedTokens).size).toBe(1);
+            expect(result.success.launches[1]).not.toHaveProperty("launchedBy");
+            for (const launch of result.success.launches)
+              expect(launch).not.toHaveProperty("memoryGrantCeiling");
+          }
+        }
+      }),
+  );
+
+  it.effect("optional cache uses caller mode when requested mode differs", () =>
+    Effect.gen(function* () {
+      let lists = 0;
+      const { launches, memorySessions, presentedTokens } = yield* launchAgainst({
+        declaresLaunchedBy: true,
+        callerRuntimeMode: "full-access",
+        standingInstructions: false,
+        declaresReport: true,
+        declaresStandingInstructions: true,
+        declaresNotifyOnCompletion: true,
+        upgradeBetweenLaunches: true,
+        advertisesMemory: false,
+        declaresMemoryCeiling: false,
+        afterFirstLaunch: {
+          advertisesMemory: false,
+          declaresMemoryCeiling: false,
+          listFailure: "failed",
+        },
+        onList: () => {
+          lists += 1;
+        },
+      });
+      expect(lists).toBe(2);
+      expect(launches).toHaveLength(2);
+      expect(memorySessions).toEqual([[]]);
+      expect(new Set(presentedTokens).size).toBe(1);
+      for (const launch of launches) {
+        expect(launch.runtimeMode).toBe("approval-required");
+        expect(launch.launchedBy).toMatchObject(launcher);
+        expect(launch.notifyOnCompletion).toBe(false);
+        expect(launch.standingInstructions).toBe(false);
+        expect(launch).not.toHaveProperty("memoryGrantCeiling");
+      }
+    }),
+  );
+
+  it.effect("asks a remote that can be told not to watch the launch it is forwarded", () =>
+    Effect.gen(function* () {
+      // An outside client's launch carries no launcher, so only this keeps the
+      // remote from watching it as its own outside launch.
+      for (const [remote, optOut] of [
+        [{ declaresLaunchedBy: true, declaresNotifyOnCompletion: true, outside: true }, false],
+        [{ declaresLaunchedBy: true, declaresNotifyOnCompletion: true }, false],
+        [{ declaresLaunchedBy: true, outside: true }, undefined],
+      ] as const) {
+        const { launches } = yield* launchAgainst(remote);
+        expect(launches).toHaveLength(1);
+        expect(launches[0]?.notifyOnCompletion).toBe(optOut);
+      }
+    }),
+  );
 
   it.effect("forwards the launcher to a remote whose goat_thread_launch declares it", () =>
     Effect.gen(function* () {
@@ -1506,6 +2629,7 @@ it.effect.each(["matching", "missing", "wrong"] as const)(
         });
       });
       const manager = SshTunnel.SshEnvironmentManager.of({
+        status: () => Effect.die("Unexpected runtime status"),
         ensureEnvironment: () =>
           Effect.succeed({
             target,
@@ -1513,6 +2637,11 @@ it.effect.each(["matching", "missing", "wrong"] as const)(
             wsBaseUrl: "ws://projects/fixture.invalid/",
             pairingToken: null,
           }),
+        readyEnvironment: () => Effect.die("Unexpected ready environment"),
+        beginSetupOperation: () => Effect.die("Unexpected setup operation"),
+        publishSetupOutcome: () => Effect.succeed(true),
+        publishProviderDiagnosis: () => Effect.die("Unexpected provider publication"),
+        forgetEnvironment: () => Effect.die("Unexpected forget"),
         disconnectEnvironment: () => Effect.void,
         revalidateTunnels: () => Effect.void,
         issueMcpClientSession: () =>
@@ -1906,6 +3035,7 @@ describe("SshRemoteDispatch SSH attachments", () => {
         const host = "build-box";
         const target = { alias: host, hostname: host, username: null, port: null };
         const manager = SshTunnel.SshEnvironmentManager.of({
+          status: () => Effect.die("Unexpected runtime status"),
           ensureEnvironment: () =>
             Effect.sync(() => {
               record.bootstrap += 1;
@@ -1916,6 +3046,11 @@ describe("SshRemoteDispatch SSH attachments", () => {
                 pairingToken: null,
               };
             }),
+          readyEnvironment: () => Effect.die("Unexpected ready environment"),
+          beginSetupOperation: () => Effect.die("Unexpected setup operation"),
+          publishSetupOutcome: () => Effect.succeed(true),
+          publishProviderDiagnosis: () => Effect.die("Unexpected provider publication"),
+          forgetEnvironment: () => Effect.die("Unexpected forget"),
           disconnectEnvironment: () => Effect.die("Unexpected disconnect"),
           revalidateTunnels: () => Effect.void,
           issueMcpClientSession: () =>
@@ -2701,13 +3836,20 @@ describe("SSH launcher transport", () => {
         throw new Error(`Unexpected method ${request.method}`);
       });
       const manager = SshTunnel.SshEnvironmentManager.of({
+        status: () => Effect.die("Unexpected runtime status"),
         ensureEnvironment: () =>
           Effect.succeed({
             target,
             httpBaseUrl: "http://box:3773/",
             wsBaseUrl: "ws://box:3773/",
             pairingToken: null,
+            remoteServerVersion: "0.0.1-older",
           }),
+        readyEnvironment: () => Effect.die("Unexpected ready environment"),
+        beginSetupOperation: () => Effect.die("Unexpected setup operation"),
+        publishSetupOutcome: () => Effect.succeed(true),
+        publishProviderDiagnosis: () => Effect.die("Unexpected provider publication"),
+        forgetEnvironment: () => Effect.die("Unexpected forget"),
         disconnectEnvironment: () => Effect.die("Unexpected disconnect"),
         revalidateTunnels: () => Effect.void,
         issueMcpClientSession: () =>
@@ -2783,7 +3925,73 @@ describe("SSH launcher transport", () => {
             'scope:"launched" cannot find its questions',
           );
       }
+      if (result._tag === "Success")
+        expect(result.success.notes).toContain(
+          `GOAT on box runs 0.0.1-older; this machine runs ${packageJson.version}. Both speak the same protocols, but a tool or launch option added in the newer build can be missing on the older one.`,
+        );
       expect(creates).toBe(scenario.success || scenario.name === "ambiguous" ? 1 : 0);
     }),
   );
 });
+
+it.effect("ready-only host tools never bootstrap or issue a session on a stopped runtime", () =>
+  Effect.gen(function* () {
+    const host = "ready-only";
+    const target = { alias: host, hostname: host, username: null, port: null };
+    let ensures = 0;
+    let sessions = 0;
+    const discover = vi
+      .spyOn(SshConfig, "discoverSshHosts")
+      .mockReturnValue(Effect.succeed([{ ...target, source: "ssh-config" }]));
+    const manager = vi.spyOn(SshTunnel.SshEnvironmentManager, "layer").mockReturnValue(
+      Layer.mock(SshTunnel.SshEnvironmentManager)({
+        readyEnvironment: () =>
+          Effect.fail(new SshLaunchError({ message: "Runtime is stopped", stdout: "" })),
+        ensureEnvironment: () => {
+          ensures++;
+          return Effect.die("must not bootstrap");
+        },
+        issueMcpClientSession: () => {
+          sessions++;
+          return Effect.die("must not issue");
+        },
+      }),
+    );
+    yield* Effect.gen(function* () {
+      const dispatch = yield* SshRemoteDispatch.SshRemoteDispatch;
+      const failure = yield* dispatch
+        .callHostTool(
+          {
+            host,
+            tool: "goat_provider_diagnose",
+            arguments: {},
+            timeoutMs: 1000,
+            writes: false,
+            requireReady: true,
+          },
+          Effect.succeed("approval-required"),
+        )
+        .pipe(Effect.result);
+      expect(failure._tag).toBe("Failure");
+      if (failure._tag === "Failure") {
+        expect(failure.failure.reason).toBe("host_unavailable");
+        expect(failure.failure.message).toContain("goat_ssh_host_prepare");
+      }
+      expect([ensures, sessions]).toEqual([0, 0]);
+    }).pipe(
+      Effect.provide(
+        SshRemoteDispatch.layer.pipe(
+          Layer.provide(ServerConfig.layerTest("/fixture", { prefix: "ready-only-" })),
+          Layer.provide(FetchHttpClient.layer),
+          Layer.provide(NodeServices.layer),
+        ),
+      ),
+      Effect.ensuring(
+        Effect.sync(() => {
+          manager.mockRestore();
+          discover.mockRestore();
+        }),
+      ),
+    );
+  }),
+);

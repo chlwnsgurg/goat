@@ -1,19 +1,11 @@
 #!/usr/bin/env node
 /**
- * Packages the server single-executable into a self-contained per-platform
- * archive: the `goat` binary, the web client, the resource monitor, and a
- * production install of the native packages the bundle keeps external. The
- * archive is the unit every runtime installer downloads, so nothing in it may
- * require Node, npm, or a compiler on the machine that unpacks it.
- *
- * Layout inside the archive (a single top-level directory named after the
- * archive stem):
- *
- *   goat | goat.exe          the single-executable
- *   client/              web app served by the server
- *   resource-monitor/    per-platform Rust helper, same paths as the npm package
- *   node_modules/        runtime externals (node-pty, msgpackr-extract, fff)
+ * The archive is the unit every runtime installer downloads, so nothing in it
+ * may require Node, npm, or a compiler on the machine that unpacks it.
  */
+// Adopts legacy T3 env names before anything reads the environment.
+import "@goat/contracts/adoptLegacyEnv";
+import { LEGACY_RESOURCE_MONITOR_BINARY_NAME } from "@goat/contracts/legacyT3Names";
 import * as NodeRuntime from "@effect/platform-node/NodeRuntime";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Config from "effect/Config";
@@ -28,9 +20,11 @@ import * as Schema from "effect/Schema";
 import { Command, Flag } from "effect/cli";
 import { ChildProcess, ChildProcessSpawner } from "effect/process";
 
-import * as HostProcess from "@t3tools/shared/HostProcess";
-import { fromYaml } from "@t3tools/shared/schemaYaml";
-import { resolveSpawnCommand } from "@t3tools/shared/shell";
+import * as HostProcess from "@goat/shared/HostProcess";
+import { ownRuntimeManifest, RUNTIME_MANIFEST_ARCHIVE_ENTRY } from "@goat/shared/runtimeManifest";
+import { resolveBuildCommit, resolveBuildCommitTime } from "./lib/build-commit-time.ts";
+import { fromYaml } from "@goat/shared/schemaYaml";
+import { resolveSpawnCommand } from "@goat/shared/shell";
 import rootPackageJson from "../package.json" with { type: "json" };
 import serverPackageJson from "../apps/server/package.json" with { type: "json" };
 
@@ -42,7 +36,48 @@ import {
 } from "./build-desktop-artifact.ts";
 import { selectCliRuntimeExternalDependencies } from "./lib/cli-external-packages.ts";
 import { resolveCatalogDependencies } from "./lib/resolve-catalog.ts";
+import { isMachO } from "./lib/release-verify.ts";
 import { neutralizeBuildRoot } from "./lib/sea-build-path.ts";
+
+/** Copies cached helper outputs while emitting only the current binary name. */
+export const stageCliResourceMonitor = Effect.fn("stageCliResourceMonitor")(function* (
+  sourceDir: string,
+  destinationDir: string,
+) {
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  yield* fs.copy(sourceDir, destinationDir);
+  for (const entry of yield* fs.readDirectory(destinationDir, { recursive: true })) {
+    const name = path.basename(entry);
+    if (
+      name !== LEGACY_RESOURCE_MONITOR_BINARY_NAME &&
+      name !== `${LEGACY_RESOURCE_MONITOR_BINARY_NAME}.exe`
+    )
+      continue;
+    const legacyPath = path.join(destinationDir, entry);
+    const currentPath = path.join(
+      path.dirname(legacyPath),
+      `goat-resource-monitor${name.endsWith(".exe") ? ".exe" : ""}`,
+    );
+    if (yield* fs.exists(currentPath)) {
+      yield* fs.remove(legacyPath);
+    } else {
+      yield* fs.rename(legacyPath, currentPath);
+    }
+  }
+});
+
+export const stageCliRuntimeManifest = Effect.fn("stageCliRuntimeManifest")(function* (
+  contentDir: string,
+  input: Parameters<typeof ownRuntimeManifest>[0],
+) {
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  yield* fs.writeFileString(
+    path.join(contentDir, RUNTIME_MANIFEST_ARCHIVE_ENTRY),
+    `${yield* encodeJsonString(ownRuntimeManifest(input))}\n`,
+  );
+});
 
 const BuildPlatform = Schema.Literals(["mac", "linux", "win"]);
 const BuildArch = Schema.Literals(["arm64", "x64"]);
@@ -92,7 +127,6 @@ export class CliArchiveInputMissingError extends Schema.TaggedError<CliArchiveIn
   }
 }
 
-/** Platform/arch pair as it appears in archive names and `process.platform`/`process.arch`. */
 export function cliArchivePlatformKey(platform: BuildPlatform, arch: BuildArch): string {
   const nodePlatform = platform === "mac" ? "darwin" : platform === "win" ? "win32" : "linux";
   return `${nodePlatform}-${arch}`;
@@ -108,7 +142,6 @@ export function cliArchiveFileName(version: string, platform: BuildPlatform, arc
   return `${cliArchiveStem(version, platform, arch)}.${platform === "win" ? "zip" : "tar.gz"}`;
 }
 
-/** The bsdtar Windows ships in System32; resolves regardless of which tar is first on PATH. */
 export function windowsSystemTar(): string {
   const systemRoot = process.env.SystemRoot ?? process.env.windir ?? "C:\\Windows";
   return `${systemRoot}\\System32\\tar.exe`;
@@ -119,8 +152,6 @@ const runCommand = Effect.fn("runCommand")(function* (
   label: string,
 ) {
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
-  // Output is inherited so the build log shows what each tool did; a failing
-  // signing or packaging step is otherwise a bare exit code.
   const child = yield* spawner.spawn(
     ChildProcess.isStandardCommand(command)
       ? ChildProcess.make(command.command, command.args, {
@@ -144,9 +175,8 @@ const requireInput = Effect.fn("requireInput")(function* (inputPath: string, hin
 });
 
 /**
- * Installs the runtime-external packages into `stageDir/node_modules` with a
- * hoisted, symlink-free layout. The tree is archived and unpacked on machines
- * without pnpm, so the store layout cannot be relied on to survive the trip.
+ * The tree is archived and unpacked on machines without pnpm, so the store
+ * layout cannot be relied on to survive the trip.
  */
 const stageRuntimeExternals = Effect.fn("stageRuntimeExternals")(function* (input: {
   readonly repoRoot: string;
@@ -220,9 +250,6 @@ const stageRuntimeExternals = Effect.fn("stageRuntimeExternals")(function* (inpu
     "vp install --prod (cli archive runtime externals)",
   );
 
-  // pnpm's bookkeeping and the manifest only matter to pnpm; the runtime
-  // resolves packages by directory. node-pty ships every platform's prebuilds
-  // in one package (58 MB); only the archive's own platform loads.
   const platformKey = cliArchivePlatformKey(input.platform, input.arch);
   const prebuildsDir = path.join(input.stageDir, "node_modules/node-pty/prebuilds");
   const foreignPrebuilds = (yield* fs
@@ -270,7 +297,6 @@ const removeNestedBinDirectories = (
     }
   });
 
-/** Copies the web client without its sourcemaps, which nothing serves. */
 const stageWebClient = Effect.fn("stageWebClient")(function* (source: string, target: string) {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
@@ -284,13 +310,13 @@ const stageWebClient = Effect.fn("stageWebClient")(function* (source: string, ta
 });
 
 const MacSigningConfig = Config.all({
-  identity: Config.String("T3CODE_CLI_MAC_SIGN_IDENTITY").pipe(Config.option),
+  identity: Config.String("GOAT_CLI_MAC_SIGN_IDENTITY").pipe(Config.option),
   appleKeychainProfile: Config.String("APPLE_KEYCHAIN_PROFILE").pipe(Config.option),
   appleKeychain: Config.String("APPLE_KEYCHAIN").pipe(Config.option),
   appleApiKey: Config.String("APPLE_API_KEY").pipe(Config.option),
   appleApiKeyId: Config.String("APPLE_API_KEY_ID").pipe(Config.option),
   appleApiIssuer: Config.String("APPLE_API_ISSUER").pipe(Config.option),
-  requireNotarization: Config.String("T3CODE_REQUIRE_NOTARIZATION").pipe(Config.withDefault("0")),
+  requireNotarization: Config.String("GOAT_REQUIRE_NOTARIZATION").pipe(Config.withDefault("0")),
 });
 
 /**
@@ -328,7 +354,7 @@ export const signMacArchiveContents = Effect.fn("signMacArchiveContents")(functi
     if (identity === "-") {
       return yield* new CliNotarizationCredentialsMissingError({
         detail:
-          "Required notarization needs a Developer ID in T3CODE_CLI_MAC_SIGN_IDENTITY; ad hoc signing is not allowed.",
+          "Required notarization needs a Developer ID in GOAT_CLI_MAC_SIGN_IDENTITY; ad hoc signing is not allowed.",
       });
     }
     if (!authArgs) {
@@ -340,15 +366,29 @@ export const signMacArchiveContents = Effect.fn("signMacArchiveContents")(functi
   }
 
   const entitlements = path.join(input.repoRoot, "apps/server/resources/cli-entitlements.plist");
-  const libraries = (yield* fs.readDirectory(input.contentDir, { recursive: true }))
+  const entries = yield* fs.readDirectory(input.contentDir, { recursive: true });
+  const libraries = entries
     .filter(
       (entry) =>
         entry.endsWith(".node") ||
         entry.endsWith(".dylib") ||
         entry.endsWith("spawn-helper") ||
-        entry.endsWith("t3-resource-monitor"),
+        entry.endsWith("goat-resource-monitor"),
     )
     .map((entry) => path.join(input.contentDir, entry));
+  // Vendor executables such as the Cursor SDK's cursorsandbox and rg carry their
+  // vendor's Developer ID. Every Mach-O in a GOAT archive carries GOAT's, which the
+  // desktop app's signature verification requires, so they are re-signed too.
+  for (const entry of entries) {
+    const target = path.join(input.contentDir, entry);
+    if (path.basename(entry).includes(".") || libraries.includes(target)) continue;
+    if (target === input.executablePath) continue;
+    const binary = yield* fs.readFile(target).pipe(
+      Effect.map(isMachO),
+      Effect.orElseSucceed(() => false),
+    );
+    if (binary) libraries.push(target);
+  }
 
   for (const target of [...libraries, input.executablePath]) {
     yield* runCommand(
@@ -364,7 +404,7 @@ export const signMacArchiveContents = Effect.fn("signMacArchiveContents")(functi
     );
   }
   if (identity === "-") {
-    yield* Effect.log("[cli-archive] Signed ad hoc (no T3CODE_CLI_MAC_SIGN_IDENTITY).");
+    yield* Effect.log("[cli-archive] Signed ad hoc (no GOAT_CLI_MAC_SIGN_IDENTITY).");
     return;
   }
 
@@ -467,14 +507,11 @@ const WindowsSigningConfig = Config.all({
 });
 
 /**
- * Node's --build-sea injects the blob into a copy of node.exe by rebuilding
- * its resource section but, unlike its Mach-O path, leaves node's original
+ * Node's --build-sea injects the blob into a copy of node.exe by rebuilding its
+ * resource section but, unlike its Mach-O path, leaves node's original
  * Authenticode data-directory entry in the PE header. The file grows, so the
  * entry now points into the middle of the new section at bytes that are not a
- * certificate table. signtool refuses to sign such an image (0x800700C1, "not
- * a valid Win32 application") and cannot `remove /s` it either, since the SIP
- * fails to parse the garbage. Clearing the entry is exactly what a signature
- * strip does, without needing a parser that trusts the broken table.
+ * certificate table.
  */
 const stripStaleAuthenticodeEntry = Effect.fn("stripStaleAuthenticodeEntry")(function* (
   executablePath: string,
@@ -510,7 +547,6 @@ const stripStaleAuthenticodeEntry = Effect.fn("stripStaleAuthenticodeEntry")(fun
   );
 });
 
-/** Signs goat.exe through the same Azure Trusted Signing setup the installer uses. */
 const signWindowsExecutable = Effect.fn("signWindowsExecutable")(function* (
   executablePath: string,
 ) {
@@ -523,9 +559,6 @@ const signWindowsExecutable = Effect.fn("signWindowsExecutable")(function* (
     return;
   }
   yield* stripStaleAuthenticodeEntry(executablePath);
-  // Mirrors electron-builder's invocation for the installer: every value
-  // single-quoted, the file path in Windows form. `$ErrorActionPreference`
-  // makes a signing failure inside the cmdlet surface as a non-zero exit.
   const quote = (value: string) => `'${value.replaceAll("'", "''")}'`;
   const script = [
     "$ErrorActionPreference = 'Stop';",
@@ -584,14 +617,17 @@ const buildCliArchive = Effect.fn("buildCliArchive")(function* (input: {
     builtExecutable,
     `Run \`node apps/server/scripts/cli.ts build-exe --target ${targetKey}\` first.`,
   );
-  yield* requireInput(path.join(webClient, "index.html"), "Run `vp run --filter t3 build` first.");
+  yield* requireInput(
+    path.join(webClient, "index.html"),
+    "Run `vp run --filter goat build` first.",
+  );
   yield* requireInput(
     resourceMonitorDir,
     "Build the resource monitor or pass --resource-monitor-dir.",
   );
 
   const stem = cliArchiveStem(input.version, input.platform, input.arch);
-  const stageRoot = yield* fs.makeTempDirectoryScoped({ prefix: "t3-cli-archive-" });
+  const stageRoot = yield* fs.makeTempDirectoryScoped({ prefix: "goat-cli-archive-" });
   const contentDir = path.join(stageRoot, stem);
   yield* fs.makeDirectory(contentDir, { recursive: true });
 
@@ -602,10 +638,16 @@ const buildCliArchive = Effect.fn("buildCliArchive")(function* (input: {
     neutralizeBuildRoot(yield* fs.readFile(builtExecutable), repoRoot),
   );
   yield* fs.chmod(path.join(contentDir, executableName), 0o755);
+  const rawCommitTime = resolveBuildCommitTime(repoRoot);
+  yield* stageCliRuntimeManifest(contentDir, {
+    version: input.version,
+    commit: resolveBuildCommit(repoRoot),
+    commitTime: /^[1-9][0-9]{0,15}$/.test(rawCommitTime) ? Number(rawCommitTime) : undefined,
+  });
   // Upstream T3 Code's MIT notice travels with every GOAT archive.
   yield* fs.copyFile(path.join(repoRoot, "LICENSE"), path.join(contentDir, "LICENSE-T3CODE.txt"));
   yield* stageWebClient(webClient, path.join(contentDir, "client"));
-  yield* fs.copy(resourceMonitorDir, path.join(contentDir, "resource-monitor"));
+  yield* stageCliResourceMonitor(resourceMonitorDir, path.join(contentDir, "resource-monitor"));
   yield* stageRuntimeExternals({
     repoRoot,
     stageDir: contentDir,
@@ -649,9 +691,10 @@ const buildCliArchive = Effect.fn("buildCliArchive")(function* (input: {
     // The npm registry rejects a tarball containing any, and the npm platform
     // packages are re-packed from this archive's contents, so store every
     // file as a file. macOS's bsdtar has no such flag; pnpm clones there.
+    // Key on the host's tar, since a Mac can cross-build a Linux archive.
     yield* runCommand(
       ChildProcess.make("tar", [
-        ...(input.platform === "linux" ? ["--hard-dereference"] : []),
+        ...(hostPlatform === "linux" ? ["--hard-dereference"] : []),
         "-czf",
         archivePath,
         "-C",

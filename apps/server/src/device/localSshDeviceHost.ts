@@ -1,9 +1,9 @@
 import * as NodeDnsPromises from "node:dns/promises";
 import * as NodeNet from "node:net";
-import type { SshDeviceHostConfig } from "@t3tools/contracts";
+import type { SshDeviceHostConfig } from "@goat/contracts";
 import * as NodeOS from "node:os";
 import * as Context from "effect/Context";
-import { runSshCommand } from "@t3tools/ssh/command";
+import { runSshCommand } from "@goat/ssh/command";
 import * as Effect from "effect/Effect";
 
 export const LocalDeviceHostAddresses = Context.Reference<ReadonlySet<string>>(
@@ -18,7 +18,6 @@ export const LocalDeviceHostAddresses = Context.Reference<ReadonlySet<string>>(
   },
 );
 
-/** Resolve aliases on the owning environment without opening an SSH connection. */
 export const isLocalSshDeviceHost = Effect.fn("isLocalSshDeviceHost")(function* (
   host: SshDeviceHostConfig,
 ) {

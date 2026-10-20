@@ -6,8 +6,8 @@ import {
   type ProviderInstanceId,
   ProviderSetupError,
   type ProviderSetupInput,
-} from "@t3tools/contracts";
-import { resolveCommandPath } from "@t3tools/shared/shell";
+} from "@goat/contracts";
+import { resolveCommandPath } from "@goat/shared/shell";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
@@ -18,14 +18,13 @@ import * as AntigravityInstallation from "./AntigravityInstallation.ts";
 import { deriveProviderInstanceConfigMap } from "./ProviderInstanceRegistryHydration.ts";
 import * as ProviderInstanceRegistry from "./ProviderInstanceRegistry.ts";
 import * as ProviderRegistry from "./ProviderRegistry.ts";
-import { mergeProviderInstanceEnvironment } from "@t3tools/provider-core/server/instanceEnvironment";
+import { mergeProviderInstanceEnvironment } from "@goat/provider-core/server/instanceEnvironment";
 
 const ANTIGRAVITY = ProviderDriverKind.make("antigravity");
 const hasBinaryPath = Schema.is(Schema.Struct({ binaryPath: Schema.String }));
 const decodeCodexSettings = Schema.decodeUnknownEffect(CodexSettings);
 const decodeAntigravitySettings = Schema.decodeUnknownEffect(AntigravitySettings);
 
-/** Route instance setup to the environment-owned installer without owning the download. */
 export const makeProviderInstallation = Effect.fn("makeProviderInstallation")(function* () {
   const antigravityInstallation = yield* AntigravityInstallation.AntigravityInstallation;
   const codexInstallation = yield* CodexInstallation.CodexInstallation;
@@ -141,12 +140,10 @@ export const makeProviderInstallation = Effect.fn("makeProviderInstallation")(fu
           return [];
         }
         const binaryPath = entry.config.binaryPath.trim();
-        return yield* resolveCommandPath(binaryPath, {
+        const resolved = yield* resolveCommandPath(binaryPath, {
           env: yield* mergeProviderInstanceEnvironment(entry.environment),
-        }).pipe(
-          Effect.map((resolved) => [binaryPath, resolved]),
-          Effect.orElseSucceed(() => [binaryPath]),
-        );
+        });
+        return resolved === null ? [binaryPath] : [binaryPath, resolved];
       }),
     );
     yield* installation

@@ -4,22 +4,29 @@ import {
   EnvironmentId,
   ProjectId,
   ProviderInstanceId,
+  ProviderDriverKind,
   ThreadId,
   type OrchestrationV2ThreadShell,
   type Project as ProjectRecord,
-} from "@t3tools/contracts";
+} from "@goat/contracts";
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Stream from "effect/Stream";
+import {
+  splitStandingInstructions,
+  standingInstructionsVersion,
+} from "@goat/shared/standingInstructions";
 
 import * as ThreadLaunch from "../../../orchestration-v2/ThreadLaunchService.ts";
 import * as ThreadManagement from "../../../orchestration-v2/ThreadManagementService.ts";
 import * as ServerConfig from "../../../config.ts";
+import * as ServerSettings from "../../../serverSettings.ts";
 import * as Project from "../../../project/ProjectService.ts";
 import * as ManagedProjectFolders from "../../../project/ManagedProjectFolders.ts";
 import * as GitVcsDriver from "../../../vcs/GitVcsDriver.ts";
@@ -27,23 +34,80 @@ import * as VcsProcess from "../../../vcs/VcsProcess.ts";
 import * as SshRemoteDispatch from "../../../sshRemote/SshRemoteDispatch.ts";
 import * as HostThreadsMcpService from "../../HostThreadsMcpService.ts";
 import * as LaunchWatchService from "../../LaunchWatchService.ts";
+import * as CompletionWebhook from "../../completionWebhook.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
 import * as McpToolAccess from "../../McpToolAccess.ts";
 import * as OrchestratorMcpService from "../../OrchestratorMcpService.ts";
 import * as RemoteReportService from "../../../remoteReports/RemoteReportService.ts";
+import type * as ProviderAdapter from "@goat/provider-core/server/ProviderAdapter";
+import * as ThreadResults from "../../../threadResults/ThreadResultService.ts";
 import * as ProjectHandlers from "./handlers.ts";
+import * as ThreadLaunchMcpService from "../../ThreadLaunchMcpService.ts";
+import * as ProviderAdapters from "../../../orchestration-v2/ProviderAdapterRegistry.ts";
+import * as CloudSource from "../../../orchestration-v2/CloudTaskSourceService.ts";
+import { CodexProviderCapabilitiesV2 } from "../../../orchestration-v2/Adapters/CodexAdapterV2.ts";
 import { ProjectToolkit } from "./tools.ts";
 
-type Registration = Parameters<LaunchWatchService.LaunchWatchServiceShape["register"]>[0];
+const localAdapter: ProviderAdapter.ProviderAdapterV2["Service"] = {
+  instanceId: ProviderInstanceId.make("codex"),
+  driver: ProviderDriverKind.make("codex"),
+  getCapabilities: () => Effect.succeed(CodexProviderCapabilitiesV2),
+  planSelectionTransition: () => Effect.succeed({ type: "apply_on_next_turn" }),
+  openSession: () => Effect.die("Launch admission does not open a provider session."),
+};
 
-/** Records the launch watches a handler asks for. */
-const launchWatches = (registrations: Array<Registration> = []) =>
+/** Launch handlers resolve their service from the tool invocation context. */
+const withLaunchService = <A, E, R>(dependencies: Layer.Layer<A, E, R>) =>
+  ThreadLaunchMcpService.layer.pipe(
+    Layer.provide(
+      Layer.mock(ProviderAdapters.ProviderAdapterRegistryV2)({
+        get: () => Effect.succeed(localAdapter),
+      }),
+    ),
+    Layer.provide(Layer.mock(CloudSource.CloudTaskSourceService)({})),
+    Layer.provideMerge(dependencies),
+  );
+
+type Registration = Parameters<LaunchWatchService.LaunchWatchServiceShape["register"]>[0];
+type ExternalWatch = Parameters<LaunchWatchService.LaunchWatchServiceShape["watchExternal"]>[0];
+type Route = Parameters<LaunchWatchService.LaunchWatchServiceShape["releaseRoute"]>[0];
+
+/**
+ * Records the launch watches a handler asks for. A notifyTarget named "unknown" is refused like
+ * an unconfigured one; any other name resolves to that named target.
+ */
+const launchWatches = (
+  registrations: Array<Registration> = [],
+  externalWatches: Array<ExternalWatch> = [],
+  webhookWatchesExternal = false,
+  released: Array<Route> = [],
+  registerInterrupted = false,
+) =>
   Layer.mock(LaunchWatchService.LaunchWatchService)({
     register: (input) =>
+      registerInterrupted
+        ? Effect.interrupt
+        : Effect.sync(() => {
+            registrations.push(input);
+            return {} as never;
+          }),
+    watchExternal: (input) =>
       Effect.sync(() => {
-        registrations.push(input);
-        return {} as never;
+        externalWatches.push(input);
+        return webhookWatchesExternal ? ({} as never) : null;
       }),
+    resolveRoute: (input) =>
+      input.notifyTarget?.name === "unknown"
+        ? Effect.fail(
+            new CompletionWebhook.CompletionWebhookTargetError({
+              message: 'Unknown notify target "unknown".',
+            }),
+          )
+        : Effect.succeed({
+            notifyWebhook: false,
+            webhookTarget: { type: "named" as const, name: input.notifyTarget?.name ?? "" },
+          }),
+    releaseRoute: (route) => Effect.sync(() => void released.push(route)),
   });
 
 /** Launches from a T3 thread caller over mocks; returns what the handler did. */
@@ -51,13 +115,37 @@ const launchFromThread = (params: {
   readonly title: string;
   readonly message?: string;
   readonly notifyOnCompletion?: boolean;
+  readonly notifyWebhook?: boolean;
+  readonly notifyTarget?: { readonly name: string };
   readonly launchedBy?: ThreadLaunch.ThreadLaunchInput["launchedBy"];
+  readonly standingInstructions?: boolean;
+  readonly settings?: Parameters<typeof ServerSettings.layerTest>[0];
+  /** An outside MCP client launches instead of a GOAT thread. */
+  readonly outsideClient?: boolean;
+  readonly clientAccess?: "full-access" | "read-only";
+  /** Whether the completion webhook takes an outside client's launch. */
+  readonly webhookWatchesExternal?: boolean;
+  /** The launch service refuses instead of launching. */
+  readonly launchFails?: ThreadLaunch.ThreadLaunchWorkspaceMissingError;
+  /** The launch is interrupted while its watch is being saved, after the thread exists. */
+  readonly registerInterrupted?: boolean;
 }) =>
   Effect.gen(function* () {
+    const {
+      settings,
+      outsideClient,
+      clientAccess,
+      webhookWatchesExternal,
+      launchFails,
+      registerInterrupted,
+      ...rest
+    } = params;
     const sourceThreadId = ThreadId.make("source-thread");
     const projectId = ProjectId.make("project");
     const providerInstanceId = ProviderInstanceId.make("codex");
     const modelSelection = { instanceId: providerInstanceId, model: "gpt-5" };
+    // An outside client has no thread to inherit a project or model from.
+    const input = outsideClient === true ? { ...rest, projectId, modelSelection } : rest;
     const caller = {
       id: sourceThreadId,
       title: "Orchestrator",
@@ -73,19 +161,30 @@ const launchFromThread = (params: {
     let launchedSender: ThreadId | undefined;
     let launchedBy: ThreadLaunch.ThreadLaunchInput["launchedBy"];
     const registrations: Array<Registration> = [];
+    const externalWatches: Array<ExternalWatch> = [];
+    const released: Array<Route> = [];
     let launchedInput: ThreadLaunch.ThreadLaunchInput | undefined;
     const layerDependencies = Layer.mergeAll(
+      ServerSettings.layerTest(settings),
       NodeCrypto.layer,
-      launchWatches(registrations),
+      launchWatches(
+        registrations,
+        externalWatches,
+        webhookWatchesExternal === true,
+        released,
+        registerInterrupted === true,
+      ),
       Layer.succeed(McpInvocationContext.McpInvocationContext, {
         environmentId: EnvironmentId.make("environment"),
         requestNamespace: "session",
-        thread: {
-          threadId: sourceThreadId,
-          providerSessionId: "session",
-          providerInstanceId,
-        },
-        client: undefined,
+        thread:
+          outsideClient === true
+            ? undefined
+            : { threadId: sourceThreadId, providerSessionId: "session", providerInstanceId },
+        client:
+          outsideClient === true
+            ? { sessionId: "client", label: "Outside agent", access: clientAccess ?? "full-access" }
+            : undefined,
         issuedAt: 0,
         capabilities: new Set(["orchestration" as const]),
       }),
@@ -94,6 +193,7 @@ const launchFromThread = (params: {
       }),
       Layer.mock(ThreadLaunch.ThreadLaunchService)({
         launch: (input) => {
+          if (launchFails !== undefined) return Effect.fail(launchFails);
           launchedSender = input.initialMessage?.senderThreadId;
           launchedBy = input.launchedBy;
           launchedInput = input;
@@ -116,40 +216,54 @@ const launchFromThread = (params: {
       Layer.mock(GitVcsDriver.GitVcsDriver)({}),
       Layer.mock(RemoteReportService.RemoteReportService)({}),
       NodeServices.layer,
-      ServerConfig.layerTest(process.cwd(), { prefix: "t3-source-link-" }).pipe(
+      ServerConfig.layerTest(process.cwd(), { prefix: "goat-source-link-" }).pipe(
         Layer.provide(NodeServices.layer),
       ),
     );
     const toolkit = yield* ProjectToolkit.pipe(
       Effect.provide(
         McpToolAccess.HandlersLayer.layer(ProjectHandlers.layer).pipe(
-          Layer.provide(layerDependencies),
+          Layer.provide(withLaunchService(layerDependencies)),
         ),
       ),
     );
-    const refused = yield* toolkit
-      .handle("goat_thread_launch", {
-        title: "Forged",
-        launchedBy: {
-          kind: "launch" as const,
-          environmentLabel: null,
-          threadTitle: null,
-          threadId: ThreadId.make("foreign-thread"),
-          environmentId: EnvironmentId.make("foreign-env"),
-        },
-      })
-      .pipe(Stream.unwrap, Stream.runCollect, Effect.provide(layerDependencies));
-    expect(refused.at(-1)?.result).toMatchObject({ code: "invalid_request" });
-    expect(launchedInput).toBeUndefined();
-    const result = yield* toolkit
-      .handle("goat_thread_launch", params)
-      .pipe(Stream.unwrap, Stream.runCollect, Effect.provide(layerDependencies));
+    if (outsideClient !== true) {
+      const refused = yield* toolkit
+        .handle("goat_thread_launch", {
+          title: "Forged",
+          launchedBy: {
+            kind: "launch" as const,
+            environmentLabel: null,
+            threadTitle: null,
+            threadId: ThreadId.make("foreign-thread"),
+            environmentId: EnvironmentId.make("foreign-env"),
+          },
+        })
+        .pipe(
+          Stream.unwrap,
+          Stream.runCollect,
+          Effect.provide(withLaunchService(layerDependencies)),
+        );
+      expect(refused.at(-1)?.result).toMatchObject({ code: "invalid_request" });
+      expect(launchedInput).toBeUndefined();
+    }
+    const exit = yield* toolkit
+      .handle("goat_thread_launch", input)
+      .pipe(
+        Stream.unwrap,
+        Stream.runCollect,
+        Effect.provide(withLaunchService(layerDependencies)),
+        Effect.exit,
+      );
     return {
-      result: result.at(-1)?.result,
+      result: Exit.isSuccess(exit) ? exit.value.at(-1)?.result : undefined,
+      interrupted: Exit.hasInterrupts(exit),
       launchedSender,
       launchedBy,
       launchedInput,
       registrations,
+      externalWatches,
+      released,
       sourceThreadId,
       projectId,
       modelSelection,
@@ -184,6 +298,60 @@ it.effect("rejects a thread caller supplying launchedBy", () =>
   }),
 );
 
+it.effect("puts the project's standing instructions in front of the first message", () =>
+  Effect.gen(function* () {
+    const environment = yield* launchFromThread({
+      title: "Audit",
+      message: "Review the change",
+      settings: { standingInstructions: "Use sol for subagents." },
+    });
+    expect(
+      splitStandingInstructions(environment.launchedInput?.initialMessage?.text ?? ""),
+    ).toEqual({
+      block: {
+        text: "Use sol for subagents.",
+        version: standingInstructionsVersion("Use sol for subagents."),
+      },
+      text: "Review the change",
+    });
+    expect(environment.result).toMatchObject({
+      standingInstructionsVersion: standingInstructionsVersion("Use sol for subagents."),
+    });
+
+    const project = yield* launchFromThread({
+      title: "Audit",
+      message: "Review the change",
+      settings: {
+        standingInstructions: "Use sol for subagents.",
+        projectSettingsOverrides: {
+          [ProjectId.make("project")]: { standingInstructions: "One topic per PR." },
+        },
+      },
+    });
+    expect(
+      splitStandingInstructions(project.launchedInput?.initialMessage?.text ?? "").block?.text,
+    ).toBe("One topic per PR.");
+  }),
+);
+
+it.effect("sends the message as written when the launch opts out or starts no run", () =>
+  Effect.gen(function* () {
+    const settings = { standingInstructions: "Use sol for subagents." };
+    const optedOut = yield* launchFromThread({
+      title: "Audit",
+      message: "Review the change",
+      standingInstructions: false,
+      settings,
+    });
+    expect(optedOut.launchedInput?.initialMessage?.text).toBe("Review the change");
+    expect(optedOut.result).toMatchObject({ standingInstructionsVersion: null });
+
+    const idle = yield* launchFromThread({ title: "Idle", settings });
+    expect(idle.launchedInput?.initialMessage).toBeUndefined();
+    expect(idle.result).toMatchObject({ standingInstructionsVersion: null });
+  }),
+);
+
 it.effect("watches the launched thread's first run for the calling thread", () =>
   Effect.gen(function* () {
     const launched = yield* launchFromThread({ title: "Audit", message: "Review the change" });
@@ -195,8 +363,11 @@ it.effect("watches the launched thread's first run for the calling thread", () =
         projectId: launched.projectId,
         title: "Audit",
         runId: "launched-run",
+        notifyWebhook: false,
       }),
     ]);
+    const opted = yield* launchFromThread({ title: "Audit", message: "Go", notifyWebhook: true });
+    expect(opted.registrations).toEqual([expect.objectContaining({ notifyWebhook: true })]);
   }),
 );
 
@@ -212,6 +383,106 @@ it.effect("records a dormant watch for an idle launch, and none when the caller 
     });
     expect(optedOut.result).toMatchObject({ runId: "launched-run", watching: false });
     expect(optedOut.registrations).toEqual([]);
+  }),
+);
+
+it.effect("leaves an outside client's launch unwatched while the webhook does not take it", () =>
+  Effect.gen(function* () {
+    const launched = yield* launchFromThread({
+      title: "Audit",
+      message: "Go",
+      outsideClient: true,
+    });
+    expect(launched.result).toMatchObject({ runId: "launched-run", watching: false });
+    expect(launched.registrations).toEqual([]);
+    expect(launched.externalWatches).toEqual([
+      expect.objectContaining({ route: { notifyWebhook: false, webhookTarget: null } }),
+    ]);
+  }),
+);
+
+it.effect("watches an outside client's launch for the completion webhook", () =>
+  Effect.gen(function* () {
+    const launched = yield* launchFromThread({
+      title: "Audit",
+      message: "Go",
+      notifyWebhook: true,
+      outsideClient: true,
+      webhookWatchesExternal: true,
+    });
+    expect(launched.result).toMatchObject({ runId: "launched-run", watching: true });
+    expect(launched.registrations).toEqual([]);
+    expect(launched.externalWatches).toEqual([
+      {
+        // The watch belongs to the launching client alone.
+        owner: "session",
+        host: null,
+        threadId: expect.any(String),
+        projectId: launched.projectId,
+        title: "Audit",
+        runId: "launched-run",
+        ceiling: "full-access",
+        route: { notifyWebhook: true, webhookTarget: null },
+      },
+    ]);
+
+    // An idle launch has no run to report, and opting out of notifications wins.
+    const idle = yield* launchFromThread({
+      title: "Idle",
+      notifyWebhook: true,
+      outsideClient: true,
+      webhookWatchesExternal: true,
+    });
+    const optedOut = yield* launchFromThread({
+      title: "Audit",
+      message: "Go",
+      notifyWebhook: true,
+      notifyOnCompletion: false,
+      outsideClient: true,
+      webhookWatchesExternal: true,
+    });
+    for (const launch of [idle, optedOut]) {
+      expect(launch.result).toMatchObject({ watching: false });
+      expect(launch.externalWatches).toEqual([]);
+    }
+  }),
+);
+
+it.effect("leaves a launch another machine's GOAT forwarded to that machine's watch", () =>
+  Effect.gen(function* () {
+    const forwarded = yield* launchFromThread({
+      title: "Audit",
+      message: "Go",
+      notifyWebhook: true,
+      outsideClient: true,
+      webhookWatchesExternal: true,
+      launchedBy: {
+        kind: "launch",
+        threadId: ThreadId.make("foreign-thread"),
+        environmentId: EnvironmentId.make("foreign-env"),
+        environmentLabel: "studio",
+        threadTitle: "Orchestrator",
+      },
+    });
+    expect(forwarded.launchedBy).toMatchObject({ threadId: "foreign-thread" });
+    expect(forwarded.result).toMatchObject({ watching: false });
+    expect(forwarded.externalWatches).toEqual([]);
+  }),
+);
+
+it.effect("refuses a read-only outside client before launching or watching", () =>
+  Effect.gen(function* () {
+    const refused = yield* launchFromThread({
+      title: "Audit",
+      message: "Go",
+      notifyWebhook: true,
+      outsideClient: true,
+      clientAccess: "read-only",
+      webhookWatchesExternal: true,
+    });
+    expect(refused.result).toMatchObject({ code: "capability_denied" });
+    expect(refused.launchedInput).toBeUndefined();
+    expect(refused.externalWatches).toEqual([]);
   }),
 );
 
@@ -234,6 +505,7 @@ it.effect("launches a scratch thread into the Scratch project", () =>
     } as OrchestrationV2ThreadShell;
     const launched: Array<ThreadLaunch.ThreadLaunchInput> = [];
     const layerDependencies = Layer.mergeAll(
+      ServerSettings.layerTest(),
       NodeCrypto.layer,
       launchWatches(),
       Layer.succeed(McpInvocationContext.McpInvocationContext, {
@@ -272,21 +544,25 @@ it.effect("launches a scratch thread into the Scratch project", () =>
       Layer.mock(GitVcsDriver.GitVcsDriver)({}),
       Layer.mock(RemoteReportService.RemoteReportService)({}),
       NodeServices.layer,
-      ServerConfig.layerTest(process.cwd(), { prefix: "t3-scratch-launch-" }).pipe(
+      ServerConfig.layerTest(process.cwd(), { prefix: "goat-scratch-launch-" }).pipe(
         Layer.provide(NodeServices.layer),
       ),
     );
     const toolkit = yield* ProjectToolkit.pipe(
       Effect.provide(
         McpToolAccess.HandlersLayer.layer(ProjectHandlers.layer).pipe(
-          Layer.provide(layerDependencies),
+          Layer.provide(withLaunchService(layerDependencies)),
         ),
       ),
     );
     const handle = (params: Parameters<typeof toolkit.handle<"goat_thread_launch">>[1]) =>
       toolkit
         .handle("goat_thread_launch", params)
-        .pipe(Stream.unwrap, Stream.runCollect, Effect.provide(layerDependencies));
+        .pipe(
+          Stream.unwrap,
+          Stream.runCollect,
+          Effect.provide(withLaunchService(layerDependencies)),
+        );
 
     const result = yield* handle({ title: "Notes", scratch: true, message: "Draft a list" });
     expect(result.at(-1)?.result).toMatchObject({ projectId: scratchProjectId });
@@ -333,6 +609,7 @@ it.effect("starts a project from just a title when workspaceRoot is omitted", ()
       deletedAt: null,
     };
     const layerDependencies = Layer.mergeAll(
+      ServerSettings.layerTest(),
       NodeCrypto.layer,
       launchWatches(),
       Layer.succeed(McpInvocationContext.McpInvocationContext, {
@@ -377,21 +654,25 @@ it.effect("starts a project from just a title when workspaceRoot is omitted", ()
       Layer.mock(GitVcsDriver.GitVcsDriver)({}),
       Layer.mock(RemoteReportService.RemoteReportService)({}),
       NodeServices.layer,
-      ServerConfig.layerTest(process.cwd(), { prefix: "t3-named-project-" }).pipe(
+      ServerConfig.layerTest(process.cwd(), { prefix: "goat-named-project-" }).pipe(
         Layer.provide(NodeServices.layer),
       ),
     );
     const toolkit = yield* ProjectToolkit.pipe(
       Effect.provide(
         McpToolAccess.HandlersLayer.layer(ProjectHandlers.layer).pipe(
-          Layer.provide(layerDependencies),
+          Layer.provide(withLaunchService(layerDependencies)),
         ),
       ),
     );
     const handle = (params: Parameters<typeof toolkit.handle<"goat_project_create">>[1]) =>
       toolkit
         .handle("goat_project_create", params)
-        .pipe(Stream.unwrap, Stream.runCollect, Effect.provide(layerDependencies));
+        .pipe(
+          Stream.unwrap,
+          Stream.runCollect,
+          Effect.provide(withLaunchService(layerDependencies)),
+        );
 
     const result = yield* handle({ title: "Pinball Stats" });
     expect(result.at(-1)?.result).toMatchObject({
@@ -401,11 +682,9 @@ it.effect("starts a project from just a title when workspaceRoot is omitted", ()
     });
     expect(named).toEqual(["Pinball Stats"]);
 
-    // A path still registers that folder, and never makes a named project.
     yield* handle({ title: "Existing", workspaceRoot: "/work/existing" });
     expect(registered).toEqual(["/work/existing"]);
 
-    // Fields this mode cannot apply are rejected, not dropped.
     for (const extra of [
       { scripts: [] },
       { defaultModelSelection: { instanceId: providerInstanceId, model: "gpt-5" } },
@@ -424,8 +703,12 @@ const clientLaunchHarness = (input: {
   readonly checkWorktreeBase?: ThreadLaunch.ThreadLaunchService["Service"]["checkWorktreeBase"];
 }) => {
   const projectId = ProjectId.make("project:client-target");
-  const modelSelection = { instanceId: ProviderInstanceId.make("claude"), model: "claude-opus" };
+  const modelSelection = {
+    instanceId: ProviderInstanceId.make("claudeAgent"),
+    model: "claude-opus",
+  };
   const layerDependencies = Layer.mergeAll(
+    ServerSettings.layerTest(),
     NodeCrypto.layer,
     launchWatches(),
     Layer.succeed(McpInvocationContext.McpInvocationContext, {
@@ -478,7 +761,7 @@ const clientLaunchHarness = (input: {
     Layer.provideMerge(GitVcsDriver.layer),
     Layer.provideMerge(VcsProcess.layer),
     Layer.provideMerge(
-      ServerConfig.layerTest(process.cwd(), { prefix: "t3-client-launch-" }).pipe(
+      ServerConfig.layerTest(process.cwd(), { prefix: "goat-client-launch-" }).pipe(
         Layer.provide(NodeServices.layer),
       ),
     ),
@@ -496,13 +779,15 @@ it.effect("a client launches at its ceiling with the project's default model", (
     });
     const toolkit = yield* ProjectToolkit.pipe(
       Effect.provide(
-        McpToolAccess.HandlersLayer.layer(ProjectHandlers.layer).pipe(Layer.provide(dependencies)),
+        McpToolAccess.HandlersLayer.layer(ProjectHandlers.layer).pipe(
+          Layer.provide(withLaunchService(dependencies)),
+        ),
       ),
     );
     const handle = (params: Parameters<typeof toolkit.handle<"goat_thread_launch">>[1]) =>
       toolkit
         .handle("goat_thread_launch", params)
-        .pipe(Stream.unwrap, Stream.runCollect, Effect.provide(dependencies));
+        .pipe(Stream.unwrap, Stream.runCollect, Effect.provide(withLaunchService(dependencies)));
 
     const result = yield* handle({ title: "Fix", projectId, message: "Fix the bug" });
     expect(result.at(-1)?.result).toMatchObject({ projectId, modelSelection });
@@ -535,7 +820,7 @@ it.effect("a launch binds only an existing checkout that is one of the project's
   Effect.gen(function* () {
     const fileSystem = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
-    const root = yield* fileSystem.makeTempDirectoryScoped({ prefix: "t3-launch-worktree-" });
+    const root = yield* fileSystem.makeTempDirectoryScoped({ prefix: "goat-launch-worktree-" });
     const repo = path.join(root, "repo");
     const worktree = path.join(root, "feature");
     const outside = path.join(root, "outside");
@@ -558,7 +843,9 @@ it.effect("a launch binds only an existing checkout that is one of the project's
     }
     const toolkit = yield* ProjectToolkit.pipe(
       Effect.provide(
-        McpToolAccess.HandlersLayer.layer(ProjectHandlers.layer).pipe(Layer.provide(dependencies)),
+        McpToolAccess.HandlersLayer.layer(ProjectHandlers.layer).pipe(
+          Layer.provide(withLaunchService(dependencies)),
+        ),
       ),
     );
     const launchInto = (worktreePath: string) =>
@@ -568,7 +855,7 @@ it.effect("a launch binds only an existing checkout that is one of the project's
           projectId,
           workspaceStrategy: { type: "existing_worktree", worktreePath },
         })
-        .pipe(Stream.unwrap, Stream.runCollect, Effect.provide(dependencies));
+        .pipe(Stream.unwrap, Stream.runCollect, Effect.provide(withLaunchService(dependencies)));
 
     expect((yield* launchInto(worktree)).at(-1)?.result).toMatchObject({ projectId });
     expect((yield* launchInto(repo)).at(-1)?.result).toMatchObject({ projectId });
@@ -582,8 +869,6 @@ it.effect("a launch binds only an existing checkout that is one of the project's
       { type: "existing_worktree", worktreePath: repo },
     ]);
 
-    // A removed worktree stays listed as prunable until `git worktree prune`;
-    // whatever directory is later made at its path is not one of the project's.
     yield* fileSystem.remove(worktree, { recursive: true });
     yield* fileSystem.makeDirectory(worktree);
     expect((yield* launchInto(worktree)).at(-1)?.result).toMatchObject({
@@ -612,7 +897,9 @@ it.effect("a launch into a new worktree creates nothing when its base ref has no
     });
     const toolkit = yield* ProjectToolkit.pipe(
       Effect.provide(
-        McpToolAccess.HandlersLayer.layer(ProjectHandlers.layer).pipe(Layer.provide(dependencies)),
+        McpToolAccess.HandlersLayer.layer(ProjectHandlers.layer).pipe(
+          Layer.provide(withLaunchService(dependencies)),
+        ),
       ),
     );
     const launchFrom = (baseRef: string) =>
@@ -622,7 +909,7 @@ it.effect("a launch into a new worktree creates nothing when its base ref has no
           projectId,
           workspaceStrategy: { type: "worktree", baseRef, startFromOrigin: false },
         })
-        .pipe(Stream.unwrap, Stream.runCollect, Effect.provide(dependencies));
+        .pipe(Stream.unwrap, Stream.runCollect, Effect.provide(withLaunchService(dependencies)));
 
     const refused = (yield* launchFrom("t3/renamed")).at(-1)?.result;
     expect(refused).toMatchObject({ code: "invalid_request" });
@@ -634,6 +921,51 @@ it.effect("a launch into a new worktree creates nothing when its base ref has no
     expect((yield* launchFrom("main")).at(-1)?.result).toMatchObject({ projectId });
     expect(launched).toHaveLength(1);
   }),
+);
+
+it.effect(
+  "a launch onto a branch checked out elsewhere names that checkout and creates nothing",
+  () =>
+    Effect.gen(function* () {
+      const launched: Array<ThreadLaunch.ThreadLaunchInput> = [];
+      const { projectId, dependencies } = clientLaunchHarness({
+        runtimeModeCeiling: "auto",
+        launched,
+        checkWorktreeBase: ({ projectId, workspaceStrategy }) =>
+          Effect.fail(
+            new ThreadLaunch.ThreadLaunchBranchError({
+              projectId,
+              projectTitle: "Client target",
+              workspaceRoot: "/projects/client-target",
+              branch: workspaceStrategy.branch ?? "",
+              worktreePath: "/worktrees/lane",
+            }),
+          ),
+      });
+      const toolkit = yield* ProjectToolkit.pipe(
+        Effect.provide(
+          McpToolAccess.HandlersLayer.layer(ProjectHandlers.layer).pipe(
+            Layer.provide(withLaunchService(dependencies)),
+          ),
+        ),
+      );
+      const refused = (yield* toolkit
+        .handle("goat_thread_launch", {
+          title: "Fix",
+          projectId,
+          workspaceStrategy: { type: "worktree", baseRef: "origin/lane", branch: "lane" },
+        })
+        .pipe(
+          Stream.unwrap,
+          Stream.runCollect,
+          Effect.provide(withLaunchService(dependencies)),
+        )).at(-1)?.result;
+      expect(refused).toMatchObject({ code: "invalid_request" });
+      expect((refused as { message: string }).message).toBe(
+        'Branch "lane" is already checked out at /worktrees/lane in project "Client target". No thread was created. Launch into that checkout with workspaceStrategy {type:"existing_worktree", worktreePath:"/worktrees/lane"}, or pass a branch name that does not exist yet.',
+      );
+      expect(launched).toHaveLength(0);
+    }),
 );
 
 it.effect("lists and reads another machine's projects through that machine's own tools", () =>
@@ -652,6 +984,7 @@ it.effect("lists and reads another machine's projects through that machine's own
     };
     const calls: Array<SshRemoteDispatch.SshHostToolCall> = [];
     const layerDependencies = Layer.mergeAll(
+      ServerSettings.layerTest(),
       NodeCrypto.layer,
       launchWatches(),
       Layer.succeed(McpInvocationContext.McpInvocationContext, {
@@ -681,11 +1014,12 @@ it.effect("lists and reads another machine's projects through that machine's own
       Layer.mock(GitVcsDriver.GitVcsDriver)({}),
       Layer.mock(RemoteReportService.RemoteReportService)({}),
       NodeServices.layer,
-      ServerConfig.layerTest(process.cwd(), { prefix: "t3-host-projects-" }).pipe(
+      ServerConfig.layerTest(process.cwd(), { prefix: "goat-host-projects-" }).pipe(
         Layer.provide(NodeServices.layer),
       ),
     );
     const dependencies = HostThreadsMcpService.layer.pipe(
+      Layer.provide(Layer.mock(ThreadResults.ThreadResultService)({})),
       Layer.provide(Layer.mock(RemoteDispatchCoordinator.RemoteDispatchCoordinator)({})),
       Layer.provide(Layer.mock(OrchestratorMcpService.OrchestratorMcpService)({})),
       Layer.provide(
@@ -707,13 +1041,15 @@ it.effect("lists and reads another machine's projects through that machine's own
     );
     const toolkit = yield* ProjectToolkit.pipe(
       Effect.provide(
-        McpToolAccess.HandlersLayer.layer(ProjectHandlers.layer).pipe(Layer.provide(dependencies)),
+        McpToolAccess.HandlersLayer.layer(ProjectHandlers.layer).pipe(
+          Layer.provide(withLaunchService(dependencies)),
+        ),
       ),
     );
 
     const listed = yield* toolkit
       .handle("goat_project_list", { host: "box", limit: 5 })
-      .pipe(Stream.unwrap, Stream.runCollect, Effect.provide(dependencies));
+      .pipe(Stream.unwrap, Stream.runCollect, Effect.provide(withLaunchService(dependencies)));
     expect(listed.at(-1)?.result).toMatchObject({
       host: "box",
       projects: [{ id: "project:remote" }],
@@ -721,7 +1057,7 @@ it.effect("lists and reads another machine's projects through that machine's own
     });
     const read = yield* toolkit
       .handle("goat_project_read", { host: "box", projectId: ProjectId.make("project:remote") })
-      .pipe(Stream.unwrap, Stream.runCollect, Effect.provide(dependencies));
+      .pipe(Stream.unwrap, Stream.runCollect, Effect.provide(withLaunchService(dependencies)));
     expect(read.at(-1)?.result).toMatchObject({ id: "project:remote", host: "box" });
     expect(
       calls.map(({ host, tool, arguments: args, writes }) => [host, tool, args, writes]),
@@ -756,6 +1092,7 @@ const reportLaunch = (options: {
     const providerInstanceId = modelSelection.instanceId;
     // Later mock layers override the base services for these cases only.
     const dependencies = Layer.mergeAll(
+      ServerSettings.layerTest(),
       base.dependencies,
       Layer.succeed(McpInvocationContext.McpInvocationContext, {
         environmentId: EnvironmentId.make("remote-environment"),
@@ -824,7 +1161,9 @@ const reportLaunch = (options: {
     );
     const toolkit = yield* ProjectToolkit.pipe(
       Effect.provide(
-        McpToolAccess.HandlersLayer.layer(ProjectHandlers.layer).pipe(Layer.provide(dependencies)),
+        McpToolAccess.HandlersLayer.layer(ProjectHandlers.layer).pipe(
+          Layer.provide(withLaunchService(dependencies)),
+        ),
       ),
     );
     const handle = (report?: typeof reportBinding) =>
@@ -834,7 +1173,7 @@ const reportLaunch = (options: {
           projectId,
           ...(report === undefined ? {} : { report }),
         })
-        .pipe(Stream.unwrap, Stream.runCollect, Effect.provide(dependencies));
+        .pipe(Stream.unwrap, Stream.runCollect, Effect.provide(withLaunchService(dependencies)));
     return { operations, bound, launched, handle };
   });
 it.effect("a thread caller cannot supply an origin binding", () =>
@@ -943,7 +1282,7 @@ it.effect(
       const toolkit = yield* ProjectToolkit.pipe(
         Effect.provide(
           McpToolAccess.HandlersLayer.layer(ProjectHandlers.layer).pipe(
-            Layer.provide(dependencies),
+            Layer.provide(withLaunchService(dependencies)),
           ),
         ),
       );
@@ -961,7 +1300,7 @@ it.effect(
             projectId,
             launchedBy: { ...launcher, environmentId, ...(via === undefined ? {} : { via }) },
           })
-          .pipe(Stream.unwrap, Stream.runCollect, Effect.provide(dependencies));
+          .pipe(Stream.unwrap, Stream.runCollect, Effect.provide(withLaunchService(dependencies)));
       expect((yield* handle(EnvironmentId.make("environment"))).at(-1)?.result).toMatchObject({
         code: "invalid_request",
       });
@@ -973,4 +1312,93 @@ it.effect(
       yield* handle(launcher.environmentId, "delegate_task");
       expect(launched[1]?.launchedBy).toEqual({ ...launcher, via: "delegate_task" });
     }),
+);
+
+it.effect("refuses an unknown notify target before creating a thread", () =>
+  Effect.gen(function* () {
+    const launched = yield* launchFromThread({
+      title: "Audit",
+      message: "Go",
+      notifyTarget: { name: "unknown" },
+    });
+    expect(launched.result).toMatchObject({
+      code: "invalid_request",
+      message: 'Unknown notify target "unknown".',
+    });
+    expect(launched.launchedInput).toBeUndefined();
+    expect(launched.registrations).toEqual([]);
+  }),
+);
+
+it.effect("records a launch's notify target with its watch", () =>
+  Effect.gen(function* () {
+    const launched = yield* launchFromThread({
+      title: "Audit",
+      message: "Go",
+      notifyTarget: { name: "bot-a" },
+    });
+    expect(launched.result).toMatchObject({ watching: true });
+    expect(launched.registrations).toEqual([
+      expect.objectContaining({
+        notifyWebhook: false,
+        webhookTarget: { type: "named", name: "bot-a" },
+      }),
+    ]);
+    expect(launched.released).toEqual([]);
+  }),
+);
+
+it.effect("releases a notify target whose launch records no watch", () =>
+  Effect.gen(function* () {
+    // An outside client's idle launch has no run, so nothing is watched.
+    const launched = yield* launchFromThread({
+      title: "Idle",
+      notifyTarget: { name: "bot-a" },
+      outsideClient: true,
+      webhookWatchesExternal: true,
+    });
+    expect(launched.result).toMatchObject({ watching: false });
+    expect(launched.released).toEqual([
+      { notifyWebhook: false, webhookTarget: { type: "named", name: "bot-a" } },
+    ]);
+  }),
+);
+
+it.effect("releases a notify target when the launch is interrupted before its watch is saved", () =>
+  Effect.gen(function* () {
+    const launched = yield* launchFromThread({
+      title: "Audit",
+      message: "Go",
+      notifyTarget: { name: "bot-a" },
+      registerInterrupted: true,
+    });
+    expect(launched.interrupted).toBe(true);
+    // The thread exists, but no watch holds the route, so what it kept is freed.
+    expect(launched.launchedInput).toBeDefined();
+    expect(launched.registrations).toEqual([]);
+    expect(launched.released).toEqual([
+      { notifyWebhook: false, webhookTarget: { type: "named", name: "bot-a" } },
+    ]);
+  }),
+);
+it.effect("tells the agent how to restore a missing project folder, and watches nothing", () =>
+  Effect.gen(function* () {
+    const launch = yield* launchFromThread({
+      title: "Into a deleted checkout",
+      message: "Go",
+      launchFails: new ThreadLaunch.ThreadLaunchWorkspaceMissingError({
+        projectId: ProjectId.make("project"),
+        projectTitle: "Client target",
+        kind: "project",
+        path: "/projects/client-target",
+        remoteUrl: "https://github.com/acme/client-target.git",
+      }),
+    });
+    expect(launch.result).toMatchObject({
+      code: "invalid_request",
+      message:
+        'Project "Client target" points at /projects/client-target, which does not exist on this machine. No thread was created. Clone it back with goat_project_clone {remoteUrl:"https://github.com/acme/client-target.git", destinationPath:"/projects/client-target"}, or point the project at an existing checkout with goat_project_update {projectId:"project", workspaceRoot}, then launch again.',
+    });
+    expect(launch.registrations).toEqual([]);
+  }),
 );

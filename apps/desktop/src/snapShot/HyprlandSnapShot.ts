@@ -5,7 +5,7 @@ import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 import * as NodeURL from "node:url";
 import * as Schema from "effect/Schema";
-import type { DesktopCaptureHelperState } from "@t3tools/contracts";
+import type { DesktopCaptureHelperState } from "@goat/contracts";
 import type { LinuxWindowSnapshot } from "./LinuxSnapShot.ts";
 import { readPortalPng } from "./linuxCaptureSession.ts";
 import { startNativeCaptureFeedback } from "./NativeCaptureFeedback.ts";
@@ -171,7 +171,7 @@ export async function captureHyprlandWindow(
   if (state.status !== "ready")
     throw new Error(`${state.message} Open Settings → SnapShots to continue setup.`);
   const executable = hyprlandCaptureExecutable(paths);
-  const directory = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-hyprland-capture-"));
+  const directory = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "goat-hyprland-capture-"));
   const cleanup = () => NodeFSP.rm(directory, { recursive: true, force: true });
   let retained = false;
   try {

@@ -1,13 +1,7 @@
-/**
- * Cursor's client definition: settings form, label, sign-in environment
- * field, and glyph. Browser- and React Native-safe.
- *
- * @module provider-cursor/client
- */
-import { ProviderDriverKind } from "@t3tools/contracts";
-import { defineProviderClient } from "@t3tools/provider-core/client";
+import { ProviderDriverKind } from "@goat/contracts";
+import { defineProviderClient } from "@goat/provider-core/client";
 
-import { CursorSettings } from "./settings.ts";
+import { CursorSettings, CursorCloudSettings } from "./settings.ts";
 
 export const cursorClient = defineProviderClient({
   driverKind: ProviderDriverKind.make("cursor"),
@@ -31,4 +25,14 @@ export const cursorClient = defineProviderClient({
       },
     ],
   },
+});
+
+export const cursorCloudClient = defineProviderClient({
+  driverKind: ProviderDriverKind.make("cursorCloud"),
+  label: "Cursor Cloud",
+  settingsSchema: CursorCloudSettings,
+  executionLocation: "cloud",
+  hasDefaultInstance: true,
+  badgeLabel: "Cloud",
+  icon: cursorClient.icon,
 });

@@ -1,4 +1,4 @@
-import type { RepositoryIdentity } from "@t3tools/contracts";
+import type { RepositoryIdentity } from "@goat/contracts";
 import * as Cache from "effect/Cache";
 import * as Cause from "effect/Cause";
 import * as Context from "effect/Context";
@@ -22,14 +22,12 @@ const DEFAULT_SUCCESS_TTL = Duration.minutes(1);
 // A favicon scan checks about 20 files. Shell reads (and PR sync through them) ask for every
 // linked project about once a minute, and icons rarely change, so a resolved favicon is kept
 // longer than the identity, which is only a hit on RepositoryIdentityResolver's own cache.
-// Moving a project's workspace root, and deleting it, invalidate both at once.
 const DEFAULT_FAVICON_TTL = Duration.minutes(15);
 const DEFAULT_FAILURE_TTL = Duration.seconds(5);
 
 export interface ProjectEnrichment {
   readonly repositoryIdentity: RepositoryIdentity | null;
   readonly faviconPath: string | null;
-  /** True when identity resolution completed successfully, including cached null. */
   readonly repositoryIdentityResolved: boolean;
 }
 
@@ -41,34 +39,32 @@ export interface ProjectEnrichmentChange {
 
 export interface ProjectEnrichmentServiceOptions {
   readonly cacheCapacity?: number;
-  /** Maximum active and queued roots for each enrichment field. */
   readonly maxPending?: number;
-  /** Worker concurrency for each enrichment field. */
   readonly concurrency?: number;
   readonly successTtl?: Duration.Input;
   readonly faviconTtl?: Duration.Input;
   readonly failureTtl?: Duration.Input;
+  /** Observes completed background work after its cache and pending reservation are updated. */
+  readonly onResolved?: (
+    workspaceRoot: string,
+    field: "repositoryIdentity" | "faviconPath",
+  ) => Effect.Effect<void>;
 }
 
 export class ProjectEnrichmentService extends Context.Service<
   ProjectEnrichmentService,
   {
-    /** Read resolved metadata without starting or awaiting filesystem work. */
     readonly peek: (workspaceRoot: string) => Effect.Effect<ProjectEnrichment>;
-    /** Schedule missing metadata for bounded background resolution. */
     readonly request: (workspaceRoot: string) => Effect.Effect<void>;
-    /** Read immediately available metadata and schedule anything missing. */
     readonly getAvailable: (workspaceRoot: string) => Effect.Effect<ProjectEnrichment>;
-    /** Invalidate workspace-derived metadata. */
     readonly invalidate: (workspaceRoots: Iterable<string>) => Effect.Effect<void>;
-    /** Subscribe to ephemeral completion notifications. */
     readonly subscribeChanges: Effect.Effect<
       PubSub.Subscription<ProjectEnrichmentChange>,
       never,
       Scope.Scope
     >;
   }
->()("t3/project/ProjectEnrichmentService") {}
+>()("goat/project/ProjectEnrichmentService") {}
 
 function availableValue<A, E>(cached: Option.Option<Exit.Exit<A, E>>): A | null {
   return Option.match(cached, {
@@ -205,10 +201,14 @@ export const make = Effect.fn("ProjectEnrichmentService.make")(function* (
   const startWorkers = (
     lane: EnrichmentWorkLane,
     resolve: (workspaceRoot: string) => Effect.Effect<void>,
+    field: "repositoryIdentity" | "faviconPath",
   ) => {
     const worker = Queue.take(lane.queue).pipe(
       Effect.flatMap((workspaceRoot) =>
-        resolve(workspaceRoot).pipe(Effect.ensuring(removePending(lane, workspaceRoot))),
+        resolve(workspaceRoot).pipe(
+          Effect.ensuring(removePending(lane, workspaceRoot)),
+          Effect.andThen(() => options.onResolved?.(workspaceRoot, field) ?? Effect.void),
+        ),
       ),
       Effect.forever,
     );
@@ -218,8 +218,8 @@ export const make = Effect.fn("ProjectEnrichmentService.make")(function* (
   };
   yield* Effect.all(
     [
-      startWorkers(repositoryIdentityLane, resolveRepositoryIdentity),
-      startWorkers(faviconLane, resolveFavicon),
+      startWorkers(repositoryIdentityLane, resolveRepositoryIdentity, "repositoryIdentity"),
+      startWorkers(faviconLane, resolveFavicon, "faviconPath"),
     ],
     { concurrency: "unbounded", discard: true },
   );

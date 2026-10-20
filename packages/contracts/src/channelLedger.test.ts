@@ -56,6 +56,8 @@ const task = {
 
 describe("channel tasks", () => {
   it("round-trips a task with its fixed origin and requester snapshot", () => {
+    expect(roundTrip(ChannelTask, task).briefVersion).toBeUndefined();
+    expect(roundTrip(ChannelTask, { ...task, briefVersion: 2 }).briefVersion).toBe(2);
     expect(roundTrip(ChannelTask, task)).toMatchObject({
       originAddress: task.originAddress,
       requester: { externalActorId: "U123" },
@@ -94,6 +96,103 @@ describe("channel tasks", () => {
     ).toThrow();
   });
 
+  it("round-trips old and new task claims without inventing a memory grant or note permission", () => {
+    const target = {
+      environmentId: "env-1",
+      projectId: "project-1",
+      modelSelection: { instanceId: "codex", model: "gpt-6.1-sol" },
+      runtimeMode: "approval-required",
+      interactionMode: "default",
+      workspaceStrategy: { type: "root" },
+    };
+    const base = {
+      eventId: "claim-1",
+      sequence: 2,
+      taskId: task.taskId,
+      taskVersion: 2,
+      occurredAt: task.createdAt,
+      actor: "system",
+    };
+    const claim = {
+      ...base,
+      type: "task.dispatch.claimed",
+      payload: { generation: 1, target, leaseExpiresAt: task.createdAt },
+    };
+    expect(roundTrip(ChannelTask, { ...task, target }).target).not.toHaveProperty(
+      "memoryGrantCeiling",
+    );
+    expect(roundTrip(ChannelTask, task)).not.toHaveProperty("notesChangeRequested");
+    expect(roundTrip(ChannelTaskEvent, claim)).toEqual(claim);
+    const created = {
+      ...base,
+      type: "task.created",
+      payload: {
+        title: task.title,
+        instruction: task.instruction,
+        originInputId: task.originInputId,
+      },
+    };
+    expect(roundTrip(ChannelTaskEvent, created)).toEqual(created);
+    const notesChangeRequested = "forget the Korean note";
+    expect(roundTrip(ChannelTask, { ...task, notesChangeRequested }).notesChangeRequested).toBe(
+      notesChangeRequested,
+    );
+    expect(
+      roundTrip(ChannelTaskEvent, {
+        ...created,
+        payload: { ...created.payload, notesChangeRequested },
+      }),
+    ).toMatchObject({ payload: { notesChangeRequested } });
+    for (const memoryGrantCeiling of ["none", "read", "read_write"] as const) {
+      const withMemory = { ...target, memoryGrantCeiling };
+      expect(
+        roundTrip(ChannelTask, { ...task, target: withMemory }).target?.memoryGrantCeiling,
+      ).toBe(memoryGrantCeiling);
+      expect(
+        roundTrip(ChannelTaskEvent, {
+          ...claim,
+          payload: { ...claim.payload, target: withMemory },
+        }),
+      ).toMatchObject({ payload: { target: { memoryGrantCeiling } } });
+    }
+    expect(() =>
+      decodeTask({ ...task, target: { ...target, memoryGrantCeiling: "write" } }),
+    ).toThrow();
+  });
+
+  it("round-trips a move and the copy provenance on tasks and chips", () => {
+    const replicaCapturedAt = "2026-10-12T00:00:04.000Z";
+    const movedFrom = { host: "mac-studio", generation: 1, at: task.updatedAt, replicaCapturedAt };
+    expect(
+      roundTrip(ChannelTaskEvent, {
+        eventId: "move-1",
+        sequence: 4,
+        taskId: task.taskId,
+        taskVersion: 4,
+        occurredAt: task.updatedAt,
+        actor: "user",
+        type: "task.moved",
+        payload: { generation: 2, host: "mini", fromHost: "mac-studio", replicaCapturedAt },
+      }),
+    ).toMatchObject({ type: "task.moved", payload: { generation: 2, replicaCapturedAt } });
+    expect(roundTrip(ChannelTask, { ...task, movedFrom }).movedFrom).toEqual(movedFrom);
+    expect(
+      roundTrip(ChannelTaskChip, {
+        taskId: task.taskId,
+        conversationId: task.conversationId,
+        taskVersion: 4,
+        title: task.title,
+        status: "received",
+        originKind: "slack",
+        requesterLabel: "Jun",
+        createdAt: task.createdAt,
+        updatedAt: task.updatedAt,
+        openQuestionCount: 0,
+        movedFrom,
+      }).movedFrom,
+    ).toEqual(movedFrom);
+  });
+
   it("treats only completed, failed, and cancelled as terminal", () => {
     expect(
       (["received", "dispatching", "running", "waiting_input"] as const).map(isChannelTaskTerminal),
@@ -117,11 +216,11 @@ describe("channel tasks", () => {
     const completed = roundTrip(ChannelTaskEvent, {
       ...base,
       type: "task.completed",
-      payload: { generation: 1, runId: "run-1", summary: "Latency 1.2s" },
+      payload: { generation: 1, runId: "run-1", summary: "Latency 1.2s", briefVersion: 1 },
     });
     expect(completed).toMatchObject({
       type: "task.completed",
-      payload: { summary: "Latency 1.2s" },
+      payload: { summary: "Latency 1.2s", briefVersion: 1 },
     });
     // A payload that belongs to another event type does not decode.
     expect(() =>

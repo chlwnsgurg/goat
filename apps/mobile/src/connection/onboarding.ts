@@ -1,9 +1,9 @@
-import { ConnectionOnboarding } from "@t3tools/client-runtime/connection";
+import { ConnectionOnboarding } from "@goat/client-runtime/connection";
 import {
   createAtomCommandScheduler,
   createRuntimeCommand,
-} from "@t3tools/client-runtime/state/runtime";
-import type { EnvironmentId } from "@t3tools/contracts";
+} from "@goat/client-runtime/state/runtime";
+import type { EnvironmentId } from "@goat/contracts";
 import * as Effect from "effect/Effect";
 
 import { connectionAtomRuntime } from "./runtime";
@@ -22,7 +22,6 @@ export const connectPairingUrl = createRuntimeCommand(connectionAtomRuntime, {
   },
   execute: (input: {
     readonly pairingUrl: string;
-    /** Set when adding a route to this saved machine. */
     readonly expectedEnvironmentId?: EnvironmentId;
   }) =>
     ConnectionOnboarding.ConnectionOnboarding.pipe(

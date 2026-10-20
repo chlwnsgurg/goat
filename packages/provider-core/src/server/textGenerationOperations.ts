@@ -1,25 +1,33 @@
-/**
- * The text generation operations every provider shares. A provider supplies a
- * runner that sends one prompt and decodes the reply; prompts, linked source
- * control context, and output sanitizing live here so providers cannot drift
- * on them.
- *
- * @module textGeneration/TextGenerationOperations
- */
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
+import type * as SchemaAST from "effect/SchemaAST";
 
-import { type ChatAttachment, type ModelSelection, TextGenerationError } from "@t3tools/contracts";
-import { formatGeneratedBranchName, sanitizeFeatureBranchName } from "@t3tools/shared/git";
-import { extractJsonObject } from "@t3tools/shared/schemaJson";
+import {
+  validateMemoryGenerationResult,
+  GenerateMemorySummaryExecutionResult,
+  ResolveMemoryConflictExecutionResult,
+  type ChatAttachment,
+  type ModelSelection,
+  TextGenerationError,
+} from "@goat/contracts";
+import { formatGeneratedBranchName, sanitizeFeatureBranchName } from "@goat/shared/git";
+import { extractJsonObject } from "@goat/shared/schemaJson";
 
 import { buildChannelReceptionPrompt, toChannelReceptionResult } from "./channelReceptionPrompt.ts";
+import {
+  buildMemoryConflictPrompt,
+  buildMemorySummaryPrompt,
+  memoryResultFromModelOutput,
+} from "./memoryGenerationPrompts.ts";
+import { unsupportedMemoryRunner, type MemoryRunner } from "./memoryGenerationRunner.ts";
+export type { MemoryRunner } from "./memoryGenerationRunner.ts";
 import type { ProviderTextGeneration } from "./textGeneration.ts";
 import {
   buildBranchNamePrompt,
   buildCommitMessagePrompt,
   buildPrContentPrompt,
+  buildReviewGuidePrompt,
   buildThreadTitlePrompt,
 } from "./textGenerationPrompts.ts";
 import {
@@ -29,32 +37,75 @@ import {
 } from "./textGenerationUtils.ts";
 
 export type Operation = keyof ProviderTextGeneration;
+export const isMemoryOperation = (
+  operation: Operation,
+): operation is "resolveMemoryConflict" | "generateMemorySummary" =>
+  operation === "resolveMemoryConflict" || operation === "generateMemorySummary";
 
-/** One prompt for a provider to run. */
+/**
+ * Parse options for a provider's raw structured output. Memory output is authority-bearing, so a
+ * key outside its schema fails the decode instead of being silently dropped.
+ */
+export const outputDecodeOptions = (operation: Operation): SchemaAST.ParseOptions | undefined =>
+  isMemoryOperation(operation) ? { onExcessProperty: "error" } : undefined;
+const sameMemorySelection = (
+  a: import("@goat/contracts").MemoryModelSelection,
+  b: import("@goat/contracts").MemoryModelSelection,
+) =>
+  a.instanceId === b.instanceId &&
+  a.model === b.model &&
+  (a.options?.length ?? 0) === (b.options?.length ?? 0) &&
+  (a.options ?? []).every(
+    (option, i) => option.id === b.options?.[i]?.id && option.value === b.options[i]?.value,
+  );
+const decodeMemorySummaryExecution = Schema.decodeUnknownEffect(
+  GenerateMemorySummaryExecutionResult,
+);
+const decodeMemoryConflictExecution = Schema.decodeUnknownEffect(
+  ResolveMemoryConflictExecutionResult,
+);
+
 export interface Request<S extends Schema.Top> {
   readonly operation: Operation;
   readonly cwd: string;
   readonly prompt: string;
   readonly outputSchema: S;
   readonly modelSelection: ModelSelection;
-  /** The user's attachments, already listed in the prompt. Providers that accept images send them. */
   readonly attachments?: ReadonlyArray<ChatAttachment> | undefined;
+  /**
+   * Set when the model must investigate `cwd` before answering: it may read files and run
+   * read-only commands there, over as many turns as it needs, and must change nothing. A
+   * runner that cannot guarantee read-only tools fails rather than answering blind.
+   */
+  readonly investigate?: { readonly timeoutMs: number } | undefined;
 }
 
-/** Runs one request and decodes the reply as its `outputSchema`. */
+const INVESTIGATION_TIMEOUT_MS = 15 * 60_000;
+
+export const investigationUnsupported = (operation: Operation, provider: string) =>
+  new TextGenerationError({
+    operation,
+    detail: `${provider} cannot investigate a checkout read-only. Choose another review guide model, or source control writer model when none is set.`,
+  });
+
 export type Runner = <S extends Schema.Top>(
   request: Request<S>,
 ) => Effect.Effect<S["Type"], TextGenerationError, S["DecodingServices"]>;
 
-/** Decodes the JSON object in a text reply, which models often wrap in prose. */
+export const withoutInvestigation =
+  (provider: string, run: Runner): Runner =>
+  (request) =>
+    request.investigate
+      ? Effect.fail(investigationUnsupported(request.operation, provider))
+      : run(request);
+
 export const decodeJsonReply = <S extends Schema.Top>(
   request: Pick<Request<S>, "operation" | "outputSchema">,
   provider: string,
   text: string,
 ) => {
-  // Each request builds its own output schema, so the decoder cannot be hoisted.
   const decodeOutput = Schema.decodeEffect(Schema.fromJsonString(request.outputSchema));
-  return decodeOutput(extractJsonObject(text)).pipe(
+  return decodeOutput(extractJsonObject(text), outputDecodeOptions(request.operation)).pipe(
     Effect.mapError(
       (cause) =>
         new TextGenerationError({
@@ -67,6 +118,7 @@ export const decodeJsonReply = <S extends Schema.Top>(
 };
 
 export interface FromRunnerOptions {
+  readonly memoryRunner?: MemoryRunner;
   /**
    * Also offer channel reception. Only providers whose runner has been checked to run it with
    * tools off and in an empty directory turn this on.
@@ -74,12 +126,78 @@ export interface FromRunnerOptions {
   readonly channelReception?: boolean;
 }
 
-/** The text generation service over `run`. `name` prefixes each operation's span. */
 export function fromRunner(
   name: string,
   run: Runner,
   options: FromRunnerOptions = {},
 ): ProviderTextGeneration {
+  const runMemory = options.memoryRunner ?? unsupportedMemoryRunner;
+  const resolveMemoryConflict: NonNullable<ProviderTextGeneration["resolveMemoryConflict"]> =
+    Effect.fn(`${name}.resolveMemoryConflict`)(function* (input) {
+      const request = yield* buildMemoryConflictPrompt(input);
+      const generated = yield* runMemory({
+        operation: "resolveMemoryConflict",
+        cwd: input.cwd,
+        modelSelection: input.modelSelection,
+        ...request,
+      });
+      const result = yield* decodeMemoryConflictExecution(
+        { ...generated, result: memoryResultFromModelOutput(generated.result) },
+        { onExcessProperty: "error" },
+      ).pipe(
+        Effect.mapError(
+          (cause) =>
+            new TextGenerationError({
+              operation: "resolveMemoryConflict",
+              detail: "Memory result is invalid.",
+              cause,
+            }),
+        ),
+      );
+      if (
+        !validateMemoryGenerationResult(input, result.result) ||
+        result.execution.providerInstanceId !== input.modelSelection.instanceId ||
+        !sameMemorySelection(result.execution.requestedModelSelection, input.modelSelection)
+      )
+        return yield* new TextGenerationError({
+          operation: "resolveMemoryConflict",
+          detail: "Memory evidence or execution is invalid.",
+        });
+      return result;
+    });
+  const generateMemorySummary: NonNullable<ProviderTextGeneration["generateMemorySummary"]> =
+    Effect.fn(`${name}.generateMemorySummary`)(function* (input) {
+      const request = yield* buildMemorySummaryPrompt(input);
+      const generated = yield* runMemory({
+        operation: "generateMemorySummary",
+        cwd: input.cwd,
+        modelSelection: input.modelSelection,
+        ...request,
+      });
+      const result = yield* decodeMemorySummaryExecution(
+        { ...generated, result: memoryResultFromModelOutput(generated.result) },
+        { onExcessProperty: "error" },
+      ).pipe(
+        Effect.mapError(
+          (cause) =>
+            new TextGenerationError({
+              operation: "generateMemorySummary",
+              detail: "Memory result is invalid.",
+              cause,
+            }),
+        ),
+      );
+      if (
+        !validateMemoryGenerationResult(input, result.result) ||
+        result.execution.providerInstanceId !== input.modelSelection.instanceId ||
+        !sameMemorySelection(result.execution.requestedModelSelection, input.modelSelection)
+      )
+        return yield* new TextGenerationError({
+          operation: "generateMemorySummary",
+          detail: "Memory evidence or execution is invalid.",
+        });
+      return result;
+    });
   const generateCommitMessage: ProviderTextGeneration["generateCommitMessage"] = Effect.fn(
     `${name}.generateCommitMessage`,
   )(function* (input) {
@@ -180,11 +298,26 @@ export function fromRunner(
       return result.value;
     });
 
+  const generateReviewGuide: ProviderTextGeneration["generateReviewGuide"] = Effect.fn(
+    `${name}.generateReviewGuide`,
+  )(function* (input) {
+    return yield* run({
+      operation: "generateReviewGuide",
+      cwd: input.cwd,
+      modelSelection: input.modelSelection,
+      investigate: { timeoutMs: INVESTIGATION_TIMEOUT_MS },
+      ...buildReviewGuidePrompt(input),
+    });
+  });
+
   return {
+    resolveMemoryConflict,
+    generateMemorySummary,
     generateCommitMessage,
     generatePrContent,
     generateBranchName,
     generateThreadTitle,
     ...(options.channelReception === true ? { generateChannelReception } : {}),
+    generateReviewGuide,
   } satisfies ProviderTextGeneration;
 }

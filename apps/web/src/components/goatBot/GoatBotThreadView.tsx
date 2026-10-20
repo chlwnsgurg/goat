@@ -1,6 +1,6 @@
-import { scopeThreadRef } from "@t3tools/client-runtime/environment";
-import type { EnvironmentId, ThreadId } from "@t3tools/contracts";
-import { useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
+import { scopeThreadRef } from "@goat/client-runtime/environment";
+import type { EnvironmentId, ThreadId } from "@goat/contracts";
+import { useContext, useEffect, useRef, useState } from "react";
 
 import {
   refreshArchivedThreadsForEnvironment,
@@ -18,10 +18,12 @@ import { threadEnvironment } from "~/state/threads";
 import { useOrchestrationCommand } from "~/state/use-orchestration-command";
 
 import { toastManager } from "../ui/toast";
+import { ThreadVisitWatermark } from "../ThreadVisitWatermark";
 import { GoatBotChatView } from "./GoatBotChatView";
-import { resolveGoatBotRemoval, type GoatBotRemoval } from "./goatBotAvailability";
+import { resolveGoatBotRemoval, type GoatBotRemoval } from "@goat/client-runtime/goatBot";
 import { GoatBotChannelContext } from "./goatBotChannelPort";
 import { useLegacyGlobalAgentRoute } from "./goatBotHooks";
+import { useGoatBotHomeSettings } from "./useGoatBotHome";
 import { useGoatBotSession } from "./useGoatBotSession";
 import { refreshGoatBotWaitingCount } from "./useGoatBotWaitingCount";
 
@@ -56,16 +58,15 @@ function GoatBotThreadSession({
   readonly environmentId: EnvironmentId;
   readonly threadId: ThreadId;
 }) {
-  const threadRef = useMemo(
-    () => scopeThreadRef(environmentId, threadId),
-    [environmentId, threadId],
-  );
+  const threadRef = scopeThreadRef(environmentId, threadId);
   const shell = useThreadShell(threadRef);
   const bootstrapped = useEnvironmentShellsBootstrapped(environmentId);
   const visibleTurnItems = useThreadVisibleTurnItems(
     resolveThreadDetailRef(threadRef, { shellExists: shell !== null, waitForShell: true }),
   );
   const session = useGoatBotSession(visibleTurnItems);
+  const homeSettings = useGoatBotHomeSettings();
+  const moveTarget = homeSettings.moveTarget;
   const chipRevision = visibleTurnItems
     .flatMap(({ item }) =>
       item.type === "notification" && item.ledgerTask
@@ -87,10 +88,10 @@ function GoatBotThreadSession({
     if (resolvedRemoval !== null) setRemoval(null);
   }
   // An archived bot was the bot here, so if it disappears from the archive too it was deleted.
-  const resolveRemoval = useCallback((next: GoatBotRemoval) => {
+  const resolveRemoval = (next: GoatBotRemoval) => {
     if (next === "archived") setShellSeen(true);
     setRemoval(next);
-  }, []);
+  };
   const canOpenCurrentBot = session.confirmedBot !== null && !confirmedHere;
   // Keep the resolved removal while ensure is pending or failed, when confirmedHere is false.
   const removal =
@@ -106,6 +107,7 @@ function GoatBotThreadSession({
   const unarchive = useOrchestrationCommand(threadEnvironment.unarchive, { reportFailure: false });
   return (
     <>
+      {shell !== null ? <ThreadVisitWatermark threadRef={threadRef} /> : null}
       {shell === null && bootstrapped && confirmedHere && removal !== "deleted" ? (
         <GoatBotRemovalProbe
           environmentId={environmentId}
@@ -116,6 +118,16 @@ function GoatBotThreadSession({
       ) : null}
       <GoatBotChatView
         {...session}
+        homeMove={
+          moveTarget
+            ? {
+                label: moveTarget.label,
+                busy: homeSettings.busy,
+                onMove: () => homeSettings.changeHome(moveTarget.environmentId),
+              }
+            : undefined
+        }
+        homeMoveError={homeSettings.error}
         rows={removal === null ? session.rows : NO_PENDING}
         removal={removal}
         canOpenCurrentBot={canOpenCurrentBot}

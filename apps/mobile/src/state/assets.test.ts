@@ -4,7 +4,7 @@ import {
   EnvironmentId,
   ThreadId,
   type AuthSessionState,
-} from "@t3tools/contracts";
+} from "@goat/contracts";
 import * as Cause from "effect/Cause";
 import { AsyncResult } from "effect/reactivity";
 import { beforeEach, expect, it, vi } from "vite-plus/test";
@@ -39,8 +39,8 @@ vi.mock("./query", () => ({
 }));
 vi.mock("./projectClones", () => ({ environmentProjectCloneListAtom: () => null }));
 vi.mock("../connection/runtime", () => ({ connectionAtomRuntime: {} }));
-vi.mock("@t3tools/client-runtime/state/assets", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("@t3tools/client-runtime/state/assets")>()),
+vi.mock("@goat/client-runtime/state/assets", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@goat/client-runtime/state/assets")>()),
   createAssetEnvironmentAtoms: () => ({ createUrl: state.assetQuery }),
 }));
 vi.mock("./use-atom-query-runner", () => ({ useAtomQueryRunner: () => state.mint }));
@@ -77,7 +77,10 @@ it.each(["workspace-file", "media-file"] as const)(
 
 it("hides host assets with a denied grant while preserving attachments", () => {
   state.session = { authenticated: true, scopes: [] };
-  expect(useAssetUrlState(environmentId, resource)).toEqual({ _tag: "Failure", reason: "failed" });
+  expect(useAssetUrlState(environmentId, resource)).toEqual({
+    _tag: "Failure",
+    reason: "missing-file-access",
+  });
   expect(state.assetQuery).not.toHaveBeenCalled();
   expect(useAssetUrlState(environmentId, { _tag: "attachment", attachmentId: "upload" })).toEqual({
     _tag: "Success",

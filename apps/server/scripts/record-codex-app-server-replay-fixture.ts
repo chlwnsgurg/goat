@@ -1,3 +1,5 @@
+// Adopts legacy T3 env names before anything reads the environment.
+import "@goat/contracts/adoptLegacyEnv";
 import * as NodeOS from "node:os";
 
 import { CODEX_THREAD_CONFIG } from "../src/orchestration-v2/Adapters/CodexAdapterV2.ts";
@@ -5,8 +7,8 @@ import { revertCodexThread } from "../src/provider/CodexThreadRevert.ts";
 import { buildCodexInitializeParams } from "../src/provider/CodexProvider.ts";
 import * as NodeRuntime from "@effect/platform-node/NodeRuntime";
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import * as HostProcess from "@t3tools/shared/HostProcess";
-import { resolveSpawnCommand } from "@t3tools/shared/shell";
+import * as HostProcess from "@goat/shared/HostProcess";
+import { resolveSpawnCommand } from "@goat/shared/shell";
 import * as Console from "effect/Console";
 import * as Deferred from "effect/Deferred";
 import * as FileSystem from "effect/FileSystem";
@@ -58,6 +60,7 @@ import {
   TODO_LIST_PROMPT,
   TOOL_CALL_WRITE_PROMPT,
   TURN_INTERRUPT_MID_TOOL_PROMPT,
+  COMMAND_OUTPUT_STREAMING_PROMPT,
   TURN_INTERRUPT_PROMPT,
   WEB_SEARCH_PROMPT,
 } from "../src/orchestration-v2/testkit/fixtures/shared.ts";
@@ -65,7 +68,7 @@ import { codexReplayRecordingOutputRecords } from "./codexReplayRecordingRecords
 import { makeReplayRecorderDeferredRegistry } from "./replayRecorderDeferredRegistry.ts";
 
 const CODEX_REPLAY_PLAN_MODE_DEVELOPER_INSTRUCTIONS =
-  process.env.T3_CODEX_REPLAY_PLAN_DEVELOPER_INSTRUCTIONS ??
+  process.env.GOAT_CODEX_REPLAY_PLAN_DEVELOPER_INSTRUCTIONS ??
   "You are in Plan mode. Prefer request_user_input for clarifying questions. When presenting a complete plan, wrap it in <proposed_plan> and </proposed_plan>.";
 // Match the V2 adapter's initialize, thread and turn frames so recordings replay
 // against it without hand edits.
@@ -75,7 +78,7 @@ const CODEX_CLIENT_CAPABILITIES = {
   extensions: { "io.modelcontextprotocol/ui": { mimeTypes: ["text/html;profile=mcp-app"] } },
 } as const;
 const CODEX_REPLAY_DEFAULT_MODEL = "gpt-6-luna";
-const CODEX_REPLAY_MODEL_OVERRIDE = readArgValue("--model") ?? process.env.T3_CODEX_REPLAY_MODEL;
+const CODEX_REPLAY_MODEL_OVERRIDE = readArgValue("--model") ?? process.env.GOAT_CODEX_REPLAY_MODEL;
 
 const SCENARIO_NAMES = [
   "simple",
@@ -98,6 +101,7 @@ const SCENARIO_NAMES = [
   "message_steering",
   "turn_interrupt",
   "turn_interrupt_mid_tool",
+  "command_output_streaming",
   "thread_rollback",
   "thread_rollback_after_restart",
   "thread_rollback_to_stopped_turn",
@@ -173,7 +177,6 @@ interface ReplayScenario {
   readonly name: ScenarioName;
   readonly fileName: `${ScenarioName}.ndjson`;
   readonly description: string;
-  /** Model this scenario needs, e.g. one that still runs multi-agent v1. `--model` wins. */
   readonly model?: string;
   readonly runs: ReadonlyArray<ReplayRun>;
 }
@@ -212,7 +215,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 function parseScenarios(): ReadonlyArray<ScenarioName> {
   const rawValues = [
     ...readArgValues("--scenario"),
-    ...(process.env.T3_CODEX_REPLAY_SCENARIOS ? [process.env.T3_CODEX_REPLAY_SCENARIOS] : []),
+    ...(process.env.GOAT_CODEX_REPLAY_SCENARIOS ? [process.env.GOAT_CODEX_REPLAY_SCENARIOS] : []),
   ];
   const requested = rawValues.length > 0 ? rawValues : ["simple"];
   const names = requested.flatMap((value) =>
@@ -482,7 +485,6 @@ function scenarios(): ReadonlyArray<ReplayScenario> {
           name: "spawn-v2-subagent-needing-approval",
           description:
             "The child inherits the root's approval policy, so its write asks the client for approval on the child's native thread and turn.",
-          // The adapter's approval-required turn defaults.
           turnDefaults: {
             approvalPolicy: "untrusted",
             sandboxPolicy: { type: "readOnly" },
@@ -763,6 +765,29 @@ function scenarios(): ReadonlyArray<ReplayScenario> {
               label: "interrupt-after-command-execution",
               prompt: TURN_INTERRUPT_MID_TOOL_PROMPT,
               interruptAfterCommandExecutionStarted: true,
+            },
+          ],
+        },
+      ],
+    },
+    {
+      name: "command_output_streaming",
+      fileName: "command_output_streaming.ndjson",
+      description: "One command prints over several seconds, so Codex streams its output deltas.",
+      runs: [
+        {
+          name: "command-output-streaming",
+          description: "Run a foreground command that prints a line a second.",
+          prompt: COMMAND_OUTPUT_STREAMING_PROMPT,
+          turnDefaults: {
+            approvalPolicy: "never",
+            sandboxPolicy: workspaceWriteSandbox(),
+          },
+          steps: [
+            {
+              type: "turn",
+              label: "command-output-streaming",
+              prompt: COMMAND_OUTPUT_STREAMING_PROMPT,
             },
           ],
         },
@@ -1094,7 +1119,6 @@ function makeRecorder({
 }: {
   readonly outPath: string;
   readonly scenario: ReplayScenario;
-  /** Checkout root, scrubbed from recordings because it names the local worktree layout. */
   readonly checkout: string;
 }): Effect.Effect<Recorder, PlatformError.PlatformError, FileSystem.FileSystem> {
   return Effect.gen(function* () {
@@ -1214,7 +1238,7 @@ function layerCodex({ recorder }: { readonly recorder: Recorder }) {
       const { VP_TOOL_RECURSION: _vpToolRecursion, ...environment } =
         yield* HostProcess.Environment;
       const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
-      const commandName = environment.T3_CODEX_BIN ?? environment.CODEX_BIN ?? "codex";
+      const commandName = environment.GOAT_CODEX_BIN ?? environment.CODEX_BIN ?? "codex";
       const spawnCommand = yield* resolveSpawnCommand(commandName, ["app-server"], {
         env: environment,
       });
@@ -1244,7 +1268,6 @@ function installReplayHandlers({
   readonly completeTurn: (turnId: string) => Effect.Effect<void>;
   readonly startCommandExecution: (turnId: string) => Effect.Effect<void>;
   readonly beforeApprovalResponse: () => Effect.Effect<void>;
-  /** Turn id -> command item id -> process id, for commands still running. */
   readonly runningCommandProcessIds: Map<string, Map<string, string>>;
 }) {
   return Effect.all(
@@ -1350,7 +1373,6 @@ function runReplaySession({
     const beforeApprovalResponse = () =>
       approvalGate ? Deferred.await(approvalGate) : Effect.void;
     const model = scenarioModel(scenario);
-    // Same runtime params the adapter sends on thread/start, thread/resume and thread/fork.
     const threadRuntimeParams = { cwd: process.cwd(), model, config: CODEX_THREAD_CONFIG };
     const lastTurnIdByThread = new Map<string, string>();
     const runningCommandProcessIds = new Map<string, Map<string, string>>();
@@ -1432,7 +1454,6 @@ function runReplaySession({
             threadId,
             turnId,
           });
-          // Like the adapter, stop commands the interrupt left running.
           for (const processId of runningCommandProcessIds.get(turnId)?.values() ?? []) {
             yield* client.raw.request("thread/backgroundTerminals/terminate", {
               threadId,
@@ -1553,7 +1574,6 @@ function runReplaySession({
 
       for (const [stepIndex, step] of run.steps.entries()) {
         if (step.type === "rollback") {
-          // The adapter only reverts paginated history, so it reads the mode first.
           yield* client.request("thread/read", { threadId: activeThreadId, includeTurns: false });
           yield* revertCodexThread(client, activeThreadId, step.numTurns);
           continue;
@@ -1564,7 +1584,6 @@ function runReplaySession({
           if (sourceThreadId === undefined) {
             throw new Error(`Unknown replay thread alias '${step.from}'.`);
           }
-          // The adapter forks at the source's latest native turn.
           const lastTurnId = lastTurnIdByThread.get(sourceThreadId);
           const forked = yield* client.request("thread/fork", {
             threadId: sourceThreadId,
@@ -1629,15 +1648,15 @@ const program = Effect.gen(function* () {
   const path = yield* Path.Path;
   const requestedScenarios = parseScenarios();
   const allScenarios = scenarios();
-  const outDir = readArgValue("--out-dir") ?? process.env.T3_CODEX_REPLAY_OUT_DIR;
-  const singleOutPath = readArgValue("--out") ?? process.env.T3_CODEX_REPLAY_OUT;
+  const outDir = readArgValue("--out-dir") ?? process.env.GOAT_CODEX_REPLAY_OUT_DIR;
+  const singleOutPath = readArgValue("--out") ?? process.env.GOAT_CODEX_REPLAY_OUT;
   const selected = allScenarios.filter((scenario) => requestedScenarios.includes(scenario.name));
 
   if (selected.length === 0) {
     throw new Error("No replay scenarios selected.");
   }
   if (singleOutPath && selected.length !== 1) {
-    throw new Error("--out / T3_CODEX_REPLAY_OUT can only be used with exactly one --scenario.");
+    throw new Error("--out / GOAT_CODEX_REPLAY_OUT can only be used with exactly one --scenario.");
   }
 
   yield* Effect.forEach(

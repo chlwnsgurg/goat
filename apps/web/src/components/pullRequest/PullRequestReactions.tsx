@@ -4,8 +4,8 @@ import type {
   PullRequestReaction,
   PullRequestReactionContent,
   PullRequestRef,
-} from "@t3tools/contracts";
-import { SmilePlusIcon } from "lucide-react";
+} from "@goat/contracts";
+import { SmilePlusIcon } from "~/components/solar";
 import { useState } from "react";
 
 import { cn } from "~/lib/utils";
@@ -27,14 +27,12 @@ const PILL_CLASS =
 
 const EMPTY_PENDING: ReadonlyMap<PullRequestReactionContent, boolean> = new Map();
 
-/** What the host last said, so a press in flight is forgotten the moment the real counts land. */
 function reactionsSignature(reactions: ReadonlyArray<PullRequestReaction>): string {
   return reactions
     .map((reaction) => `${reaction.content}:${reaction.count}:${reaction.viewerHasReacted ? 1 : 0}`)
     .join(" ");
 }
 
-/** Reaction counts and an always-visible picker, routed to the supplied host subject. */
 export function PullRequestReactionBar({
   reactions,
   canReact,

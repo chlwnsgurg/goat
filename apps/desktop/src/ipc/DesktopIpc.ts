@@ -5,7 +5,10 @@ import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
 
 export interface DesktopIpcInvokeEvent {
-  readonly sender: { readonly id: number };
+  readonly sender: {
+    readonly id: number;
+    readonly send?: (channel: string, ...args: ReadonlyArray<unknown>) => void;
+  };
 }
 
 export interface DesktopIpcSyncEvent {
@@ -78,7 +81,7 @@ export class DesktopIpc extends Context.Service<
       input: DesktopSyncIpcMethod<E, R>,
     ) => Effect.Effect<void, DesktopIpcRegistrationError, R | Scope.Scope>;
   }
->()("@t3tools/desktop/ipc/DesktopIpc") {}
+>()("@goat/desktop/ipc/DesktopIpc") {}
 
 export const make = (ipcMain: DesktopIpcMain): DesktopIpc["Service"] =>
   DesktopIpc.of({
@@ -153,10 +156,6 @@ export const make = (ipcMain: DesktopIpcMain): DesktopIpc["Service"] =>
   });
 
 export const layer = (ipcMain: DesktopIpcMain) => Layer.succeed(DesktopIpc, make(ipcMain));
-
-/**
- * Convenience helpers for creating IPC methods
- */
 
 export interface DesktopIpcMethodRegistration<
   Payload,

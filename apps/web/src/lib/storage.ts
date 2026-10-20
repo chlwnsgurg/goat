@@ -1,3 +1,4 @@
+import { migratingStorage } from "@goat/client-runtime/storage-migration";
 import { Debouncer } from "@tanstack/react-pacer";
 
 export interface StateStorage<R = unknown> {
@@ -39,10 +40,9 @@ function isStateStorage(
 }
 
 export function resolveStorage(storage: Partial<StateStorage> | null | undefined): StateStorage {
-  return isStateStorage(storage) ? storage : createMemoryStorage();
+  return migratingStorage(isStateStorage(storage) ? storage : createMemoryStorage());
 }
 
-/** Keep the latest value and serialize it when the debounce fires or `flush` runs. */
 export function createDeferredStorage<TValue>(
   baseStorage: Partial<StateStorage> | null | undefined,
   serialize: (value: TValue) => string,

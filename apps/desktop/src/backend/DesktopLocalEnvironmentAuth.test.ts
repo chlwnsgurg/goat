@@ -7,11 +7,11 @@ import * as Ref from "effect/Ref";
 import * as HttpClient from "effect/http/HttpClient";
 import * as HttpClientRequest from "effect/http/HttpClientRequest";
 import * as HttpClientResponse from "effect/http/HttpClientResponse";
-import { PRIMARY_LOCAL_ENVIRONMENT_ID } from "@t3tools/contracts";
+import { PRIMARY_LOCAL_ENVIRONMENT_ID } from "@goat/contracts";
 import {
   DESKTOP_BOOTSTRAP_TOKEN_WINDOW_MS,
   currentDesktopBootstrapToken,
-} from "@t3tools/shared/desktopBootstrapToken";
+} from "@goat/shared/desktopBootstrapToken";
 import * as TestClock from "effect/testing/TestClock";
 
 import * as DesktopBackendPool from "./DesktopBackendPool.ts";
@@ -26,7 +26,7 @@ const config = {
     mode: "desktop",
     noBrowser: true,
     port: 3773,
-    t3Home: "/tmp/t3",
+    goatHome: "/tmp/t3",
     host: "127.0.0.1",
     desktopBootstrapToken: "desktop-bootstrap-token",
     tailscaleServeEnabled: false,
@@ -128,7 +128,6 @@ describe("DesktopLocalEnvironmentAuth", () => {
           ]),
         } as unknown as DesktopBackendPool.DesktopBackendPool["Service"]);
 
-        // The first exchange happens a day after launch, past the launch token's windows.
         yield* TestClock.setTime(DESKTOP_BOOTSTRAP_TOKEN_WINDOW_MS * 2 + 1);
         yield* Effect.gen(function* () {
           const auth = yield* DesktopLocalEnvironmentAuth.DesktopLocalEnvironmentAuth;
@@ -171,7 +170,6 @@ describe("DesktopLocalEnvironmentAuth", () => {
       },
     ]),
   } as unknown as DesktopBackendPool.DesktopBackendPool["Service"]);
-  // Answers the first `failures` exchanges with `failure`, then with a token.
   const makeExchange = (failures: number, failure: () => Response) =>
     Effect.gen(function* () {
       const requestCount = yield* Ref.make(0);

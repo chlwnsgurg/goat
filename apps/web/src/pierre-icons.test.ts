@@ -4,10 +4,26 @@ import {
   hasSpecificPierreIconForFileName,
   resolvePierreIconForEntry,
   syntheticFileNameForLanguageId,
-  T3_PIERRE_ICONS,
+  GOAT_PIERRE_ICONS,
 } from "./pierre-icons";
 
 describe("Pierre file icons", () => {
+  it("uses detected types for extensionless files while keeping known filename icons", () => {
+    assert.equal(
+      resolvePierreIconForEntry("custom-script", "file", "text/x-python")?.token,
+      "python",
+    );
+    assert.equal(resolvePierreIconForEntry("image", "file", "image/png")?.token, "image");
+    assert.equal(
+      resolvePierreIconForEntry("Dockerfile", "file", "text/x-shellscript")?.token,
+      "docker",
+    );
+    assert.isNull(resolvePierreIconForEntry("folder.png", "directory", "image/png"));
+    assert.equal(
+      resolvePierreIconForEntry("unknown", "file", "application/octet-stream")?.token,
+      "default",
+    );
+  });
   it("uses Pierre exact filename and complete-set extension mappings", () => {
     assert.equal(resolvePierreIconForEntry("Dockerfile", "file")?.token, "docker");
     assert.equal(resolvePierreIconForEntry("src/Button.tsx", "file")?.token, "react");
@@ -28,23 +44,23 @@ describe("Pierre file icons", () => {
   });
 
   it("extends Pierre with T3-specific exact filename icons", () => {
-    assert.equal(resolvePierreIconForEntry("AGENTS.md", "file")?.name, "t3-file-icon-agents");
-    assert.equal(resolvePierreIconForEntry("pnpm-lock.yaml", "file")?.name, "t3-file-icon-pnpm");
+    assert.equal(resolvePierreIconForEntry("AGENTS.md", "file")?.name, "goat-file-icon-agents");
+    assert.equal(resolvePierreIconForEntry("pnpm-lock.yaml", "file")?.name, "goat-file-icon-pnpm");
     assert.equal(
       resolvePierreIconForEntry("pnpm-workspace.yaml", "file")?.name,
-      "t3-file-icon-pnpm",
+      "goat-file-icon-pnpm",
     );
   });
 
   it("ships every custom icon referenced by the extended resolver", () => {
     const customIconNames = new Set(
       [
-        ...Object.values(T3_PIERRE_ICONS.byFileName),
-        ...Object.values(T3_PIERRE_ICONS.byFileExtension),
+        ...Object.values(GOAT_PIERRE_ICONS.byFileName),
+        ...Object.values(GOAT_PIERRE_ICONS.byFileExtension),
       ].filter((name) => name.startsWith("t3-")),
     );
     for (const iconName of customIconNames) {
-      assert.include(T3_PIERRE_ICONS.spriteSheet, `id="${iconName}"`);
+      assert.include(GOAT_PIERRE_ICONS.spriteSheet, `id="${iconName}"`);
     }
   });
 

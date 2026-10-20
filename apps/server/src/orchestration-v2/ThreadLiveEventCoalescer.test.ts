@@ -5,7 +5,7 @@ import {
   RunId,
   TurnItemId,
   type OrchestrationV2ThreadStreamItem,
-} from "@t3tools/contracts";
+} from "@goat/contracts";
 import { it } from "@effect/vitest";
 import * as Clock from "effect/Clock";
 import * as DateTime from "effect/DateTime";
@@ -229,7 +229,6 @@ describe("ThreadLiveEventCoalescer", () => {
               .offer(makeToolActivity(4, { kind: "tool.completed" }))
               .pipe(Effect.result);
             expect(overflow._tag).toBe("Failure");
-            // Do not pull or acknowledge the batch. Cleanup must still finish.
             yield* coalescer.closed;
             expect(yield* coalescer.usage).toEqual({
               retainedItems: 1,

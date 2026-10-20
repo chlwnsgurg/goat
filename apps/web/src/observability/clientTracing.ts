@@ -5,8 +5,8 @@ import * as Scope from "effect/Scope";
 import { HttpClient } from "effect/http";
 import { OtlpExporter, OtlpSerialization, OtlpTracer } from "effect/observability";
 
-import { settleAsyncResult, squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime";
-import { safeErrorLogAttributes } from "@t3tools/client-runtime/errors";
+import { settleAsyncResult, squashAtomCommandFailure } from "@goat/client-runtime/state/runtime";
+import { safeErrorLogAttributes } from "@goat/client-runtime/errors";
 import { resolvePrimaryEnvironmentHttpUrl } from "../environments/primary";
 import * as ClientTracer from "./clientTracer";
 import * as PrimaryEnvironmentHttpLayer from "../environments/primary/httpLayer";
@@ -15,10 +15,10 @@ import { APP_VERSION } from "~/branding";
 
 const DEFAULT_EXPORT_INTERVAL_MS = 1_000;
 const CLIENT_TRACING_RESOURCE = {
-  serviceName: "t3code-web",
+  serviceName: "goat-web",
   attributes: {
-    "service.namespace": "t3code",
-    "service.runtime": "t3-web",
+    "service.namespace": "goat",
+    "service.runtime": "goat-web",
     "service.mode": isElectron ? "electron" : "browser",
     "service.version": APP_VERSION,
   },

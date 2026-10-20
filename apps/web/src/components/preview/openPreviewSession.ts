@@ -5,8 +5,8 @@ import type {
   PreviewSessionSnapshot,
   PreviewViewportSetting,
   ScopedThreadRef,
-} from "@t3tools/contracts";
-import type { AtomCommandResult } from "@t3tools/client-runtime/state/runtime";
+} from "@goat/contracts";
+import type { AtomCommandResult } from "@goat/client-runtime/state/runtime";
 import * as Cause from "effect/Cause";
 import { AsyncResult } from "effect/reactivity";
 
@@ -26,11 +26,8 @@ interface OpenPreviewSessionInput<E> {
   }) => Promise<AtomCommandResult<PreviewSessionSnapshot, E>>;
   threadRef: ScopedThreadRef;
   url?: string;
-  /** Overrides the configured default; automation passes an explicit size. */
   viewport?: PreviewViewportSetting;
-  /** Overrides the configured default profile. */
   profileId?: string;
-  /** Overrides where the tab runs, such as when moving a tab between browsers. */
   runtime?: PreviewRuntime;
 }
 

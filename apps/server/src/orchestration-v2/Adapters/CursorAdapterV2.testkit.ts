@@ -1,4 +1,4 @@
-import * as HostProcess from "@t3tools/shared/HostProcess";
+import * as HostProcess from "@goat/shared/HostProcess";
 import type { InteractionUpdate, RunResult } from "@cursor/sdk";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import {
@@ -7,7 +7,7 @@ import {
   ThreadId,
   type ModelSelection,
   type ProviderReplayTranscript,
-} from "@t3tools/contracts";
+} from "@goat/contracts";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
@@ -15,20 +15,20 @@ import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
 
-import * as TestProviderHost from "@t3tools/provider-testing/TestProviderHost";
-import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
-import { ProviderAdapterDriverCreateError } from "@t3tools/provider-core/server/adapterDriver";
+import * as TestProviderHost from "@goat/provider-testing/TestProviderHost";
+import * as IdAllocator from "@goat/provider-core/server/IdAllocator";
+import { ProviderAdapterDriverCreateError } from "@goat/provider-core/server/adapterDriver";
 import * as ProviderAdapterRegistry from "../ProviderAdapterRegistry.ts";
 import type { OrchestratorV2ProviderReplayHarness } from "../testkit/ProviderReplayHarness.ts";
-import { CursorAdapterV2Driver } from "@t3tools/provider-cursor/server";
-import * as CursorAgentSdk from "@t3tools/provider-cursor/server/CursorAgentSdk";
+import { CursorAdapterV2Driver } from "@goat/provider-cursor/server";
+import * as CursorAgentSdk from "@goat/provider-cursor/server/CursorAgentSdk";
 import {
   CURSOR_DEFAULT_INSTANCE_ID,
   CURSOR_DRIVER_KIND,
   cursorSdkModelSelection,
   makeCursorAgentOptions,
-} from "@t3tools/provider-cursor/testing";
-import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
+} from "@goat/provider-cursor/testing";
+import type * as ProviderAdapter from "@goat/provider-core/server/ProviderAdapter";
 import type { RuntimePolicyV2Override } from "../RuntimePolicy.ts";
 
 const CursorAgentSdkReplayTranscript = Schema.Struct({
@@ -522,7 +522,7 @@ export function layer(
     HostProcess.Environment,
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
-      const home = yield* fs.makeTempDirectoryScoped({ prefix: "t3-cursor-replay-home-" });
+      const home = yield* fs.makeTempDirectoryScoped({ prefix: "goat-cursor-replay-home-" });
       return { HOME: home };
     }).pipe(Effect.orDie),
   ).pipe(Layer.provide(NodeServices.layer));
@@ -599,7 +599,6 @@ function sanitizeReplayValue(
   if (typeof value !== "object" || value === null) {
     return value;
   }
-  // Keys too: grep results are keyed by workspace path.
   return Object.fromEntries(
     Object.entries(value).map(([key, entry]) => [
       sanitizeReplayText(key, replacements),
@@ -653,14 +652,11 @@ class CursorReplayRecordingError extends Schema.TaggedError<CursorReplayRecordin
 interface CursorReplayRecordingInput {
   readonly scenario: string;
   readonly prompts: ReadonlyArray<string>;
-  /** Stable transcript representation when runtime-only paths were substituted into prompts. */
   readonly transcriptPrompts?: ReadonlyArray<string>;
   readonly modelSelection: ModelSelection;
   readonly cwd: string;
-  /** Stable fixture cwd used to sanitize runtime-only workspace paths in recorded updates. */
   readonly transcriptCwd?: string;
   readonly interactionMode?: "default" | "plan";
-  /** The replay fixture's policy override, so the recorded agent.open frame matches replay. */
   readonly runtimePolicyOverride?: Pick<
     RuntimePolicyV2Override,
     "approvalPolicy" | "sandboxPolicy"
@@ -671,11 +667,6 @@ interface CursorReplayRecordingInput {
   readonly restartBeforePromptIndex?: number;
 }
 
-/**
- * Records a live Cursor Agent SDK session as a replay transcript. The SDK is
- * driven through the same runner the adapter uses; its protocol frames are the
- * transcript entries.
- */
 export const recordCursorAgentSdkReplayTranscript = Effect.fn(
   "recordCursorAgentSdkReplayTranscript",
 )(function* (input: CursorReplayRecordingInput) {
@@ -837,17 +828,12 @@ export const recordCursorAgentSdkReplayTranscript = Effect.fn(
             return;
           }
           const first = yield* Deferred.succeed(toolStarted, undefined);
-          // Also hold the SDK's callback until the cancel is sent, as the async
-          // recorder did: with the tool left running, all three live probes hit
-          // the AbortError described below. Inside send the hold would never
-          // return, so updates flushed there rely on recordFrame's ordering.
           if (first && sent) {
             yield* Deferred.await(cancelSent);
           }
         }),
     });
     sent = true;
-    // Wait on the run before cancelling it, as the adapter does.
     const waiting = yield* run.wait.pipe(Effect.forkChild({ startImmediately: true }));
     if (interruptAfterRunStart) {
       yield* awaitSignal(firstUpdate, "Cursor SDK run activity before interrupt");

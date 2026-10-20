@@ -1,6 +1,6 @@
-import { DownloadIcon } from "lucide-react";
+import { DownloadIcon } from "~/components/solar";
 import { useSyncExternalStore } from "react";
-import type { RelayClientInstallProgressStage } from "@t3tools/contracts";
+import type { RelayClientInstallProgressStage } from "@goat/contracts";
 
 import {
   completeRelayClientInstallDialogClose,

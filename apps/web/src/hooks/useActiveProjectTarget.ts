@@ -1,5 +1,5 @@
-import { scopeThreadRef } from "@t3tools/client-runtime/environment";
-import type { EnvironmentId, ScopedThreadRef } from "@t3tools/contracts";
+import { scopeThreadRef } from "@goat/client-runtime/environment";
+import type { EnvironmentId, ScopedThreadRef } from "@goat/contracts";
 
 import { useProjects } from "~/state/entities";
 
@@ -12,11 +12,6 @@ export interface ActiveProjectTarget {
   readonly threadRef: ScopedThreadRef;
 }
 
-/**
- * Resolves the project workspace behind the active thread (or draft) so
- * project-scoped surfaces like the file picker and content search know which
- * workspace to query and which thread's right panel opens their results.
- */
 export function useActiveProjectTarget(): ActiveProjectTarget | null {
   const { activeDraftThread, activeThread } = useHandleNewThread();
   const projects = useProjects();

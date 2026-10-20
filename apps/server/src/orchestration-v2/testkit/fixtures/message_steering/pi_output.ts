@@ -1,5 +1,5 @@
 import { assert } from "@effect/vitest";
-import type { ProviderReplayTranscript } from "@t3tools/contracts";
+import type { ProviderReplayTranscript } from "@goat/contracts";
 
 import type { OrchestratorV2ScenarioResult } from "../../OrchestratorScenario.ts";
 import {
@@ -36,7 +36,7 @@ export function assertPiMessageSteeringOutput(
   assert.deepEqual(
     prompts.map((frame) => [frameField(frame, "message"), frameField(frame, "streamingBehavior")]),
     [
-      [MESSAGE_STEERING_INITIAL_PROMPT, undefined],
+      [MESSAGE_STEERING_INITIAL_PROMPT, "steer"],
       [MESSAGE_STEERING_STEER_PROMPT, "steer"],
     ],
   );

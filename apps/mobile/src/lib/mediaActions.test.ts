@@ -3,7 +3,7 @@ import {
   EnvironmentId,
   ThreadId,
   type AuthSessionState,
-} from "@t3tools/contracts";
+} from "@goat/contracts";
 import { AsyncResult } from "effect/reactivity";
 import { beforeEach, expect, it, vi } from "vite-plus/test";
 
@@ -26,7 +26,7 @@ vi.mock("react-native", () => ({ Alert: { alert: vi.fn() } }));
 vi.mock("@react-navigation/native", () => ({
   useNavigation: () => ({ navigate: state.navigate }),
 }));
-vi.mock("@t3tools/mobile-markdown-text/links", () => ({
+vi.mock("./markdownLinks", () => ({
   normalizeNativeMarkdownUrl: (uri: string) => uri,
 }));
 vi.mock("../state/assets", () => ({
@@ -166,6 +166,33 @@ it.each(["workspace-file", "media-file"] as const)(
     expect(state.copy).toHaveBeenCalledWith("/repo/image.png");
     expect(media.actions.find(({ id }) => id === "save")?.disabled).toBe(true);
     expect(media.actions.find(({ id }) => id === "open-file")?.disabled).toBe(true);
+  },
+);
+
+it.each(["/tmp/chart.png", "/tmp/recording.mp4", "C:\\Temp\\chart.png", "//host/share/chart.png"])(
+  "opens host media outside the workspace without losing its root: %s",
+  (path) => {
+    state.sessions.set(environmentId, granted);
+    const onOpenFile = vi.fn();
+    const source: MediaActionsSource = {
+      ...hostSource(),
+      reference: { kind: "file", path },
+      environmentId,
+      threadId,
+      resource: { _tag: "media-file", threadId, path },
+    };
+    const media = useMediaActions(source, onOpenFile);
+
+    media.actions.find(({ id }) => id === "open-file")!.run();
+
+    expect(onOpenFile).toHaveBeenCalledOnce();
+    expect(state.navigate).toHaveBeenCalledWith("ThreadFile", {
+      environmentId: String(environmentId),
+      threadId: String(threadId),
+      path: path.split("/"),
+    });
+    expect(state.navigate.mock.calls[0]?.[1].path.join("/")).toBe(path);
+    expect(media.actions.some(({ id }) => id === "copy-relative-path")).toBe(false);
   },
 );
 

@@ -9,8 +9,8 @@ import {
   RunAttemptId,
   RunId,
   ThreadId,
-} from "@t3tools/contracts";
-import { resolveSelfInvocation } from "@t3tools/shared/nodeRuntime";
+} from "@goat/contracts";
+import { resolveSelfInvocation } from "@goat/shared/nodeRuntime";
 import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
@@ -22,13 +22,13 @@ import * as Stream from "effect/Stream";
 import { ChildProcessSpawner } from "effect/process";
 import type * as EffectAcpSchema from "effect-acp/compat";
 
-import * as ProviderHost from "@t3tools/provider-core/server/ProviderHost";
-import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
-import * as TestProviderHost from "@t3tools/provider-testing/TestProviderHost";
-import type * as AcpSessionRuntime from "@t3tools/provider-acp/server/AcpSessionRuntime";
+import * as ProviderHost from "@goat/provider-core/server/ProviderHost";
+import * as McpProviderSessions from "@goat/provider-core/server/McpProviderSessions";
+import * as TestProviderHost from "@goat/provider-testing/TestProviderHost";
+import type * as AcpSessionRuntime from "@goat/provider-acp/server/AcpSessionRuntime";
 import { makeAntigravityAcpRuntime } from "../../provider/acp/AntigravityAcpSupport.ts";
-import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
-import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
+import * as IdAllocator from "@goat/provider-core/server/IdAllocator";
+import * as ProviderAdapter from "@goat/provider-core/server/ProviderAdapter";
 import {
   makeAntigravityAcpAdapterFlavor,
   makeAntigravityAdapterV2,
@@ -86,8 +86,8 @@ describe("AntigravityAdapterV2 flavor", () => {
     assert.equal(mode("full-access"), "yolo");
   });
 
-  it("exposes Antigravity's /compact command through the v2 compaction path", () => {
-    assert.isTrue(flavor.supportsCompaction);
+  it("does not invent native Antigravity compaction support", () => {
+    assert.isFalse(flavor.supportsCompaction);
   });
 
   it("routes interaction_* permission requests to the question card", () => {
@@ -161,7 +161,7 @@ describe("AntigravityAdapterV2 client file system", () => {
               command: process.execPath,
               args: [mockAgentPath],
               cwd: input.cwd,
-              env: { T3_ACP_ANTIGRAVITY: "1" },
+              env: { GOAT_ACP_ANTIGRAVITY: "1" },
             },
           }).pipe(
             Effect.provideService(Crypto.Crypto, crypto),
@@ -181,10 +181,10 @@ describe("AntigravityAdapterV2 client file system", () => {
         defaultModel: Effect.succeed(undefined),
       });
       const workspace = yield* fileSystem.makeTempDirectoryScoped({
-        prefix: "t3-antigravity-workspace-",
+        prefix: "goat-antigravity-workspace-",
       });
       const outside = yield* fileSystem.makeTempDirectoryScoped({
-        prefix: "t3-antigravity-outside-",
+        prefix: "goat-antigravity-outside-",
       });
       const outsideFile = path.join(outside, "secret.txt");
       yield* fileSystem.writeFileString(outsideFile, "secret");
@@ -234,8 +234,6 @@ describe("AntigravityAdapterV2 client file system", () => {
       assert.isTrue(Exit.isFailure(outsideWrite));
       assert.isFalse(yield* fileSystem.exists(path.join(outside, "planted.txt")));
 
-      // An in-workspace symlink to an outside file must not carry a read or
-      // write out of the workspace.
       const linkPath = path.join(workspace, "linked-secret.txt");
       yield* fileSystem.symlink(outsideFile, linkPath);
       const linkedRead = yield* readTextFile(
@@ -249,7 +247,6 @@ describe("AntigravityAdapterV2 client file system", () => {
       ).pipe(Effect.exit);
       assert.isTrue(Exit.isFailure(linkedWrite), "a write through an escaping symlink is denied");
       assert.equal(yield* fileSystem.readFileString(outsideFile), "secret");
-      // A dangling in-workspace symlink to an outside path must not create it.
       const plantedTarget = path.join(outside, "created-through-link.txt");
       const danglingLink = path.join(workspace, "dangling.txt");
       yield* fileSystem.symlink(plantedTarget, danglingLink);
@@ -259,7 +256,6 @@ describe("AntigravityAdapterV2 client file system", () => {
       ).pipe(Effect.exit);
       assert.isTrue(Exit.isFailure(danglingWrite), "a write through a dangling symlink is denied");
       assert.isFalse(yield* fileSystem.exists(plantedTarget));
-      // A new file under an in-workspace directory link to outside is denied.
       yield* fileSystem.symlink(outside, path.join(workspace, "linked-dir"));
       const linkedDirWrite = yield* writeTextFile(
         {
@@ -352,7 +348,7 @@ describe("AntigravityAdapterV2 workspace changes", () => {
               command: process.execPath,
               args: [mockAgentPath],
               cwd: input.cwd,
-              env: { T3_ACP_ANTIGRAVITY: "1", T3_ACP_HANG_PROMPT_FOREVER: "1" },
+              env: { GOAT_ACP_ANTIGRAVITY: "1", GOAT_ACP_HANG_PROMPT_FOREVER: "1" },
             },
           }).pipe(
             Effect.provideService(Crypto.Crypto, crypto),
@@ -367,8 +363,8 @@ describe("AntigravityAdapterV2 workspace changes", () => {
         withProcess: (_stop, task) => task,
         defaultModel: Effect.succeed(undefined),
       });
-      const workspaceA = yield* fileSystem.makeTempDirectoryScoped({ prefix: "t3-ag-a-" });
-      const workspaceB = yield* fileSystem.makeTempDirectoryScoped({ prefix: "t3-ag-b-" });
+      const workspaceA = yield* fileSystem.makeTempDirectoryScoped({ prefix: "goat-ag-a-" });
+      const workspaceB = yield* fileSystem.makeTempDirectoryScoped({ prefix: "goat-ag-b-" });
       yield* fileSystem.writeFileString(path.join(workspaceA, "a.txt"), "from a");
       yield* fileSystem.writeFileString(path.join(workspaceB, "b.txt"), "from b");
       const policyFor = (cwd: string) =>
@@ -390,7 +386,6 @@ describe("AntigravityAdapterV2 workspace changes", () => {
         modelSelection,
         runtimePolicy: policyFor(workspaceA),
       });
-      // The session opened for A now runs a turn for B.
       const now = yield* DateTime.now;
       yield* session
         .startTurn({
@@ -458,8 +453,6 @@ describe("AntigravityAdapterV2 workspace changes", () => {
 });
 
 describe("AntigravityAdapterV2 client file system under restrictive policies", () => {
-  // Antigravity asks before each of its own edits, so T3 serves an opted-in
-  // write whatever the thread's policy says, confined to the workspace.
   it.effect("serves in-workspace reads and writes and still refuses outside paths", () =>
     Effect.gen(function* () {
       const childProcessSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
@@ -496,7 +489,7 @@ describe("AntigravityAdapterV2 client file system under restrictive policies", (
                 command: process.execPath,
                 args: [mockAgentPath],
                 cwd: input.cwd,
-                env: { T3_ACP_ANTIGRAVITY: "1" },
+                env: { GOAT_ACP_ANTIGRAVITY: "1" },
               },
             }).pipe(
               Effect.provideService(Crypto.Crypto, crypto),
@@ -516,10 +509,10 @@ describe("AntigravityAdapterV2 client file system under restrictive policies", (
           defaultModel: Effect.succeed(undefined),
         });
         const workspace = yield* fileSystem.makeTempDirectoryScoped({
-          prefix: "t3-ag-restrictive-",
+          prefix: "goat-ag-restrictive-",
         });
         const outside = yield* fileSystem.makeTempDirectoryScoped({
-          prefix: "t3-ag-restrictive-outside-",
+          prefix: "goat-ag-restrictive-outside-",
         });
         yield* fileSystem.writeFileString(path.join(workspace, "existing.ts"), "existing");
         const threadId = ThreadId.make(`thread-antigravity-restrictive-${policy.runtimeMode}`);
@@ -563,3 +556,9 @@ describe("AntigravityAdapterV2 client file system under restrictive policies", (
     }).pipe(Effect.provide(layerSession), Effect.scoped),
   );
 });
+
+import { acpMemoryDelivery } from "./memoryDelivery.testkit.ts";
+
+it.live.each([true, false])("WP4 memory delivery antigravity attached=%s", (attached) =>
+  acpMemoryDelivery("antigravity", attached),
+);

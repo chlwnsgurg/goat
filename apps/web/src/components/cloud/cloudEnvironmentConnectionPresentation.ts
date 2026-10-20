@@ -1,7 +1,7 @@
 import {
   connectionStatusText,
   type EnvironmentConnectionPresentation,
-} from "@t3tools/client-runtime/connection";
+} from "@goat/client-runtime/connection";
 
 export interface SavedCloudEnvironmentConnectionPresentation {
   readonly buttonLabel: string;
@@ -9,11 +9,6 @@ export interface SavedCloudEnvironmentConnectionPresentation {
   readonly tone: "connected" | "connecting" | "error" | "idle";
 }
 
-/**
- * Present the live supervisor state for an environment that is already in the
- * connection catalog. Catalog membership only means the environment is saved;
- * it does not mean the connection attempt succeeded.
- */
 export function presentSavedCloudEnvironmentConnection(
   connection: EnvironmentConnectionPresentation,
 ): SavedCloudEnvironmentConnectionPresentation {
@@ -31,12 +26,19 @@ export function presentSavedCloudEnvironmentConnection(
         tone: "connecting",
       };
     case "reconnecting":
+      // A host that is away (asleep, off the network) reads as idle: it is
+      // expected, retries on its own, and must not animate for hours.
+      if (connection.unreachable)
+        return {
+          buttonLabel: "Unreachable",
+          statusText: connectionStatusText(connection),
+          tone: "idle",
+        };
       return {
         buttonLabel: "Reconnecting…",
         statusText: connectionStatusText(connection),
         tone: "connecting",
       };
-    // Not a failure: the machine is fine, this build just cannot talk to it.
     case "unsupported":
       return {
         buttonLabel: "Client not supported",

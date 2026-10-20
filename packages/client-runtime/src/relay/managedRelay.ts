@@ -1,3 +1,4 @@
+import { isGoatConnectEnabled } from "@goat/shared/goatConnect";
 import {
   RelayAccessTokenType,
   RelayApi,
@@ -28,11 +29,11 @@ import {
   RelayProtectedError,
   type RelayProtectedError as RelayProtectedErrorType,
   RelayUnregisterDeviceEndpoint,
-} from "@t3tools/contracts/relay";
-import { encodeOAuthScope, oauthScopeSetEquals } from "@t3tools/shared/oauthScope";
-import { decodeRelayJwt } from "@t3tools/shared/relayJwt";
-import { withRelayClientTracing } from "@t3tools/shared/relayTracing";
-import { normalizeSecureRelayUrl } from "@t3tools/shared/relayUrl";
+} from "@goat/contracts/relay";
+import { encodeOAuthScope, oauthScopeSetEquals } from "@goat/shared/oauthScope";
+import { decodeRelayJwt } from "@goat/shared/relayJwt";
+import { withRelayClientTracing } from "@goat/shared/relayTracing";
+import { normalizeSecureRelayUrl } from "@goat/shared/relayUrl";
 import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
 import * as Duration from "effect/Duration";
@@ -120,9 +121,6 @@ export class ManagedRelayRequestTimeoutError extends Schema.TaggedError<ManagedR
   {
     activity: ManagedRelayRequestActivity,
     timeoutMs: Schema.Number,
-    // The CLIENT span's trace id. A timed-out request has no server response
-    // to take an id from, but the client span was exported, so carrying its id
-    // makes the failure searchable instead of logging `traceId: null`.
     traceId: Schema.NullOr(Schema.String),
   },
 ) {
@@ -149,6 +147,7 @@ export class ManagedRelayRequestFailedError extends Schema.TaggedError<ManagedRe
     transportFailed: Schema.optionalKey(Schema.Boolean),
     cause: Schema.Defect(),
     relayError: Schema.optional(RelayProtectedError),
+    status: Schema.optional(Schema.Number),
     traceId: Schema.optional(Schema.String),
   },
 ) {
@@ -220,7 +219,7 @@ export class ManagedRelayDpopSigner extends Context.Service<
       input: ManagedRelayDpopProofInput,
     ) => Effect.Effect<string, ManagedRelayDpopProofCreationError>;
   }
->()("@t3tools/client-runtime/relay/managedRelay/ManagedRelayDpopSigner") {}
+>()("@goat/client-runtime/relay/managedRelay/ManagedRelayDpopSigner") {}
 
 export const MANAGED_RELAY_REQUEST_TIMEOUT_MS = 10_000;
 
@@ -302,9 +301,18 @@ export class ManagedRelayClient extends Context.Service<
     }) => Effect.Effect<RelayAgentActivitySnapshotResponse, ManagedRelayClientError>;
     readonly resetTokenCache: Effect.Effect<void>;
   }
->()("@t3tools/client-runtime/relay/managedRelay/ManagedRelayClient") {}
+>()("@goat/client-runtime/relay/managedRelay/ManagedRelayClient") {}
 
 const isRelayProtectedError = Schema.is(RelayProtectedError);
+
+const TRACEPARENT_TRACE_ID = /^[\da-f]{2}-([\da-f]{32})-[\da-f]{16}-[\da-f]{2}$/i;
+
+function untypedResponseFields(cause: RelayHttpRequestError) {
+  const response = HttpClientError.isHttpClientError(cause) ? cause.response : undefined;
+  if (!response) return {};
+  const traceId = TRACEPARENT_TRACE_ID.exec(response.headers.traceparent ?? "")?.[1];
+  return { status: response.status, ...(traceId ? { traceId } : {}) };
+}
 
 function relayRequestError(action: ManagedRelayRequestAction) {
   return (cause: RelayHttpRequestError): ManagedRelayClientError =>
@@ -313,7 +321,9 @@ function relayRequestError(action: ManagedRelayRequestAction) {
       transportFailed:
         HttpClientError.isHttpClientError(cause) && cause.reason._tag === "TransportError",
       cause,
-      ...(isRelayProtectedError(cause) ? { relayError: cause, traceId: cause.traceId } : {}),
+      ...(isRelayProtectedError(cause)
+        ? { relayError: cause, traceId: cause.traceId }
+        : untypedResponseFields(cause)),
     });
 }
 
@@ -434,7 +444,7 @@ export const make = Effect.fn("ManagedRelayClient.make")(function* (
   options: ManagedRelayClientLayerOptions,
 ) {
   const relayUrl = normalizeSecureRelayUrl(options.relayUrl);
-  if (relayUrl === null) {
+  if (!isGoatConnectEnabled() || relayUrl === null) {
     return disabledManagedRelayClient(options.relayUrl);
   }
   const signer = yield* ManagedRelayDpopSigner;
@@ -560,7 +570,6 @@ export const make = Effect.fn("ManagedRelayClient.make")(function* (
         scopes: input.scopes,
         nowMillis,
       };
-      // Cache hits do not need to wait for an unrelated exchange or store write.
       const cached = (yield* SynchronizedRef.get(cachedTokens)).find((token) =>
         tokenMatches(token, match),
       );

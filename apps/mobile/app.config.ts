@@ -1,7 +1,15 @@
 import type { ExpoConfig } from "expo/config";
 
+import { BRAND_CHANNEL_ICON_BACKGROUND } from "../../packages/shared/src/brandChannels.ts";
+
 import { BRAND_ASSET_PATHS } from "../../scripts/lib/brand-assets.ts";
 import { loadRepoEnv } from "../../scripts/lib/public-config.ts";
+// A relative path like the scripts/lib imports above: the config loader runs this file under
+// require(), which the shared package's import-only export condition would not resolve.
+import {
+  DEFAULT_IOS_TEAM_ID,
+  MOBILE_APP_IDENTITY,
+} from "../../packages/shared/src/mobileAppIdentity.ts";
 
 type AppVariant = "development" | "preview" | "production";
 
@@ -9,17 +17,17 @@ const repoEnv = loadRepoEnv();
 Object.assign(process.env, repoEnv);
 
 const APP_VARIANT = resolveAppVariant(repoEnv.APP_VARIANT);
-const isIosPersonalTeamBuild = repoEnv.T3CODE_IOS_PERSONAL_TEAM === "1";
+const isIosPersonalTeamBuild = repoEnv.GOAT_IOS_PERSONAL_TEAM === "1";
 const runtimeVersionPolicy =
   process.env.MOBILE_VERSION_POLICY ??
   (APP_VARIANT === "development" ? "appVersion" : "fingerprint");
 
-const personalTeamBundleIdentifier = repoEnv.T3CODE_IOS_PERSONAL_TEAM_BUNDLE_ID?.trim();
+const personalTeamBundleIdentifier = repoEnv.GOAT_IOS_PERSONAL_TEAM_BUNDLE_ID?.trim();
 const IOS_BUNDLE_IDENTIFIER_PATTERN = /^[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+$/;
 
 const fromRepoRoot = (relativePath: string) => `../../${relativePath}`;
-// Android layers are rendered by scripts/export-android-icons.ts from the Icon Composer sources.
-// The wordmark sits inside the adaptive safe zone; the variant artwork is a full-bleed background.
+// Android layers are rendered by scripts/export-android-icons.ts from the shared GOAT mark.
+// The wordmark sits inside the adaptive safe zone; the channel color is a full-bleed background.
 const androidAdaptiveForeground = "./assets/android-icon-foreground.png";
 
 if (
@@ -28,8 +36,28 @@ if (
     !IOS_BUNDLE_IDENTIFIER_PATTERN.test(personalTeamBundleIdentifier))
 ) {
   throw new Error(
-    "T3CODE_IOS_PERSONAL_TEAM_BUNDLE_ID must be a reverse-DNS identifier such as com.example.t3code when T3CODE_IOS_PERSONAL_TEAM=1.",
+    "GOAT_IOS_PERSONAL_TEAM_BUNDLE_ID must be a reverse-DNS identifier such as com.example.t3code when GOAT_IOS_PERSONAL_TEAM=1.",
   );
+}
+
+const iosTeamId = repoEnv.GOAT_IOS_TEAM_ID?.trim() || DEFAULT_IOS_TEAM_ID;
+const clerkConfigured = Boolean(repoEnv.EXPO_PUBLIC_CLERK_PUBLISHABLE_KEY?.trim());
+// Passkeys and universal links need a domain this app's team owns; without one, associate none.
+const clerkDomain = repoEnv.GOAT_MOBILE_CLERK_DOMAIN?.trim() || null;
+// OTA updates and EAS builds need an EAS project the GOAT account owns. Without one the binary
+// ships with updates off rather than pointing at another account's project.
+const easProjectId = repoEnv.GOAT_MOBILE_EAS_PROJECT_ID?.trim() || null;
+const easOwner = repoEnv.GOAT_MOBILE_EAS_OWNER?.trim() || null;
+const updatesEnabled = easProjectId !== null && repoEnv.GOAT_MOBILE_UPDATES_ENABLED !== "0";
+const buildNumber = parseBuildNumber(repoEnv.GOAT_MOBILE_BUILD_NUMBER);
+
+function parseBuildNumber(value: string | undefined): string | null {
+  const trimmed = value?.trim();
+  if (!trimmed) return null;
+  if (!/^[1-9][0-9]*$/.test(trimmed)) {
+    throw new Error("GOAT_MOBILE_BUILD_NUMBER must be a positive integer.");
+  }
+  return trimmed;
 }
 
 const DEVELOPMENT_ASSETS = {
@@ -37,7 +65,7 @@ const DEVELOPMENT_ASSETS = {
   iosIcon: fromRepoRoot(BRAND_ASSET_PATHS.developmentIconComposerProject),
   splashIcon: fromRepoRoot(BRAND_ASSET_PATHS.developmentIosIconPng),
   androidAdaptiveForeground,
-  androidAdaptiveBackgroundColor: "#347FF8",
+  androidAdaptiveBackgroundColor: BRAND_CHANNEL_ICON_BACKGROUND.dev,
   androidAdaptiveBackgroundImage: "./assets/android-icon-background-dev.png",
   androidSplashIcon: "./assets/android-splash-icon-dev.png",
   androidMonochromeIcon: "./assets/android-icon-mark.png",
@@ -50,7 +78,7 @@ const PREVIEW_ASSETS = {
   iosIcon: fromRepoRoot(BRAND_ASSET_PATHS.nightlyIconComposerProject),
   splashIcon: fromRepoRoot(BRAND_ASSET_PATHS.nightlyIosIconPng),
   androidAdaptiveForeground,
-  androidAdaptiveBackgroundColor: "#111533",
+  androidAdaptiveBackgroundColor: BRAND_CHANNEL_ICON_BACKGROUND.nightly,
   androidAdaptiveBackgroundImage: "./assets/android-icon-background-nightly.png",
   androidSplashIcon: "./assets/android-splash-icon-nightly.png",
   androidMonochromeIcon: "./assets/android-icon-mark.png",
@@ -63,7 +91,7 @@ const RELEASE_ASSETS = {
   iosIcon: fromRepoRoot(BRAND_ASSET_PATHS.productionIconComposerProject),
   splashIcon: fromRepoRoot(BRAND_ASSET_PATHS.productionIosIconPng),
   androidAdaptiveForeground,
-  androidAdaptiveBackgroundColor: "#000000",
+  androidAdaptiveBackgroundColor: BRAND_CHANNEL_ICON_BACKGROUND.stable,
   androidAdaptiveBackgroundImage: undefined,
   androidSplashIcon: "./assets/android-splash-icon-prod.png",
   androidMonochromeIcon: "./assets/android-icon-mark.png",
@@ -73,27 +101,15 @@ const RELEASE_ASSETS = {
 
 const VARIANT_CONFIG = {
   development: {
-    appName: "T3 Code Dev",
-    scheme: "t3code-dev",
-    iosBundleIdentifier: "com.t3tools.t3code.dev",
-    androidPackage: "com.t3tools.t3code.dev",
-    relyingParty: "clerk.t3.codes",
+    ...MOBILE_APP_IDENTITY.development,
     assets: DEVELOPMENT_ASSETS,
   },
   preview: {
-    appName: "T3 Code Preview",
-    scheme: "t3code-preview",
-    iosBundleIdentifier: "com.t3tools.t3code.preview",
-    androidPackage: "com.t3tools.t3code.preview",
-    relyingParty: "clerk.t3.codes",
+    ...MOBILE_APP_IDENTITY.preview,
     assets: PREVIEW_ASSETS,
   },
   production: {
-    appName: "T3 Code",
-    scheme: "t3code",
-    iosBundleIdentifier: "com.t3tools.t3code",
-    androidPackage: "com.t3tools.t3code",
-    relyingParty: "clerk.t3.codes",
+    ...MOBILE_APP_IDENTITY.production,
     assets: RELEASE_ASSETS,
   },
 } as const;
@@ -134,7 +150,7 @@ const widgetsPlugin: NonNullable<ExpoConfig["plugins"]>[number] = [
       {
         name: "SubscriptionUsage",
         displayName: "Subscription usage",
-        description: "Subscription quotas from your connected T3 Code environments.",
+        description: "Subscription quotas from your connected GOAT environments.",
         ios: {
           configuration: {
             title: "Subscription usage",
@@ -185,8 +201,7 @@ const widgetsPlugin: NonNullable<ExpoConfig["plugins"]>[number] = [
       {
         name: "AgentActivity",
         displayName: "Agent Activity",
-        description: "Shows the current state of active T3 Code agents.",
-        // Live Activity companion; there is no Android presentation for it.
+        description: "Shows the current state of active GOAT agents.",
         android: null,
         ios: { supportedFamilies: ["systemSmall", "systemMedium", "accessoryRectangular"] },
       },
@@ -226,10 +241,10 @@ const sharingPlugin: NonNullable<ExpoConfig["plugins"]>[number] = [
 
 const config: ExpoConfig = {
   name: variant.appName,
-  slug: "t3-code",
+  slug: "goat",
   platforms: ["ios", "android"],
   scheme: variant.scheme,
-  version: "2.0.0",
+  version: repoEnv.GOAT_MOBILE_VERSION ?? "2.0.0",
   runtimeVersion: {
     // Development manifests resolve on every launch, so avoid fingerprint's
     // expensive native-project calculation there. Preview and production stay
@@ -240,26 +255,23 @@ const config: ExpoConfig = {
   icon: variant.assets.appIcon,
   userInterfaceStyle: "automatic",
   updates: {
-    enabled: repoEnv.T3CODE_MOBILE_UPDATES_ENABLED !== "0",
-    url: "https://u.expo.dev/d763fcb8-d37c-41ea-a773-b54a0ab4a454",
+    enabled: updatesEnabled,
+    ...(easProjectId ? { url: `https://u.expo.dev/${easProjectId}` } : {}),
     checkAutomatically: "ON_LOAD",
     fallbackToCacheTimeout: 0,
   },
   ios: {
     icon: variant.assets.iosIcon,
     supportsTablet: true,
-    // Multitasking-capable iPad apps cannot rotate programmatically, so the
-    // showcase capture build requires full screen (see infoPlist below).
-    requireFullScreen: process.env.T3_SHOWCASE_CAPTURE_BUILD === "1",
+    requireFullScreen: process.env.GOAT_SHOWCASE_CAPTURE_BUILD === "1",
     bundleIdentifier: iosBundleIdentifier,
-    // Pin code signing to the T3 Tools team so non-interactive `expo run:ios`
-    // does not fall back to a personal team (which cannot sign app groups,
-    // Sign in with Apple, or push notification entitlements).
-    appleTeamId: "ARK85ZXQ4Z",
-    associatedDomains: [
-      `applinks:${variant.relyingParty}`,
-      `webcredentials:${variant.relyingParty}`,
-    ],
+    ...(buildNumber ? { buildNumber } : {}),
+    // Pin code signing to the GOAT team so non-interactive `expo run:ios` and archives
+    // do not fall back to a personal team (which cannot sign app groups or push entitlements).
+    appleTeamId: iosTeamId,
+    ...(clerkDomain
+      ? { associatedDomains: [`applinks:${clerkDomain}`, `webcredentials:${clerkDomain}`] }
+      : {}),
     entitlements: {
       "keychain-access-groups": [`$(AppIdentifierPrefix)${variant.iosBundleIdentifier}`],
     },
@@ -273,8 +285,8 @@ const config: ExpoConfig = {
         NSAllowsArbitraryLoads: true,
       },
       NSLocalNetworkUsageDescription:
-        "Allow T3 Code to connect to T3 Code servers on your local network or tailnet.",
-      NSPhotoLibraryAddUsageDescription: "Allow T3 Code to save images to your photo library.",
+        "Allow GOAT to connect to GOAT servers on your local network or tailnet.",
+      NSPhotoLibraryAddUsageDescription: "Allow GOAT to save images to your photo library.",
       // "Audio, AirPlay, and Picture in Picture": the browser screen's system
       // picture in picture needs it to start and to stay up outside the app.
       UIBackgroundModes: ["audio"],
@@ -284,7 +296,7 @@ const config: ExpoConfig = {
       // Simulator menu scripting needs), and iPadOS ignores programmatic
       // orientation requests for multitasking-capable apps — so the capture
       // build opts out of multitasking and declares landscape support.
-      ...(process.env.T3_SHOWCASE_CAPTURE_BUILD === "1"
+      ...(process.env.GOAT_SHOWCASE_CAPTURE_BUILD === "1"
         ? {
             "UISupportedInterfaceOrientations~ipad": [
               "UIInterfaceOrientationPortrait",
@@ -299,8 +311,8 @@ const config: ExpoConfig = {
   android: {
     icon: variant.assets.appIcon,
     package: variant.androidPackage,
-    ...(repoEnv.T3CODE_ANDROID_GOOGLE_SERVICES_FILE
-      ? { googleServicesFile: repoEnv.T3CODE_ANDROID_GOOGLE_SERVICES_FILE }
+    ...(repoEnv.GOAT_ANDROID_GOOGLE_SERVICES_FILE
+      ? { googleServicesFile: repoEnv.GOAT_ANDROID_GOOGLE_SERVICES_FILE }
       : {}),
     adaptiveIcon: {
       backgroundColor: variant.assets.androidAdaptiveBackgroundColor,
@@ -322,6 +334,7 @@ const config: ExpoConfig = {
   },
   plugins: [
     "expo-asset",
+    "react-native-pdf-jsi",
     [
       "expo-font",
       {
@@ -361,7 +374,11 @@ const config: ExpoConfig = {
     ],
     // appleSignIn must be gated here: withoutIosPersonalTeamCapabilities.cjs runs before
     // plugins earlier in this array, so it cannot strip the entitlement Clerk would add.
-    ["@clerk/expo", { theme: "./clerk-theme.json", appleSignIn: !isIosPersonalTeamBuild }],
+    // Without a Clerk instance there is no sign-in, so the capability is left off too.
+    [
+      "@clerk/expo",
+      { theme: "./clerk-theme.json", appleSignIn: clerkConfigured && !isIosPersonalTeamBuild },
+    ],
     "expo-web-browser",
     [
       "expo-quick-actions",
@@ -382,7 +399,7 @@ const config: ExpoConfig = {
     [
       "expo-audio",
       {
-        microphonePermission: "Allow T3 Code to use your microphone for voice input.",
+        microphonePermission: "Allow GOAT to use your microphone for voice input.",
         recordAudioAndroid: false,
         enableBackgroundPlayback: false,
         enableBackgroundRecording: false,
@@ -391,7 +408,7 @@ const config: ExpoConfig = {
     [
       "expo-camera",
       {
-        cameraPermission: "Allow T3 Code to access your camera so you can scan pairing QR codes.",
+        cameraPermission: "Allow GOAT to access your camera so you can scan pairing QR codes.",
         microphonePermission: false,
         barcodeScannerEnabled: true,
         recordAudioAndroid: false,
@@ -403,11 +420,11 @@ const config: ExpoConfig = {
       {
         image: variant.assets.splashIcon,
         resizeMode: "contain",
-        backgroundColor: "#ffffff",
+        backgroundColor: variant.assets.androidAdaptiveBackgroundColor,
         imageWidth: 220,
         dark: {
           image: variant.assets.splashIcon,
-          backgroundColor: "#0a0a0a",
+          backgroundColor: variant.assets.androidAdaptiveBackgroundColor,
         },
         android: {
           // Android 12+ masks the splash icon to a circle over the central two thirds of
@@ -424,16 +441,13 @@ const config: ExpoConfig = {
       "expo-build-properties",
       {
         android: {
-          // Keep the supported floor explicit and covered by native notification tests.
           minSdkVersion: 24,
           // kotlinx-io uses Kotlin 2.3's return-value checker annotation, while
           // SDK 58 builds with Kotlin 2.2. It has no runtime behavior.
-          //
           // WorkManager 2.9 keeps InputMerger classes but not their constructors,
           // and R8 full mode no longer keeps a default constructor implicitly.
           // Without it no work request can start, so the Glance session behind
-          // the widget never renders and it stays on "Loading widget". WorkManager
-          // 2.10 ships this rule itself; drop it once the resolved version gets there.
+          // the widget never renders and it stays on "Loading widget".
           extraProguardRules: [
             "-dontwarn kotlin.MustUseReturnValues",
             "-keep class * extends androidx.work.InputMerger { <init>(); }",
@@ -461,6 +475,7 @@ const config: ExpoConfig = {
     ...(!isIosPersonalTeamBuild ? ["./plugins/withWidgetLogoAsset.cjs", widgetsPlugin] : []),
     "./plugins/withAndroidCleartextTraffic.cjs",
     "./plugins/withAndroidGradleHeap.cjs",
+    "./plugins/withAndroidFbjniVersion.cjs",
     "./plugins/withAndroidInputBackground.cjs",
     "./plugins/withAndroidModernPopupMenu.cjs",
     "./plugins/withAndroidModernAlertDialog.cjs",
@@ -478,7 +493,7 @@ const config: ExpoConfig = {
       publishableKey: repoEnv.EXPO_PUBLIC_CLERK_PUBLISHABLE_KEY ?? null,
       jwtTemplate: repoEnv.EXPO_PUBLIC_CLERK_JWT_TEMPLATE ?? null,
     },
-    // Native Google sign-in credentials. @clerk/expo reads these from `extra`
+    // @clerk/expo reads these from `extra`
     // under their exact env-var names (not nested), and its config plugin reads
     // the iOS URL scheme at prebuild to register it in Info.plist.
     // Unset values must be omitted (not null): the public manifest serializes
@@ -492,11 +507,13 @@ const config: ExpoConfig = {
       tracesDataset: repoEnv.EXPO_PUBLIC_OTLP_TRACES_DATASET ?? null,
       tracesToken: repoEnv.EXPO_PUBLIC_OTLP_TRACES_TOKEN ?? null,
     },
-    eas: {
-      projectId: "d763fcb8-d37c-41ea-a773-b54a0ab4a454",
-    },
+    ...(easProjectId ? { eas: { projectId: easProjectId } } : {}),
   },
-  owner: "pingdotgg",
+  ...(easOwner ? { owner: easOwner } : {}),
+  experiments: {
+    // Metro only runs babel-plugin-react-compiler when this is set; see src/reactCompilerCoverage.test.ts.
+    reactCompiler: true,
+  },
 };
 
 export default config;

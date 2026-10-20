@@ -1,6 +1,7 @@
+import { isGoatConnectEnabled } from "@goat/shared/goatConnect";
 import Constants from "expo-constants";
-import { relayClerkTokenOptions } from "@t3tools/shared/relayAuth";
-import { normalizeSecureRelayUrl } from "@t3tools/shared/relayUrl";
+import { relayClerkTokenOptions } from "@goat/shared/relayAuth";
+import { normalizeSecureRelayUrl } from "@goat/shared/relayUrl";
 import * as Schema from "effect/Schema";
 
 export class CloudPublicConfigMissingError extends Schema.TaggedError<CloudPublicConfigMissingError>()(
@@ -57,6 +58,13 @@ function normalizeSecureUrl(value: unknown): string | null {
 }
 
 export function resolveCloudPublicConfig(extra: ExpoExtra = Constants.expoConfig?.extra) {
+  if (!isGoatConnectEnabled()) {
+    return {
+      clerk: { publishableKey: null, jwtTemplate: null },
+      relay: { url: null },
+      observability: { tracesUrl: null, tracesDataset: null, tracesToken: null },
+    } satisfies CloudPublicConfig;
+  }
   return {
     clerk: {
       publishableKey: trimNonEmpty(extra?.clerk?.publishableKey),

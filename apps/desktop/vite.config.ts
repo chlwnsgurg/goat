@@ -1,23 +1,30 @@
 import "vite-plus/test/config";
+// Adopts legacy T3 env names before anything reads the environment.
+import "@goat/contracts/adoptLegacyEnv";
 import { defineConfig } from "vite-plus";
 
 import { isDesktopRuntimeExternalDependency } from "../../scripts/lib/desktop-external-packages.ts";
+import { resolveBuildCommitTime } from "../../scripts/lib/build-commit-time.ts";
 import { loadRepoEnv } from "../../scripts/lib/public-config.ts";
 
 const repoEnv = loadRepoEnv();
 
-// The main process is bundled the same way the server CLI is: every JS
-// dependency is inlined and only packages Node must load from disk stay
-// external. The packaged app then installs just those externals, instead of a
-// full production install of apps/desktop's dependency tree next to a server
-// bundle that already carries its own copy of the same libraries.
+// The packaged app then installs just those externals, instead of a full
+// production install of apps/desktop's dependency tree next to a server bundle
+// that already carries its own copy of the same libraries.
 const isMainProcessExternal = (id: string) =>
   id === "electron" || id.startsWith("electron/") || isDesktopRuntimeExternalDependency(id);
-const shouldLaunchElectronAfterPack = process.env.T3CODE_DESKTOP_DEV === "1";
+const shouldLaunchElectronAfterPack = process.env.GOAT_DESKTOP_DEV === "1";
 const publicConfigDefine = {
-  __T3CODE_BUILD_CLERK_PUBLISHABLE_KEY__: JSON.stringify(
+  __GOAT_BUILD_CLERK_PUBLISHABLE_KEY__: JSON.stringify(
     repoEnv.T3CODE_CLERK_PUBLISHABLE_KEY?.trim() ?? "",
   ),
+};
+// The main process stamps the same commit time as the server archive it ships, so the SSH
+// runner can order that archive against a remote host's runtime (apps/desktop/src/ssh).
+const mainProcessDefine = {
+  ...publicConfigDefine,
+  __GOAT_BUILD_COMMIT_TIME__: JSON.stringify(resolveBuildCommitTime(import.meta.dirname)),
 };
 
 export default defineConfig({
@@ -26,13 +33,13 @@ export default defineConfig({
       build: {
         command:
           "node scripts/build-browser-secret.mjs && node scripts/build-preview-annotation-css.mjs && vp pack",
-        dependsOn: ["t3#build"],
+        dependsOn: ["goat#build"],
         cache: false,
       },
       dev: {
         command:
-          "node scripts/build-browser-secret.mjs && node scripts/build-preview-annotation-css.mjs && cross-env T3CODE_DESKTOP_DEV=1 vp pack --watch",
-        dependsOn: ["t3#build"],
+          "node scripts/build-browser-secret.mjs && node scripts/build-preview-annotation-css.mjs && cross-env GOAT_DESKTOP_DEV=1 vp pack --watch",
+        dependsOn: ["goat#build"],
         cache: false,
       },
       "dev:bundle": {
@@ -42,7 +49,7 @@ export default defineConfig({
       },
       "dev:electron": {
         command: "node scripts/dev-electron.mjs",
-        dependsOn: ["t3#build"],
+        dependsOn: ["goat#build"],
         cache: false,
       },
     },
@@ -54,7 +61,7 @@ export default defineConfig({
       dts: false,
       sourcemap: true,
       outExtensions: () => ({ js: ".cjs" }),
-      define: publicConfigDefine,
+      define: mainProcessDefine,
       outputOptions: { codeSplitting: false },
       entry: ["src/main.ts"],
       clean: true,
@@ -109,8 +116,12 @@ export default defineConfig({
       deps: {
         // Sandboxed Electron preloads cannot reliably resolve package imports
         // from inside the packaged ASAR. Bundle Clerk's preload bridge into the
-        // preload artifact instead of leaving a runtime require() behind.
-        alwaysBundle: (id) => id === "@clerk/electron" || id.startsWith("@clerk/electron/"),
+        // preload artifact instead of leaving a runtime require() behind, and the
+        // dependency-free legacy name table the localStorage merge reads.
+        alwaysBundle: (id) =>
+          id === "@clerk/electron" ||
+          id.startsWith("@clerk/electron/") ||
+          id === "@goat/contracts/legacyT3Names",
       },
     },
     {

@@ -1,4 +1,4 @@
-import { EnvironmentId } from "@t3tools/contracts";
+import { EnvironmentId } from "@goat/contracts";
 import { describe, expect, it } from "@effect/vitest";
 import * as Option from "effect/Option";
 
@@ -107,7 +107,6 @@ describe("connection presentation", () => {
     expect(environmentMcpUrl({ entry, connectedTarget: tailnet.target })).toBe(
       "http://100.115.1.44:3773/mcp",
     );
-    // Not connected: the preferred route, plain http or not.
     expect(environmentMcpUrl({ entry })).toBe("http://192.168.4.53:3773/mcp");
   });
 
@@ -123,7 +122,6 @@ describe("connection presentation", () => {
       alternateRoutes: [{ target: ENTRY.target, profile: ENTRY.profile }],
     };
 
-    // Relay discovery has not reported the tunnel address yet.
     expect(environmentMcpUrl({ entry, connectedTarget: relay })).toBe(
       "https://environment.example.test/mcp",
     );
@@ -160,6 +158,12 @@ describe("connection presentation", () => {
       error: "Socket closed.",
       traceId: "trace-previous",
       stage: "preparing",
+      failure: {
+        kind: "retrying",
+        reason: "transport",
+        detail: "Socket closed.",
+        traceId: "trace-previous",
+      },
     });
     expect(
       presentConnectionState(
@@ -179,6 +183,12 @@ describe("connection presentation", () => {
       error: "Disconnected.",
       traceId: "trace-1",
       retryAt: 1,
+      failure: {
+        kind: "retrying",
+        reason: "transport",
+        detail: "Disconnected.",
+        traceId: "trace-1",
+      },
     });
   });
 
@@ -201,6 +211,12 @@ describe("connection presentation", () => {
       error: "Relay connection timed out.",
       traceId: "trace-retry",
       stage: "opening",
+      failure: {
+        kind: "retrying",
+        reason: "transport",
+        detail: "Relay connection timed out.",
+        traceId: "trace-retry",
+      },
     });
   });
 
@@ -249,6 +265,43 @@ describe("connection presentation", () => {
       "Failed to connect. Reconnecting... Reason: Relay request timed out.",
     );
     expect(connectionStatusTitle(connection)).toBe("Failed to connect. Reconnecting...");
+  });
+
+  it("shows an unreachable host quietly through backoff and the next attempt", () => {
+    const failure = new ConnectionTransientError({
+      reason: "host-unreachable",
+      detail: "Cannot reach mbp over SSH (192.168.1.20:22: Operation timed out).",
+    });
+    const waiting = presentConnectionState(
+      supervisorState({ phase: "backoff", attempt: 3, lastFailure: failure, retryAt: 241_000 }),
+    );
+    expect(waiting).toMatchObject({ phase: "reconnecting", unreachable: true });
+    expect(connectionProgressLabel(waiting, 1_000)).toBe("Unreachable, retrying in 4m");
+    expect(connectionProgressLabel(waiting, 236_000)).toBe("Unreachable, retrying in 5s");
+    expect(connectionStatusTitle(waiting)).toBe("Host unreachable");
+    expect(connectionStatusText(waiting)).toBe(
+      "Host unreachable. Reconnecting... Reason: Cannot reach mbp over SSH (192.168.1.20:22: Operation timed out).",
+    );
+
+    const trying = presentConnectionState(
+      supervisorState({ phase: "connecting", attempt: 4, lastFailure: failure }),
+    );
+    expect(trying).toMatchObject({ phase: "reconnecting", unreachable: true });
+    expect(connectionProgressLabel(trying, 0)).toBe("Unreachable, retrying");
+
+    const broken = presentConnectionState(
+      supervisorState({
+        phase: "backoff",
+        attempt: 2,
+        lastFailure: new ConnectionTransientError({
+          reason: "remote-unavailable",
+          detail: "Server stopped.",
+        }),
+        retryAt: 5_000,
+      }),
+    );
+    expect(broken.unreachable).toBeUndefined();
+    expect(connectionStatusTitle(broken)).toBe("Failed to connect. Reconnecting...");
   });
 
   it("presents the supervisor's offline state without consulting shell state", () => {

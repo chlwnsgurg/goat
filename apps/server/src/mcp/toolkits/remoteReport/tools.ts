@@ -1,10 +1,12 @@
+import { agentSurfaceRegistry } from "@goat/contracts/agentSurface";
+import { agentSurfaceAnnotations } from "../../agentSurface.ts";
 import {
   OrchestratorMcpFailure,
   RemoteOriginReportInput,
   RemoteOriginReportResult,
   RemoteOriginReportsWaitInput,
   RemoteOriginReportsWaitResult,
-} from "@t3tools/contracts";
+} from "@goat/contracts";
 import { Tool, Toolkit } from "effect/ai";
 import * as RemoteReportService from "../../../remoteReports/RemoteReportService.ts";
 import * as ThreadManagementService from "../../../orchestration-v2/ThreadManagementService.ts";
@@ -19,20 +21,16 @@ const shared = {
     RemoteReportService.RemoteReportService,
   ],
 };
-const ReportTool = Tool.make("goat_origin_report", {
+const ReportTool = Tool.make(agentSurfaceRegistry["origin.report"].name, {
   ...shared,
-  description:
-    "Report progress, a result, failure or a need for human input to the origin of this thread. Only available inside a thread launched with an origin binding. The summary is data; a completed report is a claim and does not stop the run. Maximum 4000 characters.",
+  description: agentSurfaceRegistry["origin.report"].description,
   parameters: RemoteOriginReportInput,
   success: RemoteOriginReportResult,
-}).annotate(Tool.Destructive, false);
-const WaitTool = Tool.make("goat_origin_reports_wait", {
+}).annotateMerge(agentSurfaceAnnotations(agentSurfaceRegistry["origin.report"]));
+const WaitTool = Tool.make(agentSurfaceRegistry["origin.reports_wait"].name, {
   ...shared,
-  description:
-    "Collect one origin correlation's reports using its read key. afterSequence acknowledges only durably imported reports. Returns up to 50 reports; drain hasMore before settling. watchRunId selects an exact run, null selects latest. knownRun tracks its last observed identity and status; timeoutMs is 0..600000. A terminal report is not proof of run settlement.",
+  description: agentSurfaceRegistry["origin.reports_wait"].description,
   parameters: RemoteOriginReportsWaitInput,
   success: RemoteOriginReportsWaitResult,
-})
-  .annotate(Tool.Readonly, true)
-  .annotate(Tool.Destructive, false);
+}).annotateMerge(agentSurfaceAnnotations(agentSurfaceRegistry["origin.reports_wait"]));
 export const RemoteReportToolkit = Toolkit.make(ReportTool, WaitTool);

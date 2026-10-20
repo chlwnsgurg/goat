@@ -2,10 +2,50 @@
   "customNotices": [
     {
       "bundles": ["desktop", "web"],
+      "license": "Apache-2.0 AND BSD-2-Clause AND BSD-3-Clause AND MIT AND OFL-1.1",
+      "name": "PDF.js font, CMap and image decoder data",
+      "sourceUrl": "https://github.com/mozilla/pdfjs-dist",
+      "noticeFiles": ["apps/web/src/components/files/pdf/PDFJS-ASSET-NOTICES"]
+    },
+    {
+      "bundles": ["desktop", "web"],
+      "license": "MIT",
+      "name": "Synara PDF viewer",
+      "sourceUrl": "https://github.com/Emanuele-web04/synara",
+      "noticeFiles": ["apps/web/src/components/files/pdf/SYNARA-LICENSE"]
+    },
+    {
+      "bundles": ["desktop", "web"],
       "license": "OFL-1.1",
       "name": "Pretendard",
       "sourceUrl": "https://github.com/orioncactus/pretendard",
       "noticeFiles": ["apps/web/src/assets/fonts/Pretendard-LICENSE.txt"]
+    },
+    {
+      "bundles": ["desktop", "web"],
+      "license": "CC-BY-4.0",
+      "name": "Solar Icon Set by 480 Design",
+      "sourceUrl": "https://www.figma.com/community/file/1166831539721848736",
+      "generatedNotices": [
+        {
+          "licenseId": "CC-BY-4.0",
+          "preamble": [
+            "Icons: Solar by 480 Design, CC BY 4.0.\nThe web and desktop clients bundle the Solar Linear glyphs from @iconify-json/solar (https://github.com/iconify/icon-sets). Each glyph is converted to SVG element data, and every stroke is drawn 1.75 wide instead of 1.5; the shapes are otherwise unchanged."
+          ]
+        }
+      ]
+    },
+    {
+      "bundles": ["desktop", "web"],
+      "license": "MIT",
+      "name": "Ionic keyboard assist",
+      "sourceUrl": "https://github.com/ionic-team/ionic-framework/blob/main/core/src/utils/keyboard/keyboard.ts",
+      "generatedNotices": [
+        {
+          "licenseId": "MIT",
+          "copyrights": ["Copyright (c) 2015-present Drifty Co."]
+        }
+      ]
     },
     {
       "bundles": ["assets", "desktop", "web"],
@@ -69,7 +109,6 @@
       "license": "MIT",
       "name": "agent-device",
       "sourceUrl": "https://github.com/callstack/agent-device",
-      "version": "0.21.7",
       "generatedNotices": [
         {
           "licenseId": "MIT",
@@ -83,7 +122,6 @@
       "license": "MIT AND Apache-2.0 AND BSD-3-Clause",
       "name": "expo-device-hub",
       "sourceUrl": "https://github.com/expo/expo-device-hub",
-      "version": "0.10.1",
       "generatedNotices": [
         {
           "licenseId": "MIT",
@@ -146,7 +184,7 @@
       "bundles": ["mobile"],
       "license": "MIT",
       "name": "react-native-uitextview",
-      "noticeFile": "apps/mobile/modules/t3-markdown-text/LICENSE",
+      "noticeFile": "apps/mobile/modules/t3-source-text/LICENSE",
       "sourceUrl": "https://github.com/bluesky-social/react-native-uitextview",
       "version": "2.2.0"
     },
@@ -159,6 +197,33 @@
     }
   ],
   "packageOverrides": [
+    {
+      "name": "@react-native-async-storage/async-storage",
+      "version": "3.1.1",
+      "sourceUrl": "https://github.com/react-native-async-storage/async-storage",
+      "generatedNotice": {
+        "licenseId": "MIT",
+        "copyrights": ["Copyright (c) 2025 Krzysztof Borowy"]
+      }
+    },
+    {
+      "name": "deprecated-react-native-prop-types",
+      "version": "2.3.0",
+      "sourceUrl": "https://github.com/facebookarchive/react-native-deprecated-modules",
+      "generatedNotice": {
+        "licenseId": "MIT",
+        "copyrights": ["Copyright (c) Meta Platforms, Inc. and affiliates."]
+      }
+    },
+    {
+      "name": "@react-native/normalize-color",
+      "version": "2.1.0",
+      "sourceUrl": "https://github.com/facebook/react-native",
+      "generatedNotice": {
+        "licenseId": "MIT",
+        "copyrights": ["Copyright (c) Meta Platforms, Inc. and affiliates."]
+      }
+    },
     {
       "name": "@bufbuild/protobuf",
       "version": "1.10.0",
@@ -175,14 +240,6 @@
     },
     {
       "name": "@connectrpc/connect",
-      "version": "1.7.0",
-      "generatedNotice": {
-        "licenseId": "Apache-2.0",
-        "copyrights": ["Copyright 2021-2024 The Connect Authors"]
-      }
-    },
-    {
-      "name": "@connectrpc/connect-node",
       "version": "1.7.0",
       "generatedNotice": {
         "licenseId": "Apache-2.0",

@@ -1,7 +1,7 @@
-import { EnvironmentId, ProjectId } from "@t3tools/contracts";
+import { EnvironmentId, ProjectId } from "@goat/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
-import type { EnvironmentProject } from "@t3tools/client-runtime/state/shell";
+import type { EnvironmentProject } from "@goat/client-runtime/state/shell";
 import type { HomeProjectScope } from "../home/homeThreadList";
 import {
   filterProjectScopes,
@@ -107,7 +107,6 @@ describe("resolveEnvironmentProjectMatch", () => {
     });
     const unindexed = makeProject("unindexed", "server", { workspaceRoot: "/srv/t3code" });
     expect(resolveEnvironmentProjectMatch([fork, unindexed], selected)).toBe(unindexed);
-    // Without any weaker match the fork is still the first-project fallback.
     expect(resolveEnvironmentProjectMatch([fork], selected)).toBe(fork);
   });
 

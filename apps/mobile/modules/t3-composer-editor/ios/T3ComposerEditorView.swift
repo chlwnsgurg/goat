@@ -76,7 +76,7 @@ private final class ComposerContextAccessibilityElement: UIAccessibilityElement 
 }
 
 private final class ComposerTextView: UITextView {
-  private static let pastedImageDirectoryName = "t3-composer-paste"
+  private static let pastedImageDirectoryName = "t3-composer-paste" // goat-rename: legacy
   private static let stalePastedImageAge: TimeInterval = 60 * 60
   private static let readOnlyActions = Set([
     "cut:",
@@ -220,7 +220,8 @@ private final class ComposerTextView: UITextView {
     }
     let pasteboard = UIPasteboard.general
     let context = T3ComposerClipboard.read()
-    if !context["fragment", default: ""].isEmpty || context["html", default: ""].contains("data-t3-context-fragment=") {
+    let html = context["html", default: ""]
+    if !context["fragment", default: ""].isEmpty || html.contains("data-t3-context-fragment=") || html.contains("data-goat-context-fragment=") { // goat-rename: legacy
       onPasteContext?(context)
       return
     }
@@ -469,6 +470,7 @@ public final class T3ComposerEditorView: ExpoView, UITextViewDelegate, UITextDro
   private var pendingIconUris = Set<String>()
   private var tokensNeedRebuild = false
   private var chipsNeedMeasuredWidth = false
+  private var hasDeferredForcedRebuild = false
 
   let onComposerChange = EventDispatcher()
   let onComposerSelectionChange = EventDispatcher()
@@ -839,11 +841,21 @@ public final class T3ComposerEditorView: ExpoView, UITextViewDelegate, UITextDro
   }
 
   private func applyControlledDocument(force: Bool = false) {
-    let currentSource = textView.serializedText()
-    guard force || currentSource != value || !documentMatchesExpectedTokens() else {
+    // Rebuilding the attributed string tears down an active IME composition.
+    // Skip while marked text exists; committing the composition sends a new
+    // value from JS, and that update rebuilds, keeping any skipped force.
+    if textView.markedTextRange != nil {
+      hasDeferredForcedRebuild = hasDeferredForcedRebuild || force
       updatePlaceholderVisibility()
       return
     }
+    let shouldForce = force || hasDeferredForcedRebuild
+    let currentSource = textView.serializedText()
+    guard shouldForce || currentSource != value || !documentMatchesExpectedTokens() else {
+      updatePlaceholderVisibility()
+      return
+    }
+    hasDeferredForcedRebuild = false
 
     let previousSelection = sourceSelection()
     isApplyingControlledValue = true

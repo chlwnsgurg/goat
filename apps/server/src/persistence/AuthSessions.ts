@@ -12,7 +12,7 @@ import {
   AuthSessionId,
   ClientSurface,
   ServerAuthSessionMethod,
-} from "@t3tools/contracts";
+} from "@goat/contracts";
 
 import {
   type AuthSessionRepositoryError,
@@ -130,7 +130,7 @@ export class AuthSessionRepository extends Context.Service<
       input: SetAuthSessionClientConnectionInput,
     ) => Effect.Effect<void, AuthSessionRepositoryError>;
   }
->()("t3/persistence/AuthSessions/AuthSessionRepository") {}
+>()("goat/persistence/AuthSessions/AuthSessionRepository") {}
 
 const AuthSessionDbRow = Schema.Struct({
   sessionId: AuthSessionId,
@@ -331,8 +331,6 @@ export const make = Effect.gen(function* () {
       `,
   });
 
-  // COALESCE keeps the previous value when a client reports only one field, so
-  // a partial report never nulls out data a fuller client stored earlier.
   const setClientConnectionRow = SqlSchema.void({
     Request: SetAuthSessionClientConnectionInput,
     execute: ({ sessionId, surface, appVersion }) =>

@@ -1,9 +1,9 @@
-import { SSH_RUNTIME_PROTOCOL_VERSION } from "@t3tools/shared/sshRuntimeProtocol";
-import { ORCHESTRATION_PROTOCOL_VERSION } from "@t3tools/contracts";
+import { SSH_RUNTIME_PROTOCOL_VERSION } from "@goat/shared/sshRuntimeProtocol";
+import { ORCHESTRATION_PROTOCOL_VERSION } from "@goat/contracts";
 import { assert, describe, it } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import * as NetService from "@t3tools/shared/Net";
-import * as HostProcess from "@t3tools/shared/HostProcess";
+import * as NetService from "@goat/shared/Net";
+import * as HostProcess from "@goat/shared/HostProcess";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
@@ -28,6 +28,50 @@ import { protocolExecutable, makeProtocolFixture } from "./tunnel.protocol.fixtu
 describe.skipIf(HostProcess.Platform.defaultValue() === "win32")(
   "SSH runtime protocol selection",
   () => {
+    it.live.each([
+      { kind: "managed", activity: "idle", stopRuntime: "if_idle", stops: true },
+      { kind: "managed", activity: "busy", stopRuntime: "if_idle", stops: false },
+      { kind: "managed", activity: "unknown", stopRuntime: "if_idle", stops: false },
+      { kind: "external", activity: "idle", stopRuntime: "if_idle", stops: false },
+      { kind: "managed", activity: "idle", stopRuntime: "no", stops: false },
+    ] as const)(
+      "forget $stopRuntime preserves $kind/$activity unless owned and idle",
+      ({ kind, activity, stopRuntime, stops }) =>
+        Effect.gen(function* () {
+          const f = yield* makeProtocolFixture({
+            live: true,
+            kind,
+            oldVersion: "1.2.2",
+            ssh: SSH_RUNTIME_PROTOCOL_VERSION,
+            orchestration: ORCHESTRATION_PROTOCOL_VERSION,
+          });
+          yield* f.fs.writeFileString(`${f.test}/activity`, activity);
+          const before = yield* f.snapshot;
+          const layer = Layer.mergeAll(
+            NodeServices.layer,
+            Layer.succeed(ChildProcessSpawner.ChildProcessSpawner, f.transport),
+            Layer.succeed(FileSystem.FileSystem, f.observedFs),
+            Layer.succeed(HttpClient.HttpClient, testHttpClient),
+            Layer.succeed(NetService.NetService, testNetService),
+            SshAuth.SshPasswordPrompt.disabledLayer,
+            SshTunnel.SshEnvironmentManager.layer({
+              resolveCliRunner: Effect.succeed(f.runner),
+              leaveRemoteServerRunning: true,
+            }),
+          );
+          yield* Effect.gen(function* () {
+            const manager = yield* SshTunnel.SshEnvironmentManager;
+            const result = yield* manager.forgetEnvironment(uploadTarget, { stopRuntime });
+            assert.equal(result.status?.state, "untrusted");
+            assert.equal((yield* manager.status(uploadTarget)).status?.state, "untrusted");
+          }).pipe(Effect.provide(layer), Effect.scoped);
+          const events = yield* f.fs.readFileString(`${f.test}/events`);
+          assert.equal(events.includes('"type":"stop"'), stops);
+          if (!stops) assert.deepEqual(yield* f.snapshot, before);
+          assert.deepEqual(f.counters(), { uploads: 0, gh: 0, cacheReads: 0 });
+        }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+    );
+
     it.live(
       "cached manager auth pins its compatible release across resolver changes and rechecks both MCP attempts",
       () =>
@@ -61,6 +105,15 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")(
             });
             if ("type" in result) throw new Error("Expected a ready environment");
             assert.equal(result.pairingToken, "1.2.2");
+            // Keep executable answers, but force both MCP attempts to ask the live server.
+            const facts = `${f.home}/.goat/ssh-launch/facts`;
+            const unrecordedFacts = `${f.test}/unrecorded-facts`;
+            yield* f.fs.rename(facts, unrecordedFacts);
+            for (const name of yield* f.fs.readDirectory(unrecordedFacts)) {
+              if (name.startsWith("live.") || name.startsWith("compat."))
+                yield* f.fs.remove(`${unrecordedFacts}/${name}`);
+            }
+            yield* f.fs.symlink(unrecordedFacts, facts);
             yield* f.fs.writeFileString(`${f.test}/reject-ceiling`, "1");
             const session = yield* manager.issueMcpClientSession(uploadTarget, {
               label: "fixture",
@@ -336,7 +389,13 @@ done
 export PATH
 `,
             );
-            f.setRemotePath("/usr/bin:/bin");
+            // The node first on PATH fails the engine check, so the runner must discover nvm's.
+            // A runner image may ship a suitable /usr/bin/node, which would skip discovery.
+            const unsuitableBin = `${f.home}/unsuitable-node`;
+            yield* f.fs.makeDirectory(unsuitableBin);
+            yield* f.fs.writeFileString(`${unsuitableBin}/node`, "#!/bin/sh\nexit 1\n");
+            yield* f.fs.chmod(`${unsuitableBin}/node`, 0o700);
+            f.setRemotePath(`${unsuitableBin}:/usr/bin:/bin:/usr/sbin:/sbin`);
           }
           const layer = (nodeScriptPath: string, leaveRemoteServerRunning: boolean) =>
             Layer.mergeAll(

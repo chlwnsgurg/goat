@@ -1,6 +1,6 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { expect, it } from "@effect/vitest";
-import type { DesktopUpdateState, DesktopUpdateStatusReport } from "@t3tools/contracts";
+import type { DesktopUpdateState, DesktopUpdateStatusReport } from "@goat/contracts";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -60,8 +60,6 @@ function report(
 interface HarnessOptions {
   readonly mode?: "web" | "desktop";
   readonly controlFd?: number | undefined;
-  /** Reports emitted for the run, given the requestId the service generated.
-      The stream ends after the last one unless `keepOpen` is set. */
   readonly reports?: (requestId: string) => readonly DesktopUpdateStatusReport[];
   readonly keepOpen?: boolean;
 }
@@ -70,7 +68,7 @@ const makeHarness = Effect.fn("test.make_desktop_app_update_harness")(function* 
   options: HarnessOptions = {},
 ) {
   const fs = yield* FileSystem.FileSystem;
-  const baseDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-desktop-app-update-test-" });
+  const baseDir = yield* fs.makeTempDirectoryScoped({ prefix: "goat-desktop-app-update-test-" });
   const requestIdDeferred = yield* Deferred.make<string>();
   const baseConfig = yield* ServerConfig.ServerConfig.pipe(
     Effect.provide(ServerConfig.layerTest(process.cwd(), baseDir)),
@@ -132,7 +130,6 @@ it.layer(NodeServices.layer)("desktop app update", (it) => {
           report(requestId, makeState({ status: "checking" })),
           report(requestId, makeState({ status: "available", availableVersion: "1.2.4" })),
           report(requestId, makeState({ status: "downloading", downloadPercent: 40 })),
-          // Reports from another run must be ignored.
           report("other-run", makeState({ status: "error", message: "unrelated" })),
           report(requestId, makeState({ status: "downloaded", downloadedVersion: "1.2.4" }), {
             outcome: "ready-to-install",
@@ -146,13 +143,8 @@ it.layer(NodeServices.layer)("desktop app update", (it) => {
         method: "desktop-app",
         desktopUpdateToken: expect.any(String),
       });
-      // "downloading" is not repeated for every download report.
       expect(stages).toEqual(["downloading", "installing"]);
 
-      // Success releases the in-flight guard: if the desktop rejected the
-      // install after reporting, the server must accept a retry instead of
-      // refusing until restart. (The second run fails differently because
-      // the stub report stream is exhausted.)
       const retry = yield* service.run(() => Effect.void).pipe(Effect.flip);
       expect(retry.reason).not.toBe("A desktop app update is already in progress.");
     }),

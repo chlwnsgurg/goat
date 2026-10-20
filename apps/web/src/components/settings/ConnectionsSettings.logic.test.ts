@@ -1,10 +1,14 @@
-import type { AdvertisedEndpoint, DesktopWslState } from "@t3tools/contracts";
+import type { AdvertisedEndpoint, DesktopWslState } from "@goat/contracts";
 import { describe, expect, it, vi } from "vite-plus/test";
 import {
+  buildClientPairingQrPayload,
+  buildHubPhoneQrPayload,
+  selectHubPhoneQrTarget,
   applyWslEnableSelection,
   canRevokeOtherClients,
   isQrShareableEndpoint,
   isWslSettingsRowVisible,
+  missingTailscaleEndpointDescription,
   selectQrEndpointOption,
   togglePairingScopeSelection,
 } from "./ConnectionsSettings.logic";
@@ -230,5 +234,166 @@ describe("canRevokeOtherClients", () => {
     expect(canRevokeOtherClients([])).toBe(false);
     expect(canRevokeOtherClients([{ current: true }])).toBe(false);
     expect(canRevokeOtherClients([{ current: true }, { current: false }])).toBe(true);
+  });
+});
+
+describe("missingTailscaleEndpointDescription", () => {
+  it("explains that detection waits for Network access when the probe was skipped", () => {
+    expect(
+      missingTailscaleEndpointDescription({ mode: "local-only", tailscaleServeEnabled: false }),
+    ).toBe("Turn on Network access to detect Tailscale.");
+  });
+
+  it.each([
+    { mode: "network-accessible", tailscaleServeEnabled: false },
+    { mode: "local-only", tailscaleServeEnabled: true },
+  ] as const)("asks to start Tailscale when it was probed and not found (%o)", (state) => {
+    expect(missingTailscaleEndpointDescription(state)).toBe(
+      "Start Tailscale to set up HTTPS access through MagicDNS.",
+    );
+  });
+});
+
+function makeTailnetEndpoint(overrides: Partial<AdvertisedEndpoint> = {}): AdvertisedEndpoint {
+  return makeEndpoint({
+    id: "tailscale-ip:http://100.84.12.7:4780",
+    provider: { id: "tailscale", label: "Tailscale", kind: "private-network", isAddon: true },
+    reachability: "private-network",
+    httpBaseUrl: "http://100.84.12.7:4780",
+    wsBaseUrl: "ws://100.84.12.7:4780",
+    ...overrides,
+  });
+}
+
+function makeHttpsEndpoint(overrides: Partial<AdvertisedEndpoint> = {}): AdvertisedEndpoint {
+  return makeTailnetEndpoint({
+    id: "tailscale-magicdns:https://hub.tail.ts.net/",
+    httpBaseUrl: "https://hub.tail.ts.net/",
+    wsBaseUrl: "wss://hub.tail.ts.net/",
+    compatibility: { hostedHttpsApp: "compatible", desktopApp: "compatible" },
+    ...overrides,
+  });
+}
+
+describe("selectHubPhoneQrTarget", () => {
+  it("prefers available Tailscale HTTPS over tailnet IP and default LAN", () => {
+    const lan = makeEndpoint({ isDefault: true });
+    const ip = makeTailnetEndpoint();
+    const https = makeHttpsEndpoint();
+    const endpoints = [lan, ip, https];
+    expect(selectHubPhoneQrTarget(endpoints)).toEqual({
+      endpoint: https,
+      endpointOrigin: "https://hub.tail.ts.net",
+      kind: "tailscale-https",
+    });
+    expect(endpoints).toEqual([lan, ip, https]);
+  });
+
+  it("selects tailnet before LAN when HTTPS is unavailable", () => {
+    expect(
+      selectHubPhoneQrTarget([
+        makeEndpoint({}),
+        makeHttpsEndpoint({ status: "unavailable" }),
+        makeTailnetEndpoint(),
+      ]),
+    ).toMatchObject({ kind: "tailnet", endpointOrigin: "http://100.84.12.7:4780" });
+  });
+
+  it("selects LAN only as the last explicit fallback", () => {
+    expect(
+      selectHubPhoneQrTarget([makeHttpsEndpoint({ status: "unknown" }), makeEndpoint({})]),
+    ).toMatchObject({ kind: "lan", endpointOrigin: "http://192.168.1.42:4780" });
+  });
+
+  it("keeps inventory order within a tier instead of following isDefault", () => {
+    const first = makeTailnetEndpoint();
+    const second = makeTailnetEndpoint({
+      id: "tailscale-ip:http://100.84.12.8:4780",
+      isDefault: true,
+      httpBaseUrl: "http://100.84.12.8:4780",
+    });
+    expect(selectHubPhoneQrTarget([first, second])?.endpoint.id).toBe(first.id);
+  });
+
+  it.each([
+    makeEndpoint({ reachability: "loopback", httpBaseUrl: "http://127.0.0.1:4780" }),
+    makeEndpoint({ httpBaseUrl: "http://localhost:4780" }),
+    makeEndpoint({ httpBaseUrl: "http://[::1]:4780" }),
+    makeEndpoint({ status: "unknown" }),
+    makeEndpoint({ status: "unavailable" }),
+    makeEndpoint({ reachability: "public" }),
+    makeEndpoint({ reachability: "private-network" }),
+    makeEndpoint({ httpBaseUrl: "not a URL" }),
+    makeEndpoint({ httpBaseUrl: "file:///tmp/goat" }),
+    makeEndpoint({ httpBaseUrl: "https://user:pass@host.example" }),
+  ])("rejects an unsuitable advertised endpoint (%o)", (endpoint) => {
+    expect(selectHubPhoneQrTarget([endpoint])).toBeNull();
+  });
+
+  it("returns null for no advertisements", () => {
+    expect(selectHubPhoneQrTarget([])).toBeNull();
+  });
+});
+
+describe("buildHubPhoneQrPayload", () => {
+  it("encodes a direct pairing URL in the GOAT scheme even for hosted-compatible HTTPS", () => {
+    const target = selectHubPhoneQrTarget([makeHttpsEndpoint()])!;
+    const payload = buildHubPhoneQrPayload(target, "PAIR1234");
+    expect(payload).toBe(
+      "goat://pair?pairingUrl=https%3A%2F%2Fhub.tail.ts.net%2Fpair%23token%3DPAIR1234",
+    );
+    const direct = new URL(new URL(payload).searchParams.get("pairingUrl")!);
+    expect(direct.origin).toBe("https://hub.tail.ts.net");
+    expect(direct.pathname).toBe("/pair");
+    expect(direct.searchParams.has("host")).toBe(false);
+    expect(direct.searchParams.has("token")).toBe(false);
+    expect(new URLSearchParams(direct.hash.slice(1)).get("token")).toBe("PAIR1234");
+  });
+
+  it("preserves a custom HTTPS port and discards base paths and hosted query fields", () => {
+    const target = selectHubPhoneQrTarget([
+      makeHttpsEndpoint({
+        httpBaseUrl: "https://hub.tail.ts.net:8443/old?host=wrong.example#old",
+      }),
+    ])!;
+    const payload = buildHubPhoneQrPayload(target, "PAIR +&%/#?");
+    const inner = new URL(payload).searchParams.get("pairingUrl")!;
+    const direct = new URL(inner);
+    expect(direct.origin).toBe("https://hub.tail.ts.net:8443");
+    expect(direct.pathname).toBe("/pair");
+    expect(direct.search).toBe("");
+    expect(new URLSearchParams(direct.hash.slice(1)).get("token")).toBe("PAIR +&%/#?");
+    expect(payload).toBe(`goat://pair?pairingUrl=${encodeURIComponent(inner)}`);
+  });
+
+  it("wraps an explicitly selected LAN target as a direct app pairing link", () => {
+    const target = selectHubPhoneQrTarget([makeEndpoint({})])!;
+    expect(new URL(buildHubPhoneQrPayload(target, "LAN1234")).searchParams.get("pairingUrl")).toBe(
+      "http://192.168.1.42:4780/pair#token=LAN1234",
+    );
+  });
+});
+
+describe("buildClientPairingQrPayload", () => {
+  it("unwraps hosted browser links to the direct server URL for phone QR codes", () => {
+    const hosted = new URL("https://app.t3.codes/pair");
+    hosted.searchParams.set("host", "https://hub.tail.ts.net:8443/old?host=wrong.example");
+    hosted.hash = new URLSearchParams({ token: "PHONE +&%/#?" }).toString();
+    const browserLink = hosted.toString();
+    const direct = new URL(
+      new URL(buildClientPairingQrPayload(browserLink)).searchParams.get("pairingUrl")!,
+    );
+    expect(direct.origin).toBe("https://hub.tail.ts.net:8443");
+    expect(direct.pathname).toBe("/pair");
+    expect(direct.search).toBe("");
+    expect(new URLSearchParams(direct.hash.slice(1)).get("token")).toBe("PHONE +&%/#?");
+    expect(hosted.toString()).toBe(browserLink);
+  });
+
+  it("keeps direct browser links inside the GOAT app payload", () => {
+    const direct = "http://192.168.1.42:4780/pair#token=PAIR1234";
+    expect(new URL(buildClientPairingQrPayload(direct)).searchParams.get("pairingUrl")).toBe(
+      direct,
+    );
   });
 });

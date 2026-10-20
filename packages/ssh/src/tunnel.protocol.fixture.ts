@@ -1,15 +1,17 @@
-import { SSH_RUNTIME_PROTOCOL_VERSION } from "@t3tools/shared/sshRuntimeProtocol";
-import { ORCHESTRATION_PROTOCOL_VERSION } from "@t3tools/contracts";
+import { SSH_RUNTIME_PROTOCOL_VERSION } from "@goat/shared/sshRuntimeProtocol";
+import { ORCHESTRATION_PROTOCOL_VERSION } from "@goat/contracts";
 import { assert } from "@effect/vitest";
-import * as NetService from "@t3tools/shared/Net";
+import * as NetService from "@goat/shared/Net";
 import * as Crypto from "effect/Crypto";
+import * as Clock from "effect/Clock";
 import * as Hex from "effect/encoding/Hex";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 import { ChildProcess, ChildProcessSpawner } from "effect/process";
-import { remoteStateKey } from "./command.ts";
+import { REMOTE_RUNTIME_STATE_KEY } from "./command.ts";
+import { exitWithTestParent } from "./testParentLifetime.fixture.ts";
 import * as SshTunnel from "./tunnel.ts";
 import {
   remoteShell,
@@ -36,6 +38,16 @@ export const protocolExecutable = (
     liveTokens?: string;
     descriptor404?: boolean;
     nodeReadiness?: boolean;
+    /** Advertise `drainRestart` with a per-start instance id and answer the drain endpoint. */
+    drain?: boolean;
+    /** Build commit time answered by `__ssh-helper commit-time`; unstamped when absent. */
+    commitTime?: number;
+    /** The CLI lists memory scopes in `auth session issue --help`; builds before memory do not. */
+    memoryScopes?: boolean;
+    /** Exit code of `auth session issue --help` after it prints; 0 when absent. */
+    scopeHelpExit?: number;
+    contestedPort?: number;
+    contestedAttempts?: number;
   },
   state: string,
 ) => {
@@ -56,17 +68,27 @@ const state = ${JSON.stringify(state)};
 const test = path.join(home, ".test");
 const runtimeFile = path.join(home, ".goat/userdata/server-runtime.json");
 const args = process.argv.slice(2);
+const flag = name => { const i = args.indexOf(name); return i < 0 ? undefined : args[i+1]; };
+const drainCapable = ${JSON.stringify(signals.drain ?? false)};
+const tokenFile = path.join(home, ".goat/userdata/runtime-control.token");
 function event(type, extra = {}) { fs.appendFileSync(path.join(test, "events"), JSON.stringify({type, version, ...extra}) + "\\n"); }
+event("exec", { args });
 if (args[0] === "--version") {
   event("version", { published: fs.existsSync(path.join(state, "run-t3.sh")) ? fs.readFileSync(path.join(state, "run-t3.sh"), "utf8") : "" });
-  console.log("goat v" + version);
+  const proof = path.join(test, "pending-proof");
+  console.log("goat v" + (fs.existsSync(proof) && fs.readFileSync(proof, "utf8").trim() === "version:" + version ? "0.0.0" : version));
 } else if (args[0] === "__ssh-helper" && args[1] === "protocol") {
   if (${JSON.stringify(signals.missingCommand ?? false)}) process.exit(2);
   const at = args.indexOf("--runtime-file");
-  const flag = name => { const i = args.indexOf(name); return i < 0 ? undefined : args[i+1]; };
+  // A test writes this file to make another client's server look live from now on.
+  const liveFile = path.join(test, "live-tokens-" + version);
+  if (at >= 0 && args.includes("--shell") && fs.existsSync(liveFile)) { console.log(fs.readFileSync(liveFile, "utf8").trim()); return; }
   const value = at < 0 ? fields : await (await import(${JSON.stringify(helperUrl)})).readLiveSshRuntimeProtocol(args[at+1], flag("--port-file"), flag("--pid-file"));
   event("protocol", { live: at >= 0, status: value.status });
   if (args.includes("--shell")) {
+if (at < 0 && fs.existsSync(path.join(test, "pending-proof")) && fs.readFileSync(path.join(test, "pending-proof"), "utf8").trim() === "protocol:" + version) {
+  console.log(version + " 999 999 0 0"); return;
+}
 const injected = at < 0 ? ${JSON.stringify(signals.ownTokens ?? null)} : ${JSON.stringify(signals.liveTokens ?? null)};
 if (injected !== null) { console.log(injected); return; }
 console.log((value.status ? value.status + " " : "") + [value.serverVersion ?? "unknown",
@@ -75,19 +97,74 @@ console.log((value.status ? value.status + " " : "") + [value.serverVersion ?? "
   } else console.log(JSON.stringify(value));
 } else if (args[0] === "__ssh-helper" && args[1] === "compare-version") {
   if (${JSON.stringify(signals.missingComparison ?? false)}) process.exit(2);
-  const comparison = (await import(${JSON.stringify(new URL("../../shared/src/semver.ts", import.meta.url).href)})).compareSemverVersions(args[2], args[3]);
-  console.log(comparison < 0 ? "older" : comparison > 0 ? "newer" : "equal");
+  const rest = args.slice(2);
+  const commitFlag = name => { const at = rest.indexOf(name); return at < 0 ? undefined : Number(rest[at+1]); };
+  const [liveVersion, requestedVersion] = rest.filter((value, at) => !value.startsWith("--") && !(rest[at-1] ?? "").startsWith("--"));
+  const comparison = (await import(${JSON.stringify(new URL("../../shared/src/semver.ts", import.meta.url).href)})).compareRuntimeBuilds(
+    { version: liveVersion, commitTime: commitFlag("--live-commit-time") },
+    { version: requestedVersion, commitTime: commitFlag("--requested-commit-time") });
+  console.log(comparison === undefined ? "unknown" : comparison < 0 ? "older" : comparison > 0 ? "newer" : "equal");
+} else if (args[0] === "__ssh-helper" && args[1] === "commit-time") {
+  const commitTime = ${JSON.stringify(signals.commitTime ?? null)};
+  if (commitTime === null) process.exit(1);
+  console.log(commitTime);
 } else if (args[0] === "__ssh-helper" && args[1] === "activity") {
   const value = await (await import(${JSON.stringify(helperUrl)})).readSshServerActivity(Number(args[args.indexOf("--port")+1]), Number(args[args.indexOf("--pid")+1]));
   event("activity", { value }); console.log(value);
+} else if (args[0] === "__ssh-helper" && args[1] === "compat") {
+  const control = path.join(test, "compat");
+  if (fs.existsSync(control)) {
+    const sequence = JSON.parse(fs.readFileSync(control, "utf8"));
+    const counter = path.join(test, "compat-requests");
+    const count = fs.existsSync(counter) ? Number(fs.readFileSync(counter, "utf8")) : 0;
+    fs.writeFileSync(counter, String(count + 1));
+    const response = sequence[Math.min(count, sequence.length - 1)];
+    event("compat-override", { response, count });
+    if (response === "failure") process.exit(2);
+    if (response !== "real") { console.log(response); return; }
+  }
+  try {
+    const value = await (await import(${JSON.stringify(helperUrl)})).readSshRuntimeCompatibility(Number(flag("--port")));
+    console.log(value.verdict + " " + (value.drainRestart ? 1 : 0) + " " + (value.instanceId ?? "-"));
+  } catch { console.log("unknown 0 -"); process.exitCode = 1; }
+} else if (args[0] === "__ssh-helper" && args[1] === "drain") {
+  const value = await (await import(${JSON.stringify(helperUrl)})).requestSshRuntimeDrain({
+    port: Number(flag("--port")), instanceId: flag("--instance-id"), targetVersion: flag("--target-version"),
+    graceSeconds: Number(flag("--grace-seconds")), force: args.includes("--force"), tokenFile: flag("--token-file") });
+  event("drain-request", { value, force: args.includes("--force"), grace: Number(flag("--grace-seconds")) }); console.log(value);
+} else if (args[0] === "__ssh-helper" && args[1] === "supervise") {
+  // Supervised children prove readiness through their descriptor, not the readiness FIFO.
+  process.env.FIXTURE_SUPERVISED = "1";
+  const result = await (await import(${JSON.stringify(helperUrl)})).superviseSshRuntimeReplacement({
+    oldPid: Number(flag("--old-pid")), oldInstanceId: flag("--old-instance-id"), port: Number(flag("--port")),
+    baseDir: flag("--base-dir"), stateDir: flag("--state-dir"), runnerFile: flag("--runner"),
+    previousRunnerFile: flag("--previous-runner"), targetVersion: flag("--target-version"),
+    previousVersion: flag("--previous-version"), identity: flag("--identity"), previousIdentity: flag("--previous-identity"),
+    exitTimeoutMs: 10000, readyTimeoutMs: 10000, logFile: flag("--log") });
+  event("supervise", { status: result.status });
+  fs.writeFileSync(flag("--result"), result.status + " " + (result.pid ?? 0) + " " + (result.version ?? "-") + "\\n");
 } else if (args[0] === "__ssh-helper" && args[1] === "pick-port") {
+  if (fs.existsSync(path.join(test, "fail-pick-port-" + version))) process.exit(1);
+  const contestedPort = ${JSON.stringify(signals.contestedPort ?? null)};
+  const picked = path.join(test, "contested-picked");
+  const pickCount = fs.existsSync(picked) ? Number(fs.readFileSync(picked, "utf8")) : 0;
+  if (contestedPort !== null && pickCount < ${JSON.stringify(signals.contestedAttempts ?? 1)}) {
+    fs.writeFileSync(picked, String(pickCount + 1)); console.log(contestedPort); return;
+  }
   const socket = net.createServer(); socket.listen(0, "127.0.0.1", () => {
 const port = socket.address().port; socket.close(() => console.log(port));
   });
 } else if (args[0] === "__ssh-helper" && args[1] === "wait-ready") {
+  const proof = path.join(test, "pending-proof");
+  if (fs.existsSync(proof)) {
+    const action = fs.readFileSync(proof, "utf8").trim();
+    event("pending-proof", { action });
+    if (action === "readiness") process.exit(2);
+    if (action === "ownership-loss") fs.writeFileSync(path.join(state, "managed"), "external\\n");
+  }
   // Fixture readiness uses an event, not polling or a delay.
   let record = fs.existsSync(runtimeFile) ? JSON.parse(fs.readFileSync(runtimeFile, "utf8")) : null;
-  if (!record || !fs.existsSync(path.join(test, "accepted-ready-" + record.pid))) {
+  if (${JSON.stringify(signals.contestedPort === undefined)} && (!record || !fs.existsSync(path.join(test, "accepted-ready-" + record.pid)))) {
 const fd = fs.openSync(path.join(test, "ready.fifo"), "r");
 fs.readSync(fd, Buffer.alloc(32), 0, 32, null); fs.closeSync(fd);
 record = JSON.parse(fs.readFileSync(runtimeFile, "utf8"));
@@ -96,20 +173,50 @@ fs.writeFileSync(path.join(test, "accepted-ready-" + record.pid), "ready");
   const req = http.get("http://127.0.0.1:" + args[2] + "/", res => {
 res.resume(); res.on("end", () => process.exit(res.statusCode === 200 ? 0 : 1));
   }); req.on("error", () => process.exit(1));
+} else if (args[0] === "auth" && args.includes("--help")) {
+  console.log("  --scope choice  Authorization scope to grant. (choices: " +
+    (${JSON.stringify(signals.memoryScopes ?? true)} ? "memory:read, memory:write, " : "") + "orchestration:read, orchestration:operate)");
+  process.exitCode = ${JSON.stringify(signals.scopeHelpExit ?? 0)};
 } else if (args[0] === "auth") {
   event("auth", { args });
   if (fs.existsSync(path.join(test, "pairing-fail"))) process.exit(2);
   if (args.includes("--runtime-mode-ceiling") && fs.existsSync(path.join(test, "reject-ceiling"))) process.exit(2);
   console.log(JSON.stringify(args[1] === "pairing" ? {credential: version} : {token: version, expiresAt: null}));
 } else if (args[0] === "serve") {
+  ${exitWithTestParent('args.includes("--test-seed") || process.env.T3_TEST_SEED === "1"')}
+  if (fs.existsSync(path.join(test, "fail-start-" + version))) { event("failed-start"); process.exit(3); }
   const at = args.indexOf("--port"); const requested = at < 0 ? 0 : Number(args[at+1]);
-  const descriptor = {environmentId: "fixture", label: "Fixture", platform: {os: "linux", arch: "x64"}, capabilities: {}, ...fields};
+  const instanceId = drainCapable ? require("node:crypto").randomUUID() : undefined;
+  const descriptor = {environmentId: "fixture", label: "Fixture", platform: {os: "linux", arch: "x64"},
+    capabilities: drainCapable ? {drainRestart: true} : {}, ...fields, ...(instanceId ? {instanceId} : {})};
+  const stopSelf = () => {
+    if (fs.existsSync(runtimeFile) && JSON.parse(fs.readFileSync(runtimeFile, "utf8")).pid === process.pid) fs.unlinkSync(runtimeFile);
+    server.close(() => process.exit(0)); server.closeAllConnections();
+  };
   const server = http.createServer((req, res) => {
 res.setHeader("content-type", "application/json");
-if (req.url === "/.well-known/t3/environment" && (${JSON.stringify(signals.descriptor404 ?? false)} || fs.existsSync(path.join(test, "descriptor404")))) {
+if (req.method === "POST" && req.url === "/.well-known/goat/runtime/drain" && drainCapable) {
+  let body = ""; req.on("data", c => { body += c; }); req.on("end", () => {
+    const request = JSON.parse(body);
+    const token = fs.readFileSync(tokenFile, "utf8").trim();
+    if (req.headers["x-goat-runtime-control"] !== token) { res.statusCode = 403; res.end("{}"); return; }
+    if (request.expectedInstanceId !== instanceId) { res.end(JSON.stringify({status: "instance-changed", instanceId, forced: false})); return; }
+    const file = path.join(test, "drain");
+    const mode = fs.existsSync(file) ? fs.readFileSync(file, "utf8").trim() : "drained";
+    if (mode === "response-lost") {
+      event("drain", { status: "response-lost" });
+      res.destroy(); return;
+    }
+    const status = mode === "cancelled" && request.force !== true ? "cancelled" : "drained";
+    event("drain", { status, targetVersion: request.targetVersion, force: request.force === true, grace: request.graceSeconds });
+    res.end(JSON.stringify({status, instanceId, forced: status === "drained" && mode === "cancelled"}), () => { if (status === "drained") { event("self-stop"); stopSelf(); } });
+  });
+  return;
+}
+if (["/.well-known/goat/environment", "/.well-known/t3/environment"].includes(req.url) && (${JSON.stringify(signals.descriptor404 ?? false)} || fs.existsSync(path.join(test, "descriptor404")))) {
   res.statusCode = 404; res.end("{}"); return;
 }
-if (req.url === "/.well-known/t3/activity") {
+if (["/.well-known/goat/activity", "/.well-known/t3/activity"].includes(req.url)) {
   const file = path.join(test, "activity");
   const values = fs.existsSync(file) ? fs.readFileSync(file, "utf8").trim().split(",") : ["unknown"];
   const countFile = path.join(test, "activity-requests");
@@ -121,7 +228,7 @@ if (req.url === "/.well-known/t3/activity") {
   const activityPid = fs.existsSync(pidFile) ? Number(fs.readFileSync(pidFile, "utf8")) : process.pid;
   res.end(JSON.stringify({activity, serverVersion: version, pid: activityPid})); return;
 }
-res.end(req.url === "/.well-known/t3/environment" ? JSON.stringify(descriptor) : "ok");
+res.end(["/.well-known/goat/environment", "/.well-known/t3/environment"].includes(req.url) ? JSON.stringify(descriptor) : "ok");
   });
   process.on("SIGTERM", () => {
 event("stop");
@@ -130,15 +237,17 @@ server.close(() => process.exit(0));
   });
   server.listen(requested, "127.0.0.1", () => {
 const record = {version: 1, pid: process.pid, port: server.address().port,
-  origin: "http://127.0.0.1:" + server.address().port, startedAt: new Date().toISOString(), ...fields};
+  origin: "http://127.0.0.1:" + server.address().port, startedAt: new Date().toISOString(), ...fields, ...(instanceId ? {instanceId} : {})};
 fs.mkdirSync(path.dirname(runtimeFile), {recursive: true}); fs.writeFileSync(runtimeFile, JSON.stringify(record));
+if (drainCapable) fs.writeFileSync(tokenFile, "fixture-token-" + process.pid + "\\n", {mode: 0o600});
 fs.appendFileSync(path.join(test, "pids"), process.pid + "\\n");
 event("start", { runner: fs.readFileSync(path.join(state, "run-t3.sh"), "utf8") });
 if (args.includes("--test-seed") || process.env.T3_TEST_SEED === "1") {
   fs.writeFileSync(path.join(test, "accepted-ready-" + process.pid), "ready");
   console.log(JSON.stringify(record));
 }
-else if (!${JSON.stringify(signals.nodeReadiness ?? false)}) { const fd = fs.openSync(path.join(test, "ready.fifo"), "w"); fs.writeSync(fd, "ready\\n"); fs.closeSync(fd); }
+else if (process.env.FIXTURE_SUPERVISED === "1") fs.writeFileSync(path.join(test, "accepted-ready-" + process.pid), "ready");
+else if (!${JSON.stringify((signals.nodeReadiness ?? false) || signals.contestedPort !== undefined)}) { const fd = fs.openSync(path.join(test, "ready.fifo"), "w"); fs.writeSync(fd, "ready\\n"); fs.closeSync(fd); }
   });
 } else process.exit(97);
 })().catch(error => { console.error(error); process.exitCode = 1; });
@@ -157,12 +266,21 @@ export const makeProtocolFixture = Effect.fn("test.protocol.fixture")(function* 
   liveTokens?: string;
   descriptor404?: boolean;
   nodeMode?: boolean;
-  candidateSignals?: { ssh: number; orchestration: number };
+  contestedPort?: number;
+  contestedAttempts?: number;
+  homePrefix?: string;
+  /** The live server drains for a replacement (servers before #119 do not). */
+  drain?: boolean;
+  /** Commit time of the installed old build; unstamped when absent. */
+  commitTime?: number;
+  /** The installed old build can issue memory scopes (default true, as for current builds). */
+  memoryScopes?: boolean;
+  candidateSignals?: { ssh: number; orchestration: number; drain?: boolean; commitTime?: number };
 }) {
   const fs = yield* FileSystem.FileSystem;
   const realSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
-  const home = yield* fs.makeTempDirectoryScoped({ prefix: "goat-protocol-" });
-  const key = yield* remoteStateKey(uploadTarget);
+  const home = yield* fs.makeTempDirectoryScoped({ prefix: input.homePrefix ?? "goat-protocol-" });
+  const key = REMOTE_RUNTIME_STATE_KEY;
   const state = `${home}/.goat/ssh-launch/${key}`;
   const test = `${home}/.test`;
   const old = `${home}/.goat/runtime/goat/versions/${input.oldVersion}`;
@@ -289,6 +407,7 @@ exec -a node '${process.execPath.replaceAll("'", "'\\''")}' "$@"
       input.candidateSignals ?? {
         ssh: SSH_RUNTIME_PROTOCOL_VERSION,
         orchestration: ORCHESTRATION_PROTOCOL_VERSION,
+        drain: true,
       },
       state,
     ),
@@ -403,8 +522,9 @@ exec -a node '${process.execPath.replaceAll("'", "'\\''")}' "$@"
   const run = (
     entry: "launch" | "pairing" | "mcp",
     secondary = false,
-    options: SshTunnel.RemoteT3RunnerOptions = {},
+    options: SshTunnel.RemoteGoatRunnerOptions = {},
     prepared?: SshTunnel.PreparedRemoteRuntime,
+    session: Partial<SshTunnel.RemoteMcpClientSessionOptions> = {},
   ) => {
     const inputRunner = { ...runner, ...options, keepExistingRunner: secondary };
     const action =
@@ -433,7 +553,7 @@ exec -a node '${process.execPath.replaceAll("'", "'\\''")}' "$@"
             )
           : SshTunnel.issueRemoteMcpClientSession(
               uploadTarget,
-              { label: "fixture", ttl: "1h", runtimeModeCeiling: null },
+              { label: "fixture", ttl: "1h", runtimeModeCeiling: null, ...session },
               {},
               inputRunner,
               prepared,
@@ -452,6 +572,52 @@ exec -a node '${process.execPath.replaceAll("'", "'\\''")}' "$@"
       Effect.result,
     );
   };
+  // A frozen clock and file times model two same-second writes even when a fixture takes
+  // seconds to run. Inode and size still come from the real file.
+  let frozenSecond: number | undefined;
+  const shiftHostClock = (seconds: number, freezeFileTimes = false) =>
+    Effect.gen(function* () {
+      const bin = `${test}/clock`;
+      const now = Math.floor((yield* Clock.currentTimeMillis) / 1000);
+      const second = freezeFileTimes ? (frozenSecond ??= now) : now;
+      yield* fs.makeDirectory(bin, { recursive: true });
+      yield* fs.writeFileString(`${bin}/second`, String(second + seconds));
+      yield* fs.writeFileString(
+        `${bin}/date`,
+        `#!/bin/sh
+if [ "$#" = 1 ] && [ "$1" = +%s ]; then echo $(( ${freezeFileTimes ? '$(cat "$HOME/.test/clock/second")' : `$(/bin/date +%s) + (${seconds})`} )); else exec /bin/date "$@"; fi
+`,
+      );
+      yield* fs.chmod(`${bin}/date`, 0o700);
+      if (freezeFileTimes) {
+        yield* fs.writeFileString(
+          `${bin}/sleep`,
+          `#!/bin/sh
+# Listener polling waits for the real child; only fact warm-up advances the frozen file clock.
+case "$1" in 0.1) exit 0 ;; esac
+printf '%s\\n' "$1" >> "$HOME/.test/clock/waits"
+second="$(cat "$HOME/.test/clock/second")"
+wait_seconds="\${1%%.*}"
+echo $(( second + wait_seconds )) > "$HOME/.test/clock/second"
+`,
+        );
+        yield* fs.chmod(`${bin}/sleep`, 0o700);
+        yield* fs.writeFileString(
+          `${bin}/stat`,
+          `#!/bin/sh
+case "$2" in
+  '%d:%i:%z:%m:%c'|'%d:%i:%s:%Y:%Z')
+    sig="$(/usr/bin/stat "$@")" || exit 1
+    sig="\${sig%:*}"; sig="\${sig%:*}"
+    printf '%s:${second}:${second}\\n' "$sig" ;;
+  *) exec /usr/bin/stat "$@" ;;
+esac
+`,
+        );
+        yield* fs.chmod(`${bin}/stat`, 0o700);
+      }
+      setRemotePath(`${bin}:${remotePath}`);
+    });
   const snapshot = Effect.gen(function* () {
     const files = ["run-t3.sh", "pid", "port", "managed", "identity"];
     const values: Record<string, string | null> = {};
@@ -480,8 +646,14 @@ exec -a node '${process.execPath.replaceAll("'", "'\\''")}' "$@"
     fs,
     realSpawner,
     setBeforeCommand,
+    setCompat: (responses: ReadonlyArray<string>) =>
+      Effect.gen(function* () {
+        yield* fs.writeFileString(`${test}/compat`, JSON.stringify(responses));
+        yield* fs.writeFileString(`${test}/compat-requests`, "0");
+      }),
     setScriptPrefix,
     setRemotePath,
+    shiftHostClock,
     counters: () => ({ uploads, gh, cacheReads }),
     remoteCommands,
     transport,

@@ -32,6 +32,7 @@ import {
 } from "./index.ts";
 import {
   latestProviderTurnForAttempt,
+  OrchestrationV2RunJson,
   OrchestrationV2QuestionEscalation,
   OrchestrationV2QuestionResolution,
   OrchestrationV2AppThread,
@@ -53,6 +54,7 @@ import {
   OrchestrationV2ShellSnapshot,
   OrchestrationV2SubscribeThreadInput,
   OrchestrationV2Subagent,
+  OrchestrationV2SubagentJson,
   OrchestrationV2ThreadHistoryPage,
   OrchestrationV2ThreadProjection,
   OrchestrationV2ThreadStreamItem,
@@ -130,6 +132,8 @@ const decodeOrchestrationV2DomainEvent = Schema.decodeUnknownSync(OrchestrationV
 const decodeProviderReplayTranscript = Schema.decodeUnknownSync(ProviderReplayTranscript);
 const encodeOrchestrationV2Subagent = Schema.encodeSync(OrchestrationV2Subagent);
 const decodeOrchestrationV2Subagent = Schema.decodeUnknownSync(OrchestrationV2Subagent);
+const encodeOrchestrationV2SubagentJson = Schema.encodeSync(OrchestrationV2SubagentJson);
+const decodeOrchestrationV2SubagentJson = Schema.decodeUnknownSync(OrchestrationV2SubagentJson);
 const decodeOrchestrationV2ThreadProjection = Schema.decodeUnknownSync(
   OrchestrationV2ThreadProjection,
 );
@@ -214,7 +218,6 @@ describe("orchestration V2 contracts", () => {
         sequence: 2,
         event: {
           id: "event-2",
-          // A type no build of this client knows, standing in for a newer server's event.
           type: "run.from-a-future-server",
           threadId: "thread-1",
           occurredAt: DateTime.formatIso(now),
@@ -230,7 +233,6 @@ describe("orchestration V2 contracts", () => {
       sequence: 2,
       eventType: "run.from-a-future-server",
     });
-    // A known type with a broken payload is a real defect, not a newer event.
     expect(() =>
       decodeWireItems([
         { ...detached("event-4", 4), event: { ...detached("event-4", 4).event, payload: {} } },
@@ -264,7 +266,6 @@ describe("orchestration V2 contracts", () => {
       ...extra,
     });
     const known = item("item-known", "system_notice", { message: "Hello" });
-    // A type no build of this client knows, standing in for a newer server's item.
     const future = item("item-future", "hologram", { beam: "ref-1" });
     const projected = (position: number, turnItem: { readonly id: string }) => ({
       position,
@@ -352,7 +353,6 @@ describe("orchestration V2 contracts", () => {
       }).items.map((row) => row.item.id),
     ).toEqual(["item-known"]);
 
-    // A known turn item type with a broken payload is a real defect, not a newer item.
     const broken = item("item-broken", "system_notice", {});
     expect(() => decodeWireItems([turnItemEvent(4, broken)])).toThrow();
     expect(() =>
@@ -387,7 +387,6 @@ describe("orchestration V2 contracts", () => {
   });
 
   it("negotiates compact bounded turnItems without disturbing older peers", () => {
-    // Older servers strip the unknown opt-in, so they keep sending full turnItems.
     const legacyDecoded = decodeLegacySubscribeThreadInput({
       threadId: "thread-1",
       acceptBoundedSnapshot: true,
@@ -407,7 +406,6 @@ describe("orchestration V2 contracts", () => {
       snapshotSequence: 1,
       projection: emptyThreadProjection(),
     });
-    // Older servers never send the marker; newer clients treat absence as full turnItems.
     expect(projection.kind === "snapshot" && projection.turnItemsOmitLocalVisible).toBe(undefined);
     const marked = decodeStreamItem({
       kind: "snapshot",
@@ -416,7 +414,6 @@ describe("orchestration V2 contracts", () => {
       turnItemsOmitLocalVisible: true,
     });
     expect(marked.kind === "snapshot" && marked.turnItemsOmitLocalVisible).toBe(true);
-    // The marker only means "omitted"; any other value is a protocol error.
     expect(() =>
       decodeStreamItem({
         kind: "snapshot",
@@ -428,8 +425,6 @@ describe("orchestration V2 contracts", () => {
   });
 
   it("decodes persisted capability snapshots that predate runtimePolicy", () => {
-    // Events written before the field existed must replay; absent decodes to
-    // the weaker client-boundary guarantee so history never overclaims.
     const legacyCapabilities = {
       sessions: {
         supportsMultipleProviderThreadsPerSession: false,
@@ -648,6 +643,7 @@ describe("orchestration V2 contracts", () => {
       throw new Error(`Expected run.created, received ${event.type}.`);
     }
     expect(event.payload.id).toBe(RunId.make("run-1"));
+    expect(event.payload.memoryGrantCeiling).toBe("none");
   });
 
   it("decodes app-owned delegated task commands", () => {
@@ -695,7 +691,6 @@ describe("orchestration V2 contracts", () => {
     expect(command.taskId).toBe(NodeId.make("node-subagent-1"));
     expect(command.completionWake).toBe("always");
 
-    // The policy carries the whole decision, so it is required and closed.
     expect(() =>
       decodeOrchestrationV2Command({
         type: "delegated_task.wake-policy",
@@ -947,6 +942,68 @@ describe("orchestration V2 contracts", () => {
     expect(turnItem.progress).toBe("Inspecting package metadata");
   });
 
+  it.each(["  indented prompt\n", "\n \t\n"])(
+    "preserves workflow prompt and result %j in stored and wire JSON",
+    (preview) => {
+      const subagent = {
+        ...decodeOrchestrationV2Subagent({
+          id: "workflow-coordinator",
+          threadId: "thread-1",
+          runId: "run-1",
+          parentNodeId: "node-root-1",
+          origin: "provider_native",
+          createdBy: "agent",
+          driver: "claudeAgent",
+          providerInstanceId: "claudeAgent",
+          providerThreadId: null,
+          childThreadId: null,
+          nativeTaskRef: null,
+          prompt: "Run workflow",
+          title: null,
+          model: null,
+          status: "running",
+          result: null,
+          startedAt: now,
+          completedAt: null,
+          updatedAt: now,
+        }),
+        workflow: {
+          phases: [],
+          agents: [
+            {
+              index: 1,
+              label: "Member",
+              state: "completed" as const,
+              prompt: preview,
+              result: preview,
+            },
+          ],
+        },
+      };
+      const { workflow, ...coordinator } = subagent;
+      const incoming = { ...encodeOrchestrationV2SubagentJson(coordinator), workflow };
+      for (const codec of [
+        OrchestrationV2SubagentJson,
+        Schema.toCodecJson(OrchestrationV2Subagent),
+      ]) {
+        const encode = Schema.encodeSync(codec);
+        const decode = Schema.decodeUnknownSync(codec);
+        const json: unknown = JSON.parse(JSON.stringify(encode(subagent)));
+        expect(json).toMatchObject({
+          workflow: { agents: [{ prompt: preview, result: preview }] },
+        });
+        expect(decode(json).workflow?.agents[0]).toMatchObject({
+          prompt: preview,
+          result: preview,
+        });
+        expect(decode(incoming).workflow?.agents[0]).toMatchObject({
+          prompt: preview,
+          result: preview,
+        });
+      }
+    },
+  );
+
   it("decodes app-owned subagent parent-wake policies", () => {
     const appOwnedSubagent = {
       id: "node-subagent-2",
@@ -971,7 +1028,6 @@ describe("orchestration V2 contracts", () => {
     };
     const decode = Schema.decodeUnknownSync(OrchestrationV2Subagent);
 
-    // Legacy records predate the field and must behave as settled_only.
     expect(decode(appOwnedSubagent).completionWake).toBeUndefined();
     expect(decode({ ...appOwnedSubagent, completionWake: "always" }).completionWake).toBe("always");
     expect(decode({ ...appOwnedSubagent, completionWake: "settled_only" }).completionWake).toBe(
@@ -1338,7 +1394,6 @@ it("round-trips typed notifications and keeps work outcome separate from item st
       decodeOrchestrationV2TurnItem({ ...base, source, summary: "", updatedAt: now }),
     ).toThrow();
   }
-  // A known kind with fields that do not decode is a real defect, not a newer kind.
   expect(() =>
     decodeOrchestrationV2TurnItem({ ...base, source: { kind: "delegated_task" }, updatedAt: now }),
   ).toThrow();
@@ -1386,8 +1441,6 @@ describe("background work kinds from older or newer servers", () => {
   });
 
   it("sends and stores sources that clients from before specific kinds still decode", () => {
-    // The notification source schema clients shipped with before #13948. They
-    // reject a kind outside it, which fails the whole thread load.
     const PreSpecificKindsNotification = Schema.Struct({
       type: Schema.Literal("notification"),
       source: Schema.Union([
@@ -1418,7 +1471,6 @@ describe("background work kinds from older or newer servers", () => {
       const item = decodeOrchestrationV2TurnItemJson(storedNotification(source));
       for (const encoded of [encodeOrchestrationV2TurnItemJson(item), sendOverWire(item)]) {
         expect(decodePreSpecificKinds(encoded).source).toEqual(preSpecificKindsSource);
-        // Current clients read the specific kind back.
         expect(decodeOrchestrationV2TurnItemJson(encoded)).toEqual(item);
       }
       expect(item).toMatchObject({ source });
@@ -1455,6 +1507,7 @@ describe("background work kinds from older or newer servers", () => {
         { taskId: "bg-3", description: "Nightly", kind: "workflow", schedule: "0 3 * * *" },
         { taskId: "bg-4", description: "npm test", kind: "command" },
         { taskId: "bg-5", kind: "subagent", childThreadId: "thread-child" },
+        { taskId: "bg-6", kind: "subagent", providerInstanceId: "claudeAgent" },
       ],
     });
     expect(providerThread.pendingBackgroundTasks).toEqual([
@@ -1463,11 +1516,10 @@ describe("background work kinds from older or newer servers", () => {
       { taskId: "bg-3", description: "Nightly", kind: "background_task" },
       { taskId: "bg-4", description: "npm test", kind: "command" },
       { taskId: "bg-5", kind: "subagent", childThreadId: "thread-child" },
+      { taskId: "bg-6", kind: "subagent", providerInstanceId: "claudeAgent" },
     ]);
-    // The fallback is decode-only: what was decoded encodes as its known member.
     const encoded = encodeOrchestrationV2ProviderThreadJson(providerThread).pendingBackgroundTasks;
     expect(encoded).toEqual(providerThread.pendingBackgroundTasks);
-    // Clients from before kinds read a roster entry as this struct and ignore `kind`.
     const decodePreKindsRoster = Schema.decodeUnknownSync(
       Schema.Array(
         Schema.Struct({
@@ -1483,6 +1535,7 @@ describe("background work kinds from older or newer servers", () => {
       "bg-3",
       "bg-4",
       "bg-5",
+      "bg-6",
     ]);
     expect(() =>
       decodeOrchestrationV2ProviderThreadJson({
@@ -1890,13 +1943,14 @@ it("round-trips responder metadata in resolved requests, commands and history", 
     undefined,
     { type: "user" as const },
     { type: "client" as const, reason: "R" },
-    {
+    ...[undefined, false, true].map((relayedFromUser) => ({
       type: "agent" as const,
       threadId: ThreadId.make("caller"),
       environmentId: null,
       title: null,
       reason: "  R  ",
-    },
+      ...(relayedFromUser === undefined ? {} : { relayedFromUser }),
+    })),
   ]) {
     const metadata = respondedBy === undefined ? {} : { respondedBy };
     const request = decodeRuntimeRequestJson({
@@ -1913,6 +1967,18 @@ it("round-trips responder metadata in resolved requests, commands and history", 
       ...metadata,
     });
     expect(decodeRuntimeRequestJson(encodeRuntimeRequestJson(request))).toEqual(request);
+    const event = decodeOrchestrationV2DomainEvent({
+      id: "answer-event",
+      type: "runtime-request.updated",
+      threadId: "thread",
+      occurredAt: now,
+      payload: request,
+    });
+    expect(event.payload).toEqual(request);
+    if (respondedBy?.type === "agent" && respondedBy.relayedFromUser === undefined) {
+      expect(describeUserInputResponder({ respondedBy })).toBe('orchestrator "caller"');
+      expect(request.respondedBy).not.toHaveProperty("relayedFromUser");
+    }
     expect(
       decodeOrchestrationV2Command({
         type: "runtime-request.respond",
@@ -1952,6 +2018,32 @@ it("round-trips responder metadata in resolved requests, commands and history", 
       item,
     );
   }
+});
+it("counts human answers from direct users and agent relay claims only", () => {
+  const decode = Schema.decodeUnknownSync(UserInputRespondedBy);
+  const agent = {
+    type: "agent",
+    threadId: "caller",
+    environmentId: null,
+    title: "Coordinator",
+    reason: "The user decided this.",
+  };
+  const responders = [
+    { type: "user" },
+    { ...agent, relayedFromUser: true },
+    { ...agent, environmentId: "foreign", relayedFromUser: true },
+    agent,
+    { ...agent, relayedFromUser: false },
+    { type: "client", reason: "The user decided this." },
+  ].map((responder) => decode(responder));
+  expect(
+    responders.filter(
+      (responder) =>
+        responder.type === "user" ||
+        (responder.type === "agent" && responder.relayedFromUser === true),
+    ),
+  ).toHaveLength(3);
+  expect(() => decode({ ...agent, relayedFromUser: "true" })).toThrow();
 });
 it("describes responders and terminal outcomes truthfully", () => {
   expect(describeUserInputResponder({})).toBe("another responder");
@@ -2193,4 +2285,287 @@ describe("GOAT bot conversation messages", () => {
     expect(decoded).not.toHaveProperty("channel");
     expect(decoded).toMatchObject({ role: "assistant", text: "On it." });
   });
+});
+
+const memoryLegacyCapabilities = {
+  sessions: {
+    supportsMultipleProviderThreadsPerSession: false,
+    supportsModelSwitchInSession: false,
+    supportsProviderSwitchingViaHandoff: true,
+    supportsRuntimeModeSwitchInSession: false,
+    pendingRequestsSurviveRestart: false,
+  },
+  threads: {
+    canCreateEmptyThread: true,
+    canReadThreadSnapshot: false,
+    canRollbackThread: true,
+    canForkThread: false,
+    canForkFromTurn: false,
+    canForkFromSubagentThread: false,
+    exposesNativeThreadId: true,
+  },
+  turns: {
+    exposesNativeTurnId: false,
+    emitsTurnStarted: true,
+    emitsTurnCompleted: true,
+    supportsInterrupt: true,
+    supportsActiveSteering: false,
+    supportsSteeringByInterruptRestart: true,
+    supportsQueuedMessages: true,
+    terminalStatusQuality: "strong",
+  },
+  streaming: {
+    streamsAssistantText: true,
+    streamsReasoning: true,
+    streamsToolOutput: true,
+    streamsPlanText: false,
+    emitsMessageCompleted: true,
+  },
+  tools: {
+    exposesToolItemIds: true,
+    emitsToolStarted: true,
+    emitsToolCompleted: true,
+    emitsToolOutput: true,
+    supportsMcpTools: false,
+    supportsDynamicToolCallbacks: false,
+  },
+  approvals: {
+    supportsCommandApproval: true,
+    supportsFileReadApproval: true,
+    supportsFileChangeApproval: true,
+    supportsApplyPatchApproval: false,
+    approvalsHaveNativeRequestIds: false,
+    approvalCallbacksAreLiveOnly: true,
+    approvalsCanOriginateFromSubagents: false,
+  },
+  planning: {
+    emitsPlanUpdated: true,
+    emitsTodoList: true,
+    emitsProposedPlan: false,
+    supportsStructuredQuestions: true,
+    planDeltasHaveItemIds: false,
+  },
+  subagents: {
+    supportsSubagents: false,
+    exposesSubagentThreadIds: false,
+    emitsSubagentLifecycle: false,
+    canWaitForSubagents: false,
+    canCloseSubagents: false,
+    canForkSubagentThread: false,
+  },
+  context: {
+    acceptsSystemContext: false,
+    acceptsDeveloperContext: false,
+    acceptsSyntheticUserContext: true,
+    canGenerateSummaries: true,
+    canConsumeHandoffSummaries: true,
+    supportsDeltaHandoff: true,
+    supportsFullThreadHandoff: true,
+    maxRecommendedHandoffChars: null,
+  },
+  checkpointing: {
+    appCanCheckpointFilesystem: true,
+    supportsNestedCheckpointScopes: true,
+    providerCanRollbackConversation: true,
+    providerRollbackReturnsSnapshot: true,
+    providerCanReadConversationSnapshot: false,
+  },
+  identity: {
+    nativeThreadIds: "strong",
+    nativeTurnIds: "weak",
+    nativeItemIds: "weak",
+    nativeRequestIds: "weak",
+  },
+};
+
+describe("memory provider capability replay", () => {
+  it("replays provider capabilities without memory", () => {
+    expect(
+      decodeOrchestrationV2ProviderCapabilities(memoryLegacyCapabilities).memory,
+    ).toBeUndefined();
+  });
+  it("keeps snapshot MCP and generation capabilities independent", () => {
+    for (const key of ["snapshot", "mcp", "resolveMemoryConflict", "generateMemorySummary"]) {
+      const memory = {
+        snapshot: false,
+        mcp: false,
+        resolveMemoryConflict: false,
+        generateMemorySummary: false,
+        [key]: true,
+      };
+      expect(
+        decodeOrchestrationV2ProviderCapabilities({ ...memoryLegacyCapabilities, memory }).memory,
+      ).toEqual(memory);
+    }
+  });
+});
+
+describe("WP4 task ceiling propagation codecs", () => {
+  const delegate = {
+    type: "delegated_task.request",
+    createdBy: "agent",
+    creationSource: "mcp",
+    commandId: "delegate",
+    parentThreadId: "parent",
+    parentRunId: "run",
+    parentNodeId: "node",
+    task: "Synthetic task",
+    modelSelection: { instanceId: "codex", model: "model" },
+    runtimeMode: "full-access",
+    interactionMode: "default",
+  };
+  it("defaults legacy commands to none and preserves explicit ceiling", () => {
+    const legacy = decodeOrchestrationV2Command(delegate);
+    expect(legacy).toMatchObject({ memoryGrantCeiling: "none" });
+    expect(legacy).not.toHaveProperty("role");
+    expect(legacy).not.toHaveProperty("parentModelSelection");
+    expect(
+      decodeOrchestrationV2Command({
+        ...delegate,
+        role: "review",
+        parentModelSelection: { instanceId: "author", model: "author-model" },
+      }),
+    ).toMatchObject({
+      role: "review",
+      parentModelSelection: { instanceId: "author", model: "author-model" },
+    });
+
+    for (const memoryGrantCeiling of ["none", "read", "read_write"])
+      expect(decodeOrchestrationV2Command({ ...delegate, memoryGrantCeiling })).toMatchObject({
+        memoryGrantCeiling,
+      });
+    expect(() =>
+      decodeOrchestrationV2Command({ ...delegate, memoryGrantCeiling: "write" }),
+    ).toThrow();
+  });
+  it("preserves persisted child metadata through JSON and legacy restart", () => {
+    const child = {
+      id: "child",
+      threadId: "parent",
+      runId: "run",
+      parentNodeId: "node",
+      origin: "app_owned",
+      createdBy: "agent",
+      driver: "codex",
+      providerInstanceId: "codex",
+      providerThreadId: null,
+      childThreadId: "child-thread",
+      nativeTaskRef: null,
+      prompt: "Synthetic task",
+      title: null,
+      model: null,
+      status: "pending",
+      result: null,
+      startedAt: null,
+      completedAt: null,
+      updatedAt: now,
+    };
+    expect(decodeOrchestrationV2Subagent(child)).toMatchObject({ memoryGrantCeiling: "none" });
+    const legacyTask = decodeOrchestrationV2Subagent(child);
+    expect(legacyTask).not.toHaveProperty("role");
+    expect(legacyTask).not.toHaveProperty("parentModelSelection");
+    expect(legacyTask).not.toHaveProperty("reviewLedger");
+    const metadata = {
+      role: "review",
+      modelSelection: { instanceId: "reviewer", model: "reviewer-model" },
+      parentModelSelection: { instanceId: "author", model: "author-model" },
+    };
+    const reviewLedger = [
+      {
+        kind: "decision",
+        entryId: "entry:1",
+        findingId: "finding:1",
+        severity: "high",
+        cites: "a.ts:10",
+        summary: "Verify the guard",
+        decision: "rebutted",
+        evidence: { kind: "test", ref: "guard.test.ts", exitCode: 0 },
+        recordedAt: "2026-10-16T00:00:00.000Z",
+        recordedByRunId: "run",
+      },
+      {
+        kind: "outcome",
+        entryId: "entry:2",
+        findingId: "finding:1",
+        outcome: "later_confirmed",
+        link: { kind: "test", ref: "failure.test.ts" },
+        recordedAt: "2026-10-17T00:00:00.000Z",
+        recordedByRunId: null,
+      },
+    ];
+    const review = decodeOrchestrationV2Subagent({ ...child, ...metadata, reviewLedger });
+    const reviewJson = JSON.parse(JSON.stringify(encodeOrchestrationV2SubagentJson(review)));
+    expect(decodeOrchestrationV2SubagentJson(reviewJson)).toMatchObject(metadata);
+    expect(decodeOrchestrationV2SubagentJson(reviewJson).reviewLedger).toEqual(reviewLedger);
+    expect(() => decodeOrchestrationV2Subagent({ ...child, role: "invalid" })).toThrow();
+
+    expect(decodeOrchestrationV2Subagent(child)).not.toHaveProperty("currentMemoryAccess");
+    const assessment = { access: "none", reason: "environment_off" } as const;
+    expect(
+      encodeOrchestrationV2SubagentJson(
+        decodeOrchestrationV2Subagent({ ...child, currentMemoryAccess: assessment }),
+      ),
+    ).toHaveProperty("currentMemoryAccess", assessment);
+    expect(
+      encodeOrchestrationV2SubagentJson(decodeOrchestrationV2Subagent(child)),
+    ).not.toHaveProperty("memoryGrantCeiling");
+    for (const memoryGrantCeiling of ["none", "read", "read_write"] as const) {
+      const current = decodeOrchestrationV2Subagent({ ...child, memoryGrantCeiling });
+      const json = JSON.parse(JSON.stringify(encodeOrchestrationV2SubagentJson(current)));
+      if (memoryGrantCeiling === "none") {
+        expect(json).not.toHaveProperty("memoryGrantCeiling");
+      } else {
+        expect(json).toHaveProperty("memoryGrantCeiling", memoryGrantCeiling);
+      }
+      expect(decodeOrchestrationV2SubagentJson(json)).toMatchObject({
+        memoryGrantCeiling,
+      });
+    }
+  });
+});
+
+const decodeMemoryRun = Schema.decodeUnknownSync(OrchestrationV2RunJson);
+const encodeMemoryRun = Schema.encodeSync(OrchestrationV2RunJson);
+it("round-trips usage-limit run ancestry and omits absent ancestry on the wire", () => {
+  const legacy = {
+    id: "run-memory-contract",
+    threadId: "thread-memory-contract",
+    ordinal: 1,
+    providerInstanceId: "codex",
+    modelSelection: { instanceId: "codex", model: "test" },
+    providerThreadId: null,
+    userMessageId: "message-memory-contract",
+    rootNodeId: null,
+    activeAttemptId: null,
+    status: "starting",
+    requestedAt: "2026-10-15T00:00:00.000Z",
+    startedAt: null,
+    completedAt: null,
+    checkpointId: null,
+    contextHandoffId: null,
+  };
+  expect(encodeMemoryRun(decodeMemoryRun(legacy))).not.toHaveProperty(
+    "usageLimitContinuationOfRunId",
+  );
+  expect(encodeMemoryRun(decodeMemoryRun(legacy))).not.toHaveProperty("currentMemoryAccess");
+  const assessment = { access: "read", reason: "read_only_destination" } as const;
+  expect(
+    encodeMemoryRun(decodeMemoryRun({ ...legacy, currentMemoryAccess: assessment })),
+  ).toHaveProperty("currentMemoryAccess", assessment);
+  const continuation = { ...legacy, usageLimitContinuationOfRunId: "run-original" };
+  expect(encodeMemoryRun(decodeMemoryRun(continuation))).toEqual(continuation);
+});
+
+it("decodes review ledger append commands and refuses empty batches", () => {
+  const command = {
+    type: "delegated_task.review-ledger.append",
+    commandId: "record-review",
+    parentThreadId: "parent",
+    taskId: "review",
+    entries: [
+      { kind: "outcome", findingId: "finding", link: { kind: "test", ref: "failing.test.ts" } },
+    ],
+  };
+  expect(decodeOrchestrationV2Command(command)).toEqual(command);
+  expect(() => decodeOrchestrationV2Command({ ...command, entries: [] })).toThrow();
 });

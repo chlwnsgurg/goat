@@ -1,8 +1,10 @@
+import type { GoatBotRow } from "@goat/client-runtime/goatBot";
 import { Link } from "@tanstack/react-router";
-import type { ReactNode } from "react";
+import { useState, type ReactNode } from "react";
 
 import { APP_DISPLAY_NAME } from "~/branding";
 import { isElectron } from "~/env";
+import { ChevronRightIcon } from "~/components/solar";
 import { GOAT_BOT_PATH, type GlobalAgentLegacyRoute } from "~/globalAgentRoute";
 
 import { Button } from "../ui/button";
@@ -10,20 +12,31 @@ import { Empty, EmptyContent, EmptyDescription, EmptyHeader, EmptyTitle } from "
 import { WorkspacePageHeader } from "../WorkspacePageHeader";
 import { GoatBotAvatar } from "./GoatBotAvatar";
 import { GoatBotComposer } from "./GoatBotComposer";
+import { GoatBotModeButton } from "./GoatBotModeButton";
 import { GoatBotTimeline } from "./GoatBotTimeline";
 import {
   canSendToGoatBot,
   type GoatBotAvailability,
   type GoatBotRemoval,
-} from "./goatBotAvailability";
-import type { GoatBotRow } from "./goatBotRows";
+} from "@goat/client-runtime/goatBot";
 
 const GOAT_BOT_TITLE = "GOAT Bot";
+const EXAMPLES = [
+  "Fix the flaky test in my project",
+  "Review the latest changes",
+  "How is the work going?",
+] as const;
 
 export interface GoatBotChatViewProps {
+  readonly homeMove?:
+    | { readonly label: string; readonly busy: boolean; readonly onMove: () => void }
+    | undefined;
+  readonly homeMoveError?: string | null | undefined;
   readonly availability: GoatBotAvailability;
   readonly canOperate: boolean;
   readonly rows: ReadonlyArray<GoatBotRow>;
+  /** When GOAT Bot started reading a message it is still answering. */
+  readonly replyingSince?: string | null | undefined;
   readonly onSend: (text: string) => void;
   readonly onRetryInput: (clientKey: string) => void;
   /** Asks the server for its bot again, after a failure or a busy global agent. */
@@ -43,8 +56,11 @@ export interface GoatBotChatViewProps {
 /** GOAT Bot as a messenger: bubbles and work cards, never tool calls. */
 export function GoatBotChatView({
   availability,
+  homeMove,
+  homeMoveError,
   canOperate,
   rows,
+  replyingSince = null,
   onSend,
   onRetryInput,
   onRetryAvailability,
@@ -57,38 +73,71 @@ export function GoatBotChatView({
   const removed = removal !== null;
   const ready = availability.kind === "ready" && !removed;
   const canSend = !removed && canSendToGoatBot(availability, canOperate);
+  const [seed, setSeed] = useState<{ text: string; nonce: number } | null>(null);
+  const headerStatus =
+    removal === "archived"
+      ? "Archived"
+      : removal === "deleted"
+        ? "Deleted"
+        : removal === "unchecked"
+          ? "Couldn't check this chat"
+          : availability.kind === "ready"
+            ? null
+            : statusLine(availability);
   return (
     <div className="flex min-h-0 min-w-0 flex-1 flex-col bg-background">
-      <WorkspacePageHeader electron={isElectron} className="border-b border-border">
-        <div className="flex min-w-0 items-center gap-2.5">
+      <WorkspacePageHeader electron={isElectron} className="surface-glass relative">
+        <div className="absolute left-1/2 flex max-w-[60%] min-w-0 -translate-x-1/2 items-center gap-2">
           <GoatBotAvatar size="md" />
-          <div className="flex min-w-0 flex-col">
-            <h1 className="truncate text-sm font-medium text-foreground">{GOAT_BOT_TITLE}</h1>
-            <p className="truncate text-xs text-muted-foreground">
-              {removal === "archived"
-                ? "Archived"
-                : removal === "deleted"
-                  ? "Deleted"
-                  : removal === "unchecked"
-                    ? "Couldn't check this chat"
-                    : statusLine(availability)}
-            </p>
+          <div className="flex min-w-0 items-center gap-2">
+            <h1 className="goat-name-capsule truncate text-foreground">
+              {GOAT_BOT_TITLE} <ChevronRightIcon aria-hidden className="size-3" />
+            </h1>
+            {headerStatus ? (
+              <p className="truncate text-2xs text-muted-foreground">{headerStatus}</p>
+            ) : null}
           </div>
         </div>
+        <div className="ml-auto flex shrink-0 items-center">
+          <GoatBotModeButton to="thread" />
+        </div>
       </WorkspacePageHeader>
-      {availability.kind === "offline" || availability.kind === "connecting" ? (
+      {availability.kind === "offline" ||
+      availability.kind === "home_offline" ||
+      availability.kind === "connecting" ? (
         <div
           role="status"
           className="border-b border-border px-4 py-2 text-sm text-muted-foreground"
         >
-          {availability.kind === "offline"
-            ? "GOAT Bot's computer is offline. You can send messages again once it reconnects."
-            : "Connecting to GOAT Bot…"}
+          {availability.kind === "home_offline"
+            ? offlineHomeCopy(availability)
+            : availability.kind === "offline"
+              ? "GOAT Bot's computer is offline. You can send messages again once it reconnects."
+              : "Connecting to GOAT Bot…"}
+          {/* With no history the notice below carries the same action. */}
+          {availability.kind === "home_offline" && homeMove && rows.length > 0 ? (
+            <div className="mt-2">
+              <Button
+                size="sm"
+                variant="outline"
+                disabled={homeMove.busy}
+                onClick={homeMove.onMove}
+              >
+                Move GOAT Bot to {homeMove.label}
+              </Button>
+            </div>
+          ) : null}
         </div>
+      ) : null}
+      {homeMoveError ? (
+        <p role="alert" className="px-4 py-2 text-sm text-muted-foreground">
+          {homeMoveError}
+        </p>
       ) : null}
       {rows.length > 0 &&
       availability.kind !== "ready" &&
       availability.kind !== "offline" &&
+      availability.kind !== "home_offline" &&
       availability.kind !== "connecting" ? (
         <div role="status">
           <GoatBotNotice
@@ -100,7 +149,12 @@ export function GoatBotChatView({
       ) : null}
       {rows.length > 0 ? (
         // History stays readable while the bot is unavailable; only sending stops.
-        <GoatBotTimeline rows={rows} onRetry={onRetryInput} />
+        <GoatBotTimeline
+          rows={rows}
+          replyingSince={removed ? null : replyingSince}
+          onRetry={onRetryInput}
+          onPick={canSend ? onSend : undefined}
+        />
       ) : removal !== null ? (
         <GoatBotRemovedNotice
           removal={removal}
@@ -113,8 +167,14 @@ export function GoatBotChatView({
       ) : (
         <GoatBotNotice
           availability={availability}
+          homeMove={homeMove}
           onRetryAvailability={onRetryAvailability}
           legacyAgentRoute={legacyAgentRoute}
+          onSelectExample={
+            canSend
+              ? (text) => setSeed((previous) => ({ text, nonce: (previous?.nonce ?? 0) + 1 }))
+              : undefined
+          }
         />
       )}
       {ready && !canOperate ? (
@@ -123,6 +183,8 @@ export function GoatBotChatView({
         </p>
       ) : null}
       <GoatBotComposer
+        key={seed?.nonce ?? 0}
+        initialText={seed?.text ?? ""}
         disabled={!canSend}
         placeholder={canSend ? "Message GOAT Bot" : "GOAT Bot isn't available"}
         onSend={onSend}
@@ -224,6 +286,7 @@ function statusLine(availability: GoatBotAvailability): string {
     case "connecting":
       return "Connecting…";
     case "offline":
+    case "home_offline":
       return "Offline";
     case "legacy_active":
       return "Waiting for the global agent";
@@ -236,15 +299,31 @@ function statusLine(availability: GoatBotAvailability): string {
 
 function GoatBotNotice({
   availability,
+  homeMove,
   onRetryAvailability,
   legacyAgentRoute,
+  onSelectExample,
 }: {
   readonly availability: GoatBotAvailability;
   readonly onRetryAvailability: (() => void) | undefined;
   readonly legacyAgentRoute: GlobalAgentLegacyRoute | null;
+  readonly homeMove?: GoatBotChatViewProps["homeMove"];
+  readonly onSelectExample?: ((text: string) => void) | undefined;
 }) {
   const { title, description, retryLabel } = noticeCopy(availability);
   const actions: ReactNode[] = [];
+  if (availability.kind === "home_offline" && homeMove)
+    actions.push(
+      <Button
+        key="move"
+        size="sm"
+        variant="outline"
+        disabled={homeMove.busy}
+        onClick={homeMove.onMove}
+      >
+        Move GOAT Bot to {homeMove.label}
+      </Button>,
+    );
   if (retryLabel !== null && onRetryAvailability !== undefined) {
     actions.push(
       <Button key="retry" size="sm" variant="outline" onClick={onRetryAvailability}>
@@ -277,19 +356,26 @@ function GoatBotNotice({
     );
   }
   return (
-    <Empty className="min-h-0 flex-1">
+    <Empty size="compact" className="min-h-0 flex-1">
       <EmptyHeader className="max-w-md">
         <GoatBotAvatar size="lg" className="mx-auto mb-4" />
         <EmptyTitle>{title}</EmptyTitle>
         <EmptyDescription>{description}</EmptyDescription>
       </EmptyHeader>
-      {availability.kind === "ready" ? (
+      {availability.kind === "ready" && onSelectExample ? (
         <EmptyContent>
-          <ul className="space-y-1 text-sm text-muted-foreground">
-            <li>Fix the flaky test in my project</li>
-            <li>Review the latest changes</li>
-            <li>How is the work going?</li>
-          </ul>
+          <div className="flex flex-col items-start gap-2 text-left">
+            {EXAMPLES.map((example) => (
+              <button
+                key={example}
+                type="button"
+                className="rounded-full border border-border bg-transparent px-3 py-1.5 text-sm hover:bg-goat-bubble-in"
+                onClick={() => onSelectExample(example)}
+              >
+                {example}
+              </button>
+            ))}
+          </div>
         </EmptyContent>
       ) : null}
       {actions.length > 0 ? (
@@ -309,14 +395,20 @@ function noticeCopy(availability: GoatBotAvailability): {
   switch (availability.kind) {
     case "ready":
       return {
-        title: "Ask GOAT Bot for anything",
-        description: "It answers here and starts the work in its own threads.",
+        title: "GOAT Bot",
+        description: "Text it like a person. It answers here and does the work in its own threads.",
         retryLabel: null,
       };
     case "connecting":
       return {
         title: "Connecting to GOAT Bot…",
         description: "This takes a moment.",
+        retryLabel: null,
+      };
+    case "home_offline":
+      return {
+        title: "Waiting for GOAT Bot's computer",
+        description: offlineHomeCopy(availability),
         retryLabel: null,
       };
     case "offline":
@@ -345,4 +437,10 @@ function noticeCopy(availability: GoatBotAvailability): {
         retryLabel: null,
       };
   }
+}
+
+function offlineHomeCopy(availability: Extract<GoatBotAvailability, { kind: "home_offline" }>) {
+  return availability.known
+    ? `GOAT Bot runs on ${availability.label}, which isn't connected.`
+    : `GOAT Bot's home (${availability.label}) isn't a computer this app knows.`;
 }

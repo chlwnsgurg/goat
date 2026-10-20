@@ -1,12 +1,7 @@
 import { describe, expect, it } from "@effect/vitest";
 
-import type {
-  EnvironmentId,
-  OrchestrationV2ThreadShell,
-  Project,
-  ThreadId,
-} from "@t3tools/contracts";
-import { ProviderInstanceId, RuntimeRequestId } from "@t3tools/contracts";
+import type { EnvironmentId, OrchestrationV2ThreadShell, Project, ThreadId } from "@goat/contracts";
+import { ProviderInstanceId, RuntimeRequestId } from "@goat/contracts";
 import * as DateTime from "effect/DateTime";
 
 import { projectThreadAwarenessV2 } from "./agentAwareness.ts";
@@ -119,6 +114,28 @@ describe("projectThreadAwarenessV2", () => {
           },
         }),
       }),
+    ).toMatchObject({ phase: "waiting_for_input", headline: "Waiting for input" });
+  });
+
+  it("reports an async question as input only after the working run completes", () => {
+    const input = {
+      environmentId: "env-1" as EnvironmentId,
+      project,
+      thread: v2Thread({
+        pendingRuntimeRequest: {
+          id: RuntimeRequestId.make("request-async"),
+          kind: "user_input",
+          createdAt: updatedAt,
+          blocking: false,
+        },
+      }),
+    };
+    expect(projectThreadAwarenessV2(input)).toMatchObject({
+      phase: "running",
+      headline: "Agent is working",
+    });
+    expect(
+      projectThreadAwarenessV2({ ...input, thread: { ...input.thread, status: "completed" } }),
     ).toMatchObject({ phase: "waiting_for_input", headline: "Waiting for input" });
   });
 

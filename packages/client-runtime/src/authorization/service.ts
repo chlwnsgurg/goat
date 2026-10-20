@@ -1,10 +1,11 @@
+import { GOAT_CONNECT_COMING_SOON, isGoatConnectEnabled } from "@goat/shared/goatConnect";
 import {
   type ClientConnectionMethod,
   EnvironmentId,
   type ExecutionEnvironmentDescriptor,
-} from "@t3tools/contracts";
-import { RelayEnvironmentConnectScope } from "@t3tools/contracts/relay";
-import { withRelayClientTracing } from "@t3tools/shared/relayTracing";
+} from "@goat/contracts";
+import { RelayEnvironmentConnectScope } from "@goat/contracts/relay";
+import { withRelayClientTracing } from "@goat/shared/relayTracing";
 import {
   exchangeRemoteDpopAccessToken,
   type RemoteEnvironmentAuthError,
@@ -22,7 +23,10 @@ import {
   ConnectionTransientError,
   type ConnectionAttemptError,
 } from "../connection/model.ts";
-import { fetchRemoteEnvironmentDescriptor } from "../environment/descriptor.ts";
+import {
+  fetchRemoteEnvironmentDescriptor,
+  type VerifiedSshEndpoint,
+} from "../environment/descriptor.ts";
 import { environmentEndpointUrl } from "../environment/endpoint.ts";
 import * as ClientCapabilities from "../platform/capabilities.ts";
 import * as ManagedRelay from "../relay/managedRelay.ts";
@@ -50,6 +54,7 @@ export interface AuthorizedRemoteEnvironment {
   readonly httpBaseUrl: string;
   readonly socketUrl: string;
   readonly httpAuthorization: PreparedHttpAuthorization;
+  readonly verifiedEndpoint?: VerifiedSshEndpoint;
 }
 
 export interface AuthorizedRemoteHttpEnvironment {
@@ -68,14 +73,17 @@ export class RemoteEnvironmentAuthorization extends Context.Service<
       readonly wsBaseUrl: string;
       readonly bearerToken: string;
       readonly connectionMethod: ClientConnectionMethod;
+      readonly verifiedSshEndpoint?: VerifiedSshEndpoint;
+      readonly onEndpointVerified?: (
+        descriptor: ExecutionEnvironmentDescriptor,
+      ) => Effect.Effect<void>;
     }) => Effect.Effect<AuthorizedRemoteEnvironment, ConnectionAttemptError>;
     readonly authorizeDpop: (input: {
       readonly expectedEnvironmentId: EnvironmentId;
       /**
-       * Connect to this origin instead of the T3 Connect tunnel. The access
-       * token is not bound to an origin, and each proof is minted for the URL
-       * it signs, so a token from the relay also works on the environment's
-       * LAN or tailnet address.
+       * The access token is not bound to an origin, and each proof is minted
+       * for the URL it signs, so a token from the relay also works on the
+       * environment's LAN or tailnet address.
        */
       readonly directEndpoint?: { readonly httpBaseUrl: string; readonly wsBaseUrl: string };
     }) => Effect.Effect<AuthorizedRemoteEnvironment, ConnectionAttemptError>;
@@ -84,7 +92,13 @@ export class RemoteEnvironmentAuthorization extends Context.Service<
       readonly rejectedAccessToken?: string;
     }) => Effect.Effect<AuthorizedRemoteHttpEnvironment, ConnectionAttemptError>;
   }
->()("@t3tools/client-runtime/authorization/service/RemoteEnvironmentAuthorization") {}
+>()("@goat/client-runtime/authorization/service/RemoteEnvironmentAuthorization") {}
+
+const connectDisabled = () =>
+  new ConnectionBlockedError({
+    reason: "configuration",
+    detail: `${GOAT_CONNECT_COMING_SOON.title} is coming soon. ${GOAT_CONNECT_COMING_SOON.description}`,
+  });
 
 const CACHED_ENDPOINT_SOCKET_TIMEOUT_MS = 3_000;
 const BEARER_DESCRIPTOR_CACHE_TTL_MS = 10_000;
@@ -140,9 +154,7 @@ export const make = Effect.gen(function* () {
   >(new Map());
 
   /**
-   * Confirms a direct address still serves the expected environment before a
-   * credential is sent there. A saved LAN address can belong to another
-   * machine on a different network.
+   * A saved LAN address can belong to another machine on a different network.
    */
   const verifyDirectEndpoint = Effect.fn("clientRuntime.connection.remote.verifyDirectEndpoint")(
     function* (input: {
@@ -181,39 +193,64 @@ export const make = Effect.gen(function* () {
     },
   );
 
-  const authorizeBearer = Effect.fn("clientRuntime.connection.remote.authorizeBearer")(
-    function* (input: {
-      readonly expectedEnvironmentId: Parameters<
-        RemoteEnvironmentAuthorization["Service"]["authorizeBearer"]
-      >[0]["expectedEnvironmentId"];
-      readonly httpBaseUrl: string;
-      readonly wsBaseUrl: string;
-      readonly bearerToken: string;
-      readonly connectionMethod: ClientConnectionMethod;
-    }) {
-      const descriptor = yield* verifyDirectEndpoint(input);
-      const socketUrl = yield* resolveRemoteWebSocketConnectionUrl({
-        wsBaseUrl: input.wsBaseUrl,
-        httpBaseUrl: input.httpBaseUrl,
-        bearerToken: input.bearerToken,
-        clientMetadata: presentation.metadata,
-        connectionMethod: input.connectionMethod,
-      }).pipe(
-        Effect.mapError(mapRemoteEnvironmentError),
-        Effect.provideService(HttpClient.HttpClient, httpClient),
-      );
-      return {
-        environmentId: descriptor.environmentId,
-        label: descriptor.label,
-        httpBaseUrl: input.httpBaseUrl,
-        socketUrl,
-        httpAuthorization: {
-          _tag: "Bearer" as const,
-          token: input.bearerToken,
-        },
-      };
-    },
-  );
+  const authorizeBearer = Effect.fn("clientRuntime.connection.remote.authorizeBearer")(function* (
+    input: Parameters<RemoteEnvironmentAuthorization["Service"]["authorizeBearer"]>[0],
+  ) {
+    // Reject inconsistent gateway metadata before any request can carry credentials.
+    const verified = input.connectionMethod === "ssh" ? input.verifiedSshEndpoint : undefined;
+    if (verified !== undefined && verified.httpBaseUrl !== input.httpBaseUrl) {
+      return yield* new ConnectionBlockedError({
+        reason: "configuration",
+        detail: "SSH identity was verified on a different endpoint. Reconnect to verify it again.",
+      });
+    }
+    if (
+      verified !== undefined &&
+      verified.descriptor.environmentId !== input.expectedEnvironmentId
+    ) {
+      return yield* environmentMismatchError({
+        expected: input.expectedEnvironmentId,
+        actual: verified.descriptor.environmentId,
+      });
+    }
+    // The native manager can replace a forward while reusing its URL. Until it
+    // provides an attachment lease, SSH must revalidate without the address cache.
+    const descriptor = yield* input.connectionMethod === "ssh"
+      ? fetchDescriptor(input.httpBaseUrl, input.connectionMethod).pipe(
+          Effect.provideService(HttpClient.HttpClient, httpClient),
+        )
+      : verifyDirectEndpoint(input);
+    if (descriptor.environmentId !== input.expectedEnvironmentId) {
+      return yield* environmentMismatchError({
+        expected: input.expectedEnvironmentId,
+        actual: descriptor.environmentId,
+      });
+    }
+    yield* input.onEndpointVerified?.(descriptor) ?? Effect.void;
+    const socketUrl = yield* resolveRemoteWebSocketConnectionUrl({
+      wsBaseUrl: input.wsBaseUrl,
+      httpBaseUrl: input.httpBaseUrl,
+      bearerToken: input.bearerToken,
+      clientMetadata: presentation.metadata,
+      connectionMethod: input.connectionMethod,
+    }).pipe(
+      Effect.mapError(mapRemoteEnvironmentError),
+      Effect.provideService(HttpClient.HttpClient, httpClient),
+    );
+    return {
+      environmentId: descriptor.environmentId,
+      label: descriptor.label,
+      httpBaseUrl: input.httpBaseUrl,
+      socketUrl,
+      httpAuthorization: {
+        _tag: "Bearer" as const,
+        token: input.bearerToken,
+      },
+      ...(input.connectionMethod === "ssh"
+        ? { verifiedEndpoint: { httpBaseUrl: input.httpBaseUrl, descriptor } }
+        : {}),
+    };
+  });
 
   const createDpopSocketUrl = Effect.fn("clientRuntime.connection.remote.createDpopSocketUrl")(
     function* (
@@ -252,6 +289,15 @@ export const make = Effect.gen(function* () {
     new ConnectionBlockedError({
       reason: "authentication",
       detail: "Your cloud sign-in changed. Sign in again to authorize the environment.",
+    });
+
+  // A missing identity before the attempt captures one means the cloud session
+  // is still loading, not a sign-out. Only a captured identity that goes away
+  // or changes is evidence of one.
+  const sessionPending = () =>
+    new ConnectionTransientError({
+      reason: "session-pending",
+      detail: "Waiting for the T3 Connect sign-in to load.",
     });
 
   const assertSession = Effect.fnUntraced(function* (
@@ -363,9 +409,10 @@ export const make = Effect.gen(function* () {
   const getDpopToken = Effect.fn("clientRuntime.connection.remote.getDpopToken")(function* (
     input: Parameters<RemoteEnvironmentAuthorization["Service"]["authorizeDpopHttp"]>[0],
   ) {
+    if (!isGoatConnectEnabled()) return yield* connectDisabled();
     const session = yield* cloudSession.identity;
     if (Option.isNone(session)) {
-      return yield* sessionChanged();
+      return yield* sessionPending();
     }
     const identity = session.value;
     const thumbprint = yield* signer.thumbprint.pipe(
@@ -490,6 +537,7 @@ export const make = Effect.gen(function* () {
   const authorizeDpop = Effect.fn("clientRuntime.connection.remote.authorizeDpop")(function* (
     input: Parameters<RemoteEnvironmentAuthorization["Service"]["authorizeDpop"]>[0],
   ) {
+    if (!isGoatConnectEnabled()) return yield* connectDisabled();
     const endpoint = input.directEndpoint;
     if (endpoint !== undefined) {
       yield* verifyDirectEndpoint({
@@ -518,10 +566,10 @@ export const make = Effect.gen(function* () {
       }
       // An unreachable direct address says nothing about the token, so keep
       // it for the T3 Connect route rather than forcing a relay round trip.
-      // A rejected token falls through and is replaced like on the tunnel.
       if (endpoint !== undefined && cachedSocket.failure._tag !== "EnvironmentAuthInvalidError") {
         return yield* mapDpopSocketError(cachedSocket.failure);
       }
+      yield* assertSession(selected.identity);
       selected = yield* getDpopToken({
         ...input,
         rejectedAccessToken: selected.token.accessToken,
@@ -531,7 +579,6 @@ export const make = Effect.gen(function* () {
       Effect.result,
     );
     if (Result.isFailure(socket)) {
-      // A direct address that refuses the socket says nothing about the token.
       if (endpoint === undefined || socket.failure._tag === "ConnectionBlockedError") {
         yield* tokenLock.withPermits(1)(
           removeRejectedToken(input.expectedEnvironmentId, selected.token.accessToken),
@@ -548,7 +595,10 @@ export const make = Effect.gen(function* () {
     authorizeDpop: (input) =>
       authorizeDpop(input).pipe(Effect.withSpan("environment.authorization")),
     authorizeDpopHttp: (input) =>
-      getDpopToken(input).pipe(
+      Effect.suspend(() => {
+        if (!isGoatConnectEnabled()) return Effect.fail(connectDisabled());
+        return getDpopToken(input);
+      }).pipe(
         Effect.map(({ token }) => httpAuthorization(token)),
         Effect.withSpan("environment.authorization.http"),
         withRelayClientTracing,

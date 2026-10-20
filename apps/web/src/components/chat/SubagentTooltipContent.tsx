@@ -6,12 +6,12 @@ import type {
   ProviderDriverKind,
   ProviderInstanceId,
   OrchestrationV2Subagent,
-} from "@t3tools/contracts";
+} from "@goat/contracts";
 import {
   resolveSubagentMetadata,
   subagentDetailPreview,
-} from "@t3tools/client-runtime/state/subagent-display";
-import { getModelSelectionStringOptionValue, resolveSelectableModel } from "@t3tools/shared/model";
+} from "@goat/client-runtime/state/subagent-display";
+import { getModelSelectionStringOptionValue, resolveSelectableModel } from "@goat/shared/model";
 import { getTraitsSpeedDisplay, TraitsSpeedIcon } from "./TraitsSpeed";
 import type { ReactNode } from "react";
 import {
@@ -22,7 +22,7 @@ import {
   FolderIcon,
   GitBranchIcon,
   TerminalIcon,
-} from "lucide-react";
+} from "~/components/solar";
 import { ThreadHoverCard } from "../ThreadHoverCard";
 import { MiddleTruncate } from "../ui/middle-truncate";
 import { ProviderInstanceIcon } from "./ProviderInstanceIcon";
@@ -37,7 +37,6 @@ export function SubagentTooltipContent(props: {
   origin: OrchestrationV2Subagent["origin"];
   modelSelection?: OrchestrationV2Subagent["modelSelection"];
   provider?: ServerProvider | undefined;
-  /** The environment's instances; with several accounts on one provider, the card names this one. */
   providers?: ReadonlyArray<ServerProvider> | undefined;
   driver?: ProviderDriverKind | undefined;
   elapsed?: ReactNode;
@@ -128,7 +127,6 @@ export function SubagentTooltipContent(props: {
             displayName={entry?.displayName ?? props.provider?.displayName ?? driver}
             accentColor={entry?.accentColor}
             acpRegistryIconUrl={props.provider?.iconUrl}
-            // Same treatment as the sidebar card: accent dot, account in the label.
             showBadge={showInstanceBadge && entry?.accentColor !== undefined}
             badgeContent="none"
             badgeClassName="h-2 min-w-2 px-0"

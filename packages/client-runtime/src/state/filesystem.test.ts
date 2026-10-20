@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vite-plus/test";
-import { AuthFilesystemReadScope, AuthOrchestrationReadScope } from "@t3tools/contracts";
+import { AuthFilesystemReadScope, AuthOrchestrationReadScope } from "@goat/contracts";
 
 import {
   canPreloadBrowsePath,
@@ -9,7 +9,6 @@ import {
   resolveFilesystemReadAccess,
 } from "./filesystem.ts";
 
-/** A server that already splits scopes; it never falls back to a parent grant. */
 const SPLIT_SCOPES_SERVER = { serverUpdateScope: "environment:maintain" } as const;
 
 describe("filesystem read access", () => {

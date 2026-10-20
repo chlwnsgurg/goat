@@ -59,7 +59,7 @@ const config: ShowcaseConfig = {
       platform: "ios",
       simulator: "iPhone Test",
       appearance: "dark",
-      theme: "t3-code",
+      theme: "goat-code",
       scenes: ["thread", "review"],
       storeAsset: appleSpec,
     },
@@ -68,7 +68,7 @@ const config: ShowcaseConfig = {
       platform: "android",
       avd: "Pixel_Test",
       appearance: "light",
-      theme: "t3-code",
+      theme: "goat-code",
       scenes: ["thread", "terminal"],
       storeAsset: googleSpec,
     },
@@ -112,8 +112,6 @@ it("parses repeatable and expanded theme filters", () => {
   );
 });
 
-// The app normalizes an unknown id back to its default palette, so a typo here
-// would otherwise produce screenshots labeled with a theme they do not show.
 it("rejects unsupported themes instead of capturing the default palette", () => {
   assert.throws(() => parseShowcaseCliArgs(["--theme", "sunset"]), /Unsupported theme 'sunset'/u);
 });
@@ -125,7 +123,7 @@ it("parses validation-only mode", () => {
 it("selects an explicit CI Android ABI without changing the local default", () => {
   assert.equal(resolveShowcaseAndroidAbi(undefined), "arm64-v8a");
   assert.equal(resolveShowcaseAndroidAbi("x86_64"), "x86_64");
-  assert.throws(() => resolveShowcaseAndroidAbi("mips"), /Unsupported T3_SHOWCASE_ANDROID_ABI/u);
+  assert.throws(() => resolveShowcaseAndroidAbi("mips"), /Unsupported GOAT_SHOWCASE_ANDROID_ABI/u);
 });
 
 it("uses platform-correct default Android SDK roots", () => {
@@ -171,18 +169,16 @@ it("expands both appearances into independent upload-ready directories", () => {
     [
       {
         appearance: "light",
-        directory: NodePath.join("/captures", "apple", "iphone-test", "light", "t3-code"),
+        directory: NodePath.join("/captures", "apple", "iphone-test", "light", "goat-code"),
       },
       {
         appearance: "dark",
-        directory: NodePath.join("/captures", "apple", "iphone-test", "dark", "t3-code"),
+        directory: NodePath.join("/captures", "apple", "iphone-test", "dark", "goat-code"),
       },
     ],
   );
 });
 
-// Every palette needs its own leaf folder: one directory holding several themes
-// would mix upload slots and break the per-store screenshot count limits.
 it("expands themes into independent upload-ready directories per appearance", () => {
   const options = parseShowcaseCliArgs([
     "--device",
@@ -268,7 +264,7 @@ it("enforces store screenshot count limits", () => {
 });
 
 it("defaults every device to the app's own palette", () => {
-  assert.equal(DEFAULT_SHOWCASE_THEME, "t3-code");
+  assert.equal(DEFAULT_SHOWCASE_THEME, "goat-code");
   assert.equal(
     showcaseConfig.devices.every((device) => device.theme === DEFAULT_SHOWCASE_THEME),
     true,
@@ -333,8 +329,6 @@ it("seeds a playful multi-environment project spectrum", () => {
   }
   const primaryThread = SHOWCASE_THREADS.find((thread) => thread.id === "remote-command-center");
   assert.equal(primaryThread !== undefined && !("snoozeMinutes" in primaryThread), true);
-  // Every project contributes to both the active block and the settled tail,
-  // so each list scope screenshots with the same two-part structure.
   for (const project of SHOWCASE_PROJECTS) {
     const projectThreads = SHOWCASE_THREADS.filter((thread) => thread.projectId === project.id);
     assert.equal(

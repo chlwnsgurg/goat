@@ -1,9 +1,9 @@
 import { RefreshIcon } from "~/components/ui/refresh-icon";
-import { scopeProjectRef, scopeThreadRef } from "@t3tools/client-runtime/environment";
-import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
-import type { EnvironmentId, ThreadId } from "@t3tools/contracts";
-import { LinkIcon, PlusIcon } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { scopeProjectRef, scopeThreadRef } from "@goat/client-runtime/environment";
+import { createFileRoute, Link, useNavigate, useRouter } from "@tanstack/react-router";
+import type { EnvironmentId, ThreadId } from "@goat/contracts";
+import { LinkIcon, PlusIcon } from "~/components/solar";
+import { useEffect, useEffectEvent, useRef, useState } from "react";
 
 import { isLocalEnvironmentDisabled } from "../localEnvironment";
 import { isElectron } from "../env";
@@ -22,7 +22,10 @@ import type { GlobalAgentDraftState } from "../globalAgentResolver";
 import { buildThreadRouteParams } from "../threadRoutes";
 import {
   readThreadShell,
+  readProject,
   useAllEnvironmentShellsBootstrapped,
+  useEnvironmentShellsBootstrapped,
+  usePendingEnvironmentShellIds,
   useProjects,
   useThreadShell,
   useThreadShells,
@@ -59,21 +62,27 @@ function IndexDraftLanding() {
   const primaryEnvironmentId = usePrimaryEnvironmentId();
   const { scratchEnvironmentId, openScratchProject } = useScratchProject();
   const globalAgentRef = useGlobalAgentStore((state) => state.ref);
-  const setGlobalAgentRef = useGlobalAgentStore((state) => state.setRef);
-  const globalThreadRef = useMemo(
-    () =>
-      globalAgentRef === null
-        ? null
-        : scopeThreadRef(globalAgentRef.environmentId, globalAgentRef.threadId),
-    [globalAgentRef],
+  const refEnvironmentBootstrapped = useEnvironmentShellsBootstrapped(
+    globalAgentRef?.environmentId ?? null,
   );
+  const setGlobalAgentRef = useGlobalAgentStore((state) => state.setRef);
+  const globalThreadRef =
+    globalAgentRef === null
+      ? null
+      : scopeThreadRef(globalAgentRef.environmentId, globalAgentRef.threadId);
   const globalThreadShell = useThreadShell(globalThreadRef);
   const globalDraftState = useComposerDraftStore((store): GlobalAgentDraftState => {
     const session = globalAgentRef === null ? null : store.getDraftSession(globalAgentRef.draftId);
     if (session === null) return "none";
     return session.promotedTo != null ? "promoted" : "unpromoted";
   });
-  const startingRef = useRef(false);
+  const router = useRouter();
+  // Read at effect time: this page stays mounted while a navigation away from
+  // "/" is still loading, but the router already points at the new location.
+  const isStillOnIndex = useEffectEvent(() => router.state.location.pathname === "/");
+  // One start per attempt; a retry request opens the next attempt, and a failed or
+  // projectless run releases it (null) so a later input change can start again.
+  const startedAttemptRef = useRef<number | null>(null);
   // Unmount only. Dependency changes must not cancel or restart an in-flight run:
   // creating the scratch project changes `projects`, and a restart would create twice.
   const mountedRef = useRef(true);
@@ -86,17 +95,13 @@ function IndexDraftLanding() {
   // Set when the fallback finds no project (also after a confirm wait), so the hero shows.
   const [fallbackReady, setFallbackReady] = useState(false);
   const [startState, setStartState] = useState({ failed: false, retryRequest: 0 });
+  const attempt = startState.retryRequest;
 
-  const mostRecentProject = useMemo(
-    () =>
-      bootstrapped
-        ? (sortScopedProjectsForSidebar(projects, threads, "updated_at")[0] ?? null)
-        : null,
-    [bootstrapped, projects, threads],
-  );
+  const mostRecentProject = bootstrapped
+    ? (sortScopedProjectsForSidebar(projects, threads, "updated_at")[0] ?? null)
+    : null;
   // Read at the end of an async run, after a confirm wait during which a project may arrive.
-  const mostRecentProjectRef = useRef(mostRecentProject);
-  mostRecentProjectRef.current = mostRecentProject;
+  const readMostRecentProject = useEffectEvent(() => mostRecentProject);
 
   // A saved global agent keeps its machine. Without one: the primary machine,
   // then the only machine offering projectless threads.
@@ -104,11 +109,11 @@ function IndexDraftLanding() {
     globalAgentRef !== null
       ? scratchEnvironmentId(globalAgentRef.environmentId)
       : (scratchEnvironmentId(primaryEnvironmentId ?? null) ?? scratchEnvironmentId(null));
-  // Read after a confirm wait, like mostRecentProjectRef below.
-  const scratchEnvironmentIdRef = useRef(preferredScratchEnvironmentId);
-  scratchEnvironmentIdRef.current = preferredScratchEnvironmentId;
+  // Read after a confirm wait, like readMostRecentProject.
+  const readScratchEnvironmentId = useEffectEvent(() => preferredScratchEnvironmentId);
   const resolution = resolveGlobalAgent({
     bootstrapped,
+    refEnvironmentBootstrapped,
     ref: globalAgentRef,
     threadShell: globalThreadShell,
     draftState: globalDraftState,
@@ -132,11 +137,12 @@ function IndexDraftLanding() {
   const targetDraftId = resolution.kind === "open-draft" ? resolution.draftId : null;
 
   useEffect(() => {
-    if (startingRef.current || resolutionKind === "wait") return;
-    startingRef.current = true;
+    if (startedAttemptRef.current === attempt || resolutionKind === "wait" || !isStillOnIndex())
+      return;
+    startedAttemptRef.current = attempt;
     const fail = () => {
-      if (!mountedRef.current) return;
-      startingRef.current = false;
+      if (!mountedRef.current || !isStillOnIndex()) return;
+      startedAttemptRef.current = null;
       setStartState((state) => ({ ...state, failed: true }));
     };
     const openThread = (environmentId: EnvironmentId, threadId: ThreadId) =>
@@ -148,7 +154,7 @@ function IndexDraftLanding() {
     const createGlobalAgent = async (environmentId: EnvironmentId) => {
       const project = await openScratchProject(environmentId);
       // handleNewThread reads the route when called; never start it from a page the user moved to.
-      if (!mountedRef.current) return;
+      if (!mountedRef.current || !isStillOnIndex()) return;
       if (project === null) return fail();
       const created = await handleNewThread(scopeProjectRef(environmentId, project.id), {
         replace: true,
@@ -159,18 +165,28 @@ function IndexDraftLanding() {
       setGlobalAgentRef({ environmentId, threadId: created.threadId, draftId: created.draftId });
     };
     // Today's behavior: a draft in the most recent project, or the hero (rendered below).
-    // Reads the live project: a confirm wait may have outlasted this run's inputs.
-    const startFallback = async () => {
-      const project = mostRecentProjectRef.current;
+    const startFallback = async (project: typeof mostRecentProject) => {
+      if (!mountedRef.current || !isStillOnIndex()) return;
       if (project === null) {
         // Release so a project arriving later re-runs this effect (mostRecentProject is a
         // dependency), and show the hero meanwhile. fallbackReady is not a dependency,
         // so setting it cannot loop.
-        startingRef.current = false;
+        startedAttemptRef.current = null;
         setFallbackReady(true);
         return;
       }
-      await handleNewThread(scopeProjectRef(project.environmentId, project.id), { replace: true });
+      const projectRef = scopeProjectRef(project.environmentId, project.id);
+      const retry = () => {
+        if (!mountedRef.current || !isStillOnIndex()) return;
+        startedAttemptRef.current = null;
+        setStartState((state) => ({ ...state, retryRequest: state.retryRequest + 1 }));
+      };
+      if (readProject(projectRef) === null) {
+        retry();
+        return;
+      }
+      const opened = await handleNewThread(projectRef, { replace: true });
+      if (opened === null) retry();
     };
     const run = async (): Promise<unknown> => {
       if (
@@ -199,19 +215,20 @@ function IndexDraftLanding() {
         const settled = await confirmPromotedGlobalAgent({
           environmentId: targetEnvironmentId,
           threadId: targetThreadId,
-          readScratchEnvironmentId: () => scratchEnvironmentIdRef.current,
+          readScratchEnvironmentId: () => readScratchEnvironmentId(),
           waitForShell: () => waitForThreadShell(confirmRef, 5_000),
           readShell: () => readThreadShell(confirmRef),
         });
         // The wait can take seconds; never act after "/" has unmounted.
-        if (!mountedRef.current) return undefined;
+        if (!mountedRef.current || !isStillOnIndex()) return undefined;
         if (settled.kind === "open-thread") {
           return openThread(settled.environmentId, settled.threadId);
         }
         if (settled.kind === "create") return createGlobalAgent(settled.environmentId);
-        return startFallback();
+        // The live project: the confirm wait may have outlasted this run's inputs.
+        return startFallback(readMostRecentProject());
       }
-      return startFallback();
+      return startFallback(mostRecentProject);
     };
     void run().catch(fail);
   }, [
@@ -221,15 +238,13 @@ function IndexDraftLanding() {
     openScratchProject,
     resolutionKind,
     setGlobalAgentRef,
-    startState.retryRequest,
+    attempt,
     targetDraftId,
     targetEnvironmentId,
     targetThreadId,
   ]);
 
-  if (!bootstrapped) {
-    return null;
-  }
+  if (resolutionKind === "wait") return <IndexWaitingState />;
   if (startState.failed) {
     return (
       <DraftStartError
@@ -251,6 +266,30 @@ function IndexDraftLanding() {
     return <NoProjectsHero />;
   }
   return null;
+}
+
+function IndexWaitingState() {
+  const pendingIds = usePendingEnvironmentShellIds();
+  const { presentationById } = useEnvironments();
+  const pendingLabels = pendingIds?.map(
+    (environmentId) => presentationById.get(environmentId)?.entry.target.label ?? environmentId,
+  );
+
+  return (
+    <SidebarInset>
+      <div className="flex h-dvh min-h-0 min-w-0 flex-1 flex-col overflow-hidden overscroll-y-none bg-background">
+        <WorkspacePageHeader electron={isElectron} className="border-b border-border" />
+        <Empty>
+          <EmptyHeader>
+            <EmptyTitle>Waiting for your machines</EmptyTitle>
+            {pendingLabels?.length ? (
+              <EmptyDescription>Still loading: {pendingLabels.join(", ")}.</EmptyDescription>
+            ) : null}
+          </EmptyHeader>
+        </Empty>
+      </div>
+    </SidebarInset>
+  );
 }
 
 function DraftStartError({ onRetry }: { readonly onRetry: () => void }) {

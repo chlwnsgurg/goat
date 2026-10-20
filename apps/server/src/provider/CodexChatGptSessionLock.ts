@@ -1,7 +1,7 @@
 // @effect-diagnostics nodeBuiltinImport:off - Credential leases coordinate Node server processes.
 import * as NodePath from "node:path";
 import { lock } from "proper-lockfile";
-import { ProviderSetupError, type ProviderInstanceId } from "@t3tools/contracts";
+import { ProviderSetupError, type ProviderInstanceId } from "@goat/contracts";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 
@@ -12,7 +12,6 @@ export const withChatGptSessionLock = <A, E, R>(
   instanceId: ProviderInstanceId,
   task: Effect.Effect<A, E, R>,
 ): Effect.Effect<A, E | ProviderSetupError, R> => {
-  // In-memory stores have no shared filesystem; the auth controller still serializes its callers.
   if (!directory) return task;
   const failure = () =>
     new ProviderSetupError({

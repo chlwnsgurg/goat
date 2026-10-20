@@ -1,4 +1,4 @@
-import { WS_METHODS } from "@t3tools/contracts";
+import { WS_METHODS } from "@goat/contracts";
 import { Atom } from "effect/reactivity";
 
 import {
@@ -65,8 +65,6 @@ export function createSourceControlEnvironmentAtoms<R, E>(
         key: ({ environmentId }) => environmentId,
       },
     }),
-    // Every clone the environment tracks. Empty until a clone starts; a
-    // finished clone drops out after a grace period, a failed one stays.
     projectClones: createEnvironmentRpcSubscriptionAtomFamily(runtime, {
       label: "environment-data:source-control:project-clones",
       tag: WS_METHODS.subscribeProjectClones,

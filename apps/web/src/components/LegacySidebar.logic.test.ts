@@ -1,11 +1,11 @@
 import { describe, expect, it, vi } from "vite-plus/test";
-import { sortPinnedThreadsByOrderKey } from "@t3tools/client-runtime/state/thread-sort";
-import { EnvironmentId, ThreadId } from "@t3tools/contracts";
+import { sortPinnedThreadsByOrderKey } from "@goat/client-runtime/state/thread-sort";
+import { EnvironmentId, ThreadId } from "@goat/contracts";
 import { Atom, AtomRegistry } from "effect/reactivity";
 import {
   PrimaryConnectionTarget,
   type EnvironmentConnectionPresentation,
-} from "@t3tools/client-runtime/connection";
+} from "@goat/client-runtime/connection";
 import { useThreadSelectionStore } from "../threadSelectionStore";
 import {
   createProjectsViewEnvironmentAtoms,
@@ -99,6 +99,13 @@ describe("Projects view rows", () => {
     ).toBe(true);
     expect(isProjectsViewListedThread(pinned)).toBe(false);
     expect(isProjectsViewListedThread({ ...row, archivedAt: pinned.pinnedAt })).toBe(false);
+    expect(isProjectsViewListedThread({ ...row, archivedAt: pinned.pinnedAt }, true)).toBe(true);
+    expect(
+      isProjectsViewListedThread(
+        { ...row, archivedAt: pinned.pinnedAt, deletedAt: pinned.pinnedAt },
+        true,
+      ),
+    ).toBe(false);
   });
   it("never lists a subagent, pinned or not", () => {
     expect(isProjectsViewListedThread(subagent)).toBe(false);

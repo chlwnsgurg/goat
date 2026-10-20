@@ -1,12 +1,15 @@
-import {
-  AuthAdministrativeScopes,
-  AuthStandardClientScopes,
-  EnvironmentId,
-} from "@t3tools/contracts";
+import { vi } from "vite-plus/test";
+
+vi.mock("@goat/shared/goatConnect", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@goat/shared/goatConnect")>()),
+  isGoatConnectEnabled: () => true,
+}));
+
+import { AuthStandardClientScopes, EnvironmentId } from "@goat/contracts";
 import {
   RelayEnvironmentConnectScope,
   type RelayEnvironmentConnectResponse,
-} from "@t3tools/contracts/relay";
+} from "@goat/contracts/relay";
 import { describe, expect, it } from "@effect/vitest";
 import * as Clock from "effect/Clock";
 import * as Deferred from "effect/Deferred";
@@ -35,8 +38,8 @@ const DESCRIPTOR = {
   environmentId: ENVIRONMENT_ID,
   label: "Remote environment",
   platform: {
-    os: "linux",
-    arch: "x64",
+    os: "linux" as const,
+    arch: "x64" as const,
   },
   serverVersion: "0.0.0-test",
   capabilities: {
@@ -235,6 +238,112 @@ const makeHarness = Effect.fn("TestRemoteAuthorization.makeHarness")(function* (
 });
 
 describe("RemoteEnvironmentAuthorization", () => {
+  it.effect("revalidates the SSH attachment before a ticket and reuses that fresh descriptor", () =>
+    Effect.gen(function* () {
+      const harness = yield* makeHarness({
+        responses: [Response.json(DESCRIPTOR), websocketTicket("ssh-ticket")],
+      });
+      const verifiedSshEndpoint = { httpBaseUrl: ENDPOINT.httpBaseUrl, descriptor: DESCRIPTOR };
+      const authorized = yield* Effect.gen(function* () {
+        const remote = yield* RemoteEnvironmentAuthorization.RemoteEnvironmentAuthorization;
+        return yield* remote.authorizeBearer({
+          expectedEnvironmentId: ENVIRONMENT_ID,
+          ...ENDPOINT,
+          bearerToken: "ssh-token",
+          connectionMethod: "ssh",
+          verifiedSshEndpoint,
+        });
+      }).pipe(Effect.provide(harness.layer));
+      expect(authorized.verifiedEndpoint).toEqual(verifiedSshEndpoint);
+      expect(harness.fetch.calls.map(([url]) => String(url))).toEqual([
+        `${ENDPOINT.httpBaseUrl}/.well-known/goat/environment`,
+        `${ENDPOINT.httpBaseUrl}/api/auth/websocket-ticket`,
+      ]);
+      expect(new Headers(harness.fetch.calls[0]?.[1].headers).has("Authorization")).toBe(false);
+    }),
+  );
+
+  it.effect("rejects a same-URL SSH replacement before any bearer request", () =>
+    Effect.gen(function* () {
+      const harness = yield* makeHarness({
+        responses: [
+          Response.json({ ...DESCRIPTOR, environmentId: EnvironmentId.make("replacement") }),
+        ],
+      });
+      const failure = yield* Effect.gen(function* () {
+        const remote = yield* RemoteEnvironmentAuthorization.RemoteEnvironmentAuthorization;
+        return yield* remote.authorizeBearer({
+          expectedEnvironmentId: ENVIRONMENT_ID,
+          ...ENDPOINT,
+          bearerToken: "saved-token",
+          connectionMethod: "ssh",
+          verifiedSshEndpoint: { httpBaseUrl: ENDPOINT.httpBaseUrl, descriptor: DESCRIPTOR },
+        });
+      }).pipe(Effect.provide(harness.layer), Effect.flip);
+      expect(harness.fetch.calls).toHaveLength(1);
+      expect(String(harness.fetch.calls[0]?.[0])).toBe(
+        `${ENDPOINT.httpBaseUrl}/.well-known/goat/environment`,
+      );
+      expect(new Headers(harness.fetch.calls[0]?.[1].headers).has("Authorization")).toBe(false);
+      expect(failure).toMatchObject({ reason: "configuration" });
+    }),
+  );
+
+  it.effect.each(["wrong-environment", "wrong-endpoint"] as const)(
+    "rejects %s SSH evidence before sending a bearer",
+    (scenario) =>
+      Effect.gen(function* () {
+        const harness = yield* makeHarness({ responses: [] });
+        const failure = yield* Effect.gen(function* () {
+          const remote = yield* RemoteEnvironmentAuthorization.RemoteEnvironmentAuthorization;
+          return yield* remote.authorizeBearer({
+            expectedEnvironmentId: ENVIRONMENT_ID,
+            ...ENDPOINT,
+            bearerToken: "ssh-token",
+            connectionMethod: "ssh",
+            verifiedSshEndpoint: {
+              httpBaseUrl:
+                scenario === "wrong-endpoint" ? "http://127.0.0.1:4999" : ENDPOINT.httpBaseUrl,
+              descriptor: {
+                ...DESCRIPTOR,
+                environmentId:
+                  scenario === "wrong-environment" ? EnvironmentId.make("other") : ENVIRONMENT_ID,
+              },
+            },
+          });
+        }).pipe(Effect.provide(harness.layer), Effect.flip);
+        expect(failure).toMatchObject({ reason: "configuration" });
+        expect(harness.fetch.calls).toHaveLength(0);
+      }),
+  );
+
+  it.effect("does not let SSH evidence replace direct route identity validation", () =>
+    Effect.gen(function* () {
+      const harness = yield* makeHarness({
+        responses: [
+          Response.json({
+            ...DESCRIPTOR,
+            environmentId: EnvironmentId.make("other"),
+          }),
+        ],
+      });
+      const failure = yield* Effect.gen(function* () {
+        const remote = yield* RemoteEnvironmentAuthorization.RemoteEnvironmentAuthorization;
+        return yield* remote.authorizeBearer({
+          expectedEnvironmentId: ENVIRONMENT_ID,
+          ...ENDPOINT,
+          bearerToken: "ssh-token",
+          connectionMethod: "direct",
+          verifiedSshEndpoint: { httpBaseUrl: ENDPOINT.httpBaseUrl, descriptor: DESCRIPTOR },
+        });
+      }).pipe(Effect.provide(harness.layer), Effect.flip);
+      expect(failure).toMatchObject({ reason: "configuration" });
+      expect(harness.fetch.calls.map(([url]) => String(url))).toEqual([
+        `${ENDPOINT.httpBaseUrl}/.well-known/goat/environment`,
+      ]);
+    }),
+  );
+
   it.effect("reuses a validated bearer descriptor while issuing fresh websocket tickets", () =>
     Effect.gen(function* () {
       const harness = yield* makeHarness({
@@ -261,7 +370,9 @@ describe("RemoteEnvironmentAuthorization", () => {
       expect(first.socketUrl).toContain("wsTicket=first-ticket");
       expect(second.socketUrl).toContain("wsTicket=second-ticket");
       expect(
-        harness.fetch.calls.filter(([url]) => String(url).endsWith("/.well-known/t3/environment")),
+        harness.fetch.calls.filter(([url]) =>
+          String(url).endsWith("/.well-known/goat/environment"),
+        ),
       ).toHaveLength(1);
       expect(
         harness.fetch.calls.filter(([url]) => String(url).endsWith("/api/auth/websocket-ticket")),
@@ -307,7 +418,9 @@ describe("RemoteEnvironmentAuthorization", () => {
         }),
       );
       expect(
-        harness.fetch.calls.filter(([url]) => String(url).endsWith("/.well-known/t3/environment")),
+        harness.fetch.calls.filter(([url]) =>
+          String(url).endsWith("/.well-known/goat/environment"),
+        ),
       ).toHaveLength(2);
     }),
   );
@@ -376,7 +489,7 @@ describe("RemoteEnvironmentAuthorization", () => {
       expect(authorized.socketUrl).toMatch(/^ws:\/\/192\.168\.1\.10:3773\/ws\?/);
       expect(yield* Ref.get(harness.bootstrapCalls)).toBe(0);
       expect(harness.fetch.calls.map(([url]) => String(url))).toEqual([
-        "http://192.168.1.10:3773/.well-known/t3/environment",
+        "http://192.168.1.10:3773/.well-known/goat/environment",
         "http://192.168.1.10:3773/api/auth/websocket-ticket",
       ]);
     }),
@@ -406,9 +519,8 @@ describe("RemoteEnvironmentAuthorization", () => {
 
       expect(error).toMatchObject({ _tag: "ConnectionBlockedError", reason: "configuration" });
       expect(harness.fetch.calls.map(([url]) => String(url))).toEqual([
-        "http://192.168.1.10:3773/.well-known/t3/environment",
+        "http://192.168.1.10:3773/.well-known/goat/environment",
       ]);
-      // The token stays saved for the T3 Connect route.
       expect((yield* Ref.get(harness.tokens)).get(ENVIRONMENT_ID)?.accessToken).toBe(
         "cached-access-token",
       );
@@ -497,7 +609,7 @@ describe("RemoteEnvironmentAuthorization", () => {
 
   it.effect.each([
     { name: "read-only", grantScopes: ["orchestration:read"] },
-    { name: "administrative", grantScopes: AuthAdministrativeScopes },
+    { name: "default", grantScopes: AuthStandardClientScopes },
   ] as const)(
     "inherits $name pairing grant scopes for websocket authorization and HTTP renewal",
     ({ grantScopes }) =>
@@ -746,7 +858,7 @@ describe("RemoteEnvironmentAuthorization", () => {
           },
         ]);
         expect(harness.fetch.calls.map(([url]) => String(url))).toEqual([
-          `${ENDPOINT.httpBaseUrl}/.well-known/t3/environment`,
+          `${ENDPOINT.httpBaseUrl}/.well-known/goat/environment`,
           `${ENDPOINT.httpBaseUrl}/oauth/token`,
         ]);
         expect(yield* Ref.get(harness.proofInputs)).toEqual([
@@ -893,6 +1005,29 @@ describe("RemoteEnvironmentAuthorization", () => {
     }),
   );
 
+  it.effect("retries instead of blocking while the cloud session has not loaded", () =>
+    Effect.gen(function* () {
+      const harness = yield* makeHarness({
+        responses: [Response.json(DESCRIPTOR), accessToken("loaded-token")],
+      });
+      yield* Ref.set(harness.session, Option.none());
+      yield* Effect.gen(function* () {
+        const remote = yield* RemoteEnvironmentAuthorization.RemoteEnvironmentAuthorization;
+        const pending = yield* remote
+          .authorizeDpopHttp({ expectedEnvironmentId: ENVIRONMENT_ID })
+          .pipe(Effect.flip);
+        expect(pending).toMatchObject({
+          _tag: "ConnectionTransientError",
+          reason: "session-pending",
+        });
+        yield* Ref.set(harness.session, Option.some({ accountId: "account-1" }));
+        const loaded = yield* remote.authorizeDpopHttp({ expectedEnvironmentId: ENVIRONMENT_ID });
+        expect(loaded.httpAuthorization.accessToken).toBe("loaded-token");
+      }).pipe(Effect.provide(harness.layer));
+      expect(yield* Ref.get(harness.bootstrapCalls)).toBe(1);
+    }),
+  );
+
   it.effect("does not return or persist credentials after logout during renewal", () =>
     Effect.gen(function* () {
       const started = yield* Deferred.make<void>();
@@ -1010,13 +1145,6 @@ describe("RemoteEnvironmentAuthorization", () => {
         const remote = yield* RemoteEnvironmentAuthorization.RemoteEnvironmentAuthorization;
         yield* remote.authorizeDpopHttp({ expectedEnvironmentId: ENVIRONMENT_ID });
         yield* Ref.set(harness.session, Option.none());
-        const signedOut = yield* remote
-          .authorizeDpopHttp({ expectedEnvironmentId: ENVIRONMENT_ID })
-          .pipe(Effect.flip);
-        expect(signedOut).toMatchObject({
-          _tag: "ConnectionBlockedError",
-          reason: "authentication",
-        });
         yield* Ref.set(harness.session, Option.some({ accountId: "account-1" }));
         const signedIn = yield* remote.authorizeDpopHttp({ expectedEnvironmentId: ENVIRONMENT_ID });
         expect(signedIn.httpAuthorization.accessToken).toBe("new-session-token");

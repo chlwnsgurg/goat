@@ -1,23 +1,12 @@
-/**
- * AntigravityUsage - Antigravity's usage history as a usage source.
- *
- * Antigravity keeps conversations in SQLite databases under its data
- * directories and each instance's profile. Parsed databases stay in memory
- * while a database and its WAL keep the same `(size, mtime, ctime)`, so a
- * warm scan decodes only what changed.
- *
- * @module provider/Drivers/AntigravityUsage
- */
-
-import { type AntigravitySettings, UsageReadError } from "@t3tools/contracts";
-import { expandHomePath } from "@t3tools/provider-core/server/pathExpansion";
-import * as ProviderHost from "@t3tools/provider-core/server/ProviderHost";
+import { type AntigravitySettings, UsageReadError } from "@goat/contracts";
+import { expandHomePath } from "@goat/provider-core/server/pathExpansion";
+import * as ProviderHost from "@goat/provider-core/server/ProviderHost";
 import type {
   ProviderUsageInstance,
   ProviderUsageReader,
   ProviderUsageScan,
-} from "@t3tools/provider-core/server/usage";
-import * as HostProcess from "@t3tools/shared/HostProcess";
+} from "@goat/provider-core/server/usage";
+import * as HostProcess from "@goat/shared/HostProcess";
 import * as Context from "effect/Context";
 import * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
@@ -31,26 +20,25 @@ import { makeAntigravityUsageCache, readAntigravityUsage } from "./antigravityUs
 export class AntigravityUsage extends Context.Service<
   AntigravityUsage,
   {
-    /** Every Antigravity store: the data directories and each configured instance's profile. */
     readonly scan: (input: {
       readonly instances: ReadonlyArray<ProviderUsageInstance<AntigravitySettings>>;
       readonly windowStartMs: number;
     }) => Effect.Effect<ReadonlyArray<ProviderUsageScan>, UsageReadError>;
   }
->()("t3/provider/Drivers/AntigravityUsage") {}
+>()("goat/provider/Drivers/AntigravityUsage") {}
 
 const make = Effect.gen(function* () {
   const crypto = yield* Crypto.Crypto;
   const fileSystem = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const host = yield* ProviderHost.ProviderHost;
-  const hostEnvironment = yield* HostProcess.Environment;
   const cache = makeAntigravityUsageCache();
 
-  /** `ANTIGRAVITY_DATA_DIR` (comma-separated) or the defaults, canonicalized. */
-  const dataRoots = Effect.gen(function* () {
+  const dataRoots = Effect.fn("AntigravityUsage.dataRoots")(function* (
+    environment: NodeJS.ProcessEnv,
+  ) {
     const home = yield* HostProcess.HomeDirectory;
-    const configured = hostEnvironment["ANTIGRAVITY_DATA_DIR"]
+    const configured = environment["ANTIGRAVITY_DATA_DIR"]
       ?.split(",")
       .map((value) => value.trim())
       .filter(Boolean);
@@ -74,8 +62,8 @@ const make = Effect.gen(function* () {
     instances,
     windowStartMs,
   }) {
-    const roots = yield* dataRoots;
-    // Only configured instances have a profile; the implicit default never ran.
+    const roots: Array<string> = [];
+    for (const instance of instances) roots.push(...(yield* dataRoots(instance.environment)));
     for (const { instanceId } of instances.filter((instance) => instance.configured)) {
       const directories = yield* resolveAntigravityInstanceDirectories(
         host.paths.stateDir,

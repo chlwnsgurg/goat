@@ -1,5 +1,5 @@
 import { assert } from "@effect/vitest";
-import type { ProviderReplayTranscript } from "@t3tools/contracts";
+import type { ProviderReplayTranscript } from "@goat/contracts";
 
 import type { OrchestratorV2ScenarioResult } from "../../OrchestratorScenario.ts";
 import {
@@ -18,11 +18,6 @@ function field(value: unknown, key: string): unknown {
   return typeof value === "object" && value !== null ? Reflect.get(value, key) : undefined;
 }
 
-/**
- * Pi's durable native thread id is its session file. After the idle release,
- * the respawned process must `switch_session` to the file the first turn
- * wrote, and the resumed model still sees the first exchange.
- */
 export function assertPiProviderThreadResumeOutput(
   result: OrchestratorV2ScenarioResult,
   transcript: ProviderReplayTranscript,

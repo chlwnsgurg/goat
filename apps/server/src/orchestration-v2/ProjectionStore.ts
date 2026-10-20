@@ -1,3 +1,6 @@
+import { MAX_CONTINUATION_CHAIN } from "./ContinuationChain.ts";
+import { LEGACY_MCP_APP_OUTPUT_KEY } from "@goat/contracts/legacyT3Names";
+import { applyThreadPullRequestLinkUpdate } from "@goat/shared/threadPullRequests";
 import { projectTurnItemForWire } from "./WireProjection.ts";
 import * as Stream from "effect/Stream";
 import { makeThreadFind, findProjectedThreadItems } from "./ThreadFind.ts";
@@ -5,20 +8,21 @@ import type {
   OrchestrationV2SearchThreadInput,
   OrchestrationV2SearchThreadResult,
   OrchestrationV2ThreadHistoryPage,
-} from "@t3tools/contracts";
+} from "@goat/contracts";
 import {
   latestRootProviderFailure,
   latestUnheldRun,
   threadErrorSummary,
   usageLimitRunPresentedAsLatest,
-} from "@t3tools/shared/orchestrationV2ThreadError";
-import { threadPullRequestsOf } from "@t3tools/shared/threadPullRequests";
+} from "@goat/shared/orchestrationV2ThreadError";
+import { threadPullRequestsOf } from "@goat/shared/threadPullRequests";
 import type {
   EnvironmentId,
   OrchestrationV2AppThread,
   OrchestrationV2CheckpointScope,
   OrchestrationV2ExecutionNode,
   OrchestrationV2PlanArtifact,
+  OrchestrationV2PendingRuntimeRequestSummary,
   PlanId,
   OrchestrationV2ConversationMessage,
   OrchestrationV2DomainEvent,
@@ -32,12 +36,12 @@ import type {
   OrchestrationV2ThreadShell,
   OrchestrationV2ThreadProjection,
   OrchestrationV2TurnItem,
-  ProviderInstanceId,
+  ProjectId,
   ProviderSessionId,
   ProviderThreadId,
   ProviderTurnId,
   RunAttemptId,
-} from "@t3tools/contracts";
+} from "@goat/contracts";
 import {
   OrchestrationV2AppThreadJson as OrchestrationV2AppThreadJsonSchema,
   OrchestrationV2CheckpointJson as OrchestrationV2CheckpointJsonSchema,
@@ -63,27 +67,29 @@ import {
   ThreadId,
   TurnItemId,
   NodeId,
-} from "@t3tools/contracts";
+  ProviderInstanceId,
+} from "@goat/contracts";
 import {
   createOrchestrationV2TurnItemVisibility,
   isOrchestrationV2SupersededInterrupt,
-} from "@t3tools/shared/orchestrationV2Timeline";
-import { derivePendingBackgroundWork } from "@t3tools/shared/orchestrationV2PendingBackgroundWork";
+} from "@goat/shared/orchestrationV2Timeline";
+import { derivePendingBackgroundWork } from "@goat/shared/orchestrationV2PendingBackgroundWork";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
+import * as Equal from "effect/Equal";
 import * as Layer from "effect/Layer";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/sql/SqlClient";
 import type * as Statement from "effect/sql/Statement";
 
-import { MCP_APP_OUTPUT_KEY } from "@t3tools/shared/mcpApp";
+import { MCP_APP_OUTPUT_KEY } from "@goat/shared/mcpApp";
 import { threadHtmlRenderAttachmentIds } from "../attachmentStore.ts";
 import {
   isThreadHistoryUserTurn,
   isConversationHistoryItem,
-  isThreadHistoryTurnStart,
+  threadHistoryTurnStarts,
   THREAD_HISTORY_MAX_RAW_TURNS,
   selectHistoryPageFromCursor,
   selectRecentTimelineWindow,
@@ -162,7 +168,6 @@ export type ProjectionRecoveryKind =
   | "subagent-results"
   | "delegated-completions";
 
-/** Persisted state needed for limit recovery, without transcript or fork history. */
 export type ProjectionLimitRecoveryCandidate = Pick<
   OrchestrationV2ThreadShell,
   | "id"
@@ -179,16 +184,11 @@ export type ProjectionLimitRecoveryCandidate = Pick<
   | "snoozedUntil"
 >;
 
-/** The thread fields pull request sync reads, for a thread with at least one link. */
 export type ProjectionThreadPullRequests = Pick<
   OrchestrationV2AppThread,
-  "id" | "projectId" | "lineage" | "settledOverride" | "settledAt" | "pullRequests"
+  "id" | "projectId" | "lineage" | "settledOverride" | "settledAt" | "updatedAt" | "pullRequests"
 >;
 
-/**
- * Thread activity needed by settlement, without transcript or fork history.
- * Settlement always loads `latestUserAuthoredMessageAt`, so it is required here.
- */
 export type ProjectionSettlementCandidate = Pick<
   OrchestrationV2ThreadShell,
   | "id"
@@ -235,9 +235,10 @@ const ProjectionCheckpointContext = Schema.Struct({
   ),
   checkpoints: Schema.Array(
     OrchestrationV2CheckpointJsonSchema.mapFields(
-      ({ scopeId, runId, appRunOrdinal, status, ref }) => ({
+      ({ scopeId, runId, ordinalWithinScope, appRunOrdinal, status, ref }) => ({
         scopeId,
         runId,
+        ordinalWithinScope,
         appRunOrdinal,
         status,
         ref,
@@ -248,7 +249,6 @@ const ProjectionCheckpointContext = Schema.Struct({
 export type ProjectionCheckpointContext = typeof ProjectionCheckpointContext.Type;
 const decodeCheckpointContext = Schema.decodeUnknownEffect(ProjectionCheckpointContext);
 
-/** Durable capture targets, without transcript or checkpoint file payloads. */
 export interface ProjectionCheckpointCaptureContext {
   readonly run: OrchestrationV2Run | undefined;
   readonly rootNode: OrchestrationV2ExecutionNode | undefined;
@@ -257,7 +257,6 @@ export interface ProjectionCheckpointCaptureContext {
   readonly readyCheckpointOrdinals: ReadonlyArray<number>;
 }
 
-/** Exact durable targets used by interrupt, restart, and steering effects. */
 export interface ProjectionProviderControlContext {
   readonly providerThread: OrchestrationV2ThreadProjection["providerThreads"][number] | undefined;
   readonly providerTurn: OrchestrationV2ProviderTurn | undefined;
@@ -314,7 +313,37 @@ export interface ProjectionRecordFilter {
   readonly runtimeRequestIds?: ReadonlyArray<RuntimeRequestId>;
   readonly turnItemTypes?: ReadonlyArray<OrchestrationV2TurnItem["type"]>;
   readonly turnItemStatuses?: ReadonlyArray<OrchestrationV2TurnItem["status"]>;
+  readonly omitSettledLeafNodes?: boolean;
 }
+
+type ProjectionNode = OrchestrationV2ThreadProjection["nodes"][number];
+type ProjectionRun = OrchestrationV2ThreadProjection["runs"][number];
+const settledLeafNodeKinds: ReadonlySet<ProjectionNode["kind"]> = new Set([
+  "tool_call",
+  "assistant_message",
+  "reasoning",
+]);
+const settledNodeStatuses: ReadonlySet<ProjectionNode["status"]> = new Set([
+  "completed",
+  "interrupted",
+  "failed",
+  "cancelled",
+  "rolled_back",
+]);
+const activeRunStatuses: ReadonlySet<ProjectionRun["status"]> = new Set([
+  "preparing",
+  "queued",
+  "starting",
+  "running",
+  "waiting",
+]);
+
+// In-memory twin of the omitSettledLeafNodes SQL clause in readCanonicalProjection.
+const isSettledLeafNode = (node: ProjectionNode, runs: ReadonlyArray<ProjectionRun>) =>
+  settledLeafNodeKinds.has(node.kind) &&
+  settledNodeStatuses.has(node.status) &&
+  node.runId !== null &&
+  !runs.some((run) => run.id === node.runId && activeRunStatuses.has(run.status));
 export type ProjectionRecordField = Exclude<
   keyof OrchestrationV2ThreadProjection,
   "thread" | "updatedAt" | "visibleTurnItems"
@@ -338,10 +367,7 @@ export interface ProjectionTimelinePage {
 
 export interface ShellSnapshotOptions {
   readonly location?: "active" | "archive";
-  /**
-   * For background sweeps, not clients: skips settled threads before any of
-   * their run, item or session rows are read.
-   */
+  readonly projectId?: ProjectId;
   readonly unsettledOnly?: boolean;
 }
 
@@ -370,7 +396,6 @@ export interface ProjectionStoreV2Shape {
   readonly getNextTurnItemOrdinal: (
     threadId: ThreadId,
   ) => Effect.Effect<number, ProjectionStoreV2Error>;
-  /** One persisted turn item, or null when the thread has no such item. */
   readonly getTurnItem: (input: {
     readonly threadId: ThreadId;
     readonly itemId: TurnItemId;
@@ -388,7 +413,6 @@ export interface ProjectionStoreV2Shape {
     options?: ShellSnapshotOptions,
   ) => Effect.Effect<OrchestrationV2ThreadShellSnapshot, ProjectionStoreV2Error>;
   /**
-   * Runs the shell snapshot's SQL reads and returns the step that decodes them.
    * Callers that combine the shell with other reads run this inside their own
    * transaction and the returned decode after it commits, so the shared
    * connection is not held while thousands of rows are converted.
@@ -397,6 +421,16 @@ export interface ProjectionStoreV2Shape {
     options?: ShellSnapshotOptions,
   ) => Effect.Effect<
     Effect.Effect<OrchestrationV2ThreadShellSnapshot, ProjectionStoreV2Error>,
+    ProjectionStoreV2Error
+  >;
+  /** Stable task-id/entry-index pages over ledger history, including archived parents. */
+  readonly getReviewLedgerEntries: (input: {
+    readonly from: string;
+    readonly to: string;
+    readonly limit: number;
+    readonly cursor?: { readonly taskId: string; readonly index: number };
+  }) => Effect.Effect<
+    ReadonlyArray<{ readonly task: OrchestrationV2Subagent; readonly index: number }>,
     ProjectionStoreV2Error
   >;
   readonly getThreadShell: (
@@ -409,16 +443,15 @@ export interface ProjectionStoreV2Shape {
     readonly now: DateTime.Utc;
     readonly autoResume: boolean;
     readonly snooze: boolean;
+    /**
+     * Also return usage-limit failures without a future reset time. Only the fallback branch
+     * asks for them; `limitRecoveryCommand` arms nothing for such a failure.
+     */
+    readonly withoutReset?: boolean;
   }) => Effect.Effect<ReadonlyArray<ProjectionLimitRecoveryCandidate>, ProjectionStoreV2Error>;
-  /** Every candidate, or only `threadId` when a sweep checks one thread. */
   readonly getSettlementCandidates: (
     threadId?: ThreadId,
   ) => Effect.Effect<ReadonlyArray<ProjectionSettlementCandidate>, ProjectionStoreV2Error>;
-  /**
-   * Active (not deleted, not archived) threads with at least one pull request
-   * link, in shell snapshot order, or only `threadId` when given. Skips run,
-   * message and item reads.
-   */
   readonly getThreadsWithPullRequests: (
     threadId?: ThreadId,
   ) => Effect.Effect<ReadonlyArray<ProjectionThreadPullRequests>, ProjectionStoreV2Error>;
@@ -439,6 +472,12 @@ export interface ProjectionStoreV2Shape {
       readonly threadId: ThreadId;
       readonly requestId: RuntimeRequestId;
     }>,
+    ProjectionStoreV2Error
+  >;
+  readonly getThreadWorktreePaths: (options?: {
+    readonly includeArchived?: boolean;
+  }) => Effect.Effect<
+    ReadonlyArray<{ readonly threadId: ThreadId; readonly worktreePath: string }>,
     ProjectionStoreV2Error
   >;
   readonly getTurnStartContext: (
@@ -485,6 +524,9 @@ export interface ProjectionStoreV2Shape {
     threadId: ThreadId,
     requestId: TurnItemId,
     resultId: TurnItemId,
+  ) => Effect.Effect<boolean, ProjectionStoreV2Error>;
+  readonly isNodeStored: (
+    node: OrchestrationV2ExecutionNode,
   ) => Effect.Effect<boolean, ProjectionStoreV2Error>;
   readonly getRuntimeRequest: (
     threadId: ThreadId,
@@ -543,9 +585,7 @@ export interface ProjectionStoreV2Shape {
   readonly getThreadSnapshotWindow: (
     threadId: ThreadId,
     options: {
-      /** Row fallback for histories without turn starts. */
       readonly rowLimit: number;
-      /** User-turn window, with extra anchors for the inclusive cursor and has-more check. */
       readonly userTurnLimit?: number | undefined;
       readonly anchorItemId?: TurnItemId | undefined;
       readonly anchorThreadId?: ThreadId | undefined;
@@ -562,7 +602,7 @@ export interface ProjectionStoreV2Shape {
 }
 
 export class ProjectionStoreV2 extends Context.Service<ProjectionStoreV2, ProjectionStoreV2Shape>()(
-  "t3/orchestration-v2/ProjectionStore/ProjectionStoreV2",
+  "goat/orchestration-v2/ProjectionStore/ProjectionStoreV2",
 ) {}
 
 export const ORCHESTRATION_V2_PROJECTION_SCHEMA_VERSION = 2;
@@ -622,6 +662,11 @@ function needsRecovery(
             (run.status === "queued" && run.queueHeld !== true),
         ) ||
         projection.runtimeRequests.some((request) => request.status === "pending") ||
+        projection.subagents.some(
+          (subagent) =>
+            subagent.origin === "provider_native" &&
+            ["pending", "running", "waiting"].includes(subagent.status),
+        ) ||
         projection.providerSessions.some(
           (session) => session.status !== "stopped" && session.status !== "error",
         ) ||
@@ -685,10 +730,15 @@ function preserveCompletionDelivery(
   current: OrchestrationV2Subagent | undefined,
   next: OrchestrationV2Subagent,
 ): OrchestrationV2Subagent {
-  if (next.completionDelivery !== undefined || current?.completionDelivery === undefined) {
-    return next;
-  }
-  return { ...next, completionDelivery: current.completionDelivery };
+  return {
+    ...next,
+    ...(next.completionDelivery === undefined && current?.completionDelivery !== undefined
+      ? { completionDelivery: current.completionDelivery }
+      : {}),
+    ...(next.reviewLedger === undefined && current?.reviewLedger !== undefined
+      ? { reviewLedger: current.reviewLedger }
+      : {}),
+  };
 }
 
 export function emptyProjection(
@@ -716,7 +766,6 @@ export function emptyProjection(
   };
 }
 
-// A future queued provider has a reserved thread record but is not active until delivery.
 function isQueuedProviderThreadPlaceholder(providerThread: OrchestrationV2ProviderThread): boolean {
   return (
     providerThread.status === "not_loaded" &&
@@ -740,6 +789,11 @@ export function applyToProjection(
   };
 
   switch (event.type) {
+    case "thread.pull-request-link-updated":
+      return {
+        ...projection,
+        thread: applyThreadPullRequestLinkUpdate(projection.thread, event.payload),
+      };
     case "thread.created":
     case "thread.archived":
     case "thread.unarchived":
@@ -752,9 +806,7 @@ export function applyToProjection(
     case "thread.pinned":
     case "thread.unpinned":
     case "thread.pin-reordered":
-    case "thread.active-reordered":
     case "thread.metadata-updated":
-    case "thread.pull-request-synced":
     case "thread.runtime-mode-updated":
     case "thread.interaction-mode-updated":
     case "thread.model-selection-updated":
@@ -763,8 +815,14 @@ export function applyToProjection(
         ...base,
         thread: event.payload,
       };
-    // Visited tracking is read state, not activity: skip the updatedAt bump so
-    // viewing a thread does not surface it as recently active.
+    // Reordering and PR refreshes preserve the orchestrator's activity timestamp.
+    case "thread.active-reordered":
+    case "thread.pull-request-synced":
+      return {
+        ...base,
+        thread: event.payload,
+        updatedAt: event.payload.updatedAt,
+      };
     case "thread.visited":
     case "thread.marked-unread":
       return {
@@ -895,23 +953,22 @@ export function applyToProjection(
 }
 
 /**
- * Replay state for entities whose persisted projection is shared across thread bindings.
- *
  * Provider sessions are process-scoped: one session row can be bound to several app
  * threads. Updating that row changes what every bound thread reads, even though the
- * application event itself belongs to one thread stream. Keeping the binding index here
- * makes in-memory replay match the normalized SQL projection without scanning every
- * thread for every session event.
+ * application event itself belongs to one thread stream. Provider thread owners are global
+ * too: the latest event wins across app threads.
  */
 export interface ProjectionReplayState {
   readonly projections: Map<ThreadId, OrchestrationV2ThreadProjection>;
   readonly providerSessionThreadIds: Map<ProviderSessionId, ReadonlySet<ThreadId>>;
+  readonly providerThreadInstanceIds: Map<ProviderThreadId, ProviderInstanceId>;
 }
 
 function makeProjectionReplayState(): ProjectionReplayState {
   return {
     projections: new Map(),
     providerSessionThreadIds: new Map(),
+    providerThreadInstanceIds: new Map(),
   };
 }
 
@@ -933,14 +990,31 @@ function applyToProjectionReplayState(
   if (event.type === "provider-session.updated") {
     const boundThreadIds = state.providerSessionThreadIds.get(event.payload.id);
     if (boundThreadIds?.has(event.threadId) !== true) {
-      // The SQL projection updates the global session row but does not implicitly
-      // create a thread binding for an update event.
       next = { ...next, providerSessions: current.providerSessions };
     }
   }
   state.projections.set(event.threadId, next);
 
   switch (event.type) {
+    case "provider-thread.updated": {
+      state.providerThreadInstanceIds.set(event.payload.id, event.payload.providerInstanceId);
+      // SQL's upsert moves the provider-thread row and its roster to appThreadId.
+      for (const [threadId, projection] of state.projections) {
+        if (threadId === event.payload.appThreadId) {
+          if (threadId !== event.threadId) {
+            state.projections.set(threadId, applyToProjection(projection, event));
+          }
+          continue;
+        }
+        const providerThreads = projection.providerThreads.filter(
+          (thread) => thread.id !== event.payload.id,
+        );
+        if (providerThreads.length !== projection.providerThreads.length) {
+          state.projections.set(threadId, { ...projection, providerThreads });
+        }
+      }
+      break;
+    }
     case "provider-session.attached": {
       const boundThreadIds = new Set(state.providerSessionThreadIds.get(event.payload.id) ?? []);
       boundThreadIds.add(event.threadId);
@@ -988,6 +1062,11 @@ function applyToProjectionReplayState(
 
 type PayloadRow = {
   readonly payload_json: string;
+};
+
+type ShellPendingTurnItemRow = PayloadRow & {
+  readonly thread_id: string;
+  readonly owning_provider_instance_id: string | null;
 };
 
 type ShellThreadRow = {
@@ -1050,8 +1129,16 @@ const encodeTimelineSources = Schema.encodeEffect(
 );
 const encodeIdList = Schema.encodeSync(Schema.fromJsonString(Schema.Array(Schema.String)));
 
+// An empty list filter selects no rows, but SQLite still walks every row of
+// the thread to apply it. Callers pass `turnItemTypes: []` to skip items.
+const matchesNothing = (...filters: ReadonlyArray<ReadonlyArray<unknown> | undefined>) =>
+  filters.some((values) => values?.length === 0);
+
 const encodeThreadPayload = Schema.encodeEffect(
   Schema.fromJsonString(OrchestrationV2AppThreadJsonSchema),
+);
+const encodeThreadUpdatedAt = Schema.encodeEffect(
+  OrchestrationV2AppThreadJsonSchema.fields.updatedAt,
 );
 const encodeRunPayload = Schema.encodeEffect(Schema.fromJsonString(OrchestrationV2RunJsonSchema));
 const encodeRestartCancelledBackgroundWork = Schema.encodeEffect(
@@ -1069,7 +1156,7 @@ const encodeSubagentPayload = Schema.encodeEffect(
 const encodeProviderSessionPayload = Schema.encodeEffect(
   Schema.fromJsonString(OrchestrationV2ProviderSessionJsonSchema),
 );
-const encodeProviderThreadPayload = Schema.encodeEffect(
+export const encodeProviderThreadPayload = Schema.encodeEffect(
   Schema.fromJsonString(OrchestrationV2ProviderThreadJsonSchema),
 );
 const encodeProviderTurnPayload = Schema.encodeEffect(
@@ -1100,7 +1187,7 @@ const encodeContextTransferPayload = Schema.encodeEffect(
   Schema.fromJsonString(OrchestrationV2ContextTransferJsonSchema),
 );
 
-const decodeThreadPayload = Schema.decodeUnknownEffect(
+export const decodeThreadPayload = Schema.decodeUnknownEffect(
   Schema.fromJsonString(OrchestrationV2AppThreadJsonSchema),
 );
 const decodeRunPayload = Schema.decodeUnknownEffect(
@@ -1118,7 +1205,7 @@ const decodeSubagentPayload = Schema.decodeUnknownEffect(
 const decodeProviderSessionPayload = Schema.decodeUnknownEffect(
   Schema.fromJsonString(OrchestrationV2ProviderSessionJsonSchema),
 );
-const decodeProviderThreadPayload = Schema.decodeUnknownEffect(
+export const decodeProviderThreadPayload = Schema.decodeUnknownEffect(
   Schema.fromJsonString(OrchestrationV2ProviderThreadJsonSchema),
 );
 const decodeProviderTurnPayload = Schema.decodeUnknownEffect(
@@ -1230,25 +1317,30 @@ function sortMessagesByTurnItemOrder(
 
 function activeLocalTurnItems(
   projection: OrchestrationV2ThreadProjection,
+  selectedTurnItemIds?: ReadonlySet<string>,
 ): Array<OrchestrationV2ProjectedTurnItem> {
   const isVisible = createOrchestrationV2TurnItemVisibility({
     runs: projection.runs,
     attempts: projection.attempts,
     items: projection.turnItems,
   });
-  return projection.turnItems.filter(isVisible).map((item, position) => ({
-    position,
-    visibility: "local" as const,
-    sourceThreadId: item.threadId,
-    sourceItemId: item.id,
-    item,
-  }));
+  return projection.turnItems
+    .filter((item) => selectedTurnItemIds === undefined || selectedTurnItemIds.has(String(item.id)))
+    .filter(isVisible)
+    .map((item, position) => ({
+      position,
+      visibility: "local" as const,
+      sourceThreadId: item.threadId,
+      sourceItemId: item.id,
+      item,
+    }));
 }
 
 function localVisibleTurnItems(
   projection: OrchestrationV2ThreadProjection,
+  selectedTurnItemIds?: ReadonlySet<string>,
 ): Array<OrchestrationV2ProjectedTurnItem> {
-  return activeLocalTurnItems(projection);
+  return activeLocalTurnItems(projection, selectedTurnItemIds);
 }
 
 function inheritedVisibleTurnItemsFromLocalItems(
@@ -1264,10 +1356,11 @@ function inheritedVisibleTurnItemsFromLocalItems(
 
 function withLocalVisibleTurnItems(
   projection: OrchestrationV2ThreadProjection,
+  selectedTurnItemIds?: ReadonlySet<string>,
 ): OrchestrationV2ThreadProjection {
   return {
     ...projection,
-    visibleTurnItems: localVisibleTurnItems(projection),
+    visibleTurnItems: localVisibleTurnItems(projection, selectedTurnItemIds),
   };
 }
 
@@ -1318,6 +1411,7 @@ export function isTurnItemAtOrBeforeRun(input: {
 
 function visibleTurnItemsThroughRun(input: {
   readonly sourceProjection: OrchestrationV2ThreadProjection;
+  readonly sourceSelectedTurnItemIds?: ReadonlySet<string> | undefined;
   readonly sourceRunId: NonNullable<OrchestrationV2TurnItem["runId"]>;
 }): Array<Omit<OrchestrationV2ProjectedTurnItem, "position">> {
   const sourceRun = input.sourceProjection.runs.find((run) => run.id === input.sourceRunId);
@@ -1337,23 +1431,29 @@ function visibleTurnItemsThroughRun(input: {
       item: row.item,
     }));
   const localPrefix = inheritedVisibleTurnItemsFromLocalItems(
-    input.sourceProjection.turnItems.filter((item) => {
-      if (
-        isOrchestrationV2SupersededInterrupt({
-          item,
-          attempts: input.sourceProjection.attempts,
-          items: input.sourceProjection.turnItems,
-        })
-      ) {
-        return false;
-      }
-      return isTurnItemAtOrBeforeRun({
-        historyOrigin: input.sourceProjection.thread.historyOrigin,
-        itemRunId: item.runId,
-        runOrdinalById,
-        sourceRunOrdinal: sourceRun.ordinal,
-      });
-    }),
+    input.sourceProjection.turnItems
+      .filter(
+        (item) =>
+          input.sourceSelectedTurnItemIds === undefined ||
+          input.sourceSelectedTurnItemIds.has(String(item.id)),
+      )
+      .filter((item) => {
+        if (
+          isOrchestrationV2SupersededInterrupt({
+            item,
+            attempts: input.sourceProjection.attempts,
+            items: input.sourceProjection.turnItems,
+          })
+        ) {
+          return false;
+        }
+        return isTurnItemAtOrBeforeRun({
+          historyOrigin: input.sourceProjection.thread.historyOrigin,
+          itemRunId: item.runId,
+          runOrdinalById,
+          sourceRunOrdinal: sourceRun.ordinal,
+        });
+      }),
   );
 
   return [...inheritedPrefix, ...localPrefix];
@@ -1362,14 +1462,17 @@ function visibleTurnItemsThroughRun(input: {
 function buildVisibleTurnItems(input: {
   readonly projection: OrchestrationV2ThreadProjection;
   readonly sourceProjection: OrchestrationV2ThreadProjection | null;
+  readonly selectedTurnItemIds?: ReadonlySet<string> | undefined;
+  readonly sourceSelectedTurnItemIds?: ReadonlySet<string> | undefined;
 }): Array<OrchestrationV2ProjectedTurnItem> {
   const forkedFrom = input.projection.thread.forkedFrom;
   if (forkedFrom?.type !== "run" || input.sourceProjection === null) {
-    return localVisibleTurnItems(input.projection);
+    return localVisibleTurnItems(input.projection, input.selectedTurnItemIds);
   }
 
   const inherited = visibleTurnItemsThroughRun({
     sourceProjection: input.sourceProjection,
+    sourceSelectedTurnItemIds: input.sourceSelectedTurnItemIds,
     sourceRunId: forkedFrom.runId,
   });
   const markerItem = makeForkMarkerTurnItem({
@@ -1377,7 +1480,7 @@ function buildVisibleTurnItems(input: {
     sourceThreadId: forkedFrom.threadId,
     sourceRunId: forkedFrom.runId,
   });
-  const local = activeLocalTurnItems(input.projection).map((row) => ({
+  const local = activeLocalTurnItems(input.projection, input.selectedTurnItemIds).map((row) => ({
     visibility: "local" as const,
     sourceThreadId: row.sourceThreadId,
     sourceItemId: row.sourceItemId,
@@ -1396,26 +1499,28 @@ function buildVisibleTurnItems(input: {
   ]);
 }
 
-/**
- * An agent waiting on a secret is waiting on the user just like a question,
- * so the shell reports it as pending user input. Secret requests have no
- * runtime request of their own; this stands one in for the shell summary
- * only, keyed by the card's turn item.
- */
+function pendingRuntimeRequestSummary(
+  request: OrchestrationV2ThreadProjection["runtimeRequests"][number] | null,
+): OrchestrationV2PendingRuntimeRequestSummary | null {
+  if (request === null) return null;
+  return {
+    id: request.id,
+    kind: request.kind,
+    createdAt: request.createdAt,
+    blocking: request.responseCapability.type !== "message",
+  };
+}
+
 function secretRequestAsPendingInput(
   item: OrchestrationV2TurnItem | null,
-): OrchestrationV2ThreadProjection["runtimeRequests"][number] | null {
-  if (item?.type !== "secret_request" || item.nodeId === null) return null;
+): OrchestrationV2PendingRuntimeRequestSummary | null {
+  if ((item?.type !== "secret_request" && item?.type !== "human_handoff") || item.nodeId === null)
+    return null;
   return {
     id: RuntimeRequestId.make(item.id),
-    nodeId: item.nodeId,
-    providerTurnId: item.providerTurnId,
-    nativeRequestRef: null,
     kind: "user_input",
-    status: "pending",
-    responseCapability: { type: "message" },
     createdAt: item.startedAt ?? item.updatedAt,
-    resolvedAt: null,
+    blocking: true,
   };
 }
 
@@ -1444,27 +1549,38 @@ export function threadShellFromProjection(
       .filter(isActivityRunForShell)
       .toSorted((left, right) => right.ordinal - left.ordinal)[0] ?? null;
   const liveRunIds = new Set(projection.runs.filter(isActivityRunForShell).map((run) => run.id));
-  const pendingRuntimeRequest =
-    projection.runtimeRequests
-      .filter((request) => request.status === "pending")
-      .toSorted(
-        (left, right) =>
-          DateTime.toEpochMillis(right.createdAt) - DateTime.toEpochMillis(left.createdAt),
-      )[0] ??
-    secretRequestAsPendingInput(
-      projection.turnItems
-        .filter(
-          (item) =>
-            item.type === "secret_request" &&
-            item.status === "waiting" &&
-            item.runId !== null &&
-            liveRunIds.has(item.runId),
-        )
-        .toSorted(
-          (left, right) =>
-            DateTime.toEpochMillis(right.updatedAt) - DateTime.toEpochMillis(left.updatedAt),
-        )[0] ?? null,
-    );
+  const pendingRuntimeRequests = projection.runtimeRequests
+    .filter((request) => request.status === "pending")
+    .toSorted((left, right) => {
+      const byTime =
+        DateTime.toEpochMillis(right.createdAt) - DateTime.toEpochMillis(left.createdAt);
+      return byTime !== 0 ? byTime : left.id < right.id ? 1 : left.id > right.id ? -1 : 0;
+    });
+  let pendingRuntimeRequest = pendingRuntimeRequestSummary(
+    pendingRuntimeRequests.find(
+      (request) => request.kind !== "auth_refresh" && request.kind !== "dynamic_tool_call",
+    ) ??
+      pendingRuntimeRequests[0] ??
+      null,
+  );
+  if (pendingRuntimeRequest === null || pendingRuntimeRequest.blocking === false) {
+    pendingRuntimeRequest =
+      secretRequestAsPendingInput(
+        projection.turnItems
+          .filter(
+            (item) =>
+              item.status === "waiting" &&
+              (item.type === "human_handoff" ||
+                (item.type === "secret_request" &&
+                  item.runId !== null &&
+                  liveRunIds.has(item.runId))),
+          )
+          .toSorted(
+            (left, right) =>
+              DateTime.toEpochMillis(right.updatedAt) - DateTime.toEpochMillis(left.updatedAt),
+          )[0] ?? null,
+      ) ?? pendingRuntimeRequest;
+  }
   const userMessages = projection.messages
     .filter((message) => message.role === "user")
     .toSorted(
@@ -1496,6 +1612,10 @@ export function threadShellFromProjection(
     ...(projection.thread.launchedBy === undefined
       ? {}
       : { launchedBy: projection.thread.launchedBy }),
+    ...(projection.thread.externalLauncher === undefined
+      ? {}
+      : { externalLauncher: projection.thread.externalLauncher }),
+    ...(projection.thread.sideChatOf == null ? {} : { sideChatOf: projection.thread.sideChatOf }),
     ...(projection.thread.linkedPullRequest === undefined
       ? {}
       : { linkedPullRequest: projection.thread.linkedPullRequest }),
@@ -1524,14 +1644,7 @@ export function threadShellFromProjection(
       latestRootProviderFailure(latestRun, projection.turnItems),
       providerSession?.lastError ?? null,
     ),
-    pendingRuntimeRequest:
-      pendingRuntimeRequest === null
-        ? null
-        : {
-            id: pendingRuntimeRequest.id,
-            kind: pendingRuntimeRequest.kind,
-            createdAt: pendingRuntimeRequest.createdAt,
-          },
+    pendingRuntimeRequest,
     // Thread detail owns message bodies. Keeping them out of shell rows makes
     // initial hydration and streaming updates independent of transcript size.
     latestVisibleMessage: null,
@@ -1553,7 +1666,7 @@ export function threadShellFromProjection(
     itemCount: activeLocalTurnItems(projection).length,
     visibleItemCount: projection.visibleTurnItems.length,
     createdAt: projection.thread.createdAt,
-    updatedAt: projection.updatedAt,
+    updatedAt: projection.thread.updatedAt,
     archivedAt: projection.thread.archivedAt,
     settledOverride: projection.thread.settledOverride,
     settledAt: projection.thread.settledAt,
@@ -1571,11 +1684,6 @@ export function threadShellFromProjection(
   };
 }
 
-/**
- * Provider instances that have owned this thread's root conversation, oldest
- * first. Subagent provider threads carry an owner node and are excluded so a
- * delegated Codex child does not make a Claude thread look handed off.
- */
 function providerInstanceHistoryForShell(input: {
   readonly threadId: ThreadId;
   readonly providerThreads: ReadonlyArray<
@@ -1597,7 +1705,6 @@ function providerInstanceHistoryForShell(input: {
   return history;
 }
 
-/** The native goal lives on the provider thread that currently owns the conversation. */
 function activeProviderGoalForShell(
   providerThreads: ReadonlyArray<OrchestrationV2ThreadProjection["providerThreads"][number]>,
   activeProviderThreadId: OrchestrationV2ThreadProjection["thread"]["activeProviderThreadId"],
@@ -1632,7 +1739,7 @@ type ShellThreadState = {
   readonly lastError: string | null;
   readonly lastErrorClass: OrchestrationV2ThreadShell["lastErrorClass"];
   readonly usageLimitResetAt: OrchestrationV2ThreadShell["usageLimitResetAt"];
-  readonly pendingRuntimeRequest: OrchestrationV2ThreadProjection["runtimeRequests"][number] | null;
+  readonly pendingRuntimeRequest: OrchestrationV2PendingRuntimeRequestSummary | null;
   readonly latestUserMessageAt: DateTime.Utc | null;
   readonly latestUserAuthoredMessageAt: DateTime.Utc | null;
   readonly hasActionableProposedPlan: boolean;
@@ -1685,11 +1792,6 @@ function itemCountThroughRun(input: {
   return count;
 }
 
-/**
- * Threads that some shell row forks from at a run. Only these need run
- * ordinals and per-run item counts, to count the inherited prefix, so a thread
- * nobody forked from never pays for a scan of its run history.
- */
 function shellForkSourceIds(
   rows: ReadonlyArray<{ readonly forked_from_run_source_thread_id: string | null }>,
 ): ReadonlyArray<ThreadId> {
@@ -1767,6 +1869,10 @@ function shellFromState(input: {
     ...(input.state.thread.launchedBy === undefined
       ? {}
       : { launchedBy: input.state.thread.launchedBy }),
+    ...(input.state.thread.externalLauncher === undefined
+      ? {}
+      : { externalLauncher: input.state.thread.externalLauncher }),
+    ...(input.state.thread.sideChatOf == null ? {} : { sideChatOf: input.state.thread.sideChatOf }),
     ...(input.state.thread.linkedPullRequest === undefined
       ? {}
       : { linkedPullRequest: input.state.thread.linkedPullRequest }),
@@ -1793,14 +1899,7 @@ function shellFromState(input: {
     lastError: input.state.lastError,
     lastErrorClass: input.state.lastErrorClass,
     usageLimitResetAt: input.state.usageLimitResetAt,
-    pendingRuntimeRequest:
-      input.state.pendingRuntimeRequest === null
-        ? null
-        : {
-            id: input.state.pendingRuntimeRequest.id,
-            kind: input.state.pendingRuntimeRequest.kind,
-            createdAt: input.state.pendingRuntimeRequest.createdAt,
-          },
+    pendingRuntimeRequest: input.state.pendingRuntimeRequest,
     latestVisibleMessage: null,
     latestUserMessageAt: input.state.latestUserMessageAt,
     latestUserAuthoredMessageAt: input.state.latestUserAuthoredMessageAt,
@@ -1851,6 +1950,15 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
     const apply: ProjectionStoreV2Shape["apply"] = (event) =>
       Effect.gen(function* () {
         switch (event.type) {
+          case "thread.pull-request-link-updated": {
+            const thread = yield* getThread(event.threadId);
+            yield* apply({
+              ...event,
+              type: "thread.pull-request-synced",
+              payload: applyThreadPullRequestLinkUpdate(thread, event.payload),
+            });
+            break;
+          }
           case "thread.created":
           case "thread.archived":
           case "thread.unarchived":
@@ -2136,7 +2244,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                 started_at = excluded.started_at,
                 completed_at = excluded.completed_at,
                 updated_at = excluded.updated_at,
-                payload_json = CASE
+                payload_json = json_patch(CASE
                   WHEN json_type(excluded.payload_json, '$.completionDelivery') IS NULL
                     AND json_type(orchestration_v2_projection_subagents.payload_json, '$.completionDelivery') IS NOT NULL
                   THEN json_set(
@@ -2148,7 +2256,12 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                     )
                   )
                   ELSE excluded.payload_json
-                END
+                END, CASE
+                  WHEN json_type(excluded.payload_json, '$.reviewLedger') IS NULL
+                    AND json_type(orchestration_v2_projection_subagents.payload_json, '$.reviewLedger') IS NOT NULL
+                  THEN json_object('reviewLedger', json_extract(orchestration_v2_projection_subagents.payload_json, '$.reviewLedger'))
+                  ELSE '{}'
+                END)
             `;
             break;
           }
@@ -2695,33 +2808,25 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
           event.type !== "thread.pinned" &&
           event.type !== "thread.unpinned" &&
           event.type !== "thread.pin-reordered" &&
+          event.type !== "thread.active-reordered" &&
           event.type !== "thread.visited" &&
           event.type !== "thread.marked-unread" &&
           event.type !== "thread.metadata-updated" &&
+          event.type !== "thread.pull-request-synced" &&
+          event.type !== "thread.pull-request-link-updated" &&
           event.type !== "thread.runtime-mode-updated" &&
           event.type !== "thread.interaction-mode-updated" &&
           event.type !== "thread.model-selection-updated" &&
           event.type !== "thread.provider-switched"
         ) {
-          const rows = yield* sql<PayloadRow>`
-            SELECT payload_json
-            FROM orchestration_v2_projection_threads
+          const updatedAt = yield* encodeThreadUpdatedAt(event.occurredAt);
+          yield* sql`
+            UPDATE orchestration_v2_projection_threads
+            SET
+              updated_at = ${updatedAt},
+              payload_json = json_set(payload_json, '$.updatedAt', ${updatedAt})
             WHERE thread_id = ${event.threadId}
-            LIMIT 1
           `;
-          const row = rows[0];
-          if (row !== undefined) {
-            const thread = yield* decodeThreadPayload(row.payload_json);
-            const updatedThread = { ...thread, updatedAt: event.occurredAt };
-            const payloadJson = yield* encodeThreadPayload(updatedThread);
-            yield* sql`
-              UPDATE orchestration_v2_projection_threads
-              SET
-                updated_at = ${stringField(parseEncodedPayload(payloadJson), "updatedAt")},
-                payload_json = ${payloadJson}
-              WHERE thread_id = ${event.threadId}
-            `;
-          }
         }
       }).pipe(
         Effect.mapError(
@@ -2758,7 +2863,9 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
         }
 
         const boundedTurnItemRows =
-          fields !== undefined && !fields.includes("turnItems")
+          (fields !== undefined && !fields.includes("turnItems")) ||
+          (window === undefined &&
+            matchesNothing(filter?.turnItemTypes, filter?.turnItemStatuses, filter?.turnItemRunIds))
             ? []
             : window === undefined
               ? yield* sql<PayloadRow>`
@@ -2771,7 +2878,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                   ${filter?.turnItemRunIds === undefined ? sql`` : sql`AND (run_id IN (SELECT value FROM json_each(${encodeIdList(filter.turnItemRunIds.filter((id): id is RunId => id !== null))})) OR (${filter.turnItemRunIds.includes(null) ? 1 : 0} = 1 AND run_id IS NULL))`}
                 ORDER BY ordinal ASC, turn_item_id ASC
               `
-              : yield* sql<PayloadRow>`
+              : yield* sql<PayloadRow & { readonly is_selected: 0 | 1 }>`
                 WITH eligible AS NOT MATERIALIZED (
                   SELECT item.rowid AS item_rowid, item.payload_json, item.ordinal, item.turn_item_id,
                     item.run_id, item.node_id, item.type
@@ -2836,12 +2943,54 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                           AND request.type = 'run_interrupt_request'
                       )
                     )
+                ), run_starts AS (
+                  -- A wake (PR watch, task completion) starts its run with a
+                  -- notification instead of a user message. Read the first
+                  -- input of each run, newest run first, and add the
+                  -- notifications to the user-message turn starts. A run
+                  -- without an eligible first input (queued, rolled back) is
+                  -- skipped, so it cannot hide older turns. CROSS JOIN keeps
+                  -- the runs as the outer loop, and each probe reads only the
+                  -- first rows of a run.
+                  SELECT start.ordinal, start.type
+                  FROM orchestration_v2_projection_runs AS recent_run
+                  CROSS JOIN eligible AS start ON start.item_rowid = (
+                    SELECT first_input.rowid
+                    FROM orchestration_v2_projection_turn_items AS first_input
+                    WHERE first_input.run_id = recent_run.run_id
+                      AND first_input.type IN ('user_message', 'notification')
+                    ORDER BY first_input.ordinal
+                    LIMIT 1
+                  )
+                  WHERE recent_run.thread_id = ${threadId}
+                    AND recent_run.ordinal <= COALESCE(
+                      (
+                        SELECT anchor_run.ordinal
+                        FROM orchestration_v2_projection_turn_items AS anchor_item
+                        JOIN orchestration_v2_projection_runs AS anchor_run
+                          ON anchor_run.run_id = anchor_item.run_id
+                        WHERE anchor_item.thread_id = ${threadId}
+                          AND anchor_item.turn_item_id = ${window.anchorItemId ?? null}
+                        LIMIT 1
+                      ),
+                      9223372036854775807
+                    )
+                    AND ${window.userTurnLimit ?? null} IS NOT NULL
+                  ORDER BY recent_run.ordinal DESC
+                  LIMIT ${THREAD_HISTORY_MAX_RAW_TURNS + 2}
                 ), turn_anchors AS (
                   SELECT ordinal, payload_json
-                  FROM eligible
-                  WHERE type = 'user_message'
-                    AND json_extract(payload_json, '$.inputIntent') IN ('turn_start', 'queued_turn')
-                    AND ${window.userTurnLimit ?? null} IS NOT NULL
+                  FROM (
+                    SELECT ordinal, payload_json
+                    FROM eligible
+                    WHERE type = 'user_message'
+                      AND json_extract(payload_json, '$.inputIntent') IN ('turn_start', 'queued_turn')
+                      AND ${window.userTurnLimit ?? null} IS NOT NULL
+                    ORDER BY ordinal DESC
+                    LIMIT ${THREAD_HISTORY_MAX_RAW_TURNS + 2}
+                  )
+                  UNION ALL
+                  SELECT ordinal, NULL FROM run_starts WHERE type = 'notification'
                   ORDER BY ordinal DESC
                   LIMIT ${THREAD_HISTORY_MAX_RAW_TURNS + 2}
                 ), user_anchors AS (
@@ -2874,6 +3023,23 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                 ), retained AS MATERIALIZED (
                   SELECT item_rowid, ordinal, turn_item_id FROM selected
                   UNION
+                  SELECT request_item.rowid AS item_rowid,
+                    request_item.ordinal, request_item.turn_item_id
+                  FROM orchestration_v2_projection_runtime_requests AS pending_request
+                    INDEXED BY orchestration_v2_projection_runtime_requests_thread_status_idx
+                  CROSS JOIN orchestration_v2_projection_turn_items AS request_item
+                    INDEXED BY orchestration_v2_projection_turn_items_thread_request_idx
+                    ON request_item.thread_id = pending_request.thread_id
+                      AND request_item.type IN ('user_input_request', 'approval_request')
+                      -- Remove column affinity so the JSON expression index can
+                      -- seek by request ID as well as thread ID. IDs are strings.
+                      AND json_extract(request_item.payload_json, '$.requestId') =
+                        +pending_request.runtime_request_id
+                  WHERE pending_request.thread_id = ${threadId}
+                    AND pending_request.status = 'pending'
+                    AND ${window.requiredRunId ?? null} IS NULL
+                    AND ${fields === undefined || fields.includes("runtimeRequests") ? 1 : 0} = 1
+                  UNION
                   SELECT request.rowid AS item_rowid, request.ordinal, request.turn_item_id
                   FROM orchestration_v2_projection_turn_items AS request
                   WHERE request.run_id IN (
@@ -2897,7 +3063,11 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                 -- CROSS JOIN keeps the sorted IDs as the outer loop, so SQLite
                 -- skips sorting again once the payloads are attached. Carry the
                 -- rowid through selection to avoid a second string-key index lookup.
-                SELECT item.payload_json
+                SELECT item.payload_json,
+                  CASE WHEN EXISTS (
+                    SELECT 1 FROM selected
+                    WHERE selected.item_rowid = retained.item_rowid
+                  ) THEN 1 ELSE 0 END AS is_selected
                 FROM retained
                 CROSS JOIN orchestration_v2_projection_turn_items AS item
                   ON item.rowid = retained.item_rowid
@@ -2906,6 +3076,17 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
         // Reuse the decoded items for cohort IDs and the resulting projection.
         // Parsing these rows separately duplicates every retained tool output.
         const turnItems = yield* decodeRows(decodeTurnItemPayload, threadId)(boundedTurnItemRows);
+        const selectedTurnItemIds: ReadonlySet<string> | undefined =
+          window === undefined
+            ? undefined
+            : new Set(
+                turnItems.flatMap((item, index) => {
+                  const row = boundedTurnItemRows[index];
+                  return row !== undefined && "is_selected" in row && row.is_selected === 1
+                    ? [String(item.id)]
+                    : [];
+                }),
+              );
         const cohortJson = (field: string) =>
           JSON.stringify(
             turnItems.flatMap((payload) => {
@@ -2914,8 +3095,6 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
             }),
           );
         const cohortRunIds = cohortJson("runId");
-        // A run can contain thousands of completed nodes. Load the visible
-        // nodes and live control dependencies, then walk only their ancestors.
         const cohortNodeIds =
           window === undefined ||
           (fields !== undefined &&
@@ -2991,7 +3170,8 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
           contextTransferRows,
         ] = yield* Effect.all([
           decodeThreadPayload(threadRow.payload_json),
-          fields !== undefined && !fields.includes("runs")
+          (fields !== undefined && !fields.includes("runs")) ||
+          (window === undefined && matchesNothing(filter?.runIds))
             ? Effect.succeed([])
             : window === undefined
               ? sql<PayloadRow>`
@@ -3030,9 +3210,23 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
             : window === undefined
               ? sql<PayloadRow>`
             SELECT payload_json
-            FROM orchestration_v2_projection_nodes
-            WHERE thread_id = ${threadId}
-            ORDER BY COALESCE(started_at, ''), node_id ASC
+            FROM orchestration_v2_projection_nodes AS node
+            WHERE node.thread_id = ${threadId}
+              ${
+                filter?.omitSettledLeafNodes === true
+                  ? sql`AND NOT (
+                      node.kind IN ('tool_call', 'assistant_message', 'reasoning')
+                      AND node.status IN ('completed', 'interrupted', 'failed', 'cancelled', 'rolled_back')
+                      AND node.run_id IS NOT NULL
+                      AND NOT EXISTS (
+                        SELECT 1 FROM orchestration_v2_projection_runs AS run
+                        WHERE run.run_id = node.run_id
+                          AND run.status IN ('preparing', 'queued', 'starting', 'running', 'waiting')
+                      )
+                    )`
+                  : sql``
+              }
+            ORDER BY COALESCE(node.started_at, ''), node.node_id ASC
               `
               : sql<PayloadRow & { readonly position: number }>`
             -- Keep retained IDs outermost so SQLite looks up each node by its
@@ -3149,7 +3343,9 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                 OR provider_turn_id IN (SELECT value FROM json_each(${cohortProviderTurnIds})))
             ORDER BY created_at ASC, runtime_request_id ASC
           `,
-          fields !== undefined && !fields.includes("messages")
+          (fields !== undefined && !fields.includes("messages")) ||
+          (window === undefined &&
+            matchesNothing(filter?.messageIds, filter?.messageRoles, filter?.messageRunIds))
             ? Effect.succeed([])
             : window === undefined
               ? sql<PayloadRow>`
@@ -3296,7 +3492,6 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
           decodeRows(decodeContextHandoffPayload, threadId)(contextHandoffRows),
           decodeRows(decodeContextTransferPayload, threadId)(contextTransferRows),
         ]);
-        // A metadata read must preserve message ordering without decoding tool output.
         const messageOrdinals = new Map<string, number>();
         if (fields !== undefined && fields.includes("messages") && messages.length > 1) {
           const rows = yield* sql<{ message_id: string; ordinal: number }>`
@@ -3328,7 +3523,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
           visibleTurnItems: [],
           updatedAt: thread.updatedAt,
         } satisfies OrchestrationV2ThreadProjection;
-        return projection;
+        return { projection, selectedTurnItemIds };
       }).pipe(
         Effect.mapError((cause) =>
           isProjectionStoreThreadNotFoundError(cause)
@@ -3353,16 +3548,20 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
           | { readonly threadId: ThreadId; readonly itemId: TurnItemId }
           | undefined;
       },
-    ): Effect.Effect<OrchestrationV2ThreadProjection, ProjectionStoreV2Error> =>
+    ): Effect.Effect<
+      {
+        readonly projection: OrchestrationV2ThreadProjection;
+        readonly selectedTurnItemIds: ReadonlySet<string> | undefined;
+      },
+      ProjectionStoreV2Error
+    > =>
       Effect.gen(function* () {
         const localWindow =
           window?.suppressLocal === true ||
           (window?.historyAnchor !== undefined && window.historyAnchor.threadId !== threadId)
             ? { ...window, rowLimit: 0, anchorItemId: undefined }
             : window;
-        // Ancestors contribute timeline items, not their provider/control state.
-        // Keep their runs and attempts for fork boundaries and visibility.
-        const projection = yield* readCanonicalProjection(
+        const { projection, selectedTurnItemIds } = yield* readCanonicalProjection(
           threadId,
           localWindow,
           window !== undefined && seenThreadIds.size > 0
@@ -3371,19 +3570,28 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
         );
         const forkedFrom = projection.thread.forkedFrom;
         if (forkedFrom?.type !== "run" || seenThreadIds.has(forkedFrom.threadId)) {
-          return withLocalVisibleTurnItems(projection);
+          return {
+            projection: withLocalVisibleTurnItems(projection, selectedTurnItemIds),
+            selectedTurnItemIds,
+          };
         }
 
+        const selectedTurnItems = projection.turnItems.filter(
+          (item) => selectedTurnItemIds === undefined || selectedTurnItemIds.has(String(item.id)),
+        );
         // A row-limited segment without turn anchors must finish paging locally
         // before inherited user turns can influence the page boundary.
         if (
           window?.userTurnLimit !== undefined &&
           localWindow !== undefined &&
           localWindow.rowLimit > 0 &&
-          projection.turnItems.length >= localWindow.rowLimit &&
-          !projection.turnItems.some(isThreadHistoryUserTurn)
+          selectedTurnItems.length >= localWindow.rowLimit &&
+          !selectedTurnItems.some(isThreadHistoryUserTurn)
         ) {
-          return withLocalVisibleTurnItems(projection);
+          return {
+            projection: withLocalVisibleTurnItems(projection, selectedTurnItemIds),
+            selectedTurnItemIds,
+          };
         }
 
         const sourceWindow =
@@ -3473,17 +3681,23 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                 };
               });
 
-        const sourceProjection = yield* readProjection(
-          forkedFrom.threadId,
-          new Set([...seenThreadIds, threadId]),
-          sourceWindow,
-        );
+        const { projection: sourceProjection, selectedTurnItemIds: sourceSelectedTurnItemIds } =
+          yield* readProjection(
+            forkedFrom.threadId,
+            new Set([...seenThreadIds, threadId]),
+            sourceWindow,
+          );
         return {
-          ...projection,
-          visibleTurnItems: buildVisibleTurnItems({
-            projection,
-            sourceProjection,
-          }),
+          projection: {
+            ...projection,
+            visibleTurnItems: buildVisibleTurnItems({
+              projection,
+              sourceProjection,
+              selectedTurnItemIds,
+              sourceSelectedTurnItemIds,
+            }),
+          },
+          selectedTurnItemIds,
         };
       }).pipe(
         Effect.mapError((cause) =>
@@ -3495,8 +3709,6 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
 
     const getLimitRecoveryCandidates = Effect.fn("ProjectionStore.getLimitRecoveryCandidates")(
       function* (options: Parameters<ProjectionStoreV2Shape["getLimitRecoveryCandidates"]>[0]) {
-        // Indexed latest-run and root-error lookups avoid reading run histories,
-        // counting transcript items, or walking fork ancestors on scheduler ticks.
         const rows = yield* sql<{
           readonly payload_json: string;
           readonly run_id: string;
@@ -3508,9 +3720,10 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
             item.payload_json AS failure_payload_json,
             (
               SELECT json_extract(session.payload_json, '$.lastError')
-              FROM orchestration_v2_projection_provider_sessions session
-              INNER JOIN orchestration_v2_projection_provider_session_bindings binding
-                ON binding.provider_session_id = session.provider_session_id
+              -- Keep bindings outermost: one provider instance can hold every session.
+              FROM orchestration_v2_projection_provider_session_bindings binding
+              CROSS JOIN orchestration_v2_projection_provider_sessions session
+                ON session.provider_session_id = binding.provider_session_id
               WHERE binding.thread_id = t.thread_id
                 AND session.provider_instance_id = t.provider_instance_id
               ORDER BY session.updated_at DESC, session.provider_session_id DESC
@@ -3539,11 +3752,24 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
             LIMIT 1
           )
           WHERE t.deleted_at IS NULL
+            -- The sweep runs every scheduler tick. Without this list the latest-run
+            -- lookup above sorts every run of every thread, tens of milliseconds
+            -- for one long thread; only threads with a usage-limit failure qualify.
+            AND t.thread_id IN (
+              SELECT failure.thread_id FROM orchestration_v2_projection_turn_items failure
+              WHERE failure.type = 'error' AND failure.status = 'failed'
+                AND json_extract(failure.payload_json, '$.failure.class') = 'usage_limit'
+            )
             AND json_extract(t.payload_json, '$.archivedAt') IS NULL
             AND json_extract(t.payload_json, '$.settledOverride') IS NOT 'settled'
             AND json_extract(item.payload_json, '$.failure.class') = 'usage_limit'
-            AND json_extract(item.payload_json, '$.failure.resetAt') IS NOT NULL
-            AND julianday(json_extract(item.payload_json, '$.failure.resetAt')) > julianday(COALESCE(r.completed_at, json_extract(t.payload_json, '$.updatedAt')))
+            AND (
+              ${booleanInt(options.withoutReset === true)}
+              OR (
+                json_extract(item.payload_json, '$.failure.resetAt') IS NOT NULL
+                AND julianday(json_extract(item.payload_json, '$.failure.resetAt')) > julianday(COALESCE(r.completed_at, json_extract(t.payload_json, '$.updatedAt')))
+              )
+            )
             AND (
               (
                 json_extract(t.payload_json, '$.limitRecovery.runId') IS r.run_id
@@ -3684,6 +3910,16 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                   ON bindings.provider_session_id = sessions.provider_session_id
                 WHERE sessions.status NOT IN ('stopped', 'error')
                 UNION
+                -- A detach drops the binding but keeps the session's status.
+                SELECT sessions.thread_id
+                FROM orchestration_v2_projection_provider_sessions AS sessions
+                WHERE sessions.status NOT IN ('stopped', 'error')
+                  AND sessions.thread_id IS NOT NULL
+                  AND NOT EXISTS (
+                    SELECT 1 FROM orchestration_v2_projection_provider_session_bindings AS bindings
+                    WHERE bindings.provider_session_id = sessions.provider_session_id
+                  )
+                UNION
                 SELECT thread_id FROM pending_provider_threads
                 UNION
                 SELECT nodes.thread_id FROM pending_provider_threads
@@ -3703,6 +3939,11 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                       AND node.kind = 'root_turn'
                       AND node.status IN ('pending', 'running', 'waiting')
                   )
+                UNION
+                -- No native subagent outlives the provider process that ran it.
+                SELECT thread_id FROM orchestration_v2_projection_subagents
+                WHERE origin = 'provider_native'
+                  AND status IN ('pending', 'running', 'waiting')
                 UNION
                 SELECT item.thread_id FROM orchestration_v2_projection_turn_items AS item
                 WHERE NOT EXISTS (
@@ -3729,8 +3970,6 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
       Effect.mapError((cause) => new ProjectionStoreSetupError({ cause })),
     );
 
-    // Decode every canonical row once. Full thread reads repeat shared sessions,
-    // provider threads, transfers, and inherited fork histories for each owner.
     const getUnreadableThreadIds = Effect.fn("ProjectionStore.getUnreadableThreadIds")(
       function* () {
         const actualThreadIds = new Set<ThreadId>();
@@ -3876,8 +4115,6 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
             yield* Effect.yieldNow;
           }
         }
-        // A full fork projection also reads its source. Propagate decode failures
-        // and missing sources through the same ancestry without loading history.
         const pending = [
           ...unreadable,
           ...[...forkChildren.keys()].filter((sourceId) => !actualThreadIds.has(sourceId)),
@@ -3898,7 +4135,6 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
     const javascriptTrimWhitespace =
       " \t\n\r\v\f\u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000\ufeff";
 
-    // Startup needs execution metadata, not the transcript or inherited fork history.
     const getTurnStartContext: ProjectionStoreV2Shape["getTurnStartContext"] = (threadId, runId) =>
       sql
         .withTransaction(
@@ -3914,6 +4150,8 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
             `.pipe(Effect.flatMap(decodeRows(decodeRunAttemptPayload, threadId)));
             const nodes = yield* sql<PayloadRow>`
               SELECT payload_json FROM orchestration_v2_projection_nodes
+              -- Look up the root node by key, not every node in the thread.
+              INDEXED BY sqlite_autoindex_orchestration_v2_projection_nodes_1
               WHERE thread_id = ${threadId} AND node_id IN (SELECT json_extract(payload_json, '$.rootNodeId') FROM orchestration_v2_projection_runs WHERE thread_id = ${threadId} AND run_id = ${runId}) ORDER BY node_id ASC
             `.pipe(Effect.flatMap(decodeRows(decodeNodePayload, threadId)));
             const subagents = yield* sql<PayloadRow>`
@@ -3951,12 +4189,26 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
               WHERE bindings.thread_id = ${threadId}
               ORDER BY sessions.updated_at ASC, sessions.provider_session_id ASC
             `.pipe(Effect.flatMap(decodeRows(decodeProviderSessionPayload, threadId)));
-            // Compact retries need their original markers; emptiness is an existence check.
+            // Read only the current prompt and its bounded automatic-continuation ancestry.
+            const memoryMessageIds = [];
+            let memoryRun = runs.find((candidate) => candidate.id === runId);
+            for (
+              let depth = 0;
+              memoryRun !== undefined && depth <= MAX_CONTINUATION_CHAIN;
+              depth++
+            ) {
+              memoryMessageIds.push(memoryRun.userMessageId);
+              const sourceId =
+                memoryRun.restartContinuationOfRunId ?? memoryRun.usageLimitContinuationOfRunId;
+              memoryRun =
+                sourceId === undefined
+                  ? undefined
+                  : runs.find((candidate) => candidate.id === sourceId);
+            }
             const messages = yield* sql<PayloadRow>`
               SELECT payload_json FROM orchestration_v2_projection_messages
               WHERE thread_id = ${threadId} AND (
-                message_id IN (SELECT json_extract(payload_json, '$.userMessageId') FROM orchestration_v2_projection_runs
-                  WHERE thread_id = ${threadId} AND run_id = ${runId})
+                message_id IN ${sql.in(memoryMessageIds)}
                 OR (role = 'user' AND lower(trim(json_extract(payload_json, '$.text'), ${javascriptTrimWhitespace})) = '/compact')
               ) ORDER BY created_at ASC, message_id ASC
             `.pipe(Effect.flatMap(decodeRows(decodeMessagePayload, threadId)));
@@ -4008,7 +4260,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
       }).pipe(Effect.mapError((cause) => new ProjectionStoreReadError({ threadId, cause })));
 
     const getThreadProjection: ProjectionStoreV2Shape["getThreadProjection"] = (threadId) =>
-      readProjection(threadId, new Set());
+      readProjection(threadId, new Set()).pipe(Effect.map(({ projection }) => projection));
 
     const getRuntimeRecoveryProjection: ProjectionStoreV2Shape["getRuntimeRecoveryProjection"] = (
       threadId,
@@ -4053,6 +4305,11 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                       WHERE ended.thread_id = ${threadId}
                         AND ended.provider_thread_id = roster.provider_thread_id
                         AND ended.status NOT IN ('queued', 'rolled_back')
+                        -- A run that never started (see neverStarted) owns no work.
+                        AND NOT (
+                          json_type(ended.payload_json, '$.startedAt') = 'null'
+                          AND json_type(ended.payload_json, '$.restartContinuationOfRunId') IS NULL
+                        )
                       ORDER BY ended.completed_at IS NULL DESC, ended.completed_at DESC,
                         ended.ordinal DESC
                       LIMIT 1
@@ -4107,6 +4364,11 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                     WHERE item.thread_id = ${threadId} AND item.type = 'subagent'
                       AND item.status IN ('pending', 'running', 'waiting')
                   )
+                  OR node.node_id IN (
+                    SELECT subagent_id FROM orchestration_v2_projection_subagents
+                    WHERE thread_id = ${threadId} AND origin = 'provider_native'
+                      AND status IN ('pending', 'running', 'waiting')
+                  )
                 )
               ORDER BY COALESCE(node.started_at, ''), node.node_id ASC
             `,
@@ -4115,7 +4377,8 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
               WHERE subagent.thread_id = ${threadId}
                 AND subagent.status IN ('pending', 'starting', 'running', 'waiting')
                 AND (
-                  subagent.run_id IN (
+                  subagent.origin = 'provider_native'
+                  OR subagent.run_id IN (
                     SELECT run_id FROM orchestration_v2_projection_runs
                     WHERE thread_id = ${threadId}
                       AND status IN ('queued', 'preparing', 'starting', 'running', 'waiting')
@@ -4130,22 +4393,36 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
               ORDER BY COALESCE(subagent.started_at, ''), subagent.subagent_id ASC
             `,
           sql<PayloadRow>`
-              SELECT DISTINCT session.payload_json
+              SELECT session.payload_json
               FROM orchestration_v2_projection_provider_sessions AS session
-              JOIN orchestration_v2_projection_provider_session_bindings AS binding
-                ON binding.provider_session_id = session.provider_session_id
-              WHERE binding.thread_id = ${threadId}
-                AND (
-                  session.status NOT IN ('stopped', 'error')
-                  OR session.provider_session_id IN (
-                    SELECT provider_thread.provider_session_id
-                    FROM orchestration_v2_projection_provider_threads AS provider_thread
-                    WHERE provider_thread.provider_thread_id IN (
-                      SELECT run.provider_thread_id
-                      FROM orchestration_v2_projection_runs AS run
-                      WHERE run.thread_id = ${threadId}
-                        AND run.status IN ('queued', 'preparing', 'starting', 'running', 'waiting')
+              WHERE (
+                  session.provider_session_id IN (
+                    SELECT binding.provider_session_id
+                    FROM orchestration_v2_projection_provider_session_bindings AS binding
+                    WHERE binding.thread_id = ${threadId}
+                  )
+                  AND (
+                    session.status NOT IN ('stopped', 'error')
+                    OR session.provider_session_id IN (
+                      SELECT provider_thread.provider_session_id
+                      FROM orchestration_v2_projection_provider_threads AS provider_thread
+                      WHERE provider_thread.provider_thread_id IN (
+                        SELECT run.provider_thread_id
+                        FROM orchestration_v2_projection_runs AS run
+                        WHERE run.thread_id = ${threadId}
+                          AND run.status IN ('queued', 'preparing', 'starting', 'running', 'waiting')
+                      )
                     )
+                  )
+                )
+                -- This thread detached it, which keeps its status. Its process
+                -- did not outlive the server either, so recovery stops it.
+                OR (
+                  session.thread_id = ${threadId}
+                  AND session.status NOT IN ('stopped', 'error')
+                  AND NOT EXISTS (
+                    SELECT 1 FROM orchestration_v2_projection_provider_session_bindings AS binding
+                    WHERE binding.provider_session_id = session.provider_session_id
                   )
                 )
               ORDER BY session.updated_at ASC, session.provider_session_id ASC
@@ -4179,6 +4456,15 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                   OR provider_thread.provider_thread_id IN (
                     SELECT item.provider_thread_id
                     FROM orchestration_v2_projection_turn_items AS item
+                    WHERE item.thread_id = ${threadId}
+                      AND item.status IN ('pending', 'running', 'waiting')
+                  )
+                  -- A native subagent's item names its own provider thread; the
+                  -- run that waits on it (see awaitingProviderThreadId) is woken.
+                  OR provider_thread.provider_thread_id IN (
+                    SELECT run.provider_thread_id
+                    FROM orchestration_v2_projection_turn_items AS item
+                    JOIN orchestration_v2_projection_runs AS run ON run.run_id = item.run_id
                     WHERE item.thread_id = ${threadId}
                       AND item.status IN ('pending', 'running', 'waiting')
                   )
@@ -4386,6 +4672,15 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
           return rows[0]?.pending === 1;
         }).pipe(Effect.mapError(controlReadError(threadId)));
 
+    const isNodeStored: ProjectionStoreV2Shape["isNodeStored"] = (node) =>
+      Effect.gen(function* () {
+        const payloadJson = yield* encodeNodePayload(node);
+        const rows = yield* sql<PayloadRow>`
+          SELECT payload_json FROM orchestration_v2_projection_nodes WHERE node_id = ${node.id}
+        `;
+        return rows[0]?.payload_json === payloadJson;
+      }).pipe(Effect.mapError(controlReadError(node.threadId)));
+
     const getRuntimeRequest: ProjectionStoreV2Shape["getRuntimeRequest"] = (threadId, requestId) =>
       sql
         .withTransaction(
@@ -4410,8 +4705,6 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
         .withTransaction(
           Effect.gen(function* () {
             yield* requireThread(threadId);
-            // Match the full projection's ownership scope, but fetch only the target
-            // records. Transcript items and fork ancestors are never read here.
             const [threadRows, turnRows, attemptRows, messageRows] = yield* Effect.all([
               sql<PayloadRow>`SELECT payload_json FROM orchestration_v2_projection_provider_threads
             WHERE provider_thread_id = ${target.providerThreadId} AND (
@@ -4610,6 +4903,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
             `,
               sql`
               SELECT scope_id AS "scopeId", run_id AS "runId",
+                ordinal_within_scope AS "ordinalWithinScope",
                 app_run_ordinal AS "appRunOrdinal", status,
                 json_extract(payload_json, '$.ref') AS ref
               FROM orchestration_v2_projection_checkpoints
@@ -4748,14 +5042,12 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
         json_each(message.payload_json, '$.attachments') AS attachment
       WHERE message.thread_id = ${threadId}
     `,
-        // Pages published by html_render, and captured MCP App documents,
-        // live in the attachment store too.
         sql<{ payload_json: string }>`
       SELECT payload_json
       FROM orchestration_v2_projection_turn_items
       WHERE thread_id = ${threadId}
         AND type = 'dynamic_tool'
-        AND (payload_json LIKE '%htmlRender%' OR payload_json LIKE ${`%${MCP_APP_OUTPUT_KEY}%`})
+        AND (payload_json LIKE '%htmlRender%' OR payload_json LIKE ${`%${MCP_APP_OUTPUT_KEY}%`} OR payload_json LIKE ${`%${LEGACY_MCP_APP_OUTPUT_KEY}%`})
     `,
       ]).pipe(
         Effect.map(([messages, renders]) => [
@@ -4861,7 +5153,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
     ) =>
       sql.withTransaction(readCanonicalProjection(threadId, undefined, fields, filter)).pipe(
         Effect.map(
-          (projection) =>
+          ({ projection }) =>
             Object.fromEntries([
               ["thread", projection.thread],
               ...fields.map((field) => [field, projection[field]]),
@@ -4897,8 +5189,6 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
           ),
         );
 
-    // Only the timeline index is assembled across fork ancestry. Payloads are read
-    // after page selection, so history and MCP pages hydrate only the requested rows.
     type TimelineIndexItem = Pick<
       OrchestrationV2TurnItem,
       "id" | "threadId" | "runId" | "nodeId" | "type"
@@ -5044,8 +5334,6 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
           FROM orchestration_events WHERE application_event_version = 2
           AND aggregate_kind = 'thread' AND stream_id = ${threadId}`;
             const snapshotSequence = revisions[0]?.sequence ?? 0;
-            // Choose complete turns from the light index before loading any bodies.
-            // A history page does not need nodes, provider turns, or other control state.
             const page = yield* Effect.try({
               try: () =>
                 selectHistoryPageFromCursor({
@@ -5109,7 +5397,6 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                 snapshotSequence,
                 items: items.map((row, position) => ({ ...row, position })),
               };
-            // The no-turn fallback also respects the encoded byte budget after projection.
             const bounded = selectRecentTimelineWindow({
               items,
               snapshotSequence,
@@ -5218,7 +5505,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                       `).map((row) => ThreadId.make(row.thread_id))[0] ??
                       threadId,
                   };
-            const projection = yield* readProjection(threadId, new Set(), {
+            const { projection } = yield* readProjection(threadId, new Set(), {
               rowLimit: options.rowLimit,
               userTurnLimit: options.userTurnLimit,
               ...(historyAnchor?.threadId === threadId
@@ -5250,8 +5537,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
 
     const selectShellThreadRows = (
       threadId?: ThreadId,
-      location?: "active" | "archive",
-      unsettledOnly = false,
+      { location, projectId, unsettledOnly = false }: ShellSnapshotOptions = {},
     ) =>
       sql<ShellThreadRow>`
             SELECT
@@ -5298,9 +5584,10 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
               ) AS activity_run_started_at,
               (
                 SELECT json_extract(session.payload_json, '$.lastError')
-                FROM orchestration_v2_projection_provider_sessions session
-                INNER JOIN orchestration_v2_projection_provider_session_bindings binding
-                  ON binding.provider_session_id = session.provider_session_id
+                -- Keep bindings outermost: one provider instance can hold every session.
+                FROM orchestration_v2_projection_provider_session_bindings binding
+                CROSS JOIN orchestration_v2_projection_provider_sessions session
+                  ON session.provider_session_id = binding.provider_session_id
                 WHERE binding.thread_id = t.thread_id
                   AND session.provider_instance_id = t.provider_instance_id
                 ORDER BY session.updated_at DESC, session.provider_session_id DESC
@@ -5309,7 +5596,6 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
               (
                 SELECT item.payload_json
                 FROM orchestration_v2_projection_turn_items item
-                  INDEXED BY orchestration_v2_projection_turn_items_thread_run_idx
                 INNER JOIN orchestration_v2_projection_runs r ON r.run_id = item.run_id
                 WHERE r.run_id = presented.run_id
                   AND r.status = 'failed'
@@ -5326,7 +5612,6 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
               (
                 SELECT item.payload_json
                 FROM orchestration_v2_projection_turn_items item
-                  INDEXED BY orchestration_v2_projection_turn_items_thread_run_idx
                 WHERE item.thread_id = t.thread_id
                   AND item.run_id = blocked.run_id
                   AND item.type = 'error' AND item.status = 'failed'
@@ -5334,15 +5619,26 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                 ORDER BY item.updated_at DESC, item.ordinal DESC, item.turn_item_id DESC
                 LIMIT 1
               ) AS blocking_failure_payload_json,
-              (
-                SELECT request.payload_json
-                FROM orchestration_v2_projection_runtime_requests request
-                WHERE request.thread_id = t.thread_id
-                  AND request.status = 'pending'
-                ORDER BY request.created_at DESC, request.runtime_request_id DESC
-                LIMIT 1
+              COALESCE(
+                (
+                  SELECT request.payload_json
+                  FROM orchestration_v2_projection_runtime_requests request
+                  WHERE request.thread_id = t.thread_id
+                    AND request.status = 'pending'
+                    AND request.kind NOT IN ('auth_refresh', 'dynamic_tool_call')
+                  ORDER BY request.created_at DESC, request.runtime_request_id DESC
+                  LIMIT 1
+                ),
+                (
+                  SELECT request.payload_json
+                  FROM orchestration_v2_projection_runtime_requests request
+                  WHERE request.thread_id = t.thread_id
+                    AND request.status = 'pending'
+                  ORDER BY request.created_at DESC, request.runtime_request_id DESC
+                  LIMIT 1
+                )
               ) AS pending_request_payload_json,
-              (
+              COALESCE((
                 SELECT secret.payload_json
                 -- Keep runs outermost so completed history is never scanned for a pending secret.
                 FROM orchestration_v2_projection_runs r
@@ -5354,7 +5650,15 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                   AND secret.type = 'secret_request' AND secret.status = 'waiting'
                 ORDER BY secret.updated_at DESC, secret.turn_item_id DESC
                 LIMIT 1
-              ) AS pending_secret_request_payload_json,
+              ), (
+                SELECT handoff.payload_json
+                FROM orchestration_v2_projection_turn_items handoff
+                WHERE handoff.thread_id = t.thread_id
+                  AND handoff.type IN ('human_handoff', 'secret_request')
+                  AND handoff.type = 'human_handoff' AND handoff.status = 'waiting'
+                ORDER BY handoff.updated_at DESC, handoff.turn_item_id DESC
+                LIMIT 1
+              )) AS pending_secret_request_payload_json,
               (
                 SELECT message.updated_at
                 FROM orchestration_v2_projection_messages message
@@ -5427,6 +5731,8 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
               LIMIT 1
             ) AND blocked.status = 'failed'
             WHERE t.deleted_at IS NULL${threadId === undefined ? sql`` : sql` AND t.thread_id = ${threadId}`}${
+              projectId === undefined ? sql`` : sql` AND t.project_id = ${projectId}`
+            }${
               location === "active"
                 ? sql` AND json_extract(t.payload_json, '$.archivedAt') IS NULL`
                 : location === "archive"
@@ -5483,9 +5789,11 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
 
     const selectShellPendingTurnItemRows = (threadIds?: ReadonlyArray<ThreadId>) =>
       threadIds === undefined
-        ? sql<PayloadRow & { readonly thread_id: string }>`
-            SELECT i.thread_id, i.payload_json
+        ? sql<ShellPendingTurnItemRow>`
+            SELECT i.thread_id, i.payload_json, p.provider_instance_id AS owning_provider_instance_id
             FROM orchestration_v2_projection_turn_items i
+            LEFT JOIN orchestration_v2_projection_provider_threads p
+              ON p.provider_thread_id = i.provider_thread_id
             LEFT JOIN orchestration_v2_projection_runs r
               ON r.run_id = i.run_id
             WHERE i.type IN ('command_execution', 'dynamic_tool', 'subagent')
@@ -5495,9 +5803,11 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
               -- matching the item_count query's exclusion above.
               AND (i.run_id IS NULL OR r.status <> 'rolled_back')
           `
-        : sql<PayloadRow & { readonly thread_id: string }>`
-            SELECT i.thread_id, i.payload_json
+        : sql<ShellPendingTurnItemRow>`
+            SELECT i.thread_id, i.payload_json, p.provider_instance_id AS owning_provider_instance_id
             FROM orchestration_v2_projection_turn_items i
+            LEFT JOIN orchestration_v2_projection_provider_threads p
+              ON p.provider_thread_id = i.provider_thread_id
             LEFT JOIN orchestration_v2_projection_runs r
               ON r.run_id = i.run_id
             WHERE i.type IN ('command_execution', 'dynamic_tool', 'subagent')
@@ -5531,7 +5841,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
 
     const pendingBackgroundDataByThreadId = (input: {
       readonly providerThreadRows: ReadonlyArray<PayloadRow & { readonly thread_id: string }>;
-      readonly pendingTurnItemRows: ReadonlyArray<PayloadRow & { readonly thread_id: string }>;
+      readonly pendingTurnItemRows: ReadonlyArray<ShellPendingTurnItemRow>;
     }) =>
       Effect.gen(function* () {
         const providerThreadsByThreadId = new Map<
@@ -5552,7 +5862,16 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
 
         const pendingTurnItemsByThreadId = new Map<ThreadId, Array<OrchestrationV2TurnItem>>();
         for (const row of input.pendingTurnItemRows) {
-          const turnItem = yield* decodeTurnItemPayload(row.payload_json);
+          const turnItem = {
+            ...(yield* decodeTurnItemPayload(row.payload_json)),
+            ...(row.owning_provider_instance_id === null
+              ? {}
+              : {
+                  owningProviderInstanceId: ProviderInstanceId.make(
+                    row.owning_provider_instance_id,
+                  ),
+                }),
+          };
           const threadId = ThreadId.make(row.thread_id);
           const existing = pendingTurnItemsByThreadId.get(threadId) ?? [];
           existing.push(turnItem);
@@ -5566,9 +5885,6 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
       sql
         .withTransaction(
           Effect.gen(function* () {
-            // Settlement needs activity timestamps, not item counts, run history,
-            // provider sessions or inherited fork rows. Reject parked and busy
-            // threads before loading the remaining candidates' background work.
             const rows = yield* sql<SettlementThreadRow>`
             SELECT t.thread_id, t.payload_json,
               r.run_id AS latest_run_id,
@@ -5697,11 +6013,29 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
               lineage: thread.lineage,
               settledOverride: thread.settledOverride,
               settledAt: thread.settledAt,
+              updatedAt: thread.updatedAt,
               pullRequests: thread.pullRequests ?? [],
             })),
           ),
         );
       }).pipe(Effect.mapError((cause) => new ProjectionStoreSetupError({ cause })));
+
+    const getThreadWorktreePaths: ProjectionStoreV2Shape["getThreadWorktreePaths"] = (options) =>
+      sql<{ readonly thread_id: string; readonly worktree_path: string }>`
+        SELECT thread_id, json_extract(payload_json, '$.worktreePath') AS worktree_path
+        FROM orchestration_v2_projection_threads
+        WHERE deleted_at IS NULL
+          ${options?.includeArchived === true ? sql`` : sql`AND json_extract(payload_json, '$.archivedAt') IS NULL`}
+          AND json_extract(payload_json, '$.worktreePath') IS NOT NULL
+      `.pipe(
+        Effect.map((rows) =>
+          rows.map((row) => ({
+            threadId: ThreadId.make(row.thread_id),
+            worktreePath: row.worktree_path,
+          })),
+        ),
+        Effect.mapError((cause) => new ProjectionStoreSetupError({ cause })),
+      );
 
     const shellThreadStateFromRow = (input: {
       readonly row: ShellThreadRow;
@@ -5725,14 +6059,21 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
           pendingTurnItemsByThreadId,
         } = input;
         const thread = yield* decodeThreadPayload(row.payload_json);
-        const pendingRuntimeRequest =
+        let pendingRuntimeRequest =
           row.pending_request_payload_json !== null
-            ? yield* decodeRuntimeRequestPayload(row.pending_request_payload_json)
-            : row.pending_secret_request_payload_json !== null
-              ? secretRequestAsPendingInput(
-                  yield* decodeTurnItemPayload(row.pending_secret_request_payload_json),
-                )
-              : null;
+            ? pendingRuntimeRequestSummary(
+                yield* decodeRuntimeRequestPayload(row.pending_request_payload_json),
+              )
+            : null;
+        if (
+          (pendingRuntimeRequest === null || pendingRuntimeRequest.blocking === false) &&
+          row.pending_secret_request_payload_json !== null
+        ) {
+          pendingRuntimeRequest =
+            secretRequestAsPendingInput(
+              yield* decodeTurnItemPayload(row.pending_secret_request_payload_json),
+            ) ?? pendingRuntimeRequest;
+        }
         let terminalFailureItem =
           row.terminal_failure_payload_json === null
             ? null
@@ -5850,11 +6191,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
 
     const readShellSnapshotRows = (options: ShellSnapshotOptions | undefined) =>
       Effect.gen(function* () {
-        const targetThreadRows = yield* selectShellThreadRows(
-          undefined,
-          options?.location,
-          options?.unsettledOnly ?? false,
-        );
+        const targetThreadRows = yield* selectShellThreadRows(undefined, options);
         const targetThreadIds = new Set(
           targetThreadRows.map((row) => ThreadId.make(row.thread_id)),
         );
@@ -5965,9 +6302,6 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
         .withTransaction(readShellSnapshotRows(options))
         .pipe(Effect.mapError(shellSnapshotReadError), Effect.flatMap(decodeShellSnapshot));
 
-    // Per-thread shell for the live shell streams: reads only the target thread
-    // plus its fork-source chain instead of materializing every thread. Returns
-    // null when the thread is deleted or unknown.
     const getThreadShell: ProjectionStoreV2Shape["getThreadShell"] = (threadId) =>
       sql
         .withTransaction(
@@ -6035,8 +6369,37 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
         )
         .pipe(Effect.mapError((cause) => new ProjectionStoreReadError({ threadId, cause })));
 
+    const getReviewLedgerEntries: ProjectionStoreV2Shape["getReviewLedgerEntries"] = (input) =>
+      Effect.gen(function* () {
+        const rows = yield* sql<{ task_id: string; payload_json: string; entry_index: number }>`
+          SELECT task.subagent_id AS task_id, task.payload_json, CAST(entry.key AS INTEGER) AS entry_index
+          FROM orchestration_v2_projection_subagents AS task
+          JOIN orchestration_v2_projection_threads AS parent ON parent.thread_id = task.thread_id
+          JOIN json_each(task.payload_json, '$.reviewLedger') AS entry
+          WHERE json_extract(task.payload_json, '$.reviewLedger') IS NOT NULL
+            AND task.origin = 'app_owned'
+            AND json_extract(task.payload_json, '$.role') = 'review'
+            AND parent.deleted_at IS NULL
+            AND julianday(json_extract(entry.value, '$.recordedAt')) >= julianday(${input.from})
+            AND julianday(json_extract(entry.value, '$.recordedAt')) < julianday(${input.to})
+            AND (task.subagent_id > ${input.cursor?.taskId ?? ""}
+              OR (task.subagent_id = ${input.cursor?.taskId ?? ""} AND CAST(entry.key AS INTEGER) > ${input.cursor?.index ?? -1}))
+          ORDER BY task.subagent_id COLLATE BINARY, CAST(entry.key AS INTEGER)
+          LIMIT ${Math.min(Math.max(input.limit, 1), 1_001)}
+        `;
+        const tasks = new Map<string, OrchestrationV2Subagent>();
+        return yield* Effect.forEach(rows, (row) =>
+          Effect.gen(function* () {
+            const task = tasks.get(row.task_id) ?? (yield* decodeSubagentPayload(row.payload_json));
+            tasks.set(row.task_id, task);
+            return { task, index: row.entry_index };
+          }),
+        );
+      }).pipe(Effect.mapError((cause) => new ProjectionStoreReadError({ cause })));
+
     return {
       apply,
+      getReviewLedgerEntries,
       getShellSnapshot,
       readShellSnapshot,
       getThreadShell,
@@ -6045,6 +6408,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
       getThreadsWithPullRequests,
       getQuestionEscalationCandidates,
       getLaunchedPendingQuestions,
+      getThreadWorktreePaths,
       getThreadProjection,
       getTurnStartContext,
       getTurnStartHistory,
@@ -6109,6 +6473,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
           Effect.map((rows) => (rows[0]?.busy === 1 ? ("busy" as const) : ("idle" as const))),
           Effect.mapError((cause) => new ServerActivityReadError({ cause })),
         ),
+      isNodeStored,
       getMessageCount,
       getNextTurnItemOrdinal,
       getTurnItem,
@@ -6143,6 +6508,7 @@ export const layerMemory: Layer.Layer<ProjectionStoreV2> = Layer.effect(
             const next: ProjectionReplayState = {
               projections: new Map(existing.projections),
               providerSessionThreadIds: new Map(existing.providerSessionThreadIds),
+              providerThreadInstanceIds: new Map(existing.providerThreadInstanceIds),
             };
             if (!applyToProjectionReplayState(next, event)) {
               return [
@@ -6163,6 +6529,12 @@ export const layerMemory: Layer.Layer<ProjectionStoreV2> = Layer.effect(
           const existing = (yield* Ref.get(replayState)).projections;
           const selectedThreadIds = [...existing.entries()]
             .filter(([, projection]) => {
+              if (
+                options?.projectId !== undefined &&
+                projection.thread.projectId !== options.projectId
+              ) {
+                return false;
+              }
               if (
                 options?.unsettledOnly &&
                 (projection.thread.settledAt !== null ||
@@ -6238,6 +6610,45 @@ export const layerMemory: Layer.Layer<ProjectionStoreV2> = Layer.effect(
                 left.id.localeCompare(right.id),
             );
         }),
+      getReviewLedgerEntries: (input) =>
+        Ref.get(replayState).pipe(
+          Effect.map((state) =>
+            [...state.projections.values()]
+              .filter(({ thread }) => thread.deletedAt === null)
+              .flatMap(({ subagents }) =>
+                subagents
+                  .filter((task) => task.origin === "app_owned" && task.role === "review")
+                  .flatMap((task) =>
+                    (task.reviewLedger ?? []).flatMap((entry, index) => {
+                      const time = Date.parse(entry.recordedAt);
+                      return time >= Date.parse(input.from) &&
+                        time < Date.parse(input.to) &&
+                        (input.cursor === undefined ||
+                          task.id > input.cursor.taskId ||
+                          (task.id === input.cursor.taskId && index > input.cursor.index))
+                        ? [{ task, index }]
+                        : [];
+                    }),
+                  ),
+              )
+              .sort((a, b) =>
+                a.task.id < b.task.id ? -1 : a.task.id > b.task.id ? 1 : a.index - b.index,
+              )
+              .slice(0, Math.min(Math.max(input.limit, 1), 1_001)),
+          ),
+        ),
+      getThreadWorktreePaths: (options) =>
+        Ref.get(replayState).pipe(
+          Effect.map((state) =>
+            [...state.projections.values()].flatMap(({ thread }) =>
+              thread.deletedAt === null &&
+              (options?.includeArchived === true || thread.archivedAt === null) &&
+              thread.worktreePath !== null
+                ? [{ threadId: thread.id, worktreePath: thread.worktreePath }]
+                : [],
+            ),
+          ),
+        ),
       getThreadsWithPullRequests: (threadId) =>
         Ref.get(replayState).pipe(
           Effect.map((state) =>
@@ -6261,6 +6672,7 @@ export const layerMemory: Layer.Layer<ProjectionStoreV2> = Layer.effect(
                 lineage: thread.lineage,
                 settledOverride: thread.settledOverride,
                 settledAt: thread.settledAt,
+                updatedAt: thread.updatedAt,
                 pullRequests: thread.pullRequests ?? [],
               })),
           ),
@@ -6359,17 +6771,20 @@ export const layerMemory: Layer.Layer<ProjectionStoreV2> = Layer.effect(
                 (thread) =>
                   thread.status === "failed" &&
                   thread.lastErrorClass === "usage_limit" &&
-                  thread.usageLimitResetAt !== null &&
+                  (options.withoutReset === true || thread.usageLimitResetAt != null) &&
                   thread.pendingRuntimeRequest === null,
               )
               .filter((thread) => {
-                const resetMs = Date.parse(thread.usageLimitResetAt!);
+                const resetMs = Date.parse(thread.usageLimitResetAt ?? "");
                 const nowMs = DateTime.toEpochMillis(options.now);
                 if (
                   !Number.isFinite(resetMs) ||
                   resetMs <= DateTime.toEpochMillis(thread.latestRunCompletedAt ?? thread.updatedAt)
                 )
-                  return false;
+                  return (
+                    options.withoutReset === true &&
+                    thread.limitRecovery?.runId !== thread.latestRunId
+                  );
                 if (
                   thread.limitRecovery?.runId !== thread.latestRunId ||
                   thread.limitRecovery.resetAt !== thread.usageLimitResetAt
@@ -6519,6 +6934,15 @@ export const layerMemory: Layer.Layer<ProjectionStoreV2> = Layer.effect(
               : ("idle" as const),
           ),
         ),
+      isNodeStored: (node) =>
+        Ref.get(replayState).pipe(
+          Effect.map((state) => {
+            const stored = state.projections
+              .get(node.threadId)
+              ?.nodes.find((candidate) => candidate.id === node.id);
+            return stored !== undefined && Equal.equals(stored, node);
+          }),
+        ),
       getMessageCount: (threadId) =>
         Ref.get(replayState).pipe(
           Effect.map((state) => state.projections.get(threadId)?.messages.length ?? 0),
@@ -6587,6 +7011,10 @@ export const layerMemory: Layer.Layer<ProjectionStoreV2> = Layer.effect(
                   filter.turnItemStatuses.includes(row.status)) &&
                 (filter?.turnItemRunId === undefined || filter.turnItemRunId === row.runId),
             ),
+            nodes:
+              filter?.omitSettledLeafNodes === true
+                ? projection.nodes.filter((node) => !isSettledLeafNode(node, projection.runs))
+                : projection.nodes,
           };
           return Object.fromEntries([
             ["thread", projection.thread],
@@ -6714,9 +7142,10 @@ export const layerMemory: Layer.Layer<ProjectionStoreV2> = Layer.effect(
               cwd,
             })),
             checkpoints: projection.checkpoints.map(
-              ({ scopeId, runId, appRunOrdinal, status, ref }) => ({
+              ({ scopeId, runId, ordinalWithinScope, appRunOrdinal, status, ref }) => ({
                 scopeId,
                 runId,
+                ordinalWithinScope,
                 appRunOrdinal,
                 status,
                 ref,
@@ -6773,7 +7202,7 @@ export const layerMemory: Layer.Layer<ProjectionStoreV2> = Layer.effect(
         }),
       getThreadProjection: (threadId) =>
         Effect.gen(function* () {
-          const existing = (yield* Ref.get(replayState)).projections;
+          const { projections: existing, providerThreadInstanceIds } = yield* Ref.get(replayState);
           const readProjection = (
             targetThreadId: ThreadId,
             seenThreadIds: ReadonlySet<ThreadId>,
@@ -6802,7 +7231,17 @@ export const layerMemory: Layer.Layer<ProjectionStoreV2> = Layer.effect(
           if (!projection) {
             return yield* new ProjectionStoreThreadNotFoundError({ threadId });
           }
-          return projection;
+          // Match the SQL shell join, including provider threads stored on child app threads.
+          return {
+            ...projection,
+            turnItems: projection.turnItems.map((item) => {
+              const owner =
+                item.type !== "subagent" || item.providerThreadId === null
+                  ? undefined
+                  : providerThreadInstanceIds.get(item.providerThreadId);
+              return owner === undefined ? item : { ...item, owningProviderInstanceId: owner };
+            }),
+          };
         }),
       getTurnStartContext: (threadId, runId) =>
         service.getThreadProjection(threadId).pipe(
@@ -6852,21 +7291,22 @@ export const layerMemory: Layer.Layer<ProjectionStoreV2> = Layer.effect(
         ),
       searchThreadStream: (input) => Stream.fromEffect(service.searchThread(input)),
       searchThread: (input) =>
-        service.getThreadSnapshot(input.threadId).pipe(
-          Effect.flatMap(({ projection, snapshotSequence }) =>
-            projection.thread.deletedAt !== null
-              ? Effect.fail(new ProjectionStoreThreadNotFoundError({ threadId: input.threadId }))
-              : Effect.succeed(
-                  // This store has no project records, so only worktree paths resolve labels.
-                  findProjectedThreadItems(
-                    projection.visibleTurnItems,
-                    input,
-                    snapshotSequence,
-                    projection.thread.worktreePath ?? undefined,
+        service
+          .getThreadSnapshot(input.threadId)
+          .pipe(
+            Effect.flatMap(({ projection, snapshotSequence }) =>
+              projection.thread.deletedAt !== null
+                ? Effect.fail(new ProjectionStoreThreadNotFoundError({ threadId: input.threadId }))
+                : Effect.succeed(
+                    findProjectedThreadItems(
+                      projection.visibleTurnItems,
+                      input,
+                      snapshotSequence,
+                      projection.thread.worktreePath ?? undefined,
+                    ),
                   ),
-                ),
+            ),
           ),
-        ),
       getThreadHistoryPage: (threadId, cursor, throughEntryId, conversationOnly) =>
         service.getThreadSnapshot(threadId).pipe(
           Effect.flatMap(({ projection, snapshotSequence }) =>
@@ -6924,12 +7364,11 @@ export const layerMemory: Layer.Layer<ProjectionStoreV2> = Layer.effect(
                     (row) => row.sourceItemId === options.anchorItemId,
                   ) + 1;
             const candidates = snapshot.projection.visibleTurnItems.slice(0, anchorIndex);
+            const turnStarts = threadHistoryTurnStarts(candidates.map((row) => row.item));
             const turnAnchors =
               options.userTurnLimit === undefined
                 ? []
-                : candidates.flatMap((row, index) =>
-                    isThreadHistoryTurnStart(row.item) ? [index] : [],
-                  );
+                : candidates.flatMap((_row, index) => (turnStarts[index] ? [index] : []));
             const rawStart = turnAnchors.at(-(THREAD_HISTORY_MAX_RAW_TURNS + 2)) ?? 0;
             const anchors = turnAnchors.filter(
               (index) => index >= rawStart && isThreadHistoryUserTurn(candidates[index]!.item),

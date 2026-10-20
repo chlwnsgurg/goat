@@ -1,5 +1,5 @@
-import { cliReleaseChannelOf } from "@t3tools/shared/cliRelease";
-import { compareSemverVersions, parseSemver } from "@t3tools/shared/semver";
+import { cliReleaseChannelOf } from "@goat/shared/cliRelease";
+import { compareSemverVersions, parseSemver } from "@goat/shared/semver";
 import * as Clock from "effect/Clock";
 import * as Config from "effect/Config";
 import * as DateTime from "effect/DateTime";
@@ -15,6 +15,7 @@ export const GitHubReleaseAsset = Schema.Struct({
   name: Schema.String,
   size: Schema.Int,
   digest: Schema.optional(Schema.NullOr(Schema.String)),
+  state: Schema.optional(Schema.String),
 });
 export type GitHubReleaseAsset = typeof GitHubReleaseAsset.Type;
 
@@ -24,6 +25,7 @@ export const GitHubRelease = Schema.Struct({
   draft: Schema.Boolean,
   prerelease: Schema.Boolean,
   published_at: Schema.NullOr(Schema.String),
+  created_at: Schema.optional(Schema.String),
 });
 export type GitHubRelease = typeof GitHubRelease.Type;
 export const GitHubReleaseTag = Schema.Struct({ name: Schema.String });
@@ -193,21 +195,41 @@ export const makeGitHubReleasesClient = Effect.fn("makeGitHubReleasesClient")(fu
       request(`${base}/releases/${id}`).pipe(
         Effect.flatMap((response) => readJson(response, GitHubRelease)),
       ),
-    createDraft: (version: string, name: string, body: string) =>
+    // Nightlies are prereleases that are never "latest"; a stable release becomes
+    // the repository's latest, which is what stable desktop feeds read.
+    createDraft: (
+      version: string,
+      name: string,
+      body: string,
+      prerelease: boolean,
+      target = "main",
+    ) =>
       jsonRequest(`${base}/releases`, "POST", {
         tag_name: `v${version}`,
-        target_commitish: "main",
+        target_commitish: target,
         draft: true,
-        prerelease: true,
-        make_latest: "false",
+        prerelease,
+        make_latest: prerelease ? "false" : "true",
         name,
         body,
       }).pipe(Effect.flatMap((response) => readJson(response, GitHubRelease))),
-    publishDraft: (id: number) =>
-      jsonRequest(`${base}/releases/${id}`, "PATCH", {
-        draft: false,
+    // goat-nightly's per-run hand-off store. A draft creates no tag and stays hidden
+    // from anyone without push access.
+    createStagingDraft: (tag: string, target: string) =>
+      jsonRequest(`${base}/releases`, "POST", {
+        tag_name: tag,
+        target_commitish: target,
+        draft: true,
         prerelease: true,
         make_latest: "false",
+        name: `${tag} (goat-nightly hand-off, deleted after the run)`,
+        body: "Temporary goat-nightly build hand-off. The run's cleanup job deletes it.",
+      }).pipe(Effect.flatMap((response) => readJson(response, GitHubRelease))),
+    publishDraft: (id: number, prerelease: boolean) =>
+      jsonRequest(`${base}/releases/${id}`, "PATCH", {
+        draft: false,
+        prerelease,
+        make_latest: prerelease ? "false" : "true",
       }).pipe(Effect.asVoid),
     deleteAsset: (id: number) =>
       request(`${base}/releases/assets/${id}`, { method: "DELETE" }).pipe(Effect.asVoid),

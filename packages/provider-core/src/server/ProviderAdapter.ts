@@ -1,5 +1,7 @@
-import type { OrchestrationV2HistoricalMessage } from "@t3tools/contracts";
+import type { MemoryContextSnapshot, OrchestrationV2HistoricalMessage } from "@goat/contracts";
 import {
+  OrchestrationV2CloudTask,
+  OrchestrationV2CloudSourceRestriction,
   ChatAttachment,
   CheckpointId,
   MessageId,
@@ -32,7 +34,8 @@ import {
   RunAttemptId,
   RunId,
   ThreadId,
-} from "@t3tools/contracts";
+  TurnItemId,
+} from "@goat/contracts";
 import * as Context from "effect/Context";
 import * as Schema from "effect/Schema";
 import type * as Effect from "effect/Effect";
@@ -90,12 +93,6 @@ export const ProviderAdapterV2Event = Schema.Union([
     type: Schema.Literal("provider_thread.updated"),
     driver: ProviderDriverKind,
     providerThread: OrchestrationV2ProviderThread,
-    /**
-     * Set when the provider rewound its own conversation outside T3, for
-     * example a Pi extension moving the session-tree leaf back. Lists every
-     * native turn id still on the active branch; the ingestor rolls back
-     * earlier runs whose turns fell off it.
-     */
     retainedNativeTurnIds: Schema.optional(Schema.Array(Schema.String)),
   }),
   Schema.Struct({
@@ -123,6 +120,18 @@ export const ProviderAdapterV2Event = Schema.Union([
     type: Schema.Literal("turn_item.updated"),
     driver: ProviderDriverKind,
     turnItem: OrchestrationV2TurnItem,
+  }),
+  /**
+   * Raw output from a running command. Never persisted: the session manager
+   * hands it to the command output hub, which only clients showing the row see.
+   * The item's final output still arrives in its `turn_item.updated`.
+   */
+  Schema.Struct({
+    type: Schema.Literal("command_output.delta"),
+    driver: ProviderDriverKind,
+    threadId: ThreadId,
+    itemId: TurnItemId,
+    chunk: Schema.String,
   }),
   Schema.Struct({
     type: Schema.Literal("runtime_request.updated"),
@@ -157,6 +166,12 @@ export const ProviderAdapterV2Event = Schema.Union([
     retry: Schema.optional(OrchestrationV2ProviderRetry),
     retryStartedAt: Schema.optional(Schema.DateTimeUtc),
     threadDisposition: Schema.Literals(["reusable", "broken"]),
+    /**
+     * Child turns the root started outlive its failure and will report their
+     * own terminals, as after a completed root. Without it, the run settles
+     * every child it still sees as open.
+     */
+    childTurnsContinue: Schema.optional(Schema.Literal(true)),
   }),
 ]);
 export type ProviderAdapterV2Event = typeof ProviderAdapterV2Event.Type;
@@ -347,11 +362,19 @@ export class ProviderAdapterEventStreamError extends Schema.TaggedError<Provider
   }
 }
 
+// Only fixed reasons reach failure messages; detail can contain private configuration.
+const ProviderAdapterFailureReason = Schema.Literals([
+  "previous_turn_active",
+  "attachment_unreadable",
+]);
+export type ProviderAdapterFailureReason = typeof ProviderAdapterFailureReason.Type;
+
 export class ProviderAdapterProtocolError extends Schema.TaggedError<ProviderAdapterProtocolError>()(
   "ProviderAdapterProtocolError",
   {
     driver: ProviderDriverKind,
     detail: Schema.String,
+    reason: Schema.optional(ProviderAdapterFailureReason),
     cause: Schema.optional(Schema.Defect()),
     payload: Schema.optional(Schema.Unknown),
   },
@@ -386,15 +409,12 @@ export interface ProviderAdapterV2OpenSessionInput {
   readonly modelSelection: ModelSelection;
   readonly runtimePolicy: ProviderAdapterV2RuntimePolicy;
   readonly resumeFromSession?: OrchestrationV2ProviderSession;
-  /** Native thread to activate while an eager adapter opens its provider process. */
   readonly initialNativeThreadId?: string;
-  /** Preserves provider item identity across eager activation of a persisted thread. */
   readonly initialProviderItemIdentityVersion?: 2;
 }
 
 export interface ProviderAdapterV2EnsureThreadInput {
   readonly threadId: ThreadId;
-  /** The app thread's title, for providers that name their native sessions. */
   readonly title?: string;
   readonly modelSelection: ModelSelection;
   readonly runtimePolicy: ProviderAdapterV2RuntimePolicy;
@@ -402,12 +422,41 @@ export interface ProviderAdapterV2EnsureThreadInput {
   readonly existingProviderThread?: OrchestrationV2ProviderThread;
 }
 
+export interface ProviderAdapterV2CloudLaunchSource {
+  /** Existing verified checkout, never a cloud output directory. */
+  readonly cwd: string;
+  readonly restriction: OrchestrationV2CloudSourceRestriction;
+}
+
+export type ProviderAdapterV2CloudTaskMetadata = Pick<
+  OrchestrationV2CloudTask,
+  "url" | "title" | "progress"
+>;
+
 export interface ProviderAdapterV2TurnInput {
+  readonly memoryContext?: MemoryContextSnapshot;
+  /** Process-local admission callback; never persisted or sent to a provider. */
+  readonly refreshMemoryContext?: () => Effect.Effect<
+    MemoryContextSnapshot | undefined,
+    ProviderAdapterTurnStartError
+  >;
+  /** Initial launch only. Follow-up and attach must not require this checkout. */
+  readonly cloudLaunchSource?: ProviderAdapterV2CloudLaunchSource;
+  readonly cloudSource?: OrchestrationV2CloudTask["source"];
+  /** Acknowledged durable acceptance; use before observing a submitted task. */
+  readonly commitCloudTask?: (
+    task: OrchestrationV2CloudTask,
+    refs?: Pick<OrchestrationV2ProviderThread, "nativeThreadRef" | "nativeConversationHeadRef">,
+  ) => Effect.Effect<void, ProviderAdapterV2Error>;
+  /** Attached-runtime metadata after terminal; waits for run subscription cleanup. */
+  readonly commitCloudTaskMetadata?: (
+    nativeId: string,
+    metadata: ProviderAdapterV2CloudTaskMetadata,
+  ) => Effect.Effect<void, ProviderAdapterV2Error>;
   readonly appThread: OrchestrationV2AppThread;
   readonly threadId: ThreadId;
   readonly runId: RunId;
   readonly runOrdinal: number;
-  /** Whether the current native session has an accepted turn; omitted when unknown. */
   readonly nativeThreadHasTurns?: boolean;
   readonly providerTurnOrdinal: number;
   readonly restartContinuationOfRunId?: RunId;
@@ -417,11 +466,6 @@ export interface ProviderAdapterV2TurnInput {
   readonly message: ProviderAdapterV2TurnMessage;
   readonly modelSelection: ModelSelection;
   readonly runtimePolicy: ProviderAdapterV2RuntimePolicy;
-  /**
-   * What the thread's MCP Apps want the agent to know (`ui/update-model-context`),
-   * latest per app, keyed stably per app. Adapters that host apps deliver it as
-   * application context; others never receive any.
-   */
   readonly appContext?: ReadonlyArray<{ readonly key: string; readonly text: string }>;
 }
 
@@ -436,7 +480,6 @@ export interface ProviderAdapterV2SteerInput {
 export interface ProviderAdapterV2InterruptInput {
   readonly providerThread: OrchestrationV2ProviderThread;
   readonly providerTurnId: ProviderTurnId;
-  /** When true, the next `startTurn` may respawn the provider runtime (Grok Stop recovery). */
   readonly requestRuntimeRestart?: boolean;
 }
 
@@ -498,14 +541,12 @@ export interface ProviderAdapterV2HistoricalContext {
   readonly context: string;
 }
 
-/** An MCP tool as the provider's MCP client lists it. */
 export interface ProviderAdapterV2McpTool {
   readonly name: string;
   readonly _meta?: unknown;
   readonly annotations?: unknown;
 }
 
-/** MCP `CallToolResult` / `ReadResourceResult` shapes, passed through unchanged. */
 export interface ProviderAdapterV2McpCallToolResult {
   readonly content: ReadonlyArray<unknown>;
   readonly structuredContent?: unknown;
@@ -531,6 +572,12 @@ export interface ProviderAdapterV2McpApps {
   }) => Effect.Effect<{ readonly contents: ReadonlyArray<unknown> }, ProviderAdapterV2Error>;
 }
 
+export type ProviderAdapterV2SubagentOutcome = {
+  readonly status: "completed" | "failed" | "cancelled";
+  readonly completedAt: NonNullable<OrchestrationV2Subagent["completedAt"]>;
+  readonly result: OrchestrationV2Subagent["result"];
+};
+
 export interface ProviderAdapterV2SessionRuntime {
   readonly instanceId: ProviderInstanceId;
   readonly driver: ProviderDriverKind;
@@ -543,33 +590,26 @@ export interface ProviderAdapterV2SessionRuntime {
    * Adapter runtimes may omit this and expose only their single-consumer event stream.
    */
   readonly subscribeEvents?: Effect.Effect<ProviderAdapterV2EventSubscription>;
-  /**
-   * Adapters whose native runtime can hold pending work outside an active
-   * turn (for example Claude background tasks and their wake turns) report it
-   * here so the session manager defers idle release while it is pending.
-   */
   readonly hasPendingBackgroundWork?: Effect.Effect<boolean>;
   /**
-   * Per-provider-thread pending work for root-run ingestion stop gates. When
-   * present, RunExecutionService uses only this probe (never the session-wide
-   * hasPendingBackgroundWork) so sibling native threads cannot pin an
-   * unrelated root subscription open.
+   * When present, RunExecutionService uses only this probe (never the
+   * session-wide hasPendingBackgroundWork) so sibling native threads cannot pin
+   * an unrelated root subscription open.
    */
   readonly hasPendingBackgroundWorkForThread?: (
     providerThread: OrchestrationV2ProviderThread,
   ) => Effect.Effect<boolean>;
   /**
-   * Capacity for the requested model/options, independent of native thread usage.
-   * `cwd` is the thread's working directory, for providers whose project config
-   * can change a model's limits.
+   * Set when every background task this session lists on its provider threads
+   * runs inside the session's own process and ends when it closes. Leave unset
+   * when a task can outlive the session, for example on a shared server, so its
+   * thread keeps showing Waiting.
    */
+  readonly backgroundTasksEndWithProcess?: true;
   readonly getModelContextWindow?: (
     modelSelection: ModelSelection,
     cwd?: string | null,
   ) => number | undefined;
-  /** Whether an option-only change preserves measured native usage and capacity.
-   * Compaction thresholds are still discarded. Unknown transitions invalidate usage.
-   */
   readonly canReuseContextUsage?: (previous: ModelSelection, next: ModelSelection) => boolean;
   readonly ensureThread: (
     input: ProviderAdapterV2EnsureThreadInput,
@@ -589,20 +629,31 @@ export interface ProviderAdapterV2SessionRuntime {
   readonly startTurn: (
     input: ProviderAdapterV2TurnInput,
   ) => Effect.Effect<void, ProviderAdapterV2Error>;
+  /** Attach observation to saved work. Never submit a prompt or create a task. */
+  readonly resumeTurn?: (
+    input: Omit<ProviderAdapterV2TurnInput, "message" | "cloudLaunchSource"> & {
+      readonly cloudTask: OrchestrationV2CloudTask;
+    },
+  ) => Effect.Effect<void, ProviderAdapterV2Error>;
   readonly compactThread?: (
     input: ProviderAdapterV2TurnInput,
   ) => Effect.Effect<void, ProviderAdapterV2Error>;
   readonly steerTurn: (
     input: ProviderAdapterV2SteerInput,
   ) => Effect.Effect<void, ProviderAdapterV2Error>;
+  readonly stopTask?: (input: {
+    readonly providerThread: OrchestrationV2ProviderThread;
+    readonly taskId: string;
+  }) => Effect.Effect<void, ProviderAdapterV2Error>;
   readonly interruptTurn: (
     input: ProviderAdapterV2InterruptInput,
   ) => Effect.Effect<void, ProviderAdapterV2Error>;
-  /**
-   * Lets a runtime shared by several app threads unload one provider thread's
-   * native state (and its MCP servers) when that app thread detaches, while
-   * the runtime keeps serving the others. A later resume reloads it.
-   */
+  readonly stopSubagent?: (input: {
+    readonly providerThread: OrchestrationV2ProviderThread;
+    readonly nativeTaskId: string;
+    /** A delayed Stop must not interrupt a task resumed after this request. */
+    readonly requestedAt?: NonNullable<OrchestrationV2Subagent["startedAt"]>;
+  }) => Effect.Effect<void | ProviderAdapterV2SubagentOutcome, ProviderAdapterV2Error>;
   readonly unloadThread?: (input: {
     readonly providerThread: OrchestrationV2ProviderThread;
   }) => Effect.Effect<void, ProviderAdapterV2Error>;
@@ -612,18 +663,13 @@ export interface ProviderAdapterV2SessionRuntime {
   readonly readThreadSnapshot: (
     input: ProviderAdapterV2ReadThreadSnapshotInput,
   ) => Effect.Effect<ProviderAdapterV2ThreadSnapshot, ProviderAdapterV2Error>;
-  /**
-   * Providers that accept product feedback for a thread (#7949, Codex → OpenAI)
-   * expose it here; absent means the driver has no feedback channel.
-   */
   readonly uploadFeedback?: (input: {
     readonly providerThread: OrchestrationV2ProviderThread;
     readonly reason?: string;
   }) => Effect.Effect<{ readonly feedbackId: string }, ProviderAdapterV2Error>;
   /**
-   * MCP Apps host operations through the provider's own MCP client, for
-   * drivers whose protocol exposes them (Codex). Absent means apps from this
-   * provider are not interactive and their tool calls stay plain tool rows.
+   * Absent means apps from this provider are not interactive and their tool
+   * calls stay plain tool rows.
    */
   readonly mcpApps?: ProviderAdapterV2McpApps;
   readonly rollbackThread: (
@@ -650,4 +696,4 @@ export class ProviderAdapterV2 extends Context.Service<
       input: ProviderAdapterV2OpenSessionInput,
     ) => Effect.Effect<ProviderAdapterV2SessionRuntime, ProviderAdapterV2Error, Scope.Scope>;
   }
->()("@t3tools/provider-core/server/ProviderAdapter/ProviderAdapterV2") {}
+>()("@goat/provider-core/server/ProviderAdapter/ProviderAdapterV2") {}

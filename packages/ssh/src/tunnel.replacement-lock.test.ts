@@ -4,15 +4,15 @@ import * as NodeOS from "node:os";
 import * as NodeChildProcess from "node:child_process";
 import { assert, describe, it } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import { ORCHESTRATION_PROTOCOL_VERSION } from "@t3tools/contracts";
-import { SSH_RUNTIME_PROTOCOL_VERSION } from "@t3tools/shared/sshRuntimeProtocol";
-import * as HostProcess from "@t3tools/shared/HostProcess";
+import { ORCHESTRATION_PROTOCOL_VERSION } from "@goat/contracts";
+import { SSH_RUNTIME_PROTOCOL_VERSION } from "@goat/shared/sshRuntimeProtocol";
+import * as HostProcess from "@goat/shared/HostProcess";
 import * as Fiber from "effect/Fiber";
+import * as FileSystem from "effect/FileSystem";
 import * as Stream from "effect/Stream";
 import { ChildProcess, ChildProcessSpawner } from "effect/process";
-import { remoteStateKey } from "./command.ts";
 import * as SshTunnel from "./tunnel.ts";
-import { uploadTarget, installArchivePsDouble } from "./tunnel.fixture.ts";
+import { ARCHIVE, uploadTarget, installArchivePsDouble } from "./tunnel.fixture.ts";
 import { protocolExecutable } from "./tunnel.protocol.fixture.ts";
 import * as Effect from "effect/Effect";
 import * as Result from "effect/Result";
@@ -70,13 +70,198 @@ case "$3" in */${name})
 describe.skipIf(HostProcess.Platform.defaultValue() === "win32")(
   "host-wide replacement symlink mutex",
   () => {
-    it.live("legacy stop failure rolls back identity while holding the replacement lock", () =>
+    it.live.each(["external", "managed"] as const)(
+      "attaches an equal-version %s server without a deferred refresh when the lock is contended",
+      (kind) =>
+        Effect.gen(function* () {
+          const f = yield* makeProtocolFixture({
+            live: true,
+            kind,
+            oldVersion: ARCHIVE.archiveVersion,
+            drain: true,
+            ...current,
+          });
+          if (kind === "external") yield* f.fs.remove(`${f.state}/pid`);
+          const lock = `${f.home}/.goat/ssh-launch/replacement.lock`;
+          yield* f.fs.symlink(liveOwner(), lock);
+          const before = yield* f.snapshot;
+          const result = yield* SshTunnel.launchOrReuseRemoteServer(
+            uploadTarget,
+            {},
+            {
+              ...f.runner,
+              refreshOwnedRuntimeOnFirstConnection: true,
+            },
+          ).pipe(
+            Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, f.transport),
+            Effect.provideService(FileSystem.FileSystem, f.observedFs),
+          );
+          assert.equal(result.status, "ready");
+          if (result.status !== "ready") return;
+          assert.equal(result.remoteServerKind, kind);
+          assert.isUndefined(result.pending);
+          assert.isUndefined(result.refresh);
+          assert.equal(f.remoteCommands.length, 2);
+          assert.deepEqual(yield* f.snapshot, before);
+          assert.equal(yield* f.fs.readLink(lock), liveOwner());
+          assert.isFalse(yield* f.fs.exists(`${f.test}/activity-requests`));
+          const events = yield* f.fs.readFileString(`${f.test}/events`);
+          for (const type of ["stop", "drain", "self-stop", "supervise"])
+            assert.notInclude(events, `"type":"${type}"`);
+          yield* Effect.sync(() => process.kill(f.pid, 0));
+        }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+    );
+
+    it.live.each(
+      (["external", "managed"] as const).flatMap((kind) =>
+        ["before", "readiness"].map((fence) => ({ kind, fence })),
+      ),
+    )("lock-only $kind contention stays pending when fenced at $fence", ({ kind, fence }) =>
+      Effect.gen(function* () {
+        const f = yield* makeProtocolFixture({
+          live: true,
+          kind,
+          oldVersion: ARCHIVE.archiveVersion,
+          drain: true,
+          ...current,
+        });
+        if (kind === "external") yield* f.fs.remove(`${f.state}/pid`);
+        const runtime = JSON.parse(
+          yield* f.fs.readFileString(`${f.home}/.goat/userdata/server-runtime.json`),
+        ) as { instanceId: string };
+        if (fence === "before") {
+          yield* f.fs.writeFileString(`${f.state}/draining`, runtime.instanceId);
+        } else {
+          const executable = `${f.old}/goat`;
+          const code = yield* f.fs.readFileString(executable);
+          const seam = 'args[1] === "wait-ready") {';
+          assert.include(code, seam);
+          yield* f.fs.writeFileString(
+            executable,
+            code.replace(
+              seam,
+              seam +
+                `
+  fs.writeFileSync(${JSON.stringify(`${f.state}/draining`)}, ${JSON.stringify(runtime.instanceId)});`,
+            ),
+          );
+        }
+        const lock = `${f.home}/.goat/ssh-launch/replacement.lock`;
+        yield* f.fs.symlink(liveOwner(), lock);
+        const before = yield* f.snapshot;
+        const result = yield* f.run("launch", false, {
+          refreshOwnedRuntimeOnFirstConnection: true,
+        });
+        if (Result.isFailure(result)) throw result.failure;
+        assert.equal(result.success.status, "pending");
+        assert.equal(result.success.pending?.reason, "contended");
+        assert.deepEqual(yield* f.snapshot, before);
+        assert.equal(yield* f.fs.readFileString(`${f.state}/draining`), runtime.instanceId);
+        assert.equal(yield* f.fs.readLink(lock), liveOwner());
+        const events = yield* f.fs.readFileString(`${f.test}/events`);
+        for (const type of ["stop", "drain", "self-stop", "supervise"])
+          assert.notInclude(events, `"type":"${type}"`);
+        yield* Effect.sync(() => process.kill(f.pid, 0));
+      }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+    );
+
+    it.live.each(["deferred", "replaced", "cold"])(
+      "a second client waits in-command before attaching (%s)",
+      (mode) =>
+        Effect.gen(function* () {
+          const replace = mode !== "deferred";
+          const commands = mode === "cold" ? 2 : 1;
+          const f = yield* makeProtocolFixture({
+            live: true,
+            kind: "managed",
+            oldVersion: "1.2.2",
+            drain: true,
+            ...current,
+            candidateSignals: { ...current, drain: true },
+          });
+          const launch = (refresh: boolean, previous?: SshTunnel.PreparedRemoteRuntime) =>
+            SshTunnel.launchOrReuseRemoteServer(
+              uploadTarget,
+              {},
+              {
+                ...f.runner,
+                refreshOwnedRuntimeOnFirstConnection: refresh,
+              },
+              undefined,
+              previous,
+            ).pipe(Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, f.transport));
+          yield* f.shiftHostClock(60);
+          yield* f.fs.writeFileString(`${f.test}/activity`, "busy");
+          const baseline = yield* launch(true);
+          assert.equal(baseline.status, "ready");
+          if (baseline.status !== "ready") return;
+          assert.isString(baseline.selectedRuntime.reconnectProbe);
+          if (replace) yield* f.fs.writeFileString(`${f.test}/activity`, "idle");
+          yield* pauseFirstLock(f, "replacement.lock");
+          const fifo = yield* f.realSpawner.spawn(
+            ChildProcess.make("mkfifo", [`${f.test}/wait-release`]),
+          );
+          assert.equal(Number(yield* fifo.exitCode), 0);
+          f.setScriptPrefix(`sleep() {
+  printf waiting > "$HOME/.test/waiting"
+  read -r release < "$HOME/.test/wait-release"
+}
+`);
+          yield* f.fs.writeFileString(
+            `${f.test}/lock-barrier-bin/sleep`,
+            `#!/bin/sh
+printf waiting > "$HOME/.test/waiting"
+read -r release < "$HOME/.test/wait-release"
+`,
+          );
+          yield* f.fs.chmod(`${f.test}/lock-barrier-bin/sleep`, 0o700);
+          const first = yield* Effect.forkChild(launch(true));
+          yield* fileMilestone(`${f.test}/lock-acquired`);
+          const before = f.remoteCommands.length;
+          const second = yield* Effect.forkChild(
+            launch(mode === "cold", mode === "cold" ? undefined : baseline.selectedRuntime),
+          );
+          yield* fileMilestone(`${f.test}/waiting`);
+          assert.equal(f.remoteCommands.length - before, commands);
+          yield* f.fs.writeFileString(`${f.test}/lock-release`, "release\n");
+          const firstResult = yield* Fiber.join(first);
+          assert.equal(firstResult.status, "ready");
+          if (firstResult.status !== "ready") return;
+          assert.equal(firstResult.refresh, replace ? "replaced" : undefined);
+          if (replace) {
+            const runtime = JSON.parse(
+              yield* f.fs.readFileString(`${f.home}/.goat/userdata/server-runtime.json`),
+            ) as { pid: number; port: number };
+            yield* installArchivePsDouble(
+              f.home,
+              runtime.pid,
+              runtime.port,
+              ARCHIVE.archiveVersion,
+            );
+          }
+          yield* f.fs.writeFileString(`${f.test}/wait-release`, "release\n");
+          const attached = yield* Fiber.join(second);
+          assert.equal(attached.status, "ready");
+          if (attached.status !== "ready") return;
+          assert.equal(
+            attached.selectedRuntime.version,
+            replace ? ARCHIVE.archiveVersion : "1.2.2",
+          );
+          assert.deepEqual(attached.pending, replace ? undefined : baseline.pending);
+          assert.equal(f.remoteCommands.length - before, commands);
+          assert.isString(attached.selectedRuntime.reconnectProbe);
+        }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+      180_000,
+    );
+
+    it.live("cancelled legacy drain rolls back identity while holding the replacement lock", () =>
       Effect.gen(function* () {
         const f = yield* makeProtocolFixture({
           live: true,
           kind: "managed",
           oldVersion: "1.2.2",
-          descriptor404: true,
+          drain: true,
+          ...current,
         });
         yield* f.fs.remove(`${f.state}/identity`);
         const before = yield* f.snapshot;
@@ -93,17 +278,18 @@ exec /bin/rm "$@"
         );
         yield* f.fs.chmod(`${bin}/rm`, 0o700);
         f.setRemotePath(`${bin}:${f.test}/identity-bin:${process.env.PATH ?? ""}`);
-        f.setScriptPrefix(
-          'kill() { if [ "$1" = -0 ]; then command kill "$@"; else return 1; fi; }\n',
-        );
+        yield* f.fs.writeFileString(`${f.test}/drain`, "cancelled");
         const result = yield* f.run("launch");
-        assert.isTrue(Result.isFailure(result));
+        if (Result.isFailure(result)) throw result.failure;
+        assert.equal(result.success.pending?.reason, "busy");
         assert.isNotEmpty((yield* f.fs.readFileString(`${f.test}/rollback-owner`)).trim());
         assert.deepEqual(yield* f.snapshot, before);
         assert.notInclude(
           yield* f.fs.readDirectory(`${f.home}/.goat/ssh-launch`),
           "replacement.lock",
         );
+        for (const type of ["stop", "self-stop", "supervise"])
+          assert.notInclude(yield* f.fs.readFileString(`${f.test}/events`), `"type":"${type}"`);
         yield* Effect.sync(() => process.kill(f.pid, 0));
       }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
     );
@@ -117,6 +303,7 @@ exec /bin/rm "$@"
           live: true,
           kind: "managed",
           oldVersion: "1.2.2",
+          drain: true,
           ...current,
         });
         const bin = `${f.test}/locale-bin`;
@@ -163,6 +350,7 @@ exec "$HOME/.test/identity-bin/ps" "$@"
             live: true,
             kind: "managed",
             oldVersion: "1.2.2",
+            drain: true,
             ...current,
           });
           const bin = `${f.test}/minimal-bin`;
@@ -196,8 +384,9 @@ exec "$HOME/.test/identity-bin/ps" "$@"
             live: true,
             kind: "managed",
             oldVersion: "1.2.2",
+            drain: true,
             ...current,
-            candidateSignals: current,
+            candidateSignals: { ...current, drain: true },
           });
           const lock = `${f.home}/.goat/ssh-launch/replacement.lock`;
           const recovery = `${f.home}/.goat/ssh-launch/replacement.recovery`;
@@ -231,8 +420,9 @@ exec "$HOME/.test/identity-bin/ps" "$@"
             live: true,
             kind: "managed",
             oldVersion: "1.2.2",
+            drain: true,
             ...current,
-            candidateSignals: current,
+            candidateSignals: { ...current, drain: true },
           });
           const lock = `${f.home}/.goat/ssh-launch/replacement.lock`;
           const recovery = `${f.home}/.goat/ssh-launch/replacement.recovery`;
@@ -267,8 +457,9 @@ exec "$HOME/.test/identity-bin/ps" "$@"
           live: true,
           kind: "managed",
           oldVersion: "1.2.2",
+          drain: true,
           ...current,
-          candidateSignals: current,
+          candidateSignals: { ...current, drain: true },
         });
         const bin = `${f.test}/lock-bin`;
         yield* f.fs.makeDirectory(bin);
@@ -302,16 +493,12 @@ case "$3" in */replacement.lock)
           live: true,
           kind: "managed",
           oldVersion: "1.2.2",
+          drain: true,
           ...current,
-          candidateSignals: current,
+          candidateSignals: { ...current, drain: true },
         });
         yield* f.fs.writeFileString(`${f.test}/activity`, "idle");
         const other = { ...uploadTarget, alias: "other-alias" };
-        const otherKey = yield* remoteStateKey(other);
-        const otherState = `${f.home}/.goat/ssh-launch/${otherKey}`;
-        yield* f.fs.makeDirectory(otherState);
-        for (const name of ["run-t3.sh", "pid", "port", "managed", "identity"])
-          yield* f.fs.copyFile(`${f.state}/${name}`, `${otherState}/${name}`);
         yield* pauseFirstLock(f, "replacement.lock");
         const first = yield* Effect.forkChild(
           f.run("launch", false, { refreshOwnedRuntimeOnFirstConnection: true }),
@@ -325,13 +512,13 @@ case "$3" in */replacement.lock)
         ).pipe(Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, f.transport));
         assert.equal(second.pending?.reason, "contended");
         assert.equal(yield* f.fs.readLink(`${f.home}/.goat/ssh-launch/replacement.lock`), owner);
-        assert.notInclude(yield* f.fs.readFileString(`${f.test}/events`), '"type":"stop"');
+        assert.notInclude(yield* f.fs.readFileString(`${f.test}/events`), '"type":"self-stop"');
         yield* f.fs.writeFileString(`${f.test}/lock-release`, "release\n");
         const result = yield* Fiber.join(first);
         if (Result.isFailure(result)) throw result.failure;
         assert.equal(result.success.refresh, "replaced");
         assert.equal(
-          (yield* f.fs.readFileString(`${f.test}/events`)).split('"type":"stop"').length - 1,
+          (yield* f.fs.readFileString(`${f.test}/events`)).split('"type":"self-stop"').length - 1,
           1,
         );
       }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
@@ -343,8 +530,9 @@ case "$3" in */replacement.lock)
           live: true,
           kind: "managed",
           oldVersion: "1.2.2",
+          drain: true,
           ...current,
-          candidateSignals: current,
+          candidateSignals: { ...current, drain: true },
         });
         const lock = `${f.home}/.goat/ssh-launch/replacement.lock`;
         const recovery = `${f.home}/.goat/ssh-launch/replacement.recovery`;
@@ -384,8 +572,9 @@ case "$3" in */replacement.lock)
           live: true,
           kind: "managed",
           oldVersion: "1.2.2",
+          drain: true,
           ...current,
-          candidateSignals: current,
+          candidateSignals: { ...current, drain: true },
         });
         yield* pauseFirstLock(f, "replacement.lock");
         const launch = yield* Effect.forkChild(
@@ -407,7 +596,7 @@ case "$3" in */replacement.lock)
         yield* f.fs.writeFileString(`${directory}/.install-complete`, newer);
         yield* f.fs.writeFileString(
           `${f.state}/run-t3.sh`,
-          SshTunnel.buildRemoteT3RunnerScript({ archiveVersion: newer }),
+          SshTunnel.buildRemoteGoatRunnerScript({ archiveVersion: newer }),
         );
         yield* Effect.sync(() => process.kill(f.pid, "SIGTERM"));
         const child = yield* f.realSpawner.spawn(

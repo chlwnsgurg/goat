@@ -1,11 +1,27 @@
 name: goat-nightly
 
-# GOAT nightly channel (devlog/_plan/261012_release_nightly/020_wp2_pipeline.md).
-# A successful goat-ci run of a dev push builds every platform from that commit,
-# signs and notarizes macOS on the Mac Studio, verifies everything, and publishes
-# a prerelease to the public goat-si/goat-releases repository. Only the hosted
-# publish job can read the goat-releases App credentials. The pre-push guard
+# GOAT release channels (docs/internals/release-channels.md).
+# goat-ci does not run on push, so a nightly starts when a maintainer runs goat-ci
+# by hand on dev (gh workflow run goat-ci.yml --ref dev) and that run succeeds.
+# Only the full lane counts: goat-ci names a manual run "goat-ci <lane> on
+# <branch>", and prepare requires "goat-ci all on dev". It builds every platform
+# from that commit, signs and notarizes macOS
+# on the Mac Studio, verifies everything, and publishes a nightly prerelease to
+# the public goat-si/goat-releases repository. A manual run of this workflow
+# builds a nightly or a stable release of a dev commit. Nothing publishes
+# unless the repository variable GOAT_RELEASES_PUBLISH is 'true'; a manual run
+# also needs its publish input. Only the hosted publish job can read the
+# goat-releases App credentials. The pre-push guard
 # (.vite-hooks/goat-workflow-guard.mjs) enforces the gates below.
+#
+# Jobs hand their outputs to each other through draft releases in goat-si/goat,
+# one per hand-off, tagged goat-nightly-staging-<run id>--<name>
+# (scripts/nightly-staging.ts), never through Actions artifacts: release assets do
+# not count toward the Actions and Packages storage quota. Draft releases are
+# visible only with push access, so every job that reads or writes a hand-off asks
+# for contents: write and passes github.token to its staging steps alone. The
+# cleanup job deletes the drafts when the run ends, whatever its outcome. Re-running only the failed jobs after
+# that finds no hand-off; re-run all jobs instead.
 on:
   workflow_run:
     workflows: [goat-ci]
@@ -17,6 +33,19 @@ on:
         description: dev commit to build (default dev tip)
         required: false
         type: string
+      channel:
+        description: release channel (stable uses the plain version in apps/desktop/package.json)
+        required: false
+        default: nightly
+        type: choice
+        options:
+          - nightly
+          - stable
+      publish:
+        description: publish to goat-releases (also needs repository variable GOAT_RELEASES_PUBLISH=true)
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -30,8 +59,10 @@ jobs:
     if: >-
       github.repository == 'goat-si/goat' &&
       (github.event_name == 'workflow_dispatch' ||
-      (github.event.workflow_run.conclusion == 'success' &&
-      github.event.workflow_run.event == 'push' &&
+      (vars.GOAT_RELEASES_PUBLISH == 'true' &&
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'workflow_dispatch' &&
+      github.event.workflow_run.display_title == 'goat-ci all on dev' &&
       github.event.workflow_run.head_branch == 'dev' &&
       github.event.workflow_run.head_repository.full_name == 'goat-si/goat'))
     # Hosted: the resolve step needs gh, which the EPYC runners do not carry.
@@ -43,6 +74,8 @@ jobs:
       version: ${{ steps.release.outputs.version }}
       tag: ${{ steps.release.outputs.tag }}
       name: ${{ steps.release.outputs.name }}
+      channel: ${{ steps.release.outputs.channel }}
+      manifest: ${{ steps.release.outputs.manifest }}
     steps:
       # A merge that landed while goat-ci ran makes this run stale; the newer
       # run publishes instead (latest one wins).
@@ -100,18 +133,51 @@ jobs:
 
       - name: Install script dependencies
         if: steps.resolve.outputs.skip == 'false'
-        run: vp install --filter=@t3tools/scripts...
+        run: vp install --filter=@goat/scripts...
 
-      - name: Resolve nightly version
+      # Version rule (docs/internals/release-channels.md#version-rule): a nightly is
+      # <base>-nightly.<date>.<run> of the package version, stamped into every
+      # artifact. check-release-version refuses a version that does not sort
+      # above the newest stable and the previous nightly; once the base ships
+      # stable it fails with the exact bump command instead of publishing.
+      - name: Resolve release version
         id: release
         if: steps.resolve.outputs.skip == 'false'
         env:
           SHA: ${{ steps.resolve.outputs.sha }}
+          CHANNEL: ${{ inputs.channel || 'nightly' }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          node scripts/check-release-version.ts
-          node scripts/resolve-nightly-release.ts --date "$(date -u +%Y%m%d)" \
-            --run-number "$GITHUB_RUN_NUMBER" --sha "$SHA" --github-output
+          base="$(node -p 'require("./apps/desktop/package.json").version')"
+          tags="$RUNNER_TEMP/goat-releases-tags.txt"
+          gh api --paginate 'repos/goat-si/goat-releases/releases?per_page=100' --jq '.[].tag_name' > "$tags"
+          case "$CHANNEL" in
+            nightly)
+              metadata="$(node scripts/resolve-nightly-release.ts --date "$(date -u +%Y%m%d)" \
+                --run-number "$GITHUB_RUN_NUMBER" --sha "$SHA")"
+              version="$(printf '%s\n' "$metadata" | sed -n 's/^version=//p')"
+              manifest=nightly
+              ;;
+            stable)
+              version="$base"
+              metadata="$(printf 'version=%s\ntag=v%s\nname=GOAT %s (%s)\n' "$base" "$base" "$base" "${SHA:0:12}")"
+              manifest=latest
+              ;;
+            *)
+              echo "::error::unknown channel '$CHANNEL'"
+              exit 1
+              ;;
+          esac
+          if ! problems="$(node scripts/check-release-version.ts --candidate "$version" --published-tags "$tags" 2>&1)"; then
+            printf '%s\n' "$problems"
+            printf '%s\n' "$problems" | sed -n 's/^.*check-release-version: /::error::/p'
+            exit 1
+          fi
+          printf '%s\n' "$problems"
+          printf '%s\n' "$metadata" >> "$GITHUB_OUTPUT"
+          echo "channel=$CHANNEL" >> "$GITHUB_OUTPUT"
+          echo "manifest=$manifest" >> "$GITHUB_OUTPUT"
 
   js_bundle:
     name: JS bundle
@@ -119,11 +185,14 @@ jobs:
     if: needs.prepare.result == 'success' && needs.prepare.outputs.skip == 'false'
     runs-on: [self-hosted, linux, x64, goat, epyc]
     timeout-minutes: 30
+    permissions:
+      contents: write
     concurrency:
-      group: goat-nightly-js-bundle
+      group: goat-nightly-js-bundle-${{ needs.prepare.outputs.channel }}
       cancel-in-progress: true
     env:
       VERSION: ${{ needs.prepare.outputs.version }}
+      STAGING_TAG: goat-nightly-staging-${{ github.run_id }}
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -143,7 +212,7 @@ jobs:
           run-install: false
 
       - name: Install bundle dependencies
-        run: vp install --filter=t3... --filter=@t3tools/web... --filter=@t3tools/desktop... --filter=@t3tools/scripts...
+        run: vp install --filter=goat... --filter=@goat/web... --filter=@goat/desktop... --filter=@goat/scripts...
 
       - name: Align package versions
         run: node scripts/update-release-package-versions.ts "$VERSION"
@@ -153,15 +222,27 @@ jobs:
       - name: Build JS bundle
         run: vp run build:desktop
 
-      - name: Upload JS bundle
-        uses: actions/upload-artifact@v4
-        with:
-          name: js-bundle
-          path: |
-            apps/server/dist
-            apps/desktop/dist-electron
-          if-no-files-found: error
-          retention-days: 1
+      # The hand-off tool comes from this workflow's commit, so a run can build any
+      # dev commit, including one older than the tool.
+      - name: Fetch hand-off tool
+        shell: bash
+        env:
+          GOAT_RELEASES_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          for file in nightly-staging.ts lib/github-releases.ts; do
+            curl -fsSL --retry 3 --create-dirs -o "scripts/.staging/$file" \
+              -H "Authorization: Bearer $GOAT_RELEASES_TOKEN" -H "Accept: application/vnd.github.raw+json" \
+              "https://api.github.com/repos/goat-si/goat/contents/scripts/$file?ref=$GITHUB_WORKFLOW_SHA"
+          done
+
+      - name: Stage JS bundle
+        env:
+          GOAT_RELEASES_TOKEN: ${{ github.token }}
+          SHA: ${{ needs.prepare.outputs.sha }}
+        run: |
+          node scripts/.staging/nightly-staging.ts put --repo goat-si/goat --tag "$STAGING_TAG" --target "$SHA" \
+            --name js-bundle --dir apps --paths server/dist,desktop/dist-electron
 
   cli:
     name: CLI ${{ matrix.key }}
@@ -169,8 +250,10 @@ jobs:
     if: needs.prepare.result == 'success' && needs.prepare.outputs.skip == 'false'
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 45
+    permissions:
+      contents: write
     concurrency:
-      group: goat-nightly-cli-${{ matrix.key }}
+      group: goat-nightly-cli-${{ needs.prepare.outputs.channel }}-${{ matrix.key }}
       cancel-in-progress: true
     strategy:
       fail-fast: false
@@ -203,7 +286,8 @@ jobs:
             runner: windows-11-arm
     env:
       VERSION: ${{ needs.prepare.outputs.version }}
-      T3CODE_DESKTOP_SIGNED: "false"
+      STAGING_TAG: goat-nightly-staging-${{ github.run_id }}
+      GOAT_DESKTOP_SIGNED: "false"
     defaults:
       run:
         shell: bash
@@ -227,16 +311,29 @@ jobs:
           run-install: false
 
       - name: Install dependencies
-        run: vp install --filter=t3... --filter=@t3tools/scripts...
+        run: vp install --filter=goat... --filter=@goat/scripts...
 
       - name: Align package versions
         run: node scripts/update-release-package-versions.ts "$VERSION"
 
-      - name: Download JS bundle
-        uses: actions/download-artifact@v4
-        with:
-          name: js-bundle
-          path: apps
+      # The hand-off tool comes from this workflow's commit, so a run can build any
+      # dev commit, including one older than the tool.
+      - name: Fetch hand-off tool
+        shell: bash
+        env:
+          GOAT_RELEASES_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          for file in nightly-staging.ts lib/github-releases.ts; do
+            curl -fsSL --retry 3 --create-dirs -o "scripts/.staging/$file" \
+              -H "Authorization: Bearer $GOAT_RELEASES_TOKEN" -H "Accept: application/vnd.github.raw+json" \
+              "https://api.github.com/repos/goat-si/goat/contents/scripts/$file?ref=$GITHUB_WORKFLOW_SHA"
+          done
+
+      - name: Fetch JS bundle
+        env:
+          GOAT_RELEASES_TOKEN: ${{ github.token }}
+        run: node scripts/.staging/nightly-staging.ts get --repo goat-si/goat --tag "$STAGING_TAG" --names js-bundle --dir apps
 
       # The Mac Studio keeps its own toolchain and keychain; the preflight checks
       # them and exports the signing identity and notary profile settings.
@@ -250,11 +347,27 @@ jobs:
         with:
           targets: ${{ matrix.rust_target }}
 
+      # Rust embeds dependency source paths (~/.cargo/registry/...) in its binaries,
+      # and the payload check refuses this machine's home and checkout paths.
+      - name: Keep build paths out of Rust binaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          native() { if command -v cygpath >/dev/null 2>&1; then cygpath -w "$1"; else printf '%s' "$1"; fi; }
+          # The last matching prefix wins, so the cargo homes come after the home.
+          flags="--remap-path-prefix=$(native "$HOME")=~"
+          cargo_bin="$(command -v cargo || true)"
+          for cargo_home in "${CARGO_HOME:-$HOME/.cargo}" ${cargo_bin:+"$(dirname "$(dirname "$cargo_bin")")"}; do
+            flags="$flags --remap-path-prefix=$(native "$cargo_home")=/cargo"
+          done
+          flags="$flags --remap-path-prefix=$(native "$GITHUB_WORKSPACE")=/goat-build"
+          echo "RUSTFLAGS=$flags" >> "$GITHUB_ENV"
+
       - name: Build resource monitor
         run: |
           set -euo pipefail
           cargo build --locked --release --manifest-path native/resource-monitor/Cargo.toml --target "${{ matrix.rust_target }}"
-          name=t3-resource-monitor
+          name=goat-resource-monitor
           if [ "${{ matrix.platform }}" = win ]; then name="$name.exe"; fi
           mkdir -p "$RUNNER_TEMP/cli-resource-monitor/${{ matrix.key }}"
           cp "native/resource-monitor/target/${{ matrix.rust_target }}/release/$name" "$RUNNER_TEMP/cli-resource-monitor/${{ matrix.key }}/$name"
@@ -268,7 +381,7 @@ jobs:
       - name: Build CLI archive
         env:
           APPLE_KEYCHAIN_PROFILE: ${{ matrix.platform == 'mac' && 'goat-notary' || '' }}
-          T3CODE_REQUIRE_NOTARIZATION: ${{ matrix.platform == 'mac' && '1' || '' }}
+          GOAT_REQUIRE_NOTARIZATION: ${{ matrix.platform == 'mac' && '1' || '' }}
         run: |
           set -euo pipefail
           args=(--platform "${{ matrix.platform }}" --arch "${{ matrix.arch }}" --version "$VERSION"
@@ -285,21 +398,15 @@ jobs:
           node scripts/verify-release-artifacts.ts payload --dir release-cli --version "$VERSION" \
             --key "cli-${{ matrix.platform }}-${{ matrix.arch }}" --report "reports/verify-cli-${{ matrix.key }}.json"
 
-      - name: Upload CLI archive
-        uses: actions/upload-artifact@v4
-        with:
-          name: cli-${{ matrix.key }}
-          path: release-cli/*
-          if-no-files-found: error
-          retention-days: 3
-
-      - name: Upload verification report
-        uses: actions/upload-artifact@v4
-        with:
-          name: verify-cli-${{ matrix.key }}
-          path: reports/*
-          if-no-files-found: error
-          retention-days: 3
+      - name: Stage CLI archive and verification report
+        env:
+          GOAT_RELEASES_TOKEN: ${{ github.token }}
+          SHA: ${{ needs.prepare.outputs.sha }}
+        run: |
+          set -euo pipefail
+          stage=(node scripts/.staging/nightly-staging.ts put --repo goat-si/goat --tag "$STAGING_TAG" --target "$SHA")
+          "${stage[@]}" --name "cli-${{ matrix.key }}" --dir release-cli
+          "${stage[@]}" --name "verify-cli-${{ matrix.key }}" --dir reports
 
   desktop_mac:
     name: Desktop macOS ${{ matrix.arch }}
@@ -307,8 +414,10 @@ jobs:
     if: needs.prepare.result == 'success' && needs.prepare.outputs.skip == 'false'
     runs-on: [self-hosted, macOS, ARM64, goat, mac-studio]
     timeout-minutes: 90
+    permissions:
+      contents: write
     concurrency:
-      group: goat-nightly-desktop-mac-${{ matrix.arch }}
+      group: goat-nightly-desktop-mac-${{ needs.prepare.outputs.channel }}-${{ matrix.arch }}
       cancel-in-progress: true
     strategy:
       fail-fast: false
@@ -317,12 +426,13 @@ jobs:
         arch: [arm64, x64]
     env:
       VERSION: ${{ needs.prepare.outputs.version }}
-      T3CODE_DESKTOP_UPDATE_FEED_ENABLED: "true"
-      T3CODE_DESKTOP_UPDATE_REPOSITORY: goat-si/goat-releases
-      T3CODE_DESKTOP_PAYLOAD_REPORT: ${{ github.workspace }}/reports/verify-desktop-mac-${{ matrix.arch }}.json
+      STAGING_TAG: goat-nightly-staging-${{ github.run_id }}
+      GOAT_DESKTOP_UPDATE_FEED_ENABLED: "true"
+      GOAT_DESKTOP_UPDATE_REPOSITORY: goat-si/goat-releases
+      GOAT_DESKTOP_PAYLOAD_REPORT: ${{ github.workspace }}/reports/verify-desktop-mac-${{ matrix.arch }}.json
       APPLE_KEYCHAIN_PROFILE: goat-notary
-      T3CODE_REQUIRE_NOTARIZATION: "1"
-      T3CODE_APPLE_TEAM_ID: U9ATA49N28
+      GOAT_REQUIRE_NOTARIZATION: "1"
+      GOAT_APPLE_TEAM_ID: U9ATA49N28
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -343,27 +453,52 @@ jobs:
           run-install: false
 
       - name: Install dependencies
-        run: vp install --filter=@t3tools/desktop... --filter=t3... --filter=@t3tools/scripts...
+        run: vp install --filter=@goat/desktop... --filter=goat... --filter=@goat/scripts...
 
       - name: Align package versions
         run: node scripts/update-release-package-versions.ts "$VERSION"
 
-      - name: Download JS bundle
-        uses: actions/download-artifact@v4
-        with:
-          name: js-bundle
-          path: apps
+      # The hand-off tool comes from this workflow's commit, so a run can build any
+      # dev commit, including one older than the tool.
+      - name: Fetch hand-off tool
+        shell: bash
+        env:
+          GOAT_RELEASES_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          for file in nightly-staging.ts lib/github-releases.ts; do
+            curl -fsSL --retry 3 --create-dirs -o "scripts/.staging/$file" \
+              -H "Authorization: Bearer $GOAT_RELEASES_TOKEN" -H "Accept: application/vnd.github.raw+json" \
+              "https://api.github.com/repos/goat-si/goat/contents/scripts/$file?ref=$GITHUB_WORKFLOW_SHA"
+          done
 
-      - name: Download SSH runtime archives
-        uses: actions/download-artifact@v4
-        with:
-          pattern: cli-*
-          merge-multiple: true
-          path: ssh-runtime-archives
+      - name: Fetch JS bundle and SSH runtime archives
+        env:
+          GOAT_RELEASES_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          node scripts/.staging/nightly-staging.ts get --repo goat-si/goat --tag "$STAGING_TAG" --names js-bundle --dir apps
+          node scripts/.staging/nightly-staging.ts get --repo goat-si/goat --tag "$STAGING_TAG" --names 'cli-*' --dir ssh-runtime-archives
 
-      # Exports CSC_NAME, CSC_KEYCHAIN, APPLE_KEYCHAIN and T3CODE_CLI_MAC_SIGN_IDENTITY.
+      # Exports CSC_NAME, CSC_KEYCHAIN, APPLE_KEYCHAIN and GOAT_CLI_MAC_SIGN_IDENTITY.
       - name: Mac signing preflight
         run: bash scripts/goat-mac-runner/preflight.sh --ci
+
+      # Rust embeds dependency source paths (~/.cargo/registry/...) in its binaries,
+      # and the payload check refuses this machine's home and checkout paths.
+      - name: Keep build paths out of Rust binaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          native() { if command -v cygpath >/dev/null 2>&1; then cygpath -w "$1"; else printf '%s' "$1"; fi; }
+          # The last matching prefix wins, so the cargo homes come after the home.
+          flags="--remap-path-prefix=$(native "$HOME")=~"
+          cargo_bin="$(command -v cargo || true)"
+          for cargo_home in "${CARGO_HOME:-$HOME/.cargo}" ${cargo_bin:+"$(dirname "$(dirname "$cargo_bin")")"}; do
+            flags="$flags --remap-path-prefix=$(native "$cargo_home")=/cargo"
+          done
+          flags="$flags --remap-path-prefix=$(native "$GITHUB_WORKSPACE")=/goat-build"
+          echo "RUSTFLAGS=$flags" >> "$GITHUB_ENV"
 
       - name: Build, sign and notarize desktop app
         run: |
@@ -375,7 +510,7 @@ jobs:
             --output-dir release --verbose
 
       - name: Sign, notarize and staple the DMG
-        run: node scripts/finalize-macos-dmg.ts --dir release --report "$T3CODE_DESKTOP_PAYLOAD_REPORT"
+        run: node scripts/finalize-macos-dmg.ts --dir release --report "$GOAT_DESKTOP_PAYLOAD_REPORT"
 
       - name: Verify signatures and payload
         run: |
@@ -396,21 +531,15 @@ jobs:
             for manifest in release-publish/*-mac.yml; do mv "$manifest" "${manifest%.yml}-${{ matrix.arch }}.yml"; done
           fi
 
-      - name: Upload desktop assets
-        uses: actions/upload-artifact@v4
-        with:
-          name: desktop-mac-${{ matrix.arch }}
-          path: release-publish/*
-          if-no-files-found: error
-          retention-days: 3
-
-      - name: Upload verification reports
-        uses: actions/upload-artifact@v4
-        with:
-          name: verify-desktop-mac-${{ matrix.arch }}
-          path: reports/*
-          if-no-files-found: error
-          retention-days: 3
+      - name: Stage desktop assets and verification reports
+        env:
+          GOAT_RELEASES_TOKEN: ${{ github.token }}
+          SHA: ${{ needs.prepare.outputs.sha }}
+        run: |
+          set -euo pipefail
+          stage=(node scripts/.staging/nightly-staging.ts put --repo goat-si/goat --tag "$STAGING_TAG" --target "$SHA")
+          "${stage[@]}" --name "desktop-mac-${{ matrix.arch }}" --dir release-publish
+          "${stage[@]}" --name "verify-desktop-mac-${{ matrix.arch }}" --dir reports
 
   desktop_other:
     name: Desktop ${{ matrix.platform }} ${{ matrix.arch }}
@@ -418,18 +547,22 @@ jobs:
     if: needs.prepare.result == 'success' && needs.prepare.outputs.skip == 'false'
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 70
+    permissions:
+      contents: write
     concurrency:
-      group: goat-nightly-desktop-${{ matrix.platform }}-${{ matrix.arch }}
+      group: goat-nightly-desktop-${{ needs.prepare.outputs.channel }}-${{ matrix.platform }}-${{ matrix.arch }}
       cancel-in-progress: true
     strategy:
       fail-fast: false
       matrix:
         include:
+          # Hosted: the AppImage icon needs ImageMagick, which the EPYC runners do
+          # not carry and cannot install without sudo.
           - platform: linux
             arch: x64
             target: AppImage
             rust_target: x86_64-unknown-linux-gnu
-            runner: [self-hosted, linux, x64, goat, epyc]
+            runner: ubuntu-24.04
           - platform: linux
             arch: arm64
             target: AppImage
@@ -447,10 +580,11 @@ jobs:
             runner: windows-11-arm
     env:
       VERSION: ${{ needs.prepare.outputs.version }}
-      T3CODE_DESKTOP_SIGNED: "false"
-      T3CODE_DESKTOP_UPDATE_FEED_ENABLED: "true"
-      T3CODE_DESKTOP_UPDATE_REPOSITORY: goat-si/goat-releases
-      T3CODE_DESKTOP_PAYLOAD_REPORT: ${{ github.workspace }}/reports/verify-desktop-${{ matrix.platform }}-${{ matrix.arch }}.json
+      STAGING_TAG: goat-nightly-staging-${{ github.run_id }}
+      GOAT_DESKTOP_SIGNED: "false"
+      GOAT_DESKTOP_UPDATE_FEED_ENABLED: "true"
+      GOAT_DESKTOP_UPDATE_REPOSITORY: goat-si/goat-releases
+      GOAT_DESKTOP_PAYLOAD_REPORT: ${{ github.workspace }}/reports/verify-desktop-${{ matrix.platform }}-${{ matrix.arch }}.json
     defaults:
       run:
         shell: bash
@@ -474,23 +608,32 @@ jobs:
           run-install: false
 
       - name: Install dependencies
-        run: vp install --filter=@t3tools/desktop... --filter=t3... --filter=@t3tools/scripts...
+        run: vp install --filter=@goat/desktop... --filter=goat... --filter=@goat/scripts...
 
       - name: Align package versions
         run: node scripts/update-release-package-versions.ts "$VERSION"
 
-      - name: Download JS bundle
-        uses: actions/download-artifact@v4
-        with:
-          name: js-bundle
-          path: apps
+      # The hand-off tool comes from this workflow's commit, so a run can build any
+      # dev commit, including one older than the tool.
+      - name: Fetch hand-off tool
+        shell: bash
+        env:
+          GOAT_RELEASES_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          for file in nightly-staging.ts lib/github-releases.ts; do
+            curl -fsSL --retry 3 --create-dirs -o "scripts/.staging/$file" \
+              -H "Authorization: Bearer $GOAT_RELEASES_TOKEN" -H "Accept: application/vnd.github.raw+json" \
+              "https://api.github.com/repos/goat-si/goat/contents/scripts/$file?ref=$GITHUB_WORKFLOW_SHA"
+          done
 
-      - name: Download SSH runtime archives
-        uses: actions/download-artifact@v4
-        with:
-          pattern: cli-*
-          merge-multiple: true
-          path: ssh-runtime-archives
+      - name: Fetch JS bundle and SSH runtime archives
+        env:
+          GOAT_RELEASES_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          node scripts/.staging/nightly-staging.ts get --repo goat-si/goat --tag "$STAGING_TAG" --names js-bundle --dir apps
+          node scripts/.staging/nightly-staging.ts get --repo goat-si/goat --tag "$STAGING_TAG" --names 'cli-*' --dir ssh-runtime-archives
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
@@ -501,7 +644,7 @@ jobs:
         if: matrix.platform == 'linux'
         run: |
           set -euo pipefail
-          # EPYC runners already carry these (goat-ci builds the desktop there).
+          # Hosted runners install whatever their image lacks.
           if ! pkg-config --exists libsecret-1 2>/dev/null ||
             ! { command -v magick || command -v convert; } >/dev/null 2>&1; then
             sudo apt-get update
@@ -518,6 +661,22 @@ jobs:
           $component = "Microsoft.VisualStudio.Component.VC.Runtimes.${{ matrix.arch == 'arm64' && 'ARM64' || 'x86.x64' }}.Spectre"
           $proc = Start-Process -FilePath $setupExe -ArgumentList "modify", "--installPath", "`"$installPath`"", "--add", $component, "--quiet", "--norestart" -Wait -PassThru -NoNewWindow
           if ($null -eq $proc -or $proc.ExitCode -ne 0) { exit 1 }
+
+      # Rust embeds dependency source paths (~/.cargo/registry/...) in its binaries,
+      # and the payload check refuses this machine's home and checkout paths.
+      - name: Keep build paths out of Rust binaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          native() { if command -v cygpath >/dev/null 2>&1; then cygpath -w "$1"; else printf '%s' "$1"; fi; }
+          # The last matching prefix wins, so the cargo homes come after the home.
+          flags="--remap-path-prefix=$(native "$HOME")=~"
+          cargo_bin="$(command -v cargo || true)"
+          for cargo_home in "${CARGO_HOME:-$HOME/.cargo}" ${cargo_bin:+"$(dirname "$(dirname "$cargo_bin")")"}; do
+            flags="$flags --remap-path-prefix=$(native "$cargo_home")=/cargo"
+          done
+          flags="$flags --remap-path-prefix=$(native "$GITHUB_WORKSPACE")=/goat-build"
+          echo "RUSTFLAGS=$flags" >> "$GITHUB_ENV"
 
       - name: Build desktop app (unsigned)
         run: |
@@ -544,21 +703,15 @@ jobs:
             for manifest in release-publish/*.yml; do mv "$manifest" "${manifest%.yml}-win-${{ matrix.arch }}.yml"; done
           fi
 
-      - name: Upload desktop assets
-        uses: actions/upload-artifact@v4
-        with:
-          name: desktop-${{ matrix.platform }}-${{ matrix.arch }}
-          path: release-publish/*
-          if-no-files-found: error
-          retention-days: 3
-
-      - name: Upload verification report
-        uses: actions/upload-artifact@v4
-        with:
-          name: verify-desktop-${{ matrix.platform }}-${{ matrix.arch }}
-          path: reports/*
-          if-no-files-found: error
-          retention-days: 3
+      - name: Stage desktop assets and verification report
+        env:
+          GOAT_RELEASES_TOKEN: ${{ github.token }}
+          SHA: ${{ needs.prepare.outputs.sha }}
+        run: |
+          set -euo pipefail
+          stage=(node scripts/.staging/nightly-staging.ts put --repo goat-si/goat --tag "$STAGING_TAG" --target "$SHA")
+          "${stage[@]}" --name "desktop-${{ matrix.platform }}-${{ matrix.arch }}" --dir release-publish
+          "${stage[@]}" --name "verify-desktop-${{ matrix.platform }}-${{ matrix.arch }}" --dir reports
 
   assemble:
     name: Assemble and verify
@@ -569,8 +722,11 @@ jobs:
       needs.desktop_mac.result == 'success' && needs.desktop_other.result == 'success')
     runs-on: [self-hosted, linux, x64, goat, epyc]
     timeout-minutes: 30
+    permissions:
+      contents: write
     env:
       VERSION: ${{ needs.prepare.outputs.version }}
+      STAGING_TAG: goat-nightly-staging-${{ github.run_id }}
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -591,74 +747,84 @@ jobs:
           run-install: false
 
       - name: Install script dependencies
-        run: vp install --filter=@t3tools/scripts...
+        run: vp install --filter=@goat/scripts...
 
-      - name: Download desktop assets
-        uses: actions/download-artifact@v4
-        with:
-          pattern: desktop-*
-          merge-multiple: true
-          path: release
-
-      - name: Download CLI archives
-        uses: actions/download-artifact@v4
-        with:
-          pattern: cli-*
-          merge-multiple: true
-          path: release
-
-      - name: Download verification reports
-        uses: actions/download-artifact@v4
-        with:
-          pattern: verify-*
-          merge-multiple: true
-          path: reports
-
-      - name: Download JS bundle
-        uses: actions/download-artifact@v4
-        with:
-          name: js-bundle
-          path: apps
-
-      - name: Merge update manifests
+      # The hand-off tool comes from this workflow's commit, so a run can build any
+      # dev commit, including one older than the tool.
+      - name: Fetch hand-off tool
+        shell: bash
+        env:
+          GOAT_RELEASES_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          node scripts/merge-update-manifests.ts --platform mac release/nightly-mac.yml release/nightly-mac-x64.yml
-          node scripts/merge-update-manifests.ts --platform win release/nightly-win-x64.yml release/nightly-win-arm64.yml release/nightly.yml
-          rm -f release/nightly-mac-x64.yml release/nightly-win-x64.yml release/nightly-win-arm64.yml
+          for file in nightly-staging.ts lib/github-releases.ts; do
+            curl -fsSL --retry 3 --create-dirs -o "scripts/.staging/$file" \
+              -H "Authorization: Bearer $GOAT_RELEASES_TOKEN" -H "Accept: application/vnd.github.raw+json" \
+              "https://api.github.com/repos/goat-si/goat/contents/scripts/$file?ref=$GITHUB_WORKFLOW_SHA"
+          done
+
+      - name: Fetch build outputs
+        env:
+          GOAT_RELEASES_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          fetch=(node scripts/.staging/nightly-staging.ts get --repo goat-si/goat --tag "$STAGING_TAG")
+          "${fetch[@]}" --names 'desktop-*,cli-*' --dir release
+          "${fetch[@]}" --names 'verify-*' --dir reports
+          "${fetch[@]}" --names js-bundle --dir apps
+
+      - name: Merge update manifests
+        env:
+          MANIFEST: ${{ needs.prepare.outputs.manifest }}
+        run: |
+          set -euo pipefail
+          node scripts/merge-update-manifests.ts --platform mac "release/$MANIFEST-mac.yml" "release/$MANIFEST-mac-x64.yml"
+          node scripts/merge-update-manifests.ts --platform win "release/$MANIFEST-win-x64.yml" "release/$MANIFEST-win-arm64.yml" "release/$MANIFEST.yml"
+          rm -f "release/$MANIFEST-mac-x64.yml" "release/$MANIFEST-win-x64.yml" "release/$MANIFEST-win-arm64.yml"
 
       - name: Add installers and notices
         run: |
           set -euo pipefail
           cp LICENSE release/LICENSE-T3CODE.txt
-          cp scripts/install.sh scripts/install.ps1 release/
+          cp scripts/install.sh scripts/install.ps1 scripts/install-goat-server.sh release/
           node scripts/render-third-party-notices.ts \
             --input apps/server/dist/client/third-party-licenses.json --output release/THIRD_PARTY_NOTICES.md
+
+      - name: Write runtime compatibility manifest
+        run: node scripts/release-runtime-manifest.ts --dir release --version "$VERSION"
 
       - name: Verify release and write SHA256SUMS
         run: node scripts/verify-release-artifacts.ts assemble --dir release --reports reports --version "$VERSION"
 
-      - name: Upload release assets
-        uses: actions/upload-artifact@v4
-        with:
-          name: release-assets
-          path: release/*
-          if-no-files-found: error
-          retention-days: 7
+      - name: Stage release assets
+        env:
+          GOAT_RELEASES_TOKEN: ${{ github.token }}
+          SHA: ${{ needs.prepare.outputs.sha }}
+        run: |
+          node scripts/.staging/nightly-staging.ts put --repo goat-si/goat --tag "$STAGING_TAG" --target "$SHA" \
+            --name release-assets --dir release
 
+  # Publishing is opt-in twice: the repository variable turns the channel on,
+  # and a manual run must also ask for it.
   publish:
     name: Publish to goat-releases
     needs: [prepare, assemble]
     if: >-
       needs.prepare.result == 'success' && needs.prepare.outputs.skip == 'false' &&
-      (!cancelled() && needs.assemble.result == 'success')
+      (!cancelled() && needs.assemble.result == 'success' &&
+      vars.GOAT_RELEASES_PUBLISH == 'true' &&
+      (github.event_name == 'workflow_run' || inputs.publish))
     runs-on: ubuntu-24.04
     timeout-minutes: 60
+    # Reading the draft hand-off needs push access to goat-si/goat.
+    permissions:
+      contents: write
     concurrency:
       group: goat-nightly-publish
       cancel-in-progress: false
     env:
       VERSION: ${{ needs.prepare.outputs.version }}
+      STAGING_TAG: goat-nightly-staging-${{ github.run_id }}
       RELEASE_NAME: ${{ needs.prepare.outputs.name }}
     steps:
       - name: Checkout
@@ -679,13 +845,26 @@ jobs:
           run-install: false
 
       - name: Install script dependencies
-        run: vp install --filter=@t3tools/scripts...
+        run: vp install --filter=@goat/scripts...
 
-      - name: Download release assets
-        uses: actions/download-artifact@v4
-        with:
-          name: release-assets
-          path: release
+      # The hand-off tool comes from this workflow's commit, so a run can build any
+      # dev commit, including one older than the tool.
+      - name: Fetch hand-off tool
+        shell: bash
+        env:
+          GOAT_RELEASES_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          for file in nightly-staging.ts lib/github-releases.ts; do
+            curl -fsSL --retry 3 --create-dirs -o "scripts/.staging/$file" \
+              -H "Authorization: Bearer $GOAT_RELEASES_TOKEN" -H "Accept: application/vnd.github.raw+json" \
+              "https://api.github.com/repos/goat-si/goat/contents/scripts/$file?ref=$GITHUB_WORKFLOW_SHA"
+          done
+
+      - name: Fetch release assets
+        env:
+          GOAT_RELEASES_TOKEN: ${{ github.token }}
+        run: node scripts/.staging/nightly-staging.ts get --repo goat-si/goat --tag "$STAGING_TAG" --names release-assets --dir release
 
       # The only step in this workflow that reads a secret. The token is scoped to
       # goat-si/goat-releases by the App installation.
@@ -698,7 +877,7 @@ jobs:
           owner: goat-si
           repositories: goat-releases
 
-      - name: Publish prerelease
+      - name: Publish release
         id: publish
         env:
           GOAT_RELEASES_TOKEN: ${{ steps.app_token.outputs.token }}
@@ -707,10 +886,107 @@ jobs:
             --version "$VERSION" --name "$RELEASE_NAME"
 
       - name: Prune old nightlies
-        if: steps.publish.outputs.outcome == 'published'
+        if: steps.publish.outputs.outcome == 'published' && needs.prepare.outputs.channel == 'nightly'
         env:
           GOAT_RELEASES_TOKEN: ${{ steps.app_token.outputs.token }}
           GOAT_PROTECTED_TAGS: ${{ vars.GOAT_PROTECTED_TAGS }}
         run: |
           node scripts/prune-nightly-releases.ts --repo goat-si/goat-releases --keep 30 \
             --max-age-days 30 --protect "$GOAT_PROTECTED_TAGS"
+
+      # goat-si/goat's own releases carry the runtime archives too, so the runtime supply
+      # and `goat update` can move there (CLI_RELEASE_REPOSITORY). Only the archives and
+      # their SHA256SUMS lines go there; installers and the desktop feed stay in
+      # goat-releases. GITHUB_TOKEN cannot create a release at a commit whose workflows
+      # differ from the default branch, so this needs the goat-releases App installed on
+      # goat-si/goat; it is skipped until GOAT_SOURCE_RELEASES_PUBLISH is true. Old
+      # nightlies there are not pruned: nothing marks which nightly tags this job owns.
+      - name: Create goat-si/goat release token
+        id: source_token
+        if: >-
+          vars.GOAT_SOURCE_RELEASES_PUBLISH == 'true' &&
+          (steps.publish.outputs.outcome == 'published' || steps.publish.outputs.outcome == 'already-published')
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.GOAT_RELEASES_APP_ID }}
+          private-key: ${{ secrets.GOAT_RELEASES_APP_PRIVATE_KEY }}
+          owner: goat-si
+          repositories: goat
+
+      - name: Publish runtime archives to goat-si/goat
+        if: steps.source_token.outcome == 'success'
+        env:
+          GOAT_RELEASES_TOKEN: ${{ steps.source_token.outputs.token }}
+          SHA: ${{ needs.prepare.outputs.sha }}
+        run: |
+          set -euo pipefail
+          # A build from before --assets-only still published goat-releases above.
+          if ! node scripts/publish-nightly-release.ts --help | grep -q -- '--assets-only'; then
+            echo "::notice::This build predates --assets-only; goat-si/goat gets no runtime release for v$VERSION."
+            exit 0
+          fi
+          mkdir release-runtime
+          grep -E '^[0-9a-f]{64} [ *]goat-[^ ]+(-(darwin|linux|win32)-(arm64|x64)\.(tar\.gz|zip)|-runtime\.json)$' \
+            release/SHA256SUMS > release-runtime/SHA256SUMS
+          while read -r _ name; do cp "release/${name#\*}" release-runtime/; done < release-runtime/SHA256SUMS
+          node scripts/publish-nightly-release.ts --repo goat-si/goat --dir release-runtime --assets-only \
+            --target "$SHA" --version "$VERSION" --name "$RELEASE_NAME"
+  # Deletes this run's hand-off drafts whatever happened, including cancellation,
+  # and any staging draft a crashed run left behind for more than 72 hours. A dry run
+  # (assemble passed, nothing published) keeps the release-assets draft so the
+  # verified files can be inspected; a later run's sweep removes it after 72 hours.
+  cleanup:
+    name: Delete staging release
+    needs: [prepare, js_bundle, cli, desktop_mac, desktop_other, assemble, publish]
+    if: needs.prepare.result == 'success' && needs.prepare.outputs.skip == 'false' && (always())
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    env:
+      STAGING_TAG: goat-nightly-staging-${{ github.run_id }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.prepare.outputs.sha }}
+          persist-credentials: false
+          sparse-checkout: |
+            /*
+            !/.repos/
+          sparse-checkout-cone-mode: false
+
+      - name: Setup Vite+
+        uses: voidzero-dev/setup-vp@v1
+        with:
+          node-version-file: package.json
+          cache: true
+          run-install: false
+
+      - name: Install script dependencies
+        run: vp install --filter=@goat/scripts...
+
+      # The hand-off tool comes from this workflow's commit, so a run can build any
+      # dev commit, including one older than the tool.
+      - name: Fetch hand-off tool
+        shell: bash
+        env:
+          GOAT_RELEASES_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          for file in nightly-staging.ts lib/github-releases.ts; do
+            curl -fsSL --retry 3 --create-dirs -o "scripts/.staging/$file" \
+              -H "Authorization: Bearer $GOAT_RELEASES_TOKEN" -H "Accept: application/vnd.github.raw+json" \
+              "https://api.github.com/repos/goat-si/goat/contents/scripts/$file?ref=$GITHUB_WORKFLOW_SHA"
+          done
+
+      - name: Delete staging release
+        env:
+          GOAT_RELEASES_TOKEN: ${{ github.token }}
+          ASSEMBLE: ${{ needs.assemble.result }}
+          PUBLISH: ${{ needs.publish.result }}
+        run: |
+          set -euo pipefail
+          keep=""
+          if [ "$ASSEMBLE" = success ] && [ "$PUBLISH" = skipped ]; then keep=release-assets; fi
+          node scripts/.staging/nightly-staging.ts cleanup --repo goat-si/goat --tag "$STAGING_TAG" --keep "$keep"

@@ -1,7 +1,10 @@
+import { useAtomValue } from "@effect/atom-react";
+import { environmentServerConfigsAtom } from "../../state/server";
+import { supportsMemoryProtocol } from "@goat/contracts";
 import { useNavigation } from "@react-navigation/native";
-import type { EnvironmentThreadSearchMatch } from "@t3tools/client-runtime/state/thread-search";
-import { THREAD_JUMP_KEYBINDING_COMMANDS } from "@t3tools/contracts";
-import { threadPullRequestSearchTerms } from "@t3tools/shared/threadPullRequests";
+import type { EnvironmentThreadSearchMatch } from "@goat/client-runtime/state/thread-search";
+import { THREAD_JUMP_KEYBINDING_COMMANDS } from "@goat/contracts";
+import { threadPullRequestSearchTerms } from "@goat/shared/threadPullRequests";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   FlatList,
@@ -17,10 +20,10 @@ import {
 
 import { GestureHandlerRootView } from "react-native-gesture-handler";
 
-import { GlassSurface } from "../../components/GlassSurface";
-import { RowPressable } from "../../components/RowPressable";
-import { AppText as Text } from "../../components/AppText";
-import { SymbolView, type AppSymbolName } from "../../components/AppSymbol";
+import { GlassSurface } from "../../components/ui/GlassSurface";
+import { RowPressable } from "../../components/ui/RowPressable";
+import { AppText as Text } from "../../components/ui/AppText";
+import { SymbolView, type AppSymbolName } from "../../components/ui/AppSymbol";
 import { cn } from "../../lib/cn";
 import { scopedProjectKey, scopedThreadKey } from "../../lib/scopedEntities";
 import { T3KeyboardCommands } from "../../native/T3KeyboardCommands";
@@ -33,11 +36,13 @@ import { useAppearancePreferences } from "../settings/appearance/AppearancePrefe
 import { ThreadSearchMatchExcerpt } from "../threads/thread-search-match";
 import {
   filterCommandPaletteItems,
+  memoryPaletteItem,
   nextPaletteIndex,
   type CommandPaletteItem,
 } from "./commandPaletteItems";
 import { parseActiveThreadPath, type HardwareKeyboardCommand } from "./hardwareKeyboardCommands";
 import { threadJumpIndex } from "./threadKeyboardShortcuts";
+import { PullRequestGlyph } from "../pull-requests/pullRequestGlyphs";
 
 const PALETTE_COMMANDS: ReadonlyArray<HardwareKeyboardCommand> = [
   "commandPalette",
@@ -52,6 +57,7 @@ const ACTION_ICONS: Record<string, AppSymbolName> = {
   newTask: "square.and.pencil",
   newThread: "square.and.pencil",
   addProject: "folder.badge.plus",
+  memory: "brain",
   settings: "gearshape",
   appearance: "paintbrush",
   environments: "desktopcomputer",
@@ -59,7 +65,7 @@ const ACTION_ICONS: Record<string, AppSymbolName> = {
   archive: "archivebox",
   files: "doc.text",
   terminal: "terminal",
-  review: "arrow.triangle.pull",
+  review: PullRequestGlyph.pullRequest,
   copyThreadReference: "link",
 };
 
@@ -146,6 +152,7 @@ export function CommandPalette(props: {
   const activeThreadRef = useMemo(() => parseActiveThreadPath(props.pathname), [props.pathname]);
   const activeThread = useThreadShell(activeThreadRef);
   const environments = useWorkspaceEnvironments();
+  const memoryConfigs = useAtomValue(environmentServerConfigsAtom);
   const { savedConnectionsById } = useSavedRemoteConnections();
   const [query, setQuery] = useState("");
   const [selection, setSelection] = useState<string | null>(null);
@@ -260,6 +267,41 @@ export function CommandPalette(props: {
           }),
       },
     ];
+    const activeMemoryConfig = activeThreadRef
+      ? memoryConfigs.get(activeThreadRef.environmentId)
+      : undefined;
+    if (
+      activeThreadRef
+        ? activeMemoryConfig && supportsMemoryProtocol(activeMemoryConfig.environment.capabilities)
+        : [...memoryConfigs.values()].some((config) =>
+            supportsMemoryProtocol(config.environment.capabilities),
+          )
+    ) {
+      actions.push(
+        memoryPaletteItem(() =>
+          navigation.navigate("SettingsSheet", {
+            screen: "SettingsContent",
+            params: {
+              screen: "SettingsMemory",
+              params: activeThreadRef
+                ? {
+                    environmentId: activeThreadRef.environmentId,
+                    thread: activeThreadRef,
+                    ...(activeThread
+                      ? {
+                          project: {
+                            environmentId: activeThread.environmentId,
+                            projectId: activeThread.projectId,
+                          },
+                        }
+                      : {}),
+                  }
+                : undefined,
+            },
+          }),
+        ),
+      );
+    }
     const projectByKey = new Map(
       projects.map((project) => [scopedProjectKey(project.environmentId, project.id), project]),
     );
@@ -344,6 +386,7 @@ export function CommandPalette(props: {
     return [...actions, ...projectItems, ...threadItems];
   }, [
     activeThread,
+    memoryConfigs,
     activeThreadRef,
     navigation,
     projects,

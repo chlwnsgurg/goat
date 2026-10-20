@@ -10,7 +10,7 @@ import {
   type OrchestrationV2ProviderSession,
   ProviderDriverKind,
   type ThreadId,
-} from "@t3tools/contracts";
+} from "@goat/contracts";
 import * as Context from "effect/Context";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
@@ -19,7 +19,7 @@ import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
 
 import * as CursorSdk from "./CursorSdk.ts";
-import * as ProviderEventLoggers from "@t3tools/provider-core/server/ProviderEventLoggers";
+import * as ProviderEventLoggers from "@goat/provider-core/server/ProviderEventLoggers";
 
 export const CURSOR_AGENT_SDK_PROTOCOL = "cursor-agent-sdk.local" as const;
 export const CURSOR_PROVIDER = ProviderDriverKind.make("cursor");
@@ -36,7 +36,34 @@ export class CursorAgentSdkRunnerError extends Schema.TaggedError<CursorAgentSdk
   }
 }
 
-const isCursorAgentSdkRunnerError = Schema.is(CursorAgentSdkRunnerError);
+/** The failure text a user sees: the SDK's own reason, which the error's message leaves out. */
+export function cursorSdkFailureMessage(error: CursorAgentSdkRunnerError): string {
+  const reason = sdkErrorReason(error.cause);
+  return reason === undefined
+    ? error.message
+    : `Cursor Agent SDK ${error.method} failed: ${reason}`;
+}
+
+/** Codes Cursor sends when it has no specific one. */
+const GENERIC_SDK_ERROR_CODES = new Set(["", "error", "unknown"]);
+
+/** The SDK's own message, with the code and HTTP status its errors carry. */
+function sdkErrorReason(cause: unknown): string | undefined {
+  if (!(cause instanceof Error)) return undefined;
+  const message = cause.message.trim();
+  if (message.length === 0) return undefined;
+  const code = Reflect.get(cause, "code");
+  const status = Reflect.get(cause, "status");
+  const details = [
+    ...(typeof code === "string" && !GENERIC_SDK_ERROR_CODES.has(code) && !message.includes(code)
+      ? [code]
+      : []),
+    ...(typeof status === "number" ? [`HTTP ${status}`] : []),
+  ];
+  return details.length === 0 ? message : `${message} (${details.join(", ")})`;
+}
+
+export const isCursorAgentSdkRunnerError = Schema.is(CursorAgentSdkRunnerError);
 
 export interface CursorAgentSdkOpenInput {
   readonly operation: "create" | "resume";
@@ -48,6 +75,8 @@ export interface CursorAgentSdkOpenInput {
 
 export interface CursorAgentSdkSendInput<Error> {
   readonly message: string | SDKUserMessage;
+  /** Process-local admission for recovery sends; message is the prepared first admission. */
+  readonly prepareMessage?: () => Effect.Effect<string | SDKUserMessage, CursorAgentSdkRunnerError>;
   readonly options?: Omit<SendOptions, "onDelta">;
   readonly onDelta?: (update: InteractionUpdate) => Effect.Effect<void, Error>;
 }
@@ -76,7 +105,7 @@ export class CursorAgentSdkRunner extends Context.Service<
     ) => Effect.Effect<CursorAgentSdkSession, CursorAgentSdkRunnerError>;
     readonly assertComplete: Effect.Effect<void, CursorAgentSdkRunnerError>;
   }
->()("@t3tools/provider-cursor/server/CursorAgentSdk/CursorAgentSdkRunner") {}
+>()("@goat/provider-cursor/server/CursorAgentSdk/CursorAgentSdkRunner") {}
 
 export interface CursorAgentSdkLoggedAgentOptions {
   readonly model?: AgentOptions["model"];
@@ -298,12 +327,6 @@ function makeCursorAgentSdkProtocolLogger(input: {
       .pipe(Effect.ignore);
 }
 
-/**
- * Runs agents through the Cursor SDK, logging every frame to the protocol
- * logger chosen for each opened agent. The live layer writes the native
- * provider event log; the replay recorder turns the same frames into a
- * transcript.
- */
 export const makeCursorAgentSdkRunner = Effect.fn("makeCursorAgentSdkRunner")(function* (
   protocolLoggerFor: (input: CursorAgentSdkOpenInput) => CursorAgentSdkProtocolLogger | undefined,
 ) {
@@ -311,14 +334,10 @@ export const makeCursorAgentSdkRunner = Effect.fn("makeCursorAgentSdkRunner")(fu
 
   /**
    * The Cursor SDK decides once per process whether local sandboxing works, and
-   * caches the answer the first time any run starts. Only sandboxed runs point
-   * it at its `cursorsandbox` helper first, so after an unsandboxed (Full access)
+   * caches the answer the first time any run starts. Only sandboxed runs point it
+   * at its `cursorsandbox` helper first, so after an unsandboxed (Full access)
    * run it caches "unsupported" and rejects every later sandboxed run until the
-   * server restarts. Warming a bare sandboxed executor before the first
-   * unsandboxed agent opens lets the SDK find the helper and cache the real
-   * answer. Warming is best effort: on a machine without sandbox support it
-   * fails, the SDK caches "unsupported", and sandboxed runs report that as
-   * before.
+   * server restarts.
    */
   const sandboxSupportPrimeStarted = yield* Ref.make(false);
   const sandboxSupportPrimed = yield* Deferred.make<void>();
@@ -395,16 +414,6 @@ export const makeCursorAgentSdkRunner = Effect.fn("makeCursorAgentSdkRunner")(fu
         agentId: agent.agentId,
         send: Effect.fn("CursorAgentSdkSession.send")(function* (sendInput) {
           const context = yield* Effect.context();
-          yield* log({
-            direction: "outgoing",
-            stage: "decoded",
-            payload: {
-              type: "run.start",
-              message: sendInput.message,
-              options: loggedCursorSendOptions(sendInput.options),
-            },
-          });
-
           let callbacksReady = false;
           const pendingUpdates: Array<InteractionUpdate> = [];
           let callbackFailure: { readonly cause: unknown } | undefined;
@@ -434,20 +443,37 @@ export const makeCursorAgentSdkRunner = Effect.fn("makeCursorAgentSdkRunner")(fu
             return callbackChain;
           };
 
-          const startRun = () =>
-            Effect.tryPromise({
-              try: () =>
-                agent.send(sendInput.message, {
-                  ...sendInput.options,
-                  onDelta: async ({ update }) => {
-                    if (!callbacksReady) {
-                      pendingUpdates.push(update);
-                      return;
-                    }
-                    await dispatchUpdate(update);
-                  },
-                }),
-              catch: (cause) => runnerError(cause, "run.start"),
+          const startRun = (recovering = false) =>
+            Effect.gen(function* () {
+              const message =
+                recovering && sendInput.prepareMessage
+                  ? yield* sendInput
+                      .prepareMessage()
+                      .pipe(Effect.mapError((cause) => runnerError(cause, "run.prepareMessage")))
+                  : sendInput.message;
+              yield* log({
+                direction: "outgoing",
+                stage: "decoded",
+                payload: {
+                  type: "run.start",
+                  message,
+                  options: loggedCursorSendOptions(sendInput.options),
+                },
+              });
+              return yield* Effect.tryPromise({
+                try: () =>
+                  agent.send(message, {
+                    ...sendInput.options,
+                    onDelta: async ({ update }) => {
+                      if (!callbacksReady) {
+                        pendingUpdates.push(update);
+                        return;
+                      }
+                      await dispatchUpdate(update);
+                    },
+                  }),
+                catch: (cause) => runnerError(cause, "run.start"),
+              });
             });
           const run = yield* startRun().pipe(
             Effect.catchIf(
@@ -474,7 +500,7 @@ export const makeCursorAgentSdkRunner = Effect.fn("makeCursorAgentSdkRunner")(fu
                     try: () => Agent.cancelRun(activeRun.id, runOptions),
                     catch: (cause) => runnerError(cause, "agent.cancelRun"),
                   });
-                  return yield* startRun();
+                  return yield* startRun(true);
                 }),
             ),
           );

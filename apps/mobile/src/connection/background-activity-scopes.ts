@@ -1,5 +1,5 @@
-import type { EnvironmentRpcSubscriptionObservation } from "@t3tools/client-runtime/rpc";
-import { type BackgroundScope, type EnvironmentId, WS_METHODS } from "@t3tools/contracts";
+import type { EnvironmentRpcSubscriptionObservation } from "@goat/client-runtime/rpc";
+import { type BackgroundScope, type EnvironmentId, WS_METHODS } from "@goat/contracts";
 import * as Effect from "effect/Effect";
 
 interface RetainedScope {
@@ -15,9 +15,7 @@ function notify(): void {
   for (const listener of listeners) {
     try {
       listener();
-    } catch {
-      // A failing observer must not corrupt retained-scope lifetime.
-    }
+    } catch {}
   }
 }
 

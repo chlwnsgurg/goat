@@ -17,8 +17,9 @@ import * as Option from "effect/Option";
 
 import * as Electron from "electron";
 
-import * as NetService from "@t3tools/shared/Net";
-import * as HostProcess from "@t3tools/shared/HostProcess";
+import * as NetService from "@goat/shared/Net";
+import * as HostProcess from "@goat/shared/HostProcess";
+import { adoptLegacyEnv } from "@goat/contracts/legacyT3Names";
 import serverPackageJson from "../../server/package.json" with { type: "json" };
 
 import * as DesktopIpc from "./ipc/DesktopIpc.ts";
@@ -43,6 +44,7 @@ import * as DesktopApplicationMenu from "./window/DesktopApplicationMenu.ts";
 import * as DesktopAssets from "./app/DesktopAssets.ts";
 import * as DesktopBackendConfiguration from "./backend/DesktopBackendConfiguration.ts";
 import * as DesktopBackendPool from "./backend/DesktopBackendPool.ts";
+import * as DesktopHeadlessServer from "./backend/DesktopHeadlessServer.ts";
 import * as DesktopLocalEnvironmentAuth from "./backend/DesktopLocalEnvironmentAuth.ts";
 import * as DesktopNetworkInterfaces from "./backend/DesktopNetworkInterfaces.ts";
 import * as DesktopEnvironment from "./app/DesktopEnvironment.ts";
@@ -61,10 +63,14 @@ import * as DesktopPreReadyFileSystem from "./app/DesktopPreReadyFileSystem.ts";
 import * as DesktopPreReadyPlatform from "./app/DesktopPreReadyPlatform.ts";
 import * as DesktopShellEnvironment from "./shell/DesktopShellEnvironment.ts";
 import * as DesktopSshEnvironment from "./ssh/DesktopSshEnvironment.ts";
+import { DESKTOP_BUILD_COMMIT_TIME } from "./ssh/buildCommitTime.ts";
 import { resolveDesktopSshCliRunner } from "./ssh/desktopSshCliRunner.ts";
 import * as DesktopSshPasswordPrompts from "./ssh/DesktopSshPasswordPrompts.ts";
 import * as DesktopState from "./app/DesktopState.ts";
 import * as DesktopLegacyLocalStorage from "./app/DesktopLegacyLocalStorage.ts";
+import * as DesktopRendererOriginMigration from "./app/DesktopRendererOriginMigration.ts";
+import * as DesktopSafeStorageKeyMigration from "./app/DesktopSafeStorageKeyMigration.ts";
+import * as DesktopSafeStorageSiblingKeys from "./app/DesktopSafeStorageSiblingKeys.ts";
 import * as DesktopTelemetryPublisher from "./telemetry/DesktopTelemetryPublisher.ts";
 import * as DesktopRendererHistory from "./telemetry/DesktopRendererHistory.ts";
 import * as DesktopUpdates from "./updates/DesktopUpdates.ts";
@@ -79,6 +85,10 @@ import * as DesktopWslBackend from "./wsl/DesktopWslBackend.ts";
 import * as DesktopWslEnvironment from "./wsl/DesktopWslEnvironment.ts";
 import * as DesktopWslServerTree from "./wsl/DesktopWslServerTree.ts";
 
+// Shells and launchers configured before the GOAT rename still set legacy names. They stay
+// set for children that may run an older build, such as a WSL backend.
+adoptLegacyEnv(process.env);
+
 if (process.argv.includes("--version")) {
   try {
     NodeFS.writeSync(process.stdout.fd, `${Electron.app.getVersion()}\n`);
@@ -87,6 +97,19 @@ if (process.argv.includes("--version")) {
   }
   Electron.app.exit(0);
 }
+
+// Electron reads app.name once, before the event loop starts, to name the safeStorage key (macOS
+// Keychain item, Linux keyring entry). Set the runtime name here, synchronously. Builds that set
+// it later left their key under the initial package name, which the key migration copies from.
+const initialRuntimeName = Electron.app.name;
+Electron.app.setName(
+  DesktopEnvironment.desktopRuntimeAppName(
+    DesktopEnvironment.resolveDesktopAppBranding({
+      isDevelopment: (process.env.VITE_DEV_SERVER_URL ?? "").trim() !== "",
+      appVersion: Electron.app.getVersion(),
+    }).stageLabel,
+  ),
+);
 
 const layerDesktopEnvironment = Layer.unwrap(
   Effect.gen(function* () {
@@ -130,6 +153,7 @@ const layerDesktopSshEnvironment = Layer.unwrap(
             ...(releaseBaseUrl === undefined ? {} : { releaseBaseUrl }),
           },
           serverPackageJson,
+          DESKTOP_BUILD_COMMIT_TIME,
         ),
       ),
     });
@@ -142,7 +166,6 @@ const layerElectron = Layer.mergeAll(
   ElectronMenu.layer,
   ElectronPowerMonitor.layer,
   ElectronProtocol.layer,
-  ElectronSafeStorage.layer,
   ElectronShell.layer,
   ElectronTheme.layer,
   ElectronUpdater.layer,
@@ -155,13 +178,18 @@ const layerDesktopFoundation = Layer.mergeAll(
   DesktopState.layer,
   DesktopShutdown.layer,
   DesktopLegacyLocalStorage.layer,
+  DesktopSafeStorageKeyMigration.layer({ initialRuntimeName }),
+  DesktopRendererOriginMigration.layer,
   DesktopAppSettings.layer,
   DesktopClientSettings.layer,
-  DesktopConnectionCatalogStore.layer.pipe(Layer.provideMerge(DesktopSavedEnvironments.layer)),
+  DesktopConnectionCatalogStore.layer.pipe(
+    Layer.provideMerge(DesktopSavedEnvironments.layer),
+    Layer.provideMerge(DesktopSafeStorageSiblingKeys.layer),
+  ),
   DesktopAssets.layer,
   DesktopObservability.layer,
   DesktopRendererHistory.layer,
-).pipe(Layer.provideMerge(layerDesktopEnvironment));
+).pipe(Layer.provideMerge(ElectronSafeStorage.layer), Layer.provideMerge(layerDesktopEnvironment));
 
 const layerDesktopSsh = layerDesktopSshEnvironment.pipe(
   Layer.provideMerge(DesktopSshPasswordPrompts.layer()),
@@ -199,23 +227,16 @@ const layerDesktopAppActivation = DesktopAppActivation.layer.pipe(
   Layer.provide(layerDesktopWindow),
 );
 
-// Pool layer instantiates the backend factory once for the Windows
-// primary instance and exposes it via pool.primary. Consumers go through
-// the pool now; the legacy DesktopBackendManager service is gone. The
-// WSL second instance gets registered later in the migration. See
-// DesktopBackendPool.ts header for the full rollout plan.
 const layerDesktopBackend = DesktopBackendPool.layer.pipe(
   Layer.provideMerge(DesktopAppIdentity.layer),
   Layer.provideMerge(DesktopBackendConfiguration.layer),
+  Layer.provideMerge(DesktopShellEnvironment.layer),
   Layer.provideMerge(DesktopWslEnvironment.layer),
   Layer.provideMerge(DesktopWslServerTree.layer),
   Layer.provideMerge(DesktopTelemetryPublisher.layer),
   Layer.provideMerge(layerDesktopWindow),
 );
 
-// WSL orchestrator hangs off the backend layer because it needs the
-// pool + configuration + serverExposure; it pulls NetService and the
-// foundation services through the same provideMerge chain.
 const layerDesktopWslBackend = DesktopWslBackend.layer.pipe(
   Layer.provideMerge(layerDesktopBackend),
 );
@@ -231,7 +252,7 @@ const layerDesktopApplication = Layer.mergeAll(
   DesktopApplicationMenu.layer,
   DesktopLinuxUrlHandler.layer,
   DesktopCliCommand.layer,
-  DesktopShellEnvironment.layer,
+  DesktopHeadlessServer.layer,
   layerDesktopSystemWake,
 ).pipe(
   Layer.provideMerge(layerDesktopSnapShot),

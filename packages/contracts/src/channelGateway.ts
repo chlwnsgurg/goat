@@ -1,7 +1,14 @@
 import * as Schema from "effect/Schema";
 
 import { AuthEnvironmentScopes } from "./auth.ts";
-import { IsoDateTime, PositiveInt, ThreadId, TrimmedNonEmptyString } from "./baseSchemas.ts";
+import {
+  EnvironmentId,
+  IsoDateTime,
+  NonNegativeInt,
+  PositiveInt,
+  ThreadId,
+  TrimmedNonEmptyString,
+} from "./baseSchemas.ts";
 import { ChatAttachment } from "./chatAttachment.ts";
 import {
   ChannelActorRef,
@@ -19,6 +26,7 @@ import {
 } from "./channelCommon.ts";
 import { ChannelBotRef, ChannelTask, ChannelTaskChip, ChannelTaskStatus } from "./channelLedger.ts";
 import { RuntimeMode } from "./providerPolicy.ts";
+import { GoatBotHomeClaim } from "./settings.ts";
 
 /**
  * The one door channel input comes through. Every transport (the GOAT bot, Slack, MCP agents)
@@ -119,6 +127,8 @@ export const ChannelOutboundMessage = Schema.Struct({
   chip: Schema.optional(ChannelTaskChip),
   /** The original requester to tag, such as a Slack user id. */
   mentionActorId: Schema.optional(TrimmedNonEmptyString),
+  /** Answers a question offers; transports without buttons list them in the text. */
+  options: Schema.optional(Schema.Array(TrimmedNonEmptyString)),
 });
 export type ChannelOutboundMessage = typeof ChannelOutboundMessage.Type;
 
@@ -215,6 +225,7 @@ const CHANNEL_GATEWAY_FAILURE_MESSAGES = {
   persistence_failed: "Could not store the channel message.",
   delivery_failed: "Could not deliver the channel message.",
   not_found: "The requested channel record does not exist.",
+  not_home: "GOAT Bot runs on another machine in this cluster.",
 } as const;
 
 export const ChannelGatewayErrorReason = Schema.Literals(
@@ -241,6 +252,8 @@ export class ChannelGatewayError extends Schema.TaggedError<ChannelGatewayError>
      */
     deliveryOutcome: Schema.optionalKey(Schema.Literals(["not_sent", "unknown"])),
     deliveryErrorCode: Schema.optionalKey(ChannelDeliveryErrorCode),
+    /** For `not_home`: the environment the cluster's GOAT Bot home claim names. */
+    homeEnvironmentId: Schema.optionalKey(EnvironmentId),
   },
 ) {
   override get message(): string {
@@ -256,6 +269,21 @@ export type ChannelEnsureBotInput = typeof ChannelEnsureBotInput.Type;
 
 export const ChannelEnsureBotResult = ChannelBotRef;
 export type ChannelEnsureBotResult = ChannelBotRef;
+
+/**
+ * What a client shows about the GOAT bot without opening it: which thread is the bot (null until
+ * an `ensureBot` creates one; this never creates it) and how many tasks, from any channel, wait on
+ * a person: an open question, or a worker thread that needs an answer, approval, sign-in or resume.
+ * Tasks already waiting when the bot thread was last visited (`thread.visit`) count as read.
+ */
+export const ChannelGetBotStatusInput = Schema.Struct({});
+export type ChannelGetBotStatusInput = typeof ChannelGetBotStatusInput.Type;
+
+export const ChannelGetBotStatusResult = Schema.Struct({
+  bot: Schema.NullOr(ChannelBotRef),
+  waitingCount: NonNegativeInt,
+});
+export type ChannelGetBotStatusResult = typeof ChannelGetBotStatusResult.Type;
 
 export const ChannelGetTaskInput = Schema.Struct({ taskId: ChannelTaskId });
 export type ChannelGetTaskInput = typeof ChannelGetTaskInput.Type;
@@ -277,11 +305,46 @@ export const ChannelListTasksResult = Schema.Struct({
 });
 export type ChannelListTasksResult = typeof ChannelListTasksResult.Type;
 
+export const ChannelTaskMoveInput = Schema.Struct({
+  taskId: ChannelTaskId,
+  host: TrimmedNonEmptyString,
+});
+export type ChannelTaskMoveInput = typeof ChannelTaskMoveInput.Type;
+
+export const ChannelTaskMoveResult = Schema.Struct({
+  taskId: ChannelTaskId,
+  generation: PositiveInt,
+  host: TrimmedNonEmptyString,
+  fromHost: TrimmedNonEmptyString,
+  replicaCapturedAt: IsoDateTime,
+});
+export type ChannelTaskMoveResult = typeof ChannelTaskMoveResult.Type;
+
 export const ChannelGetInputInput = Schema.Struct({ inputId: ChannelInputId });
 export type ChannelGetInputInput = typeof ChannelGetInputInput.Type;
 
+/** Where GOAT Bot lives, as this server's settings record it. */
+export const ChannelBotHomeStatus = Schema.Struct({
+  /** The winning claim this server holds; null until some client or agent claims a home. */
+  home: Schema.NullOr(GoatBotHomeClaim),
+  /** This server's environment. */
+  environmentId: EnvironmentId,
+  /** Whether this server may run GOAT Bot: it is the home, or no home is claimed yet. */
+  isHome: Schema.Boolean,
+});
+export type ChannelBotHomeStatus = typeof ChannelBotHomeStatus.Type;
+
+export const ChannelBotHomeClaimResult = Schema.Struct({
+  /** False when a newer claim, written meanwhile, still names another machine. */
+  claimed: Schema.Boolean,
+  home: GoatBotHomeClaim,
+  environmentId: EnvironmentId,
+});
+export type ChannelBotHomeClaimResult = typeof ChannelBotHomeClaimResult.Type;
+
 export const CHANNEL_GATEWAY_WS_METHODS = {
   ensureBot: "channel.ensureBot",
+  getBotStatus: "channel.getBotStatus",
   ingest: "channel.ingest",
   getTask: "channel.getTask",
   listTasks: "channel.listTasks",
@@ -297,4 +360,7 @@ export const CHANNEL_MCP_TOOL_NAMES = {
   taskGet: "channel_task_get",
   taskList: "channel_task_list",
   taskReport: "channel_task_report",
+  taskMove: "channel_task_move",
+  botHome: "channel_bot_home",
+  botHomeClaim: "channel_bot_home_claim",
 } as const;

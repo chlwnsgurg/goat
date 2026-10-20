@@ -130,14 +130,11 @@ function summarizePayload(payload: DiscordWebhookPayload) {
   } as const;
 }
 
-// Keep release text inert, including occurrences of the intentionally pinged role.
 const suppressMentions = (text: string) =>
   text.replace(/@(everyone|here)\b|<@[!&]?\d+>/g, (mention) => mention.replace("@", "@\u200b"));
 
 const escapeLinkLabel = (text: string) => text.replace(/[\\[\]]/g, "\\$&");
 
-// Compact GitHub's generated entries and comparison link, preserving custom
-// notes. Contributor links are GitHub profiles, not pings.
 function formatReleaseNotes(notes: string) {
   return notes
     .replace(
@@ -161,8 +158,6 @@ function formatReleaseNotes(notes: string) {
     );
 }
 
-// Preserve every character and prefer whole lines, then words. A single oversized
-// line still needs splitting, but never between the halves of a Unicode character.
 function splitDescription(text: string, limit: number) {
   const chunks: string[] = [];
   while (text.length > limit) {
@@ -196,7 +191,7 @@ export const buildDiscordReleaseAnnouncement = (
 
   const intro =
     options.target === "prerelease"
-      ? "A new T3 Code prerelease is available for nightly testers."
+      ? "A new GOAT prerelease is available for nightly testers."
       : `[View full release notes on GitHub](${options.releaseUrl.href})`;
   const notes =
     options.target === "prerelease"
@@ -285,7 +280,6 @@ export const postDiscordWebhook = Effect.fn("postDiscordWebhook")(function* (
   const response = yield* HttpClientRequest.post(requestUrl).pipe(
     HttpClientRequest.bodyJson(payload),
     Effect.flatMap(httpClient.execute),
-    // Bound requests and retry waits together without shortening Retry-After.
     Effect.timeout("1 minute"),
     Effect.mapError(
       (error) =>
@@ -387,7 +381,7 @@ export const notifyDiscordReleaseCommand = Command.make(
       }
       yield* Effect.logInfo("discord release announcement completed");
     }),
-).pipe(Command.withDescription("Post a T3 Code release announcement to Discord."));
+).pipe(Command.withDescription("Post a GOAT release announcement to Discord."));
 
 if (import.meta.main) {
   Command.run(notifyDiscordReleaseCommand, { version: "0.0.0" }).pipe(

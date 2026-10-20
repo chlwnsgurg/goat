@@ -9,7 +9,7 @@ import {
   OrchestrationV2Run,
   OrchestrationV2ThreadProjection,
   ThreadId,
-} from "@t3tools/contracts";
+} from "@goat/contracts";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
@@ -31,11 +31,7 @@ export class ThreadForkPlanError extends Schema.TaggedError<ThreadForkPlanError>
 ) {}
 
 /**
- * Fork copies a provider-finished conversation. Usage-limited and other
- * failed, interrupted, or cancelled turns still have a native thread (or a
- * portable transcript) even though the run did not complete successfully.
  * `waiting` is provider-finished with checkpoint capture still pending.
- * In-progress and rolled-back runs are not forkable.
  */
 export function isForkableSourceRunStatus(status: OrchestrationV2Run["status"]): boolean {
   return (
@@ -62,6 +58,8 @@ export interface ThreadForkServiceV2Shape {
     readonly transferId: ContextTransferId;
     readonly targetThreadId: ThreadId;
     readonly title?: string;
+    /** Makes the fork a hidden side chat of the source thread. */
+    readonly sideChat?: boolean;
     readonly createdBy: OrchestrationV2Actor;
     readonly creationSource: OrchestrationV2CreationSource;
     readonly createdAt: DateTime.Utc;
@@ -71,7 +69,7 @@ export interface ThreadForkServiceV2Shape {
 export class ThreadForkServiceV2 extends Context.Service<
   ThreadForkServiceV2,
   ThreadForkServiceV2Shape
->()("t3/orchestration-v2/ThreadForkService/ThreadForkServiceV2") {}
+>()("goat/orchestration-v2/ThreadForkService/ThreadForkServiceV2") {}
 
 export const layer: Layer.Layer<ThreadForkServiceV2> = Layer.succeed(
   ThreadForkServiceV2,
@@ -85,10 +83,19 @@ export const layer: Layer.Layer<ThreadForkServiceV2> = Layer.succeed(
             cause: forkableSourceRunStatusError(input.sourceRun),
           });
         }
-        // A fork is the user's own thread: it does not inherit who launched the source.
-        const { launchedBy: _sourceLauncher, ...sourceThread } = input.sourceProjection.thread;
+        // A fork is the user's own thread: it does not inherit who launched the source,
+        // and it is a side chat only when asked, even when its source is one.
+        const {
+          launchedBy: _sourceLauncher,
+          sideChatOf: _sourceSideChatOf,
+          ...sourceThread
+        } = input.sourceProjection.thread;
         const targetThread: OrchestrationV2AppThread = {
           ...sourceThread,
+          // PR context follows the conversation; watching remains the source thread's responsibility.
+          pullRequests: input.sourceProjection.thread.pullRequests?.map(
+            ({ watch: _watch, ...link }) => link,
+          ),
           createdBy: input.createdBy,
           creationSource: input.creationSource,
           id: input.targetThreadId,
@@ -99,6 +106,7 @@ export const layer: Layer.Layer<ThreadForkServiceV2> = Layer.succeed(
             relationshipToParent: "fork",
             rootThreadId: input.sourceProjection.thread.lineage.rootThreadId,
           },
+          ...(input.sideChat === true ? { sideChatOf: input.sourceProjection.thread.id } : {}),
           forkedFrom: {
             type: "run",
             threadId: input.sourceProjection.thread.id,

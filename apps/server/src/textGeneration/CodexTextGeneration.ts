@@ -1,3 +1,9 @@
+import * as HomeRoute from "../provider/OpenCodexRoute.ts";
+import { ProviderDriverKind } from "@goat/contracts";
+import {
+  withMemoryExecution,
+  type MemoryGenerationRunnerContext,
+} from "@goat/provider-core/server/memoryGenerationRunner";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Option from "effect/Option";
@@ -12,21 +18,21 @@ import {
   DEFAULT_TEXT_GENERATION_REASONING_EFFORT,
   type ServerProviderModel,
   TextGenerationError,
-} from "@t3tools/contracts";
-import { resolveSpawnCommand } from "@t3tools/shared/shell";
+} from "@goat/contracts";
+import { resolveSpawnCommand } from "@goat/shared/shell";
 
 import { resolveAttachmentPath } from "../attachmentStore.ts";
 import * as ServerConfig from "../config.ts";
-import { expandHomePath } from "@t3tools/provider-core/server/pathExpansion";
+import { expandHomePath } from "@goat/provider-core/server/pathExpansion";
 import { codexExecLaunchArgs, resolveCodexLaunchArgs } from "../provider/codexLaunchArgs.ts";
-import * as TextGenerationOperations from "@t3tools/provider-core/server/textGenerationOperations";
+import * as TextGenerationOperations from "@goat/provider-core/server/textGenerationOperations";
 import {
   normalizeCliError,
-  toJsonSchemaObject,
-} from "@t3tools/provider-core/server/textGenerationUtils";
-import { codexModelFamily, getModelSelectionStringOptionValue } from "@t3tools/shared/model";
+  toStrictJsonSchemaObject,
+} from "@goat/provider-core/server/textGenerationUtils";
+import { codexModelFamily, getModelSelectionStringOptionValue } from "@goat/shared/model";
 import { getCodexServiceTierOptionValue } from "../codexModelOptions.ts";
-import * as HostProcess from "@t3tools/shared/HostProcess";
+import * as HostProcess from "@goat/shared/HostProcess";
 
 const CODEX_TIMEOUT_MS = 180_000;
 /**
@@ -53,21 +59,42 @@ const CODEX_CHANNEL_RECEPTION_ARGS = [
   "--disable",
   "hooks",
 ] as const;
-const encodeJsonString = Schema.encodeEffect(Schema.fromJsonString(Schema.Unknown));
+const CODEX_MCP_LIST_TIMEOUT_MS = 10_000;
+// Plugins and apps bring MCP servers of their own; the user's are listed and
+// turned off by name below. These follow the user's launch args, so they win
+// over a `-c features.plugins=true` there, which `--disable plugins` does not.
+const CODEX_NO_PLUGIN_ARGS = [
+  "--config",
+  "features.plugins=false",
+  "--config",
+  "features.apps=false",
+] as const;
+const CodexMcpServers = Schema.fromJsonString(
+  Schema.Array(Schema.Struct({ name: Schema.String, enabled: Schema.Boolean })),
+);
+const decodeCodexMcpServers = Schema.decodeEffect(CodexMcpServers);
+
 /**
- * Build a Codex text-generation closure bound to a specific `CodexSettings`
- * payload. See `makeCodexAdapter` for the overall per-instance rationale.
+ * `mcp_servers={}` merges into the user's servers rather than replacing them,
+ * so each is named; quoting the name keeps one with a dot a single key.
  */
+const codexMcpServersOff = (names: ReadonlyArray<string>): string | null =>
+  names.length === 0
+    ? null
+    : `mcp_servers={${names.map((name) => `${JSON.stringify(name)}={enabled=false}`).join(",")}}`;
+const encodeJsonString = Schema.encodeEffect(Schema.fromJsonString(Schema.Unknown));
 export const makeCodexTextGeneration = Effect.fn("makeCodexTextGeneration")(function* (
   codexConfig: CodexSettings,
   environment?: NodeJS.ProcessEnv,
   getModels: Effect.Effect<ReadonlyArray<ServerProviderModel>> = Effect.succeed([]),
   resolveRuntime?: Effect.Effect<
     import("../provider/CodexManagedRuntime.ts").CodexEffectiveRuntime,
-    import("@t3tools/contracts").ProviderSetupError,
+    import("@goat/contracts").ProviderSetupError,
     Scope.Scope
   >,
+  memoryRunnerContext?: MemoryGenerationRunnerContext,
 ) {
+  const homeRoute = yield* Effect.serviceOption(HomeRoute.OpenCodexRoute);
   const fileSystem = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const commandSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
@@ -94,10 +121,60 @@ export const makeCodexTextGeneration = Effect.fn("makeCodexTextGeneration")(func
       .remove(path.dirname(filePath), { recursive: true })
       .pipe(Effect.catch(() => Effect.void));
 
+  /**
+   * Reception gets a Codex home of its own, because `--ignore-user-config` still loads the user's
+   * global AGENTS.md from `CODEX_HOME`. Its only file is a symlink to the user's auth.json. Codex
+   * rewrites auth.json in place, so a token refresh lands in the user's file through the link. If a
+   * Codex build ever replaces the link with a file of its own, the finalizer copies that file back,
+   * so the user never keeps a refresh token the refresh already rotated away. When the link cannot
+   * be made, reception falls back to the user's home; memory generation fails before spawning.
+   */
+  const makeReceptionCodexHome = Effect.fn("makeReceptionCodexHome")(function* (
+    operation: TextGenerationOperations.Operation,
+    userHome: string,
+  ) {
+    const receptionHome = yield* fileSystem
+      .makeTempDirectoryScoped({ prefix: "goat-codex-reception-home-" })
+      .pipe(
+        Effect.mapError((cause) =>
+          normalizeCliError("codex", operation, cause, "Failed to create reception Codex home"),
+        ),
+      );
+    const userAuth = path.join(userHome, "auth.json");
+    const receptionAuth = path.join(receptionHome, "auth.json");
+    if (!(yield* fileSystem.exists(userAuth).pipe(Effect.orElseSucceed(() => false)))) {
+      return receptionHome;
+    }
+    const linked = yield* fileSystem.symlink(userAuth, receptionAuth).pipe(
+      Effect.as(true),
+      Effect.orElseSucceed(() => false),
+    );
+    if (!linked) {
+      if (TextGenerationOperations.isMemoryOperation(operation))
+        return yield* new TextGenerationError({
+          operation,
+          detail: "Codex memory generation could not isolate its authentication home.",
+        });
+      return userHome;
+    }
+    yield* Effect.addFinalizer(() =>
+      fileSystem.readLink(receptionAuth).pipe(
+        Effect.matchEffect({
+          onSuccess: () => Effect.void,
+          onFailure: () =>
+            fileSystem
+              .readFile(receptionAuth)
+              .pipe(Effect.flatMap((auth) => fileSystem.writeFile(userAuth, auth))),
+        }),
+        Effect.ignore,
+      ),
+    );
+    return receptionHome;
+  });
+
   // Deliberately unscoped: text generation runs from background fibers whose
   // ambient scope may already be closed (a closed scope reaps the temp
-  // directory the moment it is created). Each allocation removes its own
-  // directory on failure; success-path cleanup is explicit in runCodexJson.
+  // directory the moment it is created).
   const writeTempFile = (
     operation: string,
     prefix: string,
@@ -105,7 +182,7 @@ export const makeCodexTextGeneration = Effect.fn("makeCodexTextGeneration")(func
   ): Effect.Effect<string, TextGenerationError> =>
     fileSystem
       .makeTempFile({
-        prefix: `t3code-${prefix}-${process.pid}-`,
+        prefix: `goat-${prefix}-${process.pid}-`,
       })
       .pipe(
         Effect.tap((filePath) =>
@@ -167,6 +244,63 @@ export const makeCodexTextGeneration = Effect.fn("makeCodexTextGeneration")(func
     return imagePaths;
   });
 
+  const listEnabledMcpServers = Effect.fn("listEnabledMcpServers")(
+    function* (input: {
+      readonly binary: string;
+      readonly cwd: string;
+      readonly env: NodeJS.ProcessEnv;
+      readonly launchArgs: ReadonlyArray<string>;
+    }) {
+      const spawnCommand = yield* resolveSpawnCommand(
+        input.binary,
+        [...input.launchArgs, ...CODEX_NO_PLUGIN_ARGS, "mcp", "list", "--json"],
+        { env: input.env },
+      );
+      const child = yield* commandSpawner.spawn(
+        ChildProcess.make(spawnCommand.command, spawnCommand.args, {
+          env: input.env,
+          cwd: input.cwd,
+          shell: spawnCommand.shell,
+        }),
+      );
+      const [stdout, , exitCode] = yield* Effect.all(
+        [
+          child.stdout.pipe(Stream.decodeText(), Stream.mkString),
+          child.stderr.pipe(Stream.runDrain),
+          child.exitCode,
+        ],
+        { concurrency: "unbounded" },
+      );
+      if (exitCode !== 0) {
+        yield* Effect.logWarning("codex mcp list failed; text generation keeps its MCP servers", {
+          reason: "exit",
+          exitCode,
+        });
+        return [];
+      }
+      const servers = yield* decodeCodexMcpServers(stdout).pipe(
+        Effect.tapError(() =>
+          Effect.logWarning("codex mcp list failed; text generation keeps its MCP servers", {
+            reason: "decode",
+          }),
+        ),
+      );
+      return servers.filter((server) => server.enabled).map((server) => server.name);
+    },
+    Effect.scoped,
+    Effect.timeoutOption(CODEX_MCP_LIST_TIMEOUT_MS),
+    Effect.flatMap(
+      Option.match({
+        onNone: () =>
+          Effect.logWarning("codex mcp list failed; text generation keeps its MCP servers", {
+            reason: "timeout",
+          }).pipe(Effect.as<ReadonlyArray<string>>([])),
+        onSome: (names) => Effect.succeed(names),
+      }),
+    ),
+    Effect.orElseSucceed((): ReadonlyArray<string> => []),
+  );
+
   const runCodexJson = Effect.fn("runCodexJson")(function* <S extends Schema.Top>({
     operation,
     cwd,
@@ -174,15 +308,16 @@ export const makeCodexTextGeneration = Effect.fn("makeCodexTextGeneration")(func
     outputSchema: outputSchemaJson,
     modelSelection,
     attachments,
+    investigate,
   }: TextGenerationOperations.Request<S>): Effect.fn.Return<
-    S["Type"],
+    { readonly result: S["Type"]; readonly effectiveModel: string },
     TextGenerationError,
     S["DecodingServices"]
   > {
     const imagePaths = yield* materializeImageAttachments(attachments);
     const schemaJson = yield* encodeJsonForOperation(
       operation,
-      toJsonSchemaObject(outputSchemaJson),
+      yield* toStrictJsonSchemaObject(operation, outputSchemaJson),
     );
     const schemaPath = yield* writeTempFile(operation, "codex-schema", schemaJson);
     const outputPath = yield* writeTempFile(operation, "codex-output", "").pipe(
@@ -198,6 +333,11 @@ export const makeCodexTextGeneration = Effect.fn("makeCodexTextGeneration")(func
           )
         : undefined;
       const effectiveConfig = resolved?.config ?? codexConfig;
+      if (TextGenerationOperations.isMemoryOperation(operation) && !effectiveConfig.enabled)
+        return yield* new TextGenerationError({
+          operation,
+          detail: "Codex is disabled in GOAT settings.",
+        });
       const effectiveEnvironment = resolved?.environment ?? resolvedEnvironment;
       const models = yield* getModels;
       const requestedModel = modelSelection.model;
@@ -207,11 +347,13 @@ export const makeCodexTextGeneration = Effect.fn("makeCodexTextGeneration")(func
           (candidate) => !candidate.isCustom && codexModelFamily(candidate.slug) === requestedModel,
         )?.slug ??
         requestedModel;
-      const isChannelReception = operation === "generateChannelReception";
+      const isChannelReception =
+        operation === "generateChannelReception" ||
+        TextGenerationOperations.isMemoryOperation(operation);
       // Reception runs in an empty directory so nothing in a checkout reaches the model.
       const workingDirectory = isChannelReception
         ? yield* fileSystem
-            .makeTempDirectoryScoped({ prefix: "t3code-codex-reception-" })
+            .makeTempDirectoryScoped({ prefix: "goat-codex-reception-" })
             .pipe(
               Effect.mapError((cause) =>
                 normalizeCliError(
@@ -223,16 +365,77 @@ export const makeCodexTextGeneration = Effect.fn("makeCodexTextGeneration")(func
               ),
             )
         : cwd;
+      const homeDirectory = yield* HostProcess.HomeDirectory;
+      const configuredHome = effectiveConfig.homePath
+        ? expandHomePath(effectiveConfig.homePath, homeDirectory)
+        : undefined;
+      const codexHome = isChannelReception
+        ? yield* makeReceptionCodexHome(
+            operation,
+            configuredHome ?? effectiveEnvironment.CODEX_HOME ?? path.join(homeDirectory, ".codex"),
+          )
+        : configuredHome;
       const launchArgs = resolveCodexLaunchArgs(effectiveConfig.launchArgs, effectiveEnvironment);
       const reasoningEffort =
         getModelSelectionStringOptionValue(modelSelection, "reasoningEffort") ??
         DEFAULT_TEXT_GENERATION_REASONING_EFFORT;
       const serviceTier = resolved ? undefined : getCodexServiceTierOptionValue(modelSelection);
+      const binary = effectiveConfig.binaryPath || "codex";
+      const env = {
+        ...effectiveEnvironment,
+        ...(codexHome ? { CODEX_HOME: codexHome } : {}),
+      };
+      const routeInput = yield* HomeRoute.resolveCodexRouteContext({
+        settings: effectiveConfig,
+        binaryPath: binary,
+        home: codexHome,
+        cwd: workingDirectory,
+        environment: env,
+        configArgv: codexExecLaunchArgs(launchArgs),
+      }).pipe(
+        Effect.provideService(Path.Path, path),
+        Effect.mapError((cause) => new TextGenerationError({ operation, detail: cause.message })),
+      );
+      const routeArgs =
+        effectiveConfig.modelRoute === "opencodex"
+          ? yield* Effect.gen(function* () {
+              if (Option.isNone(homeRoute))
+                return yield* new HomeRoute.OpenCodexRouteUnavailable({
+                  detail: "Could not read OpenCodex status",
+                });
+              yield* homeRoute.value.requireAvailable(routeInput);
+              yield* homeRoute.value.launchArgs(routeInput);
+              // No installed Codex version has a primary-source certified exec/profile
+              // precedence proof yet. A mock app-server cannot certify the exec loader.
+              return yield* new HomeRoute.OpenCodexRouteUnavailable({
+                detail: "Could not verify the effective Codex endpoint.",
+              });
+            }).pipe(
+              Effect.mapError(
+                (cause) => new TextGenerationError({ operation, detail: cause.message }),
+              ),
+            )
+          : [];
+      const execLaunchArgs = isChannelReception
+        ? [...CODEX_CHANNEL_RECEPTION_ARGS, ...routeArgs]
+        : codexExecLaunchArgs(launchArgs, routeArgs);
+      const mcpServersOff = yield* listEnabledMcpServers({
+        binary,
+        cwd: workingDirectory,
+        env,
+        // `codex mcp` rejects --strict-config; the overrides still apply.
+        launchArgs: execLaunchArgs.filter((arg) => arg !== "--strict-config"),
+      }).pipe(Effect.map(codexMcpServersOff));
       const spawnCommand = yield* resolveSpawnCommand(
-        effectiveConfig.binaryPath || "codex",
+        binary,
         [
           "exec",
-          ...(isChannelReception ? CODEX_CHANNEL_RECEPTION_ARGS : codexExecLaunchArgs(launchArgs)),
+          ...execLaunchArgs,
+          // Text generation needs only the prompt. A user's MCP server would
+          // otherwise start and could act on it, as Claude's --strict-mcp-config
+          // prevents for Claude.
+          ...CODEX_NO_PLUGIN_ARGS,
+          ...(mcpServersOff ? ["--config", mcpServersOff] : []),
           "--ephemeral",
           "--skip-git-repo-check",
           "-s",
@@ -242,6 +445,7 @@ export const makeCodexTextGeneration = Effect.fn("makeCodexTextGeneration")(func
           "--config",
           `model_reasoning_effort="${reasoningEffort}"`,
           ...(serviceTier ? ["--config", `service_tier="${serviceTier}"`] : []),
+          ...routeArgs,
           "--output-schema",
           schemaPath,
           "--output-last-message",
@@ -252,17 +456,7 @@ export const makeCodexTextGeneration = Effect.fn("makeCodexTextGeneration")(func
         { env: effectiveEnvironment },
       );
       const command = ChildProcess.make(spawnCommand.command, spawnCommand.args, {
-        env: {
-          ...effectiveEnvironment,
-          ...(effectiveConfig.homePath
-            ? {
-                CODEX_HOME: expandHomePath(
-                  effectiveConfig.homePath,
-                  yield* HostProcess.HomeDirectory,
-                ),
-              }
-            : {}),
-        },
+        env,
         cwd: workingDirectory,
         shell: spawnCommand.shell,
         stdin: {
@@ -303,6 +497,7 @@ export const makeCodexTextGeneration = Effect.fn("makeCodexTextGeneration")(func
               : `Codex CLI command failed with code ${exitCode}.`,
         });
       }
+      return model;
     });
 
     const cleanup = Effect.all([removeTempFileDir(schemaPath), removeTempFileDir(outputPath)], {
@@ -310,23 +505,27 @@ export const makeCodexTextGeneration = Effect.fn("makeCodexTextGeneration")(func
     }).pipe(Effect.asVoid);
 
     return yield* Effect.gen(function* () {
-      yield* runCodexCommand().pipe(
+      const effectiveModel = yield* runCodexCommand().pipe(
         Effect.scoped,
-        Effect.timeoutOption(CODEX_TIMEOUT_MS),
+        Effect.timeoutOption(investigate?.timeoutMs ?? CODEX_TIMEOUT_MS),
         Effect.flatMap(
           Option.match({
             onNone: () =>
               Effect.fail(
                 new TextGenerationError({ operation, detail: "Codex CLI request timed out." }),
               ),
-            onSome: () => Effect.void,
+            onSome: Effect.succeed,
           }),
         ),
       );
 
-      const decodeOutput = Schema.decodeEffect(Schema.fromJsonString(outputSchemaJson));
+      const decodeOutput = (json: string) =>
+        Schema.decodeEffect(Schema.fromJsonString(outputSchemaJson))(
+          json,
+          TextGenerationOperations.outputDecodeOptions(operation),
+        );
 
-      return yield* fileSystem.readFileString(outputPath).pipe(
+      const result = yield* fileSystem.readFileString(outputPath).pipe(
         Effect.mapError(
           (cause) =>
             new TextGenerationError({
@@ -347,10 +546,20 @@ export const makeCodexTextGeneration = Effect.fn("makeCodexTextGeneration")(func
             ),
         }),
       );
+      return { result, effectiveModel };
     }).pipe(Effect.ensuring(cleanup));
   });
 
-  return TextGenerationOperations.fromRunner("CodexTextGeneration", runCodexJson, {
-    channelReception: true,
-  });
+  return TextGenerationOperations.fromRunner(
+    "CodexTextGeneration",
+    (request) => runCodexJson(request).pipe(Effect.map((selected) => selected.result)),
+    {
+      memoryRunner: withMemoryExecution(
+        memoryRunnerContext,
+        ProviderDriverKind.make("codex"),
+        runCodexJson,
+      ),
+      channelReception: true,
+    },
+  );
 });

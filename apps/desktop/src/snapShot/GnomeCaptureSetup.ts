@@ -4,7 +4,7 @@ import * as NodeFSP from "node:fs/promises";
 import * as NodePath from "node:path";
 import { Message, sessionBus, type MessageBus, type MessageLike } from "dbus-next";
 import * as Schema from "effect/Schema";
-import type { DesktopCaptureExtensionState } from "@t3tools/contracts";
+import type { DesktopCaptureExtensionState } from "@goat/contracts";
 
 import { GNOME_CAPTURE_FILES, GNOME_CAPTURE_UUID } from "./gnomeCaptureBundle.ts";
 export { isGnomeCaptureSession } from "./linuxCaptureSession.ts";
@@ -35,7 +35,6 @@ const decodeMetadata = Schema.decodeUnknownSync(Schema.fromJsonString(Metadata))
 
 type SetupPaths = { readonly bundle: string; readonly dataHome: string };
 
-/** Copies only the shipped extension, offline. Replaced versions are kept for recovery. */
 export async function installGnomeCaptureBundle({ bundle, dataHome }: SetupPaths) {
   const metadata = decodeMetadata(
     await NodeFSP.readFile(NodePath.join(bundle, "metadata.json"), "utf8"),
@@ -58,7 +57,7 @@ export async function installGnomeCaptureBundle({ bundle, dataHome }: SetupPaths
     if (installed.version > metadata.version)
       throw new Error("A newer extension is installed. Update GOAT instead of replacing it.");
   }
-  const staged = await NodeFSP.mkdtemp(NodePath.join(parent, ".t3-capture-install-"));
+  const staged = await NodeFSP.mkdtemp(NodePath.join(parent, ".goat-capture-install-"));
   let backup: string | undefined;
   try {
     for (const name of GNOME_CAPTURE_FILES) {
@@ -86,7 +85,6 @@ export async function installGnomeCaptureBundle({ bundle, dataHome }: SetupPaths
   }
 }
 
-/** A short-lived, read-only probe unless the user explicitly invokes an action. */
 export class GnomeCaptureSetup {
   private readonly disconnected: Promise<never>;
   private readonly paths: SetupPaths;

@@ -1,7 +1,9 @@
-import type { EnvironmentId, ThreadId } from "@t3tools/contracts";
-import type { EnvironmentProject } from "@t3tools/client-runtime/state/shell";
+import type { EnvironmentId, ThreadId } from "@goat/contracts";
+import type { EnvironmentProject } from "@goat/client-runtime/state/shell";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vite-plus/test";
+
+vi.mock("../settings/MemorySettings", () => ({ MemorySettingsEntry: () => null }));
 
 vi.mock("~/hooks/useThreadActionMenu", () => ({
   useThreadActionMenu: () => ({ openMenu: () => {}, closeMenu: () => {} }),
@@ -21,6 +23,9 @@ vi.mock("../../hooks/useSettings", () => ({
 }));
 vi.mock("../ProjectFavicon", () => ({
   ProjectFavicon: () => null,
+}));
+vi.mock("../goatBot/GoatBotModeButton", () => ({
+  GoatBotModeButton: () => null,
 }));
 
 import { ChatHeader } from "./ChatHeader";

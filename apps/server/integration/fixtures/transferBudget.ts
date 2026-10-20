@@ -1,4 +1,4 @@
-import type { ProviderDriverKind } from "@t3tools/contracts";
+import type { ProviderDriverKind } from "@goat/contracts";
 export const TRANSFER_HISTORY_TURN_COUNT = 10;
 export const TRANSFER_HISTORY_TOOLS_PER_TURN = 5;
 export const TRANSFER_MEASURED_TOOLS = 20;
@@ -45,7 +45,6 @@ function digest(seed: number): string {
     .join("");
 }
 
-/** Produces safe, deterministic output with enough entropy to exercise gzip. */
 export function diagnosticOutput(input: {
   readonly provider: ProviderDriverKind;
   readonly turnIndex: number;

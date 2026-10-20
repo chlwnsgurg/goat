@@ -1,11 +1,4 @@
 #!/usr/bin/env node
-/**
- * Unpacks a CLI archive into a scratch directory and runs the executable the
- * way an installer would: no repo, no node_modules, no Node on PATH. Catches
- * the failures that only show inside the single-executable, such as an
- * external package reached through `import` or a native addon the hardened
- * runtime refuses to load.
- */
 import * as NodeRuntime from "@effect/platform-node/NodeRuntime";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Duration from "effect/Duration";
@@ -21,8 +14,13 @@ import * as Stream from "effect/Stream";
 import { Command, Flag } from "effect/cli";
 import { ChildProcess, ChildProcessSpawner } from "effect/process";
 
-import * as NetService from "@t3tools/shared/Net";
-import * as HostProcess from "@t3tools/shared/HostProcess";
+import * as NetService from "@goat/shared/Net";
+import * as HostProcess from "@goat/shared/HostProcess";
+import {
+  decodeRuntimeManifest,
+  RUNTIME_MANIFEST_ARCHIVE_ENTRY,
+} from "@goat/shared/runtimeManifest";
+import { runtimeManifestMismatch } from "./lib/runtime-manifest.ts";
 import { windowsSystemTar } from "./build-cli-archive.ts";
 import { FetchHttpClient, HttpClient, HttpClientRequest } from "effect/http";
 
@@ -66,6 +64,20 @@ const runExecutable = Effect.fn("runExecutable")(function* (
   return { stdout, stderr, exitCode };
 });
 
+export function checkCliRuntimeManifest(
+  embeddedJson: string,
+  binaryJson: string,
+  expectVersion: string,
+): string[] {
+  const embedded = decodeRuntimeManifest(embeddedJson);
+  const binary = decodeRuntimeManifest(binaryJson);
+  if (!embedded || !binary) return ["invalid runtime manifest"];
+  if (embedded.version !== expectVersion) return ["runtime manifest version mismatch"];
+  if (runtimeManifestMismatch(embedded, binary))
+    return ["binary and archive runtime manifests disagree"];
+  return [];
+}
+
 const smokeCliArchive = Effect.fn("smokeCliArchive")(function* (input: {
   readonly archive: string;
   readonly expectVersion: string;
@@ -74,7 +86,7 @@ const smokeCliArchive = Effect.fn("smokeCliArchive")(function* (input: {
   const path = yield* Path.Path;
   const platform = yield* HostProcess.Platform;
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
-  const scratch = yield* fs.makeTempDirectory({ prefix: "t3-cli-smoke-" });
+  const scratch = yield* fs.makeTempDirectory({ prefix: "goat-cli-smoke-" });
   // Windows can keep goat.exe locked (EBUSY) for a moment after the server
   // exits. A leftover scratch directory on a CI runner is harmless, so
   // cleanup retries briefly and never fails a smoke test that passed.
@@ -108,7 +120,11 @@ const smokeCliArchive = Effect.fn("smokeCliArchive")(function* (input: {
   }
   const contentDir = path.join(scratch, root);
   const executable = path.join(contentDir, platform === "win32" ? "goat.exe" : "goat");
-  for (const required of [executable, path.join(contentDir, "client/index.html")]) {
+  for (const required of [
+    executable,
+    path.join(contentDir, "client/index.html"),
+    path.join(contentDir, RUNTIME_MANIFEST_ARCHIVE_ENTRY),
+  ]) {
     if (!(yield* fs.exists(required))) {
       return yield* new CliArchiveSmokeError({
         step: "checking the archive layout",
@@ -125,10 +141,23 @@ const smokeCliArchive = Effect.fn("smokeCliArchive")(function* (input: {
     });
   }
 
-  // Starting the server is what actually opens sqlite, loads the terminal
-  // and search stacks (node-pty, fff, msgpackr-extract), and serves the
-  // client, so probe a real `serve` in a scratch home rather than a
-  // command that only reads package metadata.
+  const runtime = yield* runExecutable(
+    executable,
+    ["__ssh-helper", "runtime-manifest"],
+    contentDir,
+  );
+  const manifestProblems = checkCliRuntimeManifest(
+    yield* fs.readFileString(path.join(contentDir, RUNTIME_MANIFEST_ARCHIVE_ENTRY)),
+    runtime.stdout,
+    input.expectVersion,
+  );
+  if (runtime.exitCode !== 0 || manifestProblems.length) {
+    return yield* new CliArchiveSmokeError({
+      step: "checking runtime manifests",
+      detail: `exit ${String(runtime.exitCode)}: ${manifestProblems.join("; ")}\n${runtime.stderr}`,
+    });
+  }
+
   const net = yield* NetService.NetService;
   const port = yield* net.findAvailablePort(47700);
   const home = path.join(scratch, "home");
@@ -144,7 +173,7 @@ const smokeCliArchive = Effect.fn("smokeCliArchive")(function* (input: {
           USERPROFILE: home,
           TMPDIR: scratch,
           TEMP: scratch,
-          T3CODE_HOME: home,
+          GOAT_HOME: home,
         },
         extendEnv: false,
       },

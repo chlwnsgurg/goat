@@ -1,5 +1,5 @@
 import { assert } from "@effect/vitest";
-import type { ProviderReplayTranscript } from "@t3tools/contracts";
+import type { ProviderReplayTranscript } from "@goat/contracts";
 
 import type { OrchestratorV2ScenarioResult } from "../../OrchestratorScenario.ts";
 import {
@@ -45,7 +45,6 @@ export function assertSubagentOutput(
     projection.subagents.map((subagent) => subagent.status),
     ["completed", "completed"],
   );
-  // Each child was handed one file and reported contents only that file holds.
   assert.isTrue(
     projection.subagents.some(
       (subagent) =>

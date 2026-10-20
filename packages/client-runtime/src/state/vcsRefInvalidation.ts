@@ -1,4 +1,4 @@
-import type { EnvironmentId } from "@t3tools/contracts";
+import type { EnvironmentId } from "@goat/contracts";
 import * as Effect from "effect/Effect";
 import * as PartitionedSemaphore from "effect/PartitionedSemaphore";
 import { Atom, type AtomRegistry } from "effect/reactivity";
@@ -50,11 +50,9 @@ export function withVcsRefsPersistenceLock<A, E, R>(
 }
 
 /**
- * Clears persisted snapshots and then restarts live ref streams while holding
- * the same lock used by generation-checked refresh writes. Clearing first
- * prevents the restarted stream from rehydrating the invalidated snapshot. A
- * refresh that wins the lock is cleared afterward; one that loses observes the
- * new revision and cannot repersist its pre-mutation result.
+ * Clearing first prevents the restarted stream from rehydrating the invalidated
+ * snapshot. A refresh that wins the lock is cleared afterward; one that loses
+ * observes the new revision and cannot repersist its pre-mutation result.
  */
 export const invalidateCachedVcsRefs = Effect.fn("VcsRefsState.invalidateCached")(function* (
   registry: AtomRegistry.AtomRegistry,

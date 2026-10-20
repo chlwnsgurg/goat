@@ -4,7 +4,7 @@ import {
   ProjectId,
   ProviderInstanceId,
   type RuntimeMode,
-} from "@t3tools/contracts";
+} from "@goat/contracts";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -12,12 +12,9 @@ import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 
 import * as ProviderInstanceRegistry from "../provider/ProviderInstanceRegistry.ts";
-import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
+import * as ProviderAdapter from "@goat/provider-core/server/ProviderAdapter";
 import * as ProjectStore from "./ProjectStore.ts";
 
-/**
- * ERRORS
- */
 export class RuntimePolicyResolveError extends Schema.TaggedError<RuntimePolicyResolveError>()(
   "RuntimePolicyResolveError",
   {
@@ -42,9 +39,6 @@ export const RuntimePolicyV2Override = Schema.Struct({
 });
 export type RuntimePolicyV2Override = typeof RuntimePolicyV2Override.Type;
 
-/**
- * SERVICE DEFINITION
- */
 export interface RuntimePolicyV2Shape {
   readonly resolve: (input: {
     readonly thread: OrchestrationV2AppThread;
@@ -53,12 +47,9 @@ export interface RuntimePolicyV2Shape {
 }
 
 export class RuntimePolicyV2 extends Context.Service<RuntimePolicyV2, RuntimePolicyV2Shape>()(
-  "t3/orchestration-v2/RuntimePolicy/RuntimePolicyV2",
+  "goat/orchestration-v2/RuntimePolicy/RuntimePolicyV2",
 ) {}
 
-/**
- * IMPLEMENTATIONS
- */
 export const layer: Layer.Layer<RuntimePolicyV2> = Layer.succeed(RuntimePolicyV2, {
   resolve: (input) =>
     Effect.succeed({
@@ -68,11 +59,6 @@ export const layer: Layer.Layer<RuntimePolicyV2> = Layer.succeed(RuntimePolicyV2
     }),
 });
 
-/**
- * The mode a provider runs a thread in. A mode the provider does not offer
- * (a thread set before it stopped offering it, or a stale client) runs in
- * Supervised rather than having T3 imitate it.
- */
 function providerRuntimeMode(
   runtimeMode: RuntimeMode,
   supportedRuntimeModes: ReadonlyArray<RuntimeMode> | undefined,

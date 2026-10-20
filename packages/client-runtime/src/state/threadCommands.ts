@@ -1,13 +1,9 @@
-import type { ThreadId } from "@t3tools/contracts";
+import type { ThreadId } from "@goat/contracts";
 import * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 import { Atom } from "effect/reactivity";
-import {
-  WS_METHODS,
-  type EnvironmentId,
-  type OrchestrationV2ShellSnapshot,
-} from "@t3tools/contracts";
+import { WS_METHODS, type EnvironmentId, type OrchestrationV2ShellSnapshot } from "@goat/contracts";
 
 import { createOptimisticThreadLifecycle } from "./threadLifecycle.ts";
 import * as DateTime from "effect/DateTime";
@@ -28,6 +24,7 @@ import {
   type InterruptThreadTurnInput,
   type MarkThreadUnreadInput,
   type ForkThreadFromRunInput,
+  type ForkThreadAsSideChatInput,
   type MergeThreadBackInput,
   type PromoteQueuedRunInput,
   type ReorderQueuedRunInput,
@@ -63,6 +60,7 @@ import {
   editQueuedRun,
   interruptThreadTurn,
   forkThreadFromRun,
+  forkThreadAsSideChat,
   markThreadUnread,
   mergeThreadBack,
   promoteQueuedRun,
@@ -111,6 +109,7 @@ export type {
   InterruptThreadTurnInput,
   MarkThreadUnreadInput,
   ForkThreadFromRunInput,
+  ForkThreadAsSideChatInput,
   MergeThreadBackInput,
   PromoteQueuedRunInput,
   ReorderQueuedRunInput,
@@ -118,6 +117,7 @@ export type {
   RespondToThreadApprovalInput,
   RespondToThreadUserInputInput,
   DismissThreadUserInputInput,
+  RetryWorkspacePreparationInput,
   RevertThreadCheckpointInput,
   SetThreadInteractionModeInput,
   SetThreadRuntimeModeInput,
@@ -335,6 +335,15 @@ export function createThreadEnvironmentAtoms<R, E>(
         key: ({ environmentId, input }) => JSON.stringify([environmentId, input.sourceThreadId]),
       },
     }),
+    forkAsSideChat: createEnvironmentCommand(runtime, {
+      label: "environment-data:commands:thread:fork-as-side-chat",
+      execute: (input: ForkThreadAsSideChatInput) => forkThreadAsSideChat(input),
+      scheduler,
+      concurrency: {
+        mode: "serial",
+        key: ({ environmentId, input }) => JSON.stringify([environmentId, input.sourceThreadId]),
+      },
+    }),
     mergeBack: createEnvironmentCommand(runtime, {
       label: "environment-data:commands:thread:merge-back",
       execute: (input: MergeThreadBackInput) => mergeThreadBack(input),
@@ -451,11 +460,7 @@ export function createThreadEnvironmentAtoms<R, E>(
             ...thread,
             pendingRuntimeRequest: null,
             snoozedUntil: DateTime.makeUnsafe(input.snoozedUntil),
-            snoozedAt:
-              thread.snoozedUntil != null &&
-              DateTime.formatIso(thread.snoozedUntil) === input.snoozedUntil
-                ? (thread.snoozedAt ?? now)
-                : now,
+            snoozedAt: now,
           },
     ),
     unsnooze: optimistic.wrap(commands.unsnooze, (thread) => ({

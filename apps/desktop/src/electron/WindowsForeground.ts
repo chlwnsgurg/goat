@@ -14,7 +14,6 @@ export interface WindowsForegroundApi {
     | { readonly x: number; readonly y: number; readonly width: number; readonly height: number }
     | undefined;
   readonly getProcessImagePath: (processId: number) => string;
-  /** High bit of `GetAsyncKeyState`: whether the virtual key is currently down. */
   readonly isKeyDown: (virtualKey: number) => boolean;
   readonly attachThreadInput: (
     sourceThreadId: number,
@@ -69,8 +68,8 @@ const PROCESS_QUERY_LIMITED_INFORMATION = 0x1000;
 
 export function loadWindowsForegroundApi(): Promise<WindowsForegroundApi> {
   windowsForegroundApiPromise ??= import("ffi-rs").then(({ DataType, load, open }) => {
-    const kernel32 = "t3-kernel32";
-    const user32 = "t3-user32";
+    const kernel32 = "goat-kernel32";
+    const user32 = "goat-user32";
     open({ library: kernel32, path: "kernel32.dll" });
     open({ library: user32, path: "user32.dll" });
 

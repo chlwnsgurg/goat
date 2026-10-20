@@ -13,8 +13,8 @@ import {
   type AuthEnvironmentScope,
   AuthOrchestrationOperateScope,
   AuthOrchestrationReadScope,
-} from "@t3tools/contracts";
-import { encodeOAuthScope } from "@t3tools/shared/oauthScope";
+} from "@goat/contracts";
+import { encodeOAuthScope } from "@goat/shared/oauthScope";
 import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
 import * as Crypto from "effect/Crypto";
@@ -39,16 +39,10 @@ import {
 } from "./utils.ts";
 
 /**
- * The OAuth authorization server MCP clients (Claude Code, Codex, any agent
- * T3 Code did not launch) use to sign in to this environment's `/mcp`.
- *
  * Every URL is derived from the request's own origin, so the same server
  * answers correctly over loopback, Tailscale Serve and a T3 Connect tunnel.
- * Client registration is stateless: a client id is its signed metadata, so
- * an unauthenticated caller cannot grow server state. Redirects go to a
- * loopback address (a CLI agent on the user's machine) or any https address
- * (a hosted agent); the approval page names where access goes, and the user
- * decides.
+ * Client registration is stateless: a client id is its signed metadata, so an
+ * unauthenticated caller cannot grow server state.
  */
 
 const SIGNING_SECRET_NAME = "mcp-oauth-signing-key";
@@ -68,11 +62,6 @@ export interface McpOAuthUrls {
   readonly resource: string;
 }
 
-/**
- * Issuer and MCP resource for the origin this request reached: its Host, and
- * https when a proxy says so. A Host that is not a valid authority falls back
- * to localhost, which no client will have asked for.
- */
 export const requestUrls = (request: HttpServerRequest.HttpServerRequest): McpOAuthUrls => {
   const origin = Option.match(HttpServerRequest.toURL(request), {
     onNone: () => "http://localhost",
@@ -106,7 +95,6 @@ export const authorizationServerMetadata = (
   authorization_response_iss_parameter_supported: true,
 });
 
-/** A redirect URI an MCP client may register: loopback http, or any https. */
 const parseRedirect = (value: string): URL | undefined => {
   // No fragment, not even an empty one, which `URL.hash` reports as "" (RFC 6749 §3.1.2).
   if (value.length > MAX_REDIRECT_URI_LENGTH || value.includes("#")) return undefined;
@@ -122,9 +110,8 @@ const parseRedirect = (value: string): URL | undefined => {
 };
 
 /**
- * Whether a presented redirect is one the client registered. Loopback
- * redirects match on everything but the port (RFC 8252 §7.3), since CLI
- * agents listen on whatever port is free; https redirects match exactly.
+ * Loopback redirects match on everything but the port (RFC 8252 §7.3), since
+ * CLI agents listen on whatever port is free; https redirects match exactly.
  */
 export const redirectMatches = (registered: string, presented: string): boolean => {
   const left = parseRedirect(registered);
@@ -161,7 +148,6 @@ export interface McpOAuthClient {
   readonly redirectUris: ReadonlyArray<string>;
 }
 
-/** Problems the authorize page shows the user without redirecting anywhere. */
 export class McpOAuthPageError extends Schema.TaggedError<McpOAuthPageError>()(
   "McpOAuthPageError",
   { description: Schema.String },
@@ -171,7 +157,6 @@ export class McpOAuthPageError extends Schema.TaggedError<McpOAuthPageError>()(
   }
 }
 
-/** Problems reported back to the client through its (validated) redirect URI. */
 export class McpOAuthRedirectError extends Schema.TaggedError<McpOAuthRedirectError>()(
   "McpOAuthRedirectError",
   {
@@ -198,6 +183,7 @@ interface PendingCode {
   readonly codeChallenge: string;
   readonly resource: string;
   readonly access: AuthMcpClientAccess;
+  readonly memoryScopes: ReadonlyArray<"memory:read" | "memory:write">;
   readonly expiresAtMs: number;
 }
 
@@ -209,16 +195,11 @@ export class McpOAuth extends Context.Service<
     readonly register: (
       input: AuthMcpClientRegistration,
     ) => Effect.Effect<McpOAuthClient, AuthMcpRegistrationError>;
-    /** Validates an authorize request. Page errors must never redirect. */
+    /** Page errors must never redirect. */
     readonly validateAuthorization: (input: {
       readonly urls: McpOAuthUrls;
       readonly request: AuthMcpAuthorizationRequest;
     }) => Effect.Effect<AuthorizationRequest, McpOAuthPageError | McpOAuthRedirectError>;
-    /**
-     * The signed-in owner on this origin, when their browser session may
-     * approve at least read-only access. `approve` checks the chosen access
-     * against the session's scopes.
-     */
     readonly approvingBrowserSession: (
       request: HttpServerRequest.HttpServerRequest,
       authorization: AuthorizationRequest,
@@ -226,7 +207,6 @@ export class McpOAuth extends Context.Service<
       | { readonly csrfToken: string; readonly scopes: ReadonlyArray<AuthEnvironmentScope> }
       | undefined
     >;
-    /** Approves and returns the URL to send the browser to. */
     readonly approve: (input: {
       readonly request: HttpServerRequest.HttpServerRequest;
       readonly authorization: AuthorizationRequest;
@@ -239,9 +219,8 @@ export class McpOAuth extends Context.Service<
       readonly token: AuthMcpTokenRequest;
     }) => Effect.Effect<AuthMcpTokenResult, AuthMcpTokenError>;
   }
->()("t3/auth/McpOAuth") {}
+>()("goat/auth/McpOAuth") {}
 
-/** Appends OAuth response parameters, keeping any the client put in its redirect URI. */
 const redirectWith = (redirectUri: string, params: Record<string, string | undefined>) => {
   const url = new URL(redirectUri);
   for (const [name, value] of Object.entries(params)) {
@@ -405,7 +384,11 @@ const make = Effect.gen(function* () {
       Effect.orElseSucceed(() => undefined),
     );
 
-  const mintCode = (authorization: AuthorizationRequest, access: AuthMcpClientAccess) =>
+  const mintCode = (
+    authorization: AuthorizationRequest,
+    access: AuthMcpClientAccess,
+    memoryScopes: ReadonlyArray<"memory:read" | "memory:write">,
+  ) =>
     Effect.gen(function* () {
       const now = yield* Clock.currentTimeMillis;
       const code = Buffer.from(yield* crypto.randomBytes(32).pipe(Effect.orDie)).toString(
@@ -422,6 +405,7 @@ const make = Effect.gen(function* () {
           codeChallenge: authorization.codeChallenge,
           resource: authorization.resource,
           access,
+          memoryScopes: [...memoryScopes],
           expiresAtMs: now + AUTHORIZATION_CODE_TTL_MS,
         });
         return next;
@@ -433,25 +417,27 @@ const make = Effect.gen(function* () {
     Effect.gen(function* () {
       const { decision } = input;
       if (decision._tag === "pairing-code") {
-        yield* environmentAuth.consumeMcpApprovalCode(decision.code, decision.access).pipe(
-          Effect.catchIf(EnvironmentAuth.isServerAuthInternalError, (cause) =>
-            Effect.logError("MCP approval code check failed.", { cause }).pipe(
-              Effect.andThen(
-                Effect.fail(
-                  new McpOAuthPageError({
-                    description: "The code could not be checked. Try again.",
-                  }),
+        yield* environmentAuth
+          .consumeMcpApprovalCode(decision.code, decision.access, decision.memoryScopes)
+          .pipe(
+            Effect.catchIf(EnvironmentAuth.isServerAuthInternalError, (cause) =>
+              Effect.logError("MCP approval code check failed.", { cause }).pipe(
+                Effect.andThen(
+                  Effect.fail(
+                    new McpOAuthPageError({
+                      description: "The code could not be checked. Try again.",
+                    }),
+                  ),
                 ),
               ),
             ),
-          ),
-        );
+          );
       } else {
         const session = yield* approvingBrowserSession(input.request, input.authorization);
         if (
           session === undefined ||
           !timingSafeEqualBase64Url(decision.csrfToken, session.csrfToken) ||
-          !EnvironmentAuth.mcpClientScopes(decision.access).every((scope) =>
+          !EnvironmentAuth.mcpClientScopes(decision.access, decision.memoryScopes).every((scope) =>
             session.scopes.includes(scope),
           )
         ) {
@@ -460,7 +446,11 @@ const make = Effect.gen(function* () {
           });
         }
       }
-      const code = yield* mintCode(input.authorization, decision.access);
+      const code = yield* mintCode(
+        input.authorization,
+        decision.access,
+        decision.memoryScopes ?? [],
+      );
       yield* Effect.logInfo("Approved an MCP client sign-in.", {
         client: input.authorization.client.name,
         access: decision.access,
@@ -522,6 +512,7 @@ const make = Effect.gen(function* () {
         .issueMcpClientSession({
           label: pending.clientName,
           access: pending.access,
+          memoryScopes: pending.memoryScopes,
           client: deriveAuthClientMetadata({ request }),
         })
         .pipe(
@@ -537,7 +528,9 @@ const make = Effect.gen(function* () {
         access_token: issued.token,
         token_type: "Bearer",
         expires_in: Math.max(0, Math.floor((issued.expiresAt.epochMilliseconds - now) / 1000)),
-        scope: encodeOAuthScope(EnvironmentAuth.mcpClientScopes(pending.access)),
+        scope: encodeOAuthScope(
+          EnvironmentAuth.mcpClientScopes(pending.access, pending.memoryScopes),
+        ),
       };
     });
 
@@ -553,11 +546,6 @@ const make = Effect.gen(function* () {
 
 export const layer = Layer.effect(McpOAuth, make);
 
-/**
- * Lets `/mcp` admit OAuth clients. Their scope has no calling thread, and
- * never carries preview or device access: those tools act on the caller's
- * own thread.
- */
 export const layerMcpClientAuthenticator = Layer.effect(
   McpHttpServer.McpClientAuthenticator,
   Effect.gen(function* () {
@@ -571,14 +559,24 @@ export const layerMcpClientAuthenticator = Layer.effect(
             Clock.currentTimeMillis.pipe(
               Effect.map((issuedAt): McpInvocationContext.McpInvocationScope => ({
                 environmentId,
+                ...(client.grantedScopes === undefined
+                  ? {}
+                  : { grantedScopes: client.grantedScopes }),
+                ...(client.reauthorize === undefined ? {} : { reauthorize: client.reauthorize }),
                 requestNamespace: `client:${client.sessionId}`,
                 thread: undefined,
                 client: {
                   sessionId: client.sessionId,
                   label: client.label,
                   access: client.access,
+                  approvals: client.approvals,
                 },
                 capabilities: new Set<McpInvocationContext.McpCapability>([
+                  ...(client.grantedScopes?.some(
+                    (scope) => scope === "memory:read" || scope === "memory:write",
+                  )
+                    ? ["memory" as const]
+                    : []),
                   "orchestration",
                   "worktree",
                   "pull-requests",

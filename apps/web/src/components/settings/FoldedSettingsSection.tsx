@@ -1,16 +1,11 @@
 import { SettingsGroup } from "./SettingsGroup";
-import { ChevronRightIcon } from "lucide-react";
+import { ChevronRightIcon } from "~/components/solar";
 import { type ReactNode, useState } from "react";
 
 import { cn } from "~/lib/utils";
 import { Collapsible, CollapsiblePanel, CollapsibleTrigger } from "../ui/collapsible";
 import { useSettingsSearchTarget, useSettingsSearchTargetId } from "./settingsLayout";
 
-/**
- * A grouped settings section that starts closed. The header carries the title,
- * a one line summary of what is set inside, and an optional control such as
- * the section's own switch. A settings search that targets the section opens it.
- */
 export function FoldedSettingsSection({
   id,
   title,
@@ -20,7 +15,7 @@ export function FoldedSettingsSection({
   children,
 }: {
   readonly id: string;
-  readonly title: string;
+  readonly title: ReactNode;
   readonly summary?: string | null;
   readonly control?: ReactNode;
   readonly headerPlacement?: "inside" | "outside";

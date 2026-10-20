@@ -1,11 +1,5 @@
 import { describe, expect, it } from "vite-plus/test";
-import {
-  CommandId,
-  ComposerContextId,
-  EnvironmentId,
-  MessageId,
-  ThreadId,
-} from "@t3tools/contracts";
+import { CommandId, ComposerContextId, EnvironmentId, MessageId, ThreadId } from "@goat/contracts";
 import type { QueuedThreadMessage } from "../../state/thread-outbox-model";
 import { appendPendingThreadMessages } from "./pending-thread-feed";
 
@@ -59,7 +53,6 @@ describe("pending timeline messages", () => {
     const optimistic = appendPendingThreadMessages([], [], [queued])[0]!;
     const delivered = { ...optimistic, pendingMessage: undefined };
     expect(appendPendingThreadMessages([delivered], [delivered], [queued])).toEqual([delivered]);
-    // Folded messages still count as delivered even when absent from the presented rows.
     expect(appendPendingThreadMessages([], [delivered], [queued])).toEqual([]);
   });
 });

@@ -3,12 +3,11 @@ import * as Layer from "effect/Layer";
 import type * as Stream from "effect/Stream";
 
 export type ConnectionWakeup =
+  | "suspend"
   | "application-active"
   | "application-active-probe"
   | "application-active-reconnect"
   | "credentials-changed"
-  // The device moved to a different network (another Wi-Fi, Wi-Fi to
-  // cellular) while staying online. Saved routes may have changed reach.
   | "network-changed";
 
 function isApplicationActiveWakeup(reason: ConnectionWakeup): boolean {
@@ -19,7 +18,6 @@ function isApplicationActiveWakeup(reason: ConnectionWakeup): boolean {
   );
 }
 
-/** Conditions changed enough that a pending retry should run now, from the first rung. */
 export function resetsRetryBackoff(reason: ConnectionWakeup): boolean {
   return isApplicationActiveWakeup(reason) || reason === "network-changed";
 }
@@ -34,7 +32,7 @@ export class ConnectionWakeups extends Context.Service<
   {
     readonly changes: Stream.Stream<ConnectionWakeup>;
   }
->()("@t3tools/client-runtime/connection/wakeups/ConnectionWakeups") {}
+>()("@goat/client-runtime/connection/wakeups/ConnectionWakeups") {}
 
 const make = (service: ConnectionWakeups["Service"]) => ConnectionWakeups.of(service);
 

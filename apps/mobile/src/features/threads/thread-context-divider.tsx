@@ -1,7 +1,7 @@
 import type { ReactNode } from "react";
 import { View, type ColorValue } from "react-native";
-import { AppText as Text } from "../../components/AppText";
-import { SymbolView, type AppSymbolName } from "../../components/AppSymbol";
+import { AppText as Text } from "../../components/ui/AppText";
+import { SymbolView, type AppSymbolName } from "../../components/ui/AppSymbol";
 import { ShimmeringWorkContent } from "./thread-work-log";
 
 export function ThreadContextDivider(props: {
@@ -14,13 +14,13 @@ export function ThreadContextDivider(props: {
 }) {
   return (
     <View className="mb-3 flex-row items-center gap-3 px-1 py-1">
-      <View className="h-px min-w-2 flex-1 bg-adaptive-neutral-200-a80-white-a8" />
+      <View className="h-px min-w-2 flex-1 bg-separator" />
       <View className="shrink flex-row flex-wrap items-center justify-center gap-1.5">
         <SymbolView name={props.icon} size={12} tintColor={props.iconColor} type="monochrome" />
         {props.active ? (
           <ShimmeringWorkContent
             className="flex-none"
-            textClassName="font-t3-medium"
+            textClassName="font-goat-medium"
             compact
             icon="brain"
             iconSubtleColor={props.iconColor}
@@ -31,8 +31,8 @@ export function ThreadContextDivider(props: {
           <Text
             className={
               props.failed
-                ? "font-t3-medium text-xs text-danger-foreground"
-                : "font-t3-medium text-xs text-foreground-muted"
+                ? "font-goat-medium text-xs text-danger-foreground"
+                : "font-goat-medium text-xs text-foreground-muted"
             }
           >
             {props.label}
@@ -40,7 +40,7 @@ export function ThreadContextDivider(props: {
         )}
         {props.children}
       </View>
-      <View className="h-px min-w-2 flex-1 bg-adaptive-neutral-200-a80-white-a8" />
+      <View className="h-px min-w-2 flex-1 bg-separator" />
     </View>
   );
 }

@@ -3,7 +3,7 @@ import {
   type DevicePlatformAvailability,
   type EnvironmentId,
   SshDeviceHostConfig,
-} from "@t3tools/contracts";
+} from "@goat/contracts";
 import * as Schema from "effect/Schema";
 
 export interface DeviceHostCheckTarget {
@@ -35,7 +35,6 @@ export function deviceHostConnectionKey(host: SshDeviceHostConfig) {
   return JSON.stringify([host.target.trim(), host.port, host.identityFile?.trim() || undefined]);
 }
 
-/** Each environment settles independently so one failure cannot hide the other results. */
 export async function checkDeviceHostConnections(
   targets: ReadonlyArray<DeviceHostCheckTarget>,
   host: SshDeviceHostConfig,

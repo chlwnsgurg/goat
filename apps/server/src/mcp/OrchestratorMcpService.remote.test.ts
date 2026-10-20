@@ -1,42 +1,54 @@
 import * as Stream from "effect/Stream";
+import * as ThreadLaunchService from "../orchestration-v2/ThreadLaunchService.ts";
+import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 import * as TestClock from "effect/testing/TestClock";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
 import {
   EnvironmentId,
   EventId,
+  OrchestratorMcpFailure,
   type OrchestrationV2StoredEvent,
   MessageId,
   NodeId,
   ProviderInstanceId,
   ProviderDriverKind,
   RunId,
+  RuntimeRequestId,
   ThreadId,
   type OrchestrationV2ServerCommand,
   type OrchestrationV2Subagent,
   type OrchestrationV2ThreadShell,
   type OrchestratorMcpCapabilitiesResult,
   type OrchestratorMcpDelegateTaskInput,
-} from "@t3tools/contracts";
-import { derive } from "@t3tools/provider-core/server/IdAllocator";
-import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
+} from "@goat/contracts";
+import { derive } from "@goat/provider-core/server/IdAllocator";
+import * as NodeSqliteClient from "@goat/shared/nodeSqliteClient";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Queue from "effect/Queue";
+import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/sql/SqlClient";
+import * as SqlError from "effect/sql/SqlError";
 import * as ProviderAdapterRegistry from "../orchestration-v2/ProviderAdapterRegistry.ts";
 import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
 import * as ProjectService from "../project/ProjectService.ts";
 import * as ProviderRegistry from "../provider/ProviderRegistry.ts";
 import * as ScheduledTaskService from "../scheduledTasks/ScheduledTaskService.ts";
 import * as SecretRequests from "../secrets/SecretRequests.ts";
+import * as ServerSettings from "../serverSettings.ts";
 import * as SshRemoteDispatch from "../sshRemote/SshRemoteDispatch.ts";
 import * as RemoteDispatchCoordinator from "../remoteReports/RemoteDispatchCoordinator.ts";
-import Migration0063 from "../persistence/Migrations/063_RemoteDispatches.ts";
+import Migration0062 from "../persistence/Migrations/066_RemoteReports.ts";
+import Migration0063 from "../persistence/Migrations/067_RemoteDispatches.ts";
+import Migration0065 from "../persistence/Migrations/069_RemoteDispatchQuestions.ts";
+import Migration0068 from "../persistence/Migrations/071_RemoteReportRelay.ts";
+import Migration0073 from "../persistence/Migrations/076_MemoryTaskGrantCeiling.ts";
 import { idleThreadProjection, liveThreadShell } from "./McpToolAccess.testkit.ts";
+import * as LaunchWatchService from "./LaunchWatchService.ts";
 import type { McpInvocationScope } from "./McpInvocationContext.ts";
 import * as OrchestratorMcpService from "./OrchestratorMcpService.ts";
 
@@ -94,7 +106,12 @@ const catalog: OrchestratorMcpCapabilitiesResult = {
 
 const fixture = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
+  yield* Migration0062;
   yield* Migration0063;
+  yield* Migration0065;
+  yield* Migration0068;
+  yield* sql`CREATE TABLE scheduled_tasks (task_id TEXT PRIMARY KEY)`;
+  yield* Migration0073;
   const now = yield* DateTime.now;
   let shell: OrchestrationV2ThreadShell | null = liveThreadShell(threadId, {
     activeRunId: parentRunId,
@@ -134,6 +151,8 @@ const fixture = Effect.gen(function* () {
   const events = yield* Queue.unbounded<OrchestrationV2StoredEvent>();
   const subscribed = yield* Deferred.make<void>();
   const launches: Array<SshRemoteDispatch.SshLaunchInput> = [];
+  const metadataCalls: Array<SshRemoteDispatch.SshHostToolCall> = [];
+  let metadataPaused = false;
   let phase: "none" | "before" | "after" = "none";
   let launchRunId: string | null = remoteRunId;
   let launchFailure: SshRemoteDispatch.SshRemoteDispatchError | undefined;
@@ -142,6 +161,7 @@ const fixture = Effect.gen(function* () {
   let afterRegistration: (() => void) | undefined;
   const dependencies = Layer.mergeAll(
     NodeServices.layer,
+    ServerSettings.layerTest(),
     Layer.succeed(SqlClient.SqlClient, sql),
     Layer.mock(ThreadManagementService.ThreadManagementService)({
       getThreadRecords: (id) =>
@@ -185,6 +205,8 @@ const fixture = Effect.gen(function* () {
               title: command.title ?? null,
               model: command.modelSelection.model,
               modelSelection: command.modelSelection,
+              ...(command.role === undefined ? {} : { role: command.role }),
+              parentModelSelection: command.parentModelSelection,
               status: "running",
               result: null,
               startedAt: now,
@@ -255,6 +277,25 @@ const fixture = Effect.gen(function* () {
         Effect.gen(function* () {
           yield* authorize;
           if (call.tool === "orchestrator_capabilities") return catalog;
+          // Optional task metadata is a separate read from the coordinator's
+          // report wait and interrupt calls, whose ordering these tests control.
+          if (call.tool === "goat_thread_status") {
+            metadataCalls.push(call);
+            if (metadataPaused) return yield* Effect.never;
+            return {
+              threadId: remoteThreadId,
+              title: "Remote task",
+              phase: "running",
+              terminal: false,
+              run: null,
+              queuedRunId: null,
+              pendingRequest: null,
+              lastActivityAt: now,
+              lastMessage: null,
+              lastError: null,
+              watch: { pendingRunIds: [], lastReportedRunId: null, webhook: false },
+            };
+          }
           const reply = yield* Deferred.make<unknown, SshRemoteDispatch.SshRemoteDispatchError>();
           yield* Queue.offer(calls, { input: call, reply });
           return yield* Deferred.await(reply);
@@ -300,8 +341,11 @@ const fixture = Effect.gen(function* () {
     Layer.mock(ProjectService.ProjectService)({}),
     Layer.mock(SecretRequests.SecretRequests)({}),
     Layer.mock(ScheduledTaskService.ScheduledTaskService)({}),
+    Layer.mock(LaunchWatchService.LaunchWatchService)({}),
   );
   const layer = OrchestratorMcpService.layer.pipe(
+    Layer.provide(Layer.mock(ThreadLaunchService.ThreadLaunchService)({})),
+    Layer.provide(Layer.mock(GitVcsDriver.GitVcsDriver)({})),
     Layer.provideMerge(RemoteDispatchCoordinator.layer),
     Layer.provide(dependencies),
   );
@@ -312,6 +356,10 @@ const fixture = Effect.gen(function* () {
     commands,
     calls,
     launches,
+    metadataCalls,
+    pauseMetadata: () => {
+      metadataPaused = true;
+    },
     registered,
     subscribed,
     launchEntered,
@@ -347,6 +395,94 @@ const fixture = Effect.gen(function* () {
   };
 });
 const database = NodeSqliteClient.layer({ filename: ":memory:" });
+const encodeFailure = Schema.encodeEffect(OrchestratorMcpFailure);
+const isRemoteDispatchError = Schema.is(RemoteDispatchCoordinator.RemoteDispatchError);
+
+it.effect(
+  "preserves a pre-registration storage failure without exposing its cause on the wire",
+  () =>
+    Effect.gen(function* () {
+      const f = yield* fixture;
+      // Reproduce the stale fixture schema without changing caller authority or SSH behavior.
+      yield* f.sql`ALTER TABLE remote_dispatches DROP COLUMN memory_grant_ceiling`;
+      yield* Effect.gen(function* () {
+        const service = yield* OrchestratorMcpService.OrchestratorMcpService;
+        const result = yield* service.delegateTask(scope, input).pipe(Effect.result);
+        assert.equal(result._tag, "Failure");
+        if (result._tag !== "Failure") return;
+        const error = result.failure;
+        assert.equal(error.code, "orchestration_error");
+        assert.ok(isRemoteDispatchError(error.cause));
+        assert.equal(error.cause.stage, "storage");
+        assert.ok(SqlError.isSqlError(error.cause.cause));
+        const driverCause = error.cause.cause.reason.cause;
+        assert.ok(driverCause instanceof Error);
+        assert.match(driverCause.message, /no column named memory_grant_ceiling/u);
+        const encoded = yield* encodeFailure(error);
+        assert.deepStrictEqual(encoded, {
+          _tag: "OrchestratorMcpFailure",
+          code: "orchestration_error",
+          message: "Remote dispatch failed before task registration.",
+        });
+        assert.deepStrictEqual(JSON.parse(JSON.stringify(error)), encoded);
+        assert.equal(f.launches.length, 0);
+        assert.equal(f.projection.subagents.length, 0);
+      }).pipe(Effect.provide(f.layer));
+    }).pipe(Effect.provide(database)),
+);
+
+it.effect(
+  "remote async delegation, retries and cancellation do not await optional task metadata",
+  () =>
+    Effect.gen(function* () {
+      const f = yield* fixture;
+      f.pauseMetadata();
+      yield* Effect.gen(function* () {
+        const service = yield* OrchestratorMcpService.OrchestratorMcpService;
+        const first = yield* service.delegateTask(scope, { ...input, role: "review" });
+        const retry = yield* service.delegateTask(scope, { ...input, role: "review" });
+        assert.equal(first.role, "review");
+        assert.deepEqual(first.parentModelSelection, f.projection.runs[0]!.modelSelection);
+        assert.deepEqual(first.modelSelection, f.projection.subagents[0]!.modelSelection);
+        assert.equal(first.status, "running");
+        assert.equal(retry.taskId, first.taskId);
+        assert.equal(f.launches.length, 1);
+        yield* Queue.take(f.calls);
+        yield* f.sql`UPDATE remote_dispatches SET state = 'lost'`;
+        const cancelled = yield* service.cancelTask(scope, { taskId: first.taskId });
+        assert.equal(cancelled.status, "failed");
+        assert.equal(f.metadataCalls.length, 0);
+      }).pipe(Effect.provide(f.layer));
+    }).pipe(Effect.provide(database)),
+);
+
+it.effect("remote blocking delegation observes the result without optional task metadata", () =>
+  Effect.gen(function* () {
+    const f = yield* fixture;
+    f.pauseMetadata();
+    yield* Effect.gen(function* () {
+      const service = yield* OrchestratorMcpService.OrchestratorMcpService;
+      const waiting = yield* service
+        .delegateTask(scope, { ...input, mode: "wait" })
+        .pipe(Effect.forkChild);
+      const call = yield* Queue.take(f.calls);
+      assert.equal(call.input.tool, "goat_origin_reports_wait");
+      yield* Deferred.await(f.subscribed);
+      yield* Deferred.succeed(call.reply, {
+        threadId: remoteThreadId,
+        reports: [],
+        hasMore: false,
+        latestRunId: remoteRunId,
+        observedRun: { runId: remoteRunId, status: "completed", summary: "Saved result" },
+        timedOut: false,
+      });
+      const result = yield* Fiber.join(waiting);
+      assert.equal(result.status, "completed");
+      assert.equal(result.summary, "Saved result");
+      assert.equal(f.metadataCalls.length, 0);
+    }).pipe(Effect.provide(f.layer));
+  }).pipe(Effect.provide(database)),
+);
 
 it.effect(
   "remote models are validated on the destination and status never loads a remote child locally",
@@ -400,6 +536,40 @@ it.effect(
         assert.equal(f.launches.length, 1);
       }).pipe(Effect.provide(f.layer));
     }).pipe(Effect.provide(database)),
+);
+
+it.effect("a remote task's question releases a waiting delegate and shows in task_status", () =>
+  Effect.gen(function* () {
+    const f = yield* fixture;
+    yield* Effect.gen(function* () {
+      const service = yield* OrchestratorMcpService.OrchestratorMcpService;
+      const waiting = yield* service
+        .delegateTask(scope, { ...input, mode: "wait", timeoutMs: 600_000 })
+        .pipe(Effect.forkChild);
+      const question = RuntimeRequestId.make("request-1");
+      const call = yield* Queue.take(f.calls);
+      yield* Deferred.succeed(call.reply, {
+        threadId: remoteThreadId,
+        reports: [],
+        hasMore: false,
+        latestRunId: remoteRunId,
+        observedRun: {
+          runId: remoteRunId,
+          status: "running",
+          summary: null,
+          pendingRequestIds: [question],
+        },
+        timedOut: false,
+      });
+      const released = yield* Fiber.join(waiting);
+      assert.equal(released.status, "running");
+      assert.equal(released.waitTimedOut, false);
+      assert.deepEqual(released.pendingRequestIds, [question]);
+      assert.deepEqual((yield* service.taskStatus(scope, released.taskId)).pendingRequestIds, [
+        question,
+      ]);
+    }).pipe(Effect.provide(f.layer));
+  }).pipe(Effect.provide(database)),
 );
 
 it.effect.each(["before", "after"] as const)(

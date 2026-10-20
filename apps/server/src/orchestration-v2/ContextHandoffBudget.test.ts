@@ -1,4 +1,4 @@
-import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
+import type * as ProviderAdapter from "@goat/provider-core/server/ProviderAdapter";
 import { assert, describe, it } from "@effect/vitest";
 import {
   ContextHandoffId,
@@ -12,7 +12,7 @@ import {
   OrchestrationV2ContextHandoff,
   type OrchestrationV2HistoricalMessage,
   type OrchestrationV2ProviderThread,
-} from "@t3tools/contracts";
+} from "@goat/contracts";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
@@ -23,7 +23,7 @@ import {
   historyResponseItems,
   selectHistory,
   historicalMessage,
-} from "@t3tools/provider-core/server/handoffBudget";
+} from "@goat/provider-core/server/handoffBudget";
 import { projectContextHandoffForWire } from "./WireProjection.ts";
 import { deliverContextHandoffs } from "./ContextHandoffDelivery.ts";
 
@@ -249,7 +249,6 @@ describe("handoff budget", () => {
           ...base,
           tokenCap: 64_000,
           modelContextWindow: 1_000_000,
-          // The history byte cap is independent of both current text and image payloads.
           userText: "x".repeat(70_000),
           attachments,
           providerThread: {
@@ -547,7 +546,6 @@ describe("handoff delivery", () => {
       assert.equal(first.context, "");
       assert.deepEqual(statuses, ["pending", "injected"]);
       assert.lengthOf(history, 3);
-      // No turn has started. Reconstruct from the durable projection as a retry would.
       const second = yield* deliverContextHandoffs({ ...input, handoffs: [durable] });
       assert.equal(second.context, "");
       assert.lengthOf(history, 3);

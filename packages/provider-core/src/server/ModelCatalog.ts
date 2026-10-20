@@ -1,5 +1,5 @@
 /**
- * ModelCatalog — the model metadata a provider reads from T3's model manifest.
+ * ModelCatalog — the model metadata a provider reads from GOAT's model manifest.
  *
  * The server owns the manifest itself (bundle, remote refresh, disk cache,
  * compatibility policies). A provider only sees its own catalog entry, so a
@@ -8,17 +8,12 @@
  *
  * @module provider-core/server/ModelCatalog
  */
-import type {
-  ModelCapabilities,
-  ProviderDriverKind,
-  ServerProviderModel,
-} from "@t3tools/contracts";
+import type { ModelCapabilities, ProviderDriverKind, ServerProviderModel } from "@goat/contracts";
 import * as Context from "effect/Context";
 import type * as Effect from "effect/Effect";
 
 import type { ServerProviderDraft } from "./snapshotProbe.ts";
 
-/** One model entry in a provider's manifest catalog. */
 export interface ProviderCatalogModel {
   readonly slug: string;
   readonly name: string;
@@ -28,13 +23,10 @@ export interface ProviderCatalogModel {
   readonly status: "current" | "legacy";
   readonly badge?: "new";
   readonly capabilities: ModelCapabilities | null;
-  /** Provider-owned metadata for this model; the provider decodes it. */
   readonly adapter: unknown;
-  /** Provider-owned metadata for the model's capability profile. */
   readonly profileAdapter: unknown;
 }
 
-/** A provider's catalog entry: its models and the chat default. */
 export interface ProviderCatalog {
   readonly models: ReadonlyArray<ProviderCatalogModel>;
   readonly defaultChatModel: string | undefined;
@@ -43,24 +35,14 @@ export interface ProviderCatalog {
 export class ModelCatalog extends Context.Service<
   ModelCatalog,
   {
-    /**
-     * The driver's catalog from the manifest in memory (disk cache or bundle),
-     * or `undefined` when the manifest has no entry for it. Never fetches.
-     */
     readonly current: (
       driverKind: ProviderDriverKind,
     ) => Effect.Effect<ProviderCatalog | undefined>;
-    /** The same catalog from the bundled manifest; for fallbacks when remote data is invalid. */
     readonly bundled: (driverKind: ProviderDriverKind) => ProviderCatalog | undefined;
-    /**
-     * Starts a TTL-gated remote refresh in the background. Provider checks call
-     * this; it never fails and never blocks the check.
-     */
     readonly refreshInBackground: Effect.Effect<void>;
   }
->()("@t3tools/provider-core/server/ModelCatalog") {}
+>()("@goat/provider-core/server/ModelCatalog") {}
 
-/** A catalog model as the snapshot model it presents. */
 export const catalogServerModel = (
   catalog: ProviderCatalog,
   entry: ProviderCatalogModel,
@@ -77,22 +59,13 @@ export const catalogServerModel = (
   capabilities: entry.capabilities,
 });
 
-/** How a driver matches its discovered slugs to catalog entries. */
 export interface CatalogMatching {
-  /**
-   * Maps a slug to the family the catalog names it by, such as a dated Codex
-   * build to its base model. Defaults to the slug itself.
-   */
   readonly family?: (slug: string) => string;
 }
 
 const familyOf = (matching: CatalogMatching | undefined, slug: string) =>
   matching?.family?.(slug) ?? slug;
 
-/**
- * Reclassifies built-in models as legacy or current from the catalog. Custom
- * models are user-defined and never reclassified.
- */
 export function classifyCatalogModels(
   models: ReadonlyArray<ServerProviderModel>,
   catalog: ProviderCatalog | undefined,
@@ -110,13 +83,6 @@ export function classifyCatalogModels(
   });
 }
 
-/**
- * Moves `isDefault` to the catalog's chat default when the catalog names one
- * the models include. Providers that learn their default from the runtime can
- * be overridden here without a release. Aliases that pointed at the old
- * default move with the flag so the shared "provider default" alias keeps
- * resolving.
- */
 export function applyCatalogDefault(
   models: ReadonlyArray<ServerProviderModel>,
   catalog: ProviderCatalog | undefined,
@@ -149,11 +115,6 @@ export function applyCatalogDefault(
   });
 }
 
-/**
- * Reclassifies a snapshot draft's built-in models and moves its default from
- * the catalog. Drivers that announce models a newer CLI unlocks add
- * `updateRequiredModels` themselves; this clears a stale list.
- */
 export function applyModelCatalog(
   draft: ServerProviderDraft,
   catalog: ProviderCatalog | undefined,

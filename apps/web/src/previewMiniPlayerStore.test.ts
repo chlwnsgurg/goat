@@ -1,5 +1,5 @@
-import { scopeThreadRef } from "@t3tools/client-runtime/environment";
-import { type EnvironmentId, ThreadId } from "@t3tools/contracts";
+import { scopeThreadRef } from "@goat/client-runtime/environment";
+import { type EnvironmentId, ThreadId } from "@goat/contracts";
 import { beforeEach, describe, expect, it } from "vite-plus/test";
 
 import {
@@ -104,7 +104,6 @@ describe("previewMiniPlayerStore", () => {
     expect(
       selectThreadPreviewMiniPlayerTabId(usePreviewMiniPlayerStore.getState().byThreadKey, refA),
     ).toBeNull();
-    // The same device under a new label is still the same floating source.
     usePreviewMiniPlayerStore.getState().open(refA, { ...pixel, name: "Renamed" });
     expect(
       selectThreadPreviewMiniPlayer(usePreviewMiniPlayerStore.getState().byThreadKey, refA),

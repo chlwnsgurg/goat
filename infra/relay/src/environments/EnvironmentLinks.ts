@@ -3,7 +3,7 @@ import type {
   RelayEnvironmentLinkProofPayload,
   RelayEnvironmentLinkRequest,
   RelayManagedEndpoint,
-} from "@t3tools/contracts/relay";
+} from "@goat/contracts/relay";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
@@ -144,7 +144,6 @@ export class EnvironmentLinks extends Context.Service<
       >,
       EnvironmentLinkEnvironmentLookupPersistenceError
     >;
-    /** Sets the webhook-hold opt-in on the active links proven by one environment key. */
     readonly setHoldWebhooksWhileOffline: (input: {
       readonly environmentId: string;
       readonly environmentPublicKey: string;
@@ -400,7 +399,6 @@ const make = Effect.gen(function* () {
               : eq(relayEnvironmentLinks.environmentPublicKey, input.environmentPublicKey),
           ),
         )
-        // At most one row per user who linked this environment.
         .pipe(
           Effect.map((rows) =>
             rows.map((row) => ({

@@ -1,22 +1,12 @@
-/**
- * PiProvider — snapshot/probe layer for the Pi coding agent.
- *
- * Health is probed with `pi --version`. Models, the user's default model, and
- * the user's commands (extension slash commands, prompt templates, skills)
- * are discovered through a short-lived ephemeral RPC session
- * (`pi --mode rpc --no-session`), so everything the user configured in
- * `~/.pi/agent` — custom providers, models.json entries, extensions, skills —
- * shows up in T3 without any hardcoded catalog.
- */
 import {
   type CustomModelSetting,
   type ServerProvider,
   type ServerProviderModel,
-} from "@t3tools/contracts";
+} from "@goat/contracts";
 import type { PiSettings } from "../settings.ts";
-import { causeErrorTag } from "@t3tools/shared/observability";
-import { resolveSpawnCommand } from "@t3tools/shared/shell";
-import { compareSemverVersions } from "@t3tools/shared/semver";
+import { causeErrorTag } from "@goat/shared/observability";
+import { resolveSpawnCommand } from "@goat/shared/shell";
+import { compareSemverVersions } from "@goat/shared/semver";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Stream from "effect/Stream";
@@ -35,7 +25,7 @@ import {
   piRecordField as recordField,
   piRecordString as recordString,
 } from "./rpc.ts";
-import * as ProviderLatestVersions from "@t3tools/provider-core/server/ProviderLatestVersions";
+import * as ProviderLatestVersions from "@goat/provider-core/server/ProviderLatestVersions";
 import {
   buildServerProvider,
   isCommandMissingCause,
@@ -43,11 +33,11 @@ import {
   providerModelsFromSettings,
   spawnAndCollect,
   type ServerProviderDraft,
-} from "@t3tools/provider-core/server/snapshotProbe";
+} from "@goat/provider-core/server/snapshotProbe";
 import {
   enrichProviderSnapshotWithVersionAdvisory,
   type ProviderMaintenanceCapabilities,
-} from "@t3tools/provider-core/server/maintenanceResolver";
+} from "@goat/provider-core/server/maintenanceResolver";
 import {
   EMPTY_PI_MODEL_CAPABILITIES,
   thinkingCapabilitiesForPiModel,
@@ -62,8 +52,6 @@ const PI_PRESENTATION = {
   displayName: "Pi",
   showInteractionModeToggle: false,
   supportedRuntimeModes: ["approval-required", "auto-accept-edits", "full-access"],
-  // The adapter reports context usage from Pi's streaming usage while a
-  // turn runs, so clients can reserve the meter before the first settle.
   reportsContextWindow: true,
   requiresNewThreadForModelChange: false,
 } as const;
@@ -72,12 +60,10 @@ const VERSION_PROBE_TIMEOUT_MS = 4_000;
 const PI_RPC_DISCOVERY_TIMEOUT_MS = 15_000;
 /**
  * get_entries arrived in 0.80.3 and agent_settled landed in source at 0.80.4.
- * Version 0.80.5 was the first published package containing both hooks. T3
- * needs them for rollback boundaries and reliable turn terminalization.
+ * Version 0.80.5 was the first published package containing both hooks.
  */
 export const MINIMUM_PI_VERSION = "0.80.5";
 
-/** Deferring to the user's own settings.json default model. */
 const PI_DEFAULT_MODEL: ServerProviderModel = {
   slug: "default",
   name: "Pi default",
@@ -103,16 +89,27 @@ function piModelsFromSettings(
 
 function parseDiscoveredModels(
   data: unknown,
-  defaultThinkingLevel: unknown,
-): ReadonlyArray<ServerProviderModel> {
+  state: unknown,
+): Result.Result<ReadonlyArray<ServerProviderModel>, PiRpcError> {
   const models = recordField(data, "models");
-  if (!Array.isArray(models)) return [];
+  if (!Array.isArray(models)) {
+    return Result.fail(
+      new PiRpcError({ operation: "get_available_models", detail: "Invalid model inventory" }),
+    );
+  }
+  const activeModel = recordField(state, "model");
+  const activeProvider = recordString(activeModel, "provider");
+  const activeModelId = recordString(activeModel, "id");
   const seen = new Set<string>();
   const parsed: Array<ServerProviderModel> = [];
   for (const model of models) {
     const provider = recordString(model, "provider");
     const id = recordString(model, "id");
-    if (provider === undefined || id === undefined) continue;
+    if (provider === undefined || id === undefined || provider.trim() === "" || id.trim() === "") {
+      return Result.fail(
+        new PiRpcError({ operation: "get_available_models", detail: "Invalid model identity" }),
+      );
+    }
     const slug = `${provider}/${id}`;
     if (seen.has(slug)) continue;
     seen.add(slug);
@@ -121,10 +118,15 @@ function parseDiscoveredModels(
       name: recordString(model, "name") ?? slug,
       subProvider: provider,
       isCustom: false,
-      capabilities: thinkingCapabilitiesForPiModel(model, defaultThinkingLevel),
+      capabilities: thinkingCapabilitiesForPiModel(
+        model,
+        provider === activeProvider && id === activeModelId
+          ? recordString(state, "thinkingLevel")
+          : undefined,
+      ),
     });
   }
-  return parsed;
+  return Result.succeed(parsed);
 }
 
 const makePiDiscoveryConnection = Effect.fnUntraced(function* (
@@ -167,10 +169,7 @@ const discoverPiViaRpc = (
     const commandsData = yield* connection
       .request({ type: "get_commands" })
       .pipe(Effect.orElseSucceed(() => undefined));
-    const discoveredModels = parseDiscoveredModels(
-      modelsData,
-      recordString(stateData, "thinkingLevel"),
-    );
+    const discoveredModels = yield* Effect.fromResult(parseDiscoveredModels(modelsData, stateData));
     const { slashCommands, skills } = parsePiDiscoveredCommands(commandsData);
     return {
       models: discoveredModels,
@@ -180,7 +179,6 @@ const discoverPiViaRpc = (
     } satisfies PiDiscovery;
   }).pipe(Effect.scoped);
 
-/** Probe the full command catalog Pi exposes in a workspace without changing machine health. */
 export const discoverPiCommandsForCwd = Effect.fn("discoverPiCommandsForCwd")(
   function* (piSettings: PiSettings, environment: NodeJS.ProcessEnv, cwd: string) {
     const launchArgs = resolvePiLaunchArgs(piSettings.launchArgs);
@@ -303,7 +301,7 @@ export const checkPiProviderStatus = Effect.fn("checkPiProviderStatus")(function
         status: "error",
         auth: { status: "unknown" },
         message: isCommandMissingCause(error)
-          ? "Pi CLI (`pi`) is not installed or not on PATH. Install with `npm install -g @earendil-works/pi-coding-agent`."
+          ? "Pi CLI (`pi`) is not installed or not on PATH. Install with `npm install -g --ignore-scripts @earendil-works/pi-coding-agent`."
           : "Failed to execute Pi CLI health check.",
       },
     });

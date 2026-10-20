@@ -1,4 +1,5 @@
-import { ORCHESTRATION_PROTOCOL_HEADER } from "@t3tools/contracts";
+import { LEGACY_ORCHESTRATION_PROTOCOL_HEADER } from "@goat/contracts/legacyT3Names";
+import { ORCHESTRATION_PROTOCOL_HEADER } from "@goat/contracts";
 
 export const browserApiCorsAllowedMethods = ["GET", "POST", "OPTIONS"] as const;
 export const browserApiCorsAllowedHeaders = [
@@ -8,4 +9,13 @@ export const browserApiCorsAllowedHeaders = [
   "content-type",
   "dpop",
   ORCHESTRATION_PROTOCOL_HEADER,
+  LEGACY_ORCHESTRATION_PROTOCOL_HEADER,
+] as const;
+
+/** Origins of the Electron renderer, packaged and dev, current and before D13. */
+export const DESKTOP_RENDERER_ORIGINS = [
+  "goat://app",
+  "goat-dev://app",
+  "t3code://app",
+  "t3code-dev://app",
 ] as const;

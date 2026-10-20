@@ -1,11 +1,16 @@
-import { EnvironmentId, ThreadId, type VcsStatusResult } from "@t3tools/contracts";
+import {
+  EnvironmentId,
+  SourceControlProviderKind,
+  ThreadId,
+  type VcsStatusResult,
+} from "@goat/contracts";
 import {
   SshConnectionTarget,
   SshConnectionProfile,
   BearerConnectionTarget,
   PrimaryConnectionTarget,
   type ConnectionCatalogEntry,
-} from "@t3tools/client-runtime/connection";
+} from "@goat/client-runtime/connection";
 import * as Option from "effect/Option";
 import { assert, describe, it } from "vite-plus/test";
 import {
@@ -17,6 +22,7 @@ import {
   requiresDefaultBranchConfirmation,
   resolveAutoFeatureBranchName,
   resolveDefaultBranchActionDialogCopy,
+  resolveFeatureBranchUnavailableReason,
   resolveGitActionProgressPresentation,
   resolveGitActionResultToastTiming,
   resolveLiveThreadBranchUpdate,
@@ -353,7 +359,7 @@ describe("when: source control provider uses merge requests", () => {
     const gitlabStatus = status({
       aheadCount: 2,
       sourceControlProvider: {
-        kind: "gitlab",
+        kind: SourceControlProviderKind.make("gitlab"),
         name: "GitLab",
         baseUrl: "https://gitlab.com",
       },
@@ -1031,6 +1037,21 @@ describe("resolveDefaultBranchActionDialogCopy", () => {
         'This action will commit, push, and create a pull request on "main". You can continue on this ref or create a feature ref and run the same action there.',
       continueLabel: "Commit, push & create PR",
     });
+  });
+});
+
+describe("resolveFeatureBranchUnavailableReason", () => {
+  it("blocks the feature branch when there is nothing to commit", () => {
+    assert.equal(
+      resolveFeatureBranchUnavailableReason({ branchName: "main", hasWorkingTreeChanges: false }),
+      "There are no changes to commit, so a feature branch can't be named. Create a branch yourself or continue on main.",
+    );
+  });
+
+  it("allows the feature branch when there are changes to commit", () => {
+    assert.isNull(
+      resolveFeatureBranchUnavailableReason({ branchName: "main", hasWorkingTreeChanges: true }),
+    );
   });
 });
 

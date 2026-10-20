@@ -1,6 +1,12 @@
-import type { EnvironmentId, ProviderInstanceId, ThreadId } from "@t3tools/contracts";
+import type {
+  AuthEnvironmentScope,
+  EnvironmentId,
+  ProviderInstanceId,
+  ThreadId,
+} from "@goat/contracts";
 
 export interface McpProviderSessionConfig {
+  readonly grantedScopes?: ReadonlyArray<AuthEnvironmentScope>;
   readonly environmentId: EnvironmentId;
   readonly threadId: ThreadId;
   readonly providerSessionId: string;
@@ -8,23 +14,20 @@ export interface McpProviderSessionConfig {
   readonly endpoint: string;
   readonly authorizationHeader: string;
   /**
-   * Whether this credential includes the "preview" capability. Adapters read
-   * it to keep developer instructions truthful: when the user withholds agent
-   * browser access, the prompt must not advertise `preview_*` tools that every
-   * call would reject.
+   * Bumped when GOAT replaces this credential's authority under the same
+   * token, so a config read before the change is recognizably stale.
+   */
+  readonly credentialGeneration?: number;
+  /**
+   * Adapters read it to keep developer instructions truthful: when the user
+   * withholds agent browser access, the prompt must not advertise `preview_*`
+   * tools that every call would reject.
    */
   readonly browserToolsAvailable: boolean;
-  /** Capabilities the credential grants ("preview", "device"). */
   readonly capabilities?: ReadonlySet<string>;
-  /**
-   * Set when the session may drive devices. Adapters spread this into the
-   * provider subprocess environment so the `agent-device` CLI is on PATH and
-   * already pointed at the server's daemon; the agent never handles a token.
-   */
   readonly agentDeviceEnvironment?: Readonly<Record<string, string>>;
 }
 
-/** Provider env with the device variables applied over `base`, or `base` untouched. */
 export function withAgentDeviceEnvironment(
   base: NodeJS.ProcessEnv,
   config: Pick<McpProviderSessionConfig, "agentDeviceEnvironment"> | undefined,
@@ -38,5 +41,24 @@ export function withAgentDeviceEnvironment(
     ...base,
     ...rest,
     ...(shimDir ? { PATH: basePath ? `${shimDir}${separator}${basePath}` : shimDir } : {}),
+  };
+}
+
+/** Native tool claims are derived from the issued credential, never runtime mode. */
+export interface MemoryToolAvailability {
+  readonly read: boolean;
+  readonly write: boolean;
+  readonly source: boolean;
+}
+
+export function memoryToolAvailability(
+  config: Pick<McpProviderSessionConfig, "grantedScopes"> | undefined,
+): MemoryToolAvailability {
+  const scopes = config?.grantedScopes ?? [];
+  const read = scopes.includes("memory:read");
+  return {
+    read,
+    write: read && scopes.includes("memory:write"),
+    source: read && scopes.includes("orchestration:read"),
   };
 }

@@ -1,8 +1,8 @@
-import { SSH_RUNTIME_PROTOCOL_VERSION } from "@t3tools/shared/sshRuntimeProtocol";
-import { ORCHESTRATION_PROTOCOL_VERSION } from "@t3tools/contracts";
+import { SSH_RUNTIME_PROTOCOL_VERSION } from "@goat/shared/sshRuntimeProtocol";
+import { ORCHESTRATION_PROTOCOL_VERSION } from "@goat/contracts";
 import { assert, describe, it } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import * as HostProcess from "@t3tools/shared/HostProcess";
+import * as HostProcess from "@goat/shared/HostProcess";
 import * as Effect from "effect/Effect";
 import * as Result from "effect/Result";
 import * as Stream from "effect/Stream";
@@ -75,8 +75,7 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")(
         );
         const scripts = yield* nativeScripts({ nodeScriptPath: cli });
         const key = f.state.slice(f.state.lastIndexOf("/") + 1);
-        // nativeScripts' default key is an existing fixture constant; preserve all other script bytes.
-        const script = scripts[entry].split("711bc738002d72fd").join(key);
+        const script = scripts[entry];
         const before = yield* f.snapshot;
         const child = yield* f.realSpawner.spawn(
           ChildProcess.make(remoteShell, ["-s", "--", key], {
@@ -206,13 +205,14 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")(
       }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
     );
     it.live(
-      "validates and publishes the requested runtime before stopping its verified owned PID",
+      "validates the requested runtime before drain and publishes it before supervised startup",
       () =>
         Effect.gen(function* () {
           const f = yield* makeProtocolFixture({
             live: true,
             kind: "managed",
             oldVersion: "1.2.2",
+            drain: true,
             ssh: 99,
             orchestration: ORCHESTRATION_PROTOCOL_VERSION,
           });
@@ -232,11 +232,18 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")(
           const validation = events.findIndex(
             (event) => event.type === "version" && event.version === ARCHIVE.archiveVersion,
           );
-          const stop = events.findIndex((event) => event.type === "stop");
+          const stop = events.findIndex((event) => event.type === "drain");
           const start = events.findLastIndex((event) => event.type === "start");
+          assert.isAtLeast(validation, 0);
+          assert.isAtLeast(stop, 0);
           assert.isBelow(validation, stop);
+          assert.isFalse(events.some((event) => event.type === "stop"));
+          assert.isTrue(events.some((event) => event.type === "self-stop"));
+          assert.isTrue(
+            events.some((event) => event.type === "supervise" && event.status === "replaced"),
+          );
           assert.isBelow(stop, start);
-          assert.include(events[start].runner, `T3_ARCHIVE_VERSION='${ARCHIVE.archiveVersion}'`);
+          assert.include(events[start].runner, `GOAT_ARCHIVE_VERSION='${ARCHIVE.archiveVersion}'`);
           assert.equal(f.counters().uploads, 1);
         }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
     );

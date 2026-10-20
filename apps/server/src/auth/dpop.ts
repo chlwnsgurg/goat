@@ -1,8 +1,8 @@
 import {
   type DpopVerificationFailureCode as DpopVerificationFailureCodeType,
   verifyDpopProof,
-} from "@t3tools/shared/dpop";
-import type { DpopFailureReason } from "@t3tools/contracts";
+} from "@goat/shared/dpop";
+import type { DpopFailureReason } from "@goat/contracts";
 import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
@@ -18,7 +18,6 @@ import {
 } from "./EnvironmentAuth.ts";
 import * as ServerSecretStore from "./ServerSecretStore.ts";
 
-/** Secret store name prefix of DPoP replay markers. The server prunes expired ones. */
 export const DPOP_REPLAY_MARKER_PREFIX = "dpop-proof-";
 
 export const mapDpopFailureReason = (code: DpopVerificationFailureCodeType): DpopFailureReason => {

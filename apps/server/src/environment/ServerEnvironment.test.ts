@@ -1,6 +1,13 @@
+import { vi } from "vite-plus/test";
+import { ProviderMemoryImportRuntime } from "../memory/imports/MemoryImportTypes.ts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import { ORCHESTRATION_PROTOCOL_VERSION } from "@t3tools/contracts";
-import { SSH_RUNTIME_PROTOCOL_VERSION } from "@t3tools/shared/sshRuntimeProtocol";
+import {
+  MemoryOperationId,
+  MemorySpaceId,
+  ORCHESTRATION_PROTOCOL_VERSION,
+  supportsMemoryProtocol,
+} from "@goat/contracts";
+import { SSH_RUNTIME_PROTOCOL_VERSION } from "@goat/shared/sshRuntimeProtocol";
 import { expect, it } from "@effect/vitest";
 import * as Crypto from "effect/Crypto";
 import * as Deferred from "effect/Deferred";
@@ -10,10 +17,13 @@ import * as Layer from "effect/Layer";
 import * as PlatformError from "effect/PlatformError";
 import * as Schema from "effect/Schema";
 
-import { DEFAULT_SIGNAL_EXPORT } from "@t3tools/shared/observability";
-import * as HostProcess from "@t3tools/shared/HostProcess";
-import * as OtelEnvironment from "@t3tools/shared/otelEnvironment";
+import { DEFAULT_SIGNAL_EXPORT } from "@goat/shared/observability";
+import * as HostProcess from "@goat/shared/HostProcess";
+import * as OtelEnvironment from "@goat/shared/otelEnvironment";
 
+import * as RuntimeIdentity from "../runtimeIdentity.ts";
+import { makePersistedServerRuntimeState } from "../serverRuntimeState.ts";
+import { ownRuntimeProtocolRanges } from "@goat/shared/sshRuntimeProtocol";
 import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
 import {
   PUBLISH_AGENT_ACTIVITY_SECRET,
@@ -21,6 +31,12 @@ import {
   RELAY_URL_SECRET,
 } from "../cloud/config.ts";
 import * as ServerConfig from "../config.ts";
+import * as Settings from "../serverSettings.ts";
+import * as Sqlite from "../persistence/Sqlite.ts";
+import * as Hub from "../memory/MemoryHubHttp.ts";
+import * as HubAuth from "../memory/MemoryHubAuth.ts";
+import * as Store from "../memory/MemoryStore.ts";
+import * as HttpRouter from "effect/http/HttpRouter";
 import * as ServerEnvironment from "./ServerEnvironment.ts";
 
 const isServerEnvironmentIdPersistenceError = Schema.is(
@@ -81,14 +97,99 @@ const makeServerConfig = Effect.fn(function* (baseDir: string) {
 });
 
 it.layer(NodeServices.layer)("ServerEnvironmentLive", (it) => {
+  it.effect(
+    "shares one start identity between descriptor and runtime state, and changes it on restart",
+    () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const baseDir = yield* fs.makeTempDirectoryScoped();
+        const observe = Effect.gen(function* () {
+          const environment = yield* ServerEnvironment.ServerEnvironment;
+          const identity = yield* RuntimeIdentity.RuntimeIdentity;
+          const descriptor = yield* environment.getDescriptor;
+          const state = yield* makePersistedServerRuntimeState({
+            config: { host: undefined, devUrl: undefined },
+            port: 13773,
+            instanceId: identity.instanceId,
+          });
+          expect(descriptor.instanceId).toBe(identity.instanceId);
+          expect(state.instanceId).toBe(descriptor.instanceId);
+          expect(descriptor.protocol).toEqual(
+            ownRuntimeProtocolRanges(ORCHESTRATION_PROTOCOL_VERSION),
+          );
+          expect(descriptor.capabilities.drainRestart).toBe(true);
+          expect(descriptor.capabilities.memoryHubProtocolVersion).toBeUndefined();
+          return identity.instanceId;
+        }).pipe(Effect.provide(Layer.fresh(layerServerEnvironment(baseDir))));
+        expect(yield* observe).not.toBe(yield* observe);
+      }),
+  );
+  it.effect("advertises core memory without provider import in web and desktop modes", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const baseDir = yield* fs.makeTempDirectoryScoped();
+      const config = yield* makeServerConfig(baseDir);
+      yield* fs.makeDirectory(config.stateDir, { recursive: true });
+      for (const mode of ["web", "desktop"] as const) {
+        const descriptor = yield* ServerEnvironment.ServerEnvironment.use(
+          (environment) => environment.getDescriptor,
+        ).pipe(
+          Effect.provide(
+            ServerEnvironment.layer.pipe(
+              Layer.provide(layerEmptySecretStore),
+              Layer.provide(ServerConfig.layer({ ...config, mode })),
+            ),
+          ),
+        );
+        expect(descriptor.capabilities.memory?.protocolVersion).toBe(1);
+        expect(descriptor.capabilities.memory?.refusedReverts).toBe(true);
+        expect(descriptor.capabilities.memory?.hubDiagnostics).toBe(true);
+        expect(supportsMemoryProtocol(descriptor.capabilities)).toBe(true);
+        expect(descriptor.capabilities.memory?.importProvider).toBeUndefined();
+        expect(descriptor.capabilities.memory?.importProvider === true).toBe(false);
+        expect(descriptor.capabilities.memory?.hub).toBeUndefined();
+        expect(descriptor.capabilities.memoryHubProtocolVersion).toBeUndefined();
+      }
+    }),
+  );
+  it.effect("advertises provider import only when the acquired runtime is installed", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const baseDir = yield* fs.makeTempDirectoryScoped();
+      const descriptor = yield* ServerEnvironment.ServerEnvironment.use(
+        (s) => s.getDescriptor,
+      ).pipe(
+        Effect.provide(
+          layerServerEnvironment(baseDir).pipe(
+            Layer.provide(
+              Layer.succeed(ProviderMemoryImportRuntime, {
+                run: () => Effect.die("descriptor must not invoke provider import"),
+              }),
+            ),
+          ),
+        ),
+      );
+      expect(descriptor.capabilities.memory).toEqual({
+        protocolVersion: 1,
+        importProvider: true,
+        refusedReverts: true,
+        resolutionInputs: true,
+        retainedLocalSpace: true,
+        hubDiagnostics: true,
+      });
+      expect(descriptor.capabilities.memoryHubProtocolVersion).toBeUndefined();
+    }),
+  );
   it.effect("advertises the Slack channel in the assembled server descriptor", () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
-      const baseDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-slack-channel-" });
+      const baseDir = yield* fs.makeTempDirectoryScoped({ prefix: "goat-slack-channel-" });
       const descriptor = yield* ServerEnvironment.ServerEnvironment.use(
         (environment) => environment.getDescriptor,
       ).pipe(Effect.provide(layerServerEnvironment(baseDir)));
       expect(descriptor.capabilities.slackChannel).toBe(true);
+      expect(descriptor.capabilities.goatBotHome).toBe(true);
+      expect(descriptor.capabilities.goatBotStatus).toBe(true);
     }),
   );
   it.effect("publishes proven install ownership only for manually updated servers", () =>
@@ -129,6 +230,13 @@ it.layer(NodeServices.layer)("ServerEnvironmentLive", (it) => {
         expect(descriptor.capabilities.serverSelfUpdate).toBe(
           mode === "web" ? undefined : "desktop-managed",
         );
+        expect(descriptor.capabilities).toMatchObject({
+          settledWorktreeCleanup: true,
+          storageCleanupRun: true,
+          projectWorktreeCleanup: true,
+          worktreesDirectory: true,
+          threadAutoSettlementScope: true,
+        });
       }
     }),
   );
@@ -141,7 +249,7 @@ it.layer(NodeServices.layer)("ServerEnvironmentLive", (it) => {
       const fileSystem = yield* FileSystem.FileSystem;
       const crypto = yield* Crypto.Crypto;
       const baseDir = yield* fileSystem.makeTempDirectoryScoped({
-        prefix: "t3-server-environment-concurrent-test-",
+        prefix: "goat-server-environment-concurrent-test-",
       });
       const serverConfig = yield* makeServerConfig(baseDir);
       yield* fileSystem.makeDirectory(serverConfig.stateDir, { recursive: true });
@@ -169,7 +277,6 @@ it.layer(NodeServices.layer)("ServerEnvironmentLive", (it) => {
                   if (path !== serverConfig.environmentIdPath || remaining > 0 || value.trim()) {
                     return;
                   }
-                  // Both observe the empty file, but one repairs it after the other has finished.
                   if (++emptyReads === 2) {
                     yield* Deferred.succeed(bothReadEmpty, undefined);
                     yield* Deferred.await(firstInitialized);
@@ -182,14 +289,15 @@ it.layer(NodeServices.layer)("ServerEnvironmentLive", (it) => {
         }),
         Effect.provideService(Crypto.Crypto, {
           ...crypto,
-          randomUUIDv4: Effect.gen(function* () {
-            const id = yield* crypto.randomUUIDv4;
-            if (--remaining === 0) {
-              yield* Deferred.succeed(bothGenerated, undefined);
-            }
-            yield* Deferred.await(bothGenerated);
-            return id;
-          }),
+          randomUUIDv4: (() =>
+            Effect.gen(function* () {
+              const id = yield* crypto.randomUUIDv4();
+              if (--remaining === 0) {
+                yield* Deferred.succeed(bothGenerated, undefined);
+              }
+              yield* Deferred.await(bothGenerated);
+              return id;
+            })) as Crypto.Crypto["randomUUIDv4"],
         }),
       );
 
@@ -207,7 +315,7 @@ it.layer(NodeServices.layer)("ServerEnvironmentLive", (it) => {
     Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;
       const baseDir = yield* fileSystem.makeTempDirectoryScoped({
-        prefix: "t3-server-environment-test-",
+        prefix: "goat-server-environment-test-",
       });
 
       const first = yield* Effect.gen(function* () {
@@ -234,6 +342,7 @@ it.layer(NodeServices.layer)("ServerEnvironmentLive", (it) => {
       expect(second.capabilities.threadPullRequests).toBe(true);
       expect(second.capabilities.threadPullRequestLinking).toBe(true);
       expect(second.capabilities.serverResolvedCommandContext).toBe(true);
+      expect(second.capabilities.projectProviderInstanceOverrides).toBe(true);
       expect(second.capabilities.agentActivityPublishing).toBe(false);
     }),
   );
@@ -242,7 +351,7 @@ it.layer(NodeServices.layer)("ServerEnvironmentLive", (it) => {
     Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;
       const baseDir = yield* fileSystem.makeTempDirectoryScoped({
-        prefix: "t3-server-environment-publish-test-",
+        prefix: "goat-server-environment-publish-test-",
       });
       const layerTest = Layer.mergeAll(
         ServerEnvironment.layer.pipe(Layer.provide(ServerSecretStore.layer)),
@@ -257,15 +366,10 @@ it.layer(NodeServices.layer)("ServerEnvironmentLive", (it) => {
         const unlinked = yield* serverEnvironment.getDescriptor;
         expect(unlinked.capabilities.agentActivityPublishing).toBe(false);
 
-        // The opt-in alone is not enough: without relay link credentials no
-        // publish would leave this environment.
         yield* secrets.set(PUBLISH_AGENT_ACTIVITY_SECRET, encode("true"));
         const withoutLink = yield* serverEnvironment.getDescriptor;
         expect(withoutLink.capabilities.agentActivityPublishing).toBe(false);
 
-        // Empty credentials are as unconfigured as missing ones: the
-        // publisher's truthiness gate skips them, so the capability must not
-        // advertise publishing.
         yield* secrets.set(RELAY_URL_SECRET, encode(""));
         yield* secrets.set(RELAY_ENVIRONMENT_CREDENTIAL_SECRET, encode("credential"));
         const emptyUrl = yield* serverEnvironment.getDescriptor;
@@ -275,8 +379,6 @@ it.layer(NodeServices.layer)("ServerEnvironmentLive", (it) => {
         const linked = yield* serverEnvironment.getDescriptor;
         expect(linked.capabilities.agentActivityPublishing).toBe(true);
 
-        // The toggle changes at runtime, so the same service instance must
-        // reflect a flip without a restart.
         yield* secrets.set(PUBLISH_AGENT_ACTIVITY_SECRET, encode("false"));
         const disabled = yield* serverEnvironment.getDescriptor;
         expect(disabled.capabilities.agentActivityPublishing).toBe(false);
@@ -288,7 +390,7 @@ it.layer(NodeServices.layer)("ServerEnvironmentLive", (it) => {
     Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;
       const baseDir = yield* fileSystem.makeTempDirectoryScoped({
-        prefix: "t3-server-environment-desktop-update-test-",
+        prefix: "goat-server-environment-desktop-update-test-",
       });
       const serverConfig = yield* makeServerConfig(baseDir);
       yield* fileSystem.makeDirectory(serverConfig.stateDir, { recursive: true });
@@ -310,8 +412,6 @@ it.layer(NodeServices.layer)("ServerEnvironmentLive", (it) => {
       expect(withFd.capabilities.serverSelfUpdate).toBe("desktop-managed");
       expect(withFd.capabilities.desktopAppUpdate).toBe(true);
       expect(withFd.capabilities.serverSelfUpdateProgress).toBe(true);
-      // v2 recovery terminalizes running runs on restart, so continuation
-      // stays unadvertised until the v2 runtime carries the markers.
       expect(withFd.capabilities.serverUpdateThreadContinuation).toBeUndefined();
 
       const withoutFd = yield* describeWith({ mode: "desktop" });
@@ -329,7 +429,7 @@ it.layer(NodeServices.layer)("ServerEnvironmentLive", (it) => {
     Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;
       const baseDir = yield* fileSystem.makeTempDirectoryScoped({
-        prefix: "t3-server-environment-error-test-",
+        prefix: "goat-server-environment-error-test-",
       });
       const serverConfig = yield* makeServerConfig(baseDir);
       const environmentIdPath = serverConfig.environmentIdPath;
@@ -388,3 +488,95 @@ it.layer(NodeServices.layer)("ServerEnvironmentLive", (it) => {
     }),
   );
 });
+
+it.effect("hub advertisement follows registered routes and live disable/re-enable settings", () =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const baseDir = yield* fs.makeTempDirectoryScoped();
+    const dependencies = Settings.layer.pipe(
+      Layer.provideMerge(ServerSecretStore.layer),
+      Layer.provideMerge(Sqlite.layerMemory),
+      Layer.provideMerge(ServerConfig.layerTest(process.cwd(), baseDir)),
+    );
+    const space = MemorySpaceId.make("00000000-0000-4000-8000-000000000001");
+    const update = (mode: "disabled" | "hub", memorySpaceId: typeof space | null = space) =>
+      Settings.MemoryHubSettingsTransitions.use((transitions) =>
+        Settings.ServerSettingsService.use((settings) => settings.getSettings).pipe(
+          Effect.flatMap((current) =>
+            transitions.applyMemoryHubTransition(
+              {
+                requestId: MemoryOperationId.make(
+                  `00000000-0000-4000-8000-${String(current.memoryHubVersion + 1).padStart(12, "0")}`,
+                ),
+                expectedVersion: current.memoryHubVersion,
+                settings: mode === "disabled" ? { mode } : { mode, memorySpaceId },
+              },
+              Effect.void,
+            ),
+          ),
+        ),
+      );
+    // Only L2 domain calls are replaced. Auth, SQLite, settings and route registration are real.
+    const unused = () => Effect.die("descriptor fixture must not invoke a hub route");
+    const boundary = Layer.succeed(
+      Hub.MemoryHubService,
+      Hub.MemoryHubService.of({
+        join: unused,
+        push: unused,
+        pull: unused,
+        claim: unused,
+        renew: unused,
+        applyResolution: unused,
+        release: unused,
+        requestSourceRead: unused,
+        collectSourceReads: unused,
+        respondSourceRead: unused,
+        resultSourceRead: unused,
+      }),
+    );
+    yield* Effect.gen(function* () {
+      yield* update("hub");
+      const environment = yield* ServerEnvironment.ServerEnvironment;
+      const descriptor = yield* environment.getDescriptor;
+      expect(supportsMemoryProtocol(descriptor.capabilities)).toBe(true);
+      expect(descriptor.capabilities.memory?.importProvider === true).toBe(false);
+      expect(descriptor.capabilities.memory?.hub).toBeUndefined();
+      expect(descriptor.capabilities.memoryHubProtocolVersion).toBeUndefined();
+    }).pipe(Effect.provide(ServerEnvironment.layer.pipe(Layer.provideMerge(dependencies))));
+    const auth = HubAuth.layer.pipe(Layer.provide(Store.layer));
+    const routes = Hub.layer.pipe(
+      HttpRouter.provideRequest(
+        Layer.mergeAll(boundary, auth).pipe(Layer.provideMerge(dependencies)),
+      ),
+      Layer.provideMerge(boundary),
+      Layer.provideMerge(auth),
+      Layer.provideMerge(dependencies),
+      Layer.provide(HttpRouter.layer),
+    );
+    yield* Effect.gen(function* () {
+      const environment = yield* ServerEnvironment.ServerEnvironment;
+      const expectCapabilities = Effect.fn(function* (hubVersion: 1 | undefined) {
+        const descriptor = yield* environment.getDescriptor;
+        expect(supportsMemoryProtocol(descriptor.capabilities)).toBe(true);
+        expect(descriptor.capabilities.memory?.importProvider === true).toBe(false);
+        expect(descriptor.capabilities.memory?.hub).toBeUndefined();
+        expect(descriptor.capabilities.memoryHubProtocolVersion).toBe(hubVersion);
+      });
+      yield* update("disabled");
+      yield* expectCapabilities(undefined);
+      yield* update("hub", null);
+      yield* expectCapabilities(undefined);
+      yield* update("hub");
+      yield* expectCapabilities(1);
+      yield* update("disabled");
+      yield* expectCapabilities(undefined);
+      yield* update("hub");
+      yield* expectCapabilities(1);
+    }).pipe(Effect.provide(ServerEnvironment.layer.pipe(Layer.provideMerge(routes))));
+  }).pipe(Effect.provide(NodeServices.layer)),
+);
+
+vi.mock("@goat/shared/goatConnect", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@goat/shared/goatConnect")>()),
+  isGoatConnectEnabled: () => true,
+}));

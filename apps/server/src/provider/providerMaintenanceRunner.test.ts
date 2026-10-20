@@ -4,8 +4,8 @@ import {
   ProviderInstanceId,
   type ServerProvider,
   type ServerProviderUpdateState,
-} from "@t3tools/contracts";
-import { ServerProviderUpdateError } from "@t3tools/contracts";
+} from "@goat/contracts";
+import { ServerProviderUpdateError } from "@goat/contracts";
 import * as Cause from "effect/Cause";
 import * as Deferred from "effect/Deferred";
 import * as Duration from "effect/Duration";
@@ -20,17 +20,17 @@ import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
 import { HttpClient, HttpClientResponse } from "effect/http";
 import { ChildProcessSpawner } from "effect/process";
-import * as HostProcess from "@t3tools/shared/HostProcess";
-import { SpawnExecutableResolution } from "@t3tools/shared/shell";
+import * as HostProcess from "@goat/shared/HostProcess";
+import { SpawnExecutableResolution } from "@goat/shared/shell";
 
 import * as ProviderRegistry from "./ProviderRegistry.ts";
 import * as ModelManifest from "./ModelManifest.ts";
 import * as ProviderMaintenanceRunner from "./providerMaintenanceRunner.ts";
-import * as ProviderLatestVersions from "@t3tools/provider-core/server/ProviderLatestVersions";
+import * as ProviderLatestVersions from "@goat/provider-core/server/ProviderLatestVersions";
 import {
   makeProviderMaintenanceCapabilities,
   type ProviderMaintenanceCapabilities,
-} from "@t3tools/provider-core/server/maintenanceResolver";
+} from "@goat/provider-core/server/maintenanceResolver";
 const isServerProviderUpdateError = Schema.is(ServerProviderUpdateError);
 
 const CODEX_DRIVER = ProviderDriverKind.make("codex");
@@ -214,8 +214,6 @@ function makeRegistry(
 
 const makeTestRunner = (
   registry: ProviderRegistry.ProviderRegistry["Service"],
-  // Generic updater fixtures use synthetic versions. Keep their compatibility
-  // unknown so real harness minimums do not bypass the command under test.
   manifest: ModelManifest.ModelManifestData = {
     version: 1,
     currentModels: {},
@@ -238,7 +236,6 @@ const makeTestRunner = (
               forceRefresh: Effect.succeed(manifest),
               refreshInBackground: Effect.void,
             }),
-            // Fresh per runner so a version cached by one test cannot leak into another.
             ProviderLatestVersions.layer,
           ),
         ),
@@ -288,7 +285,6 @@ describe("providerMaintenanceRunner", () => {
   it.effect("reports unchanged when the updater exits 0 but the provider is gone", () => {
     return Effect.gen(function* () {
       const { registry, providersRef } = yield* makeRegistry(baseProvider);
-      // After the update, the refreshed snapshot no longer sees an install.
       const updater = yield* makeTestRunner({
         ...registry,
         refreshInstance: () =>
@@ -316,7 +312,6 @@ describe("providerMaintenanceRunner", () => {
     () => {
       return Effect.gen(function* () {
         const { registry, providersRef } = yield* makeRegistry(baseNativeCliProvider);
-        // A native CLI version probe can fail immediately after a successful update.
         const updater = yield* makeTestRunner({
           ...registry,
           refreshInstance: () =>
@@ -396,7 +391,6 @@ describe("providerMaintenanceRunner", () => {
       });
 
       yield* updater.updateProvider(CODEX_DRIVER);
-      // Cached read picks the lock; the two fresh reads bracket the command.
       assert.deepStrictEqual(fresh, [false, true, true]);
       assert.deepStrictEqual(calls, [
         { command: "/opt/homebrew/bin/brew", args: ["upgrade", "--cask", "codex"] },
@@ -446,6 +440,42 @@ describe("providerMaintenanceRunner", () => {
             stdout: "Checking for updates\nDownloading 2.1.293\n\u001b[32m 40%\u001b[0m\r 80%",
             exitCode: Deferred.await(exited),
           })),
+        ),
+      ),
+    );
+  });
+
+  it.effect("installs the advertised version when pnpm owns the global install", () => {
+    const calls: Array<{ command: string; args: ReadonlyArray<string> }> = [];
+    return Effect.gen(function* () {
+      const { registry } = yield* makeRegistry(baseProvider);
+      const updater = yield* makeTestRunner({
+        ...registry,
+        getProviderMaintenanceCapabilitiesForInstance: (_instanceId, provider) =>
+          Effect.succeed(
+            makeProviderMaintenanceCapabilities({
+              provider,
+              packageName: "@openai/codex",
+              updateExecutable: "pnpm",
+              updateArgs: ["add", "-g", "@openai/codex@latest"],
+              updateLockKey: "pnpm-global",
+            }),
+          ),
+      });
+
+      yield* updater.updateProvider(CODEX_DRIVER);
+      assert.deepStrictEqual(calls, [
+        { command: "pnpm", args: ["add", "-g", "@openai/codex@9.9.9"] },
+      ]);
+    }).pipe(
+      Effect.provide(
+        Layer.mergeAll(
+          layerNonWindowsPlatform,
+          layerLatestVersionHttpClient("9.9.9"),
+          layerMockSpawner((command, args) => {
+            calls.push({ command, args });
+            return { stdout: "updated" };
+          }),
         ),
       ),
     );
@@ -774,8 +804,19 @@ describe("providerMaintenanceRunner", () => {
     const calls: Array<string> = [];
     return Effect.gen(function* () {
       const { registry } = yield* makeRegistry([baseProvider, baseOpenCodeProvider]);
+      const secondQueued = yield* Deferred.make<void>();
       const updater = yield* makeTestRunner({
         ...registry,
+        setProviderMaintenanceActionState: (input) =>
+          registry
+            .setProviderMaintenanceActionState(input)
+            .pipe(
+              Effect.tap(() =>
+                input.instanceId === OPENCODE_INSTANCE_ID && input.state?.status === "queued"
+                  ? Deferred.succeed(secondQueued, undefined)
+                  : Effect.void,
+              ),
+            ),
         getProviderMaintenanceCapabilitiesForInstance: (_instanceId, provider) =>
           Effect.succeed(
             makeProviderMaintenanceCapabilities({
@@ -795,17 +836,8 @@ describe("providerMaintenanceRunner", () => {
       yield* Effect.promise(() => firstStarted);
 
       const second = yield* updater.updateProvider(OPENCODE_DRIVER).pipe(Effect.forkScoped);
-      let providersWhileQueued: ReadonlyArray<ServerProvider> = [];
-      for (let attempt = 0; attempt < 20; attempt += 1) {
-        providersWhileQueued = yield* registry.getProviders;
-        const queuedStatus = providersWhileQueued.find(
-          (provider) => provider.instanceId === OPENCODE_INSTANCE_ID,
-        )?.updateState?.status;
-        if (queuedStatus === "queued") {
-          break;
-        }
-        yield* Effect.yieldNow;
-      }
+      yield* Deferred.await(secondQueued);
+      const providersWhileQueued = yield* registry.getProviders;
       assert.deepStrictEqual(calls, ["install -g @openai/codex@latest"]);
       assert.strictEqual(
         providersWhileQueued.find((provider) => provider.instanceId === OPENCODE_INSTANCE_ID)
@@ -942,22 +974,15 @@ describe("providerMaintenanceRunner", () => {
 
       const result = yield* runner.updateProvider(CODEX_DRIVER);
 
-      // On win32, resolveSpawnCommand resolves `npm` to the `.cmd` shim and
-      // routes the spawn through cmd.exe (shell: true), escaping every arg.
       assert.strictEqual(captured.length, 1);
       const call = captured[0];
       assert.ok(call, "expected the spawner to be invoked once");
-      // The resolved command is the escaped `.cmd` path. Asserting the precise
-      // escaped string is brittle, so verify it carries the resolved shim and
-      // that shell mode was used.
-      assert.match(call.command, /npm\.cmd/i);
+      assert.strictEqual(
+        call.command,
+        '^"C:\\fake\\npm\\npm.cmd^" ^"install^" ^"-g^" ^"@openai/codex@latest^"',
+      );
+      assert.deepEqual(call.args, []);
       assert.strictEqual(call.shell, true);
-      // Args are escaped for cmd.exe shell mode (each quoted) but still carry
-      // the original install command (`install -g @openai/codex@latest`) in order.
-      assert.strictEqual(call.args.length, 3);
-      assert.match(call.args[0] ?? "", /install/);
-      assert.match(call.args[1] ?? "", /-g/);
-      assert.match(call.args[2] ?? "", /@openai\/codex@latest/);
       assert.strictEqual(result.providers[0]?.updateState?.status, "succeeded");
     }).pipe(
       Effect.provide(

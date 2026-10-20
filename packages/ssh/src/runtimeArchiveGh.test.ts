@@ -1,6 +1,6 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { afterEach, assert, beforeEach, describe, it, vi } from "@effect/vitest";
-import { CLI_RELEASE_REPOSITORY, cliArchiveFileName } from "@t3tools/shared/cliRelease";
+import { CLI_RELEASE_REPOSITORY, cliArchiveFileName } from "@goat/shared/cliRelease";
 import * as Deferred from "effect/Deferred";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
@@ -16,6 +16,7 @@ import { ChildProcess, ChildProcessSpawner } from "effect/process";
 import { SshLaunchError } from "./errors.ts";
 import { downloadRuntimeArchiveWithGh } from "./runtimeArchiveGh.ts";
 import * as SshTunnel from "./tunnel.ts";
+import { isRemoteLaunch } from "./tunnel.fixture.ts";
 
 const version = "1.2.3-preview.20260911.4";
 const asset = cliArchiveFileName(version, "linux-x64");
@@ -106,8 +107,12 @@ const fixture = Effect.fn("test.ghFixture")(function* (
         uploads.push(data);
         return processHandle();
       }
+      if (command.args.includes("goat-runtime-cleanup")) {
+        calls.push("cleanup");
+        return processHandle();
+      }
       const script = new TextDecoder().decode(data);
-      if (script.includes("ready=false")) {
+      if (script.includes("ready=false") && !isRemoteLaunch(command.args)) {
         calls.push("probe");
         if (barrier !== undefined && calls.filter((call) => call === "probe").length === 2) {
           yield* Deferred.succeed(barrier.secondProbe, undefined);
@@ -124,7 +129,7 @@ const fixture = Effect.fn("test.ghFixture")(function* (
         calls.push("mcp");
         return processHandle('T3_CEILING=default\n{"token":"fixture-session","expiresAt":null}');
       }
-      if (command.args.includes("--")) {
+      if (isRemoteLaunch(command.args)) {
         calls.push("launch");
         return processHandle(
           JSON.stringify({
@@ -145,9 +150,19 @@ const fixture = Effect.fn("test.ghFixture")(function* (
 function assertContext(error: unknown, directory: string, expectedAsset = asset) {
   assert.instanceOf(error, SshLaunchError);
   if (!(error instanceof SshLaunchError)) return;
+  // From a launch, the person reads one sentence and one action; the detail rides on the cause.
+  if (error.acquisition !== undefined)
+    assert.match(error.message, /^(No GOAT runtime for |GOAT has no runtime for )/);
   for (const value of [CLI_RELEASE_REPOSITORY, `v${version}`, expectedAsset, directory]) {
-    assert.include(error.message, value);
+    assert.include(detailOf(error), value);
   }
+}
+
+function detailOf(error: unknown): string {
+  if (!(error instanceof SshLaunchError)) return String(error);
+  return error.acquisition !== undefined && error.cause instanceof SshLaunchError
+    ? error.cause.message
+    : error.message;
 }
 
 const assertCleanStaging = Effect.fn("test.cleanStaging")(function* (
@@ -156,7 +171,7 @@ const assertCleanStaging = Effect.fn("test.cleanStaging")(function* (
   for (const directory of state.staging) assert.isFalse(yield* state.fs.exists(directory));
 });
 
-function invoke(entry: "launch" | "pairing" | "mcp", runner: SshTunnel.RemoteT3RunnerOptions) {
+function invoke(entry: "launch" | "pairing" | "mcp", runner: SshTunnel.RemoteGoatRunnerOptions) {
   return entry === "launch"
     ? SshTunnel.launchOrReuseRemoteServer(target, {}, runner).pipe(Effect.asVoid)
     : entry === "pairing"
@@ -187,7 +202,13 @@ describe("SSH archives from locally authenticated gh", () => {
         yield* invoke(entry, { archiveVersion: version, archiveDirectory: state.directory }).pipe(
           Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, state.spawner),
         );
-        assert.deepEqual(state.calls, ["probe", "gh", "upload", entry]);
+        assert.deepEqual(state.calls, [
+          "probe",
+          "gh",
+          "upload",
+          entry,
+          ...(entry === "launch" ? ["cleanup"] : []),
+        ]);
         assert.deepEqual(state.uploads, [bytes]);
         assert.deepEqual(yield* state.fs.readFile(`${state.directory}/${asset}`), bytes);
         assert.equal(
@@ -213,7 +234,7 @@ describe("SSH archives from locally authenticated gh", () => {
         ]);
         assert.equal(command?.options.shell, false);
         assert.equal(command?.options.env?.GH_PROMPT_DISABLED, "1");
-        assert.equal(command?.options.env?.T3_SSH_AUTH_SECRET, undefined);
+        assert.equal(command?.options.env?.GOAT_SSH_AUTH_SECRET, undefined);
         yield* assertCleanStaging(state);
       }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
   );
@@ -251,7 +272,7 @@ describe("SSH archives from locally authenticated gh", () => {
         assert.isTrue(Result.isFailure(result));
         if (Result.isFailure(result)) {
           assertContext(result.failure, state.directory);
-          if (mode === "mismatch") assert.include(result.failure.message, "SHA-256 mismatch");
+          if (mode === "mismatch") assert.include(detailOf(result.failure), "SHA-256 mismatch");
         }
         assert.deepEqual(state.calls, ["probe", "gh"]);
         assert.deepEqual(state.uploads, []);
@@ -268,7 +289,7 @@ describe("SSH archives from locally authenticated gh", () => {
         archiveDirectory: state.directory,
         releaseBaseUrl: "https://mirror.example/goat/",
       }).pipe(Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, state.spawner));
-      assert.deepEqual(state.calls, ["probe", "launch"]);
+      assert.deepEqual(state.calls, ["probe", "launch", "cleanup"]);
       assert.deepEqual(state.uploads, []);
       assert.deepEqual(yield* state.fs.readDirectory(state.directory), []);
     }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
@@ -283,7 +304,7 @@ describe("SSH archives from locally authenticated gh", () => {
       );
       assert.deepEqual(
         state.calls,
-        mode === "ready" ? ["probe", "launch"] : ["probe", "upload", "launch"],
+        mode === "ready" ? ["probe", "launch"] : ["probe", "upload", "launch", "cleanup"],
       );
       assert.deepEqual(state.uploads, mode === "ready" ? [] : [bytes]);
     }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
@@ -354,7 +375,7 @@ describe("SSH archives from locally authenticated gh", () => {
       assert.isTrue(Result.isFailure(result));
       if (Result.isFailure(result)) {
         assertContext(result.failure, state.directory);
-        assert.include(result.failure.message, "gh not found on PATH");
+        assert.include(detailOf(result.failure), "gh not found on PATH");
       }
       assert.deepEqual(state.calls, ["probe"]);
       assert.deepEqual(state.uploads, []);
@@ -371,7 +392,7 @@ describe("SSH archives from locally authenticated gh", () => {
         archiveDirectory: state.directory,
         ghCommand,
       }).pipe(Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, state.spawner));
-      assert.deepEqual(state.calls, ["probe", "gh", "upload", "launch"]);
+      assert.deepEqual(state.calls, ["probe", "gh", "upload", "launch", "cleanup"]);
       assert.deepEqual(state.uploads, [bytes]);
       assert.deepEqual(yield* state.fs.readFile(`${state.directory}/${asset}`), bytes);
     }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
@@ -389,11 +410,11 @@ describe("SSH archives from locally authenticated gh", () => {
       assert.isTrue(Result.isFailure(result));
       if (Result.isFailure(result)) {
         assertContext(result.failure, state.directory);
-        assert.include(result.failure.message, "authentication failed");
-        assert.include(result.failure.message, "[redacted]");
-        assert.notInclude(result.failure.message, diagnosticSecret);
+        assert.include(detailOf(result.failure), "authentication failed");
+        assert.include(detailOf(result.failure), "[redacted]");
+        assert.notInclude(detailOf(result.failure), diagnosticSecret);
         // eslint-disable-next-line no-control-regex -- Diagnostics must contain no terminal control bytes.
-        assert.notMatch(result.failure.message, /[\x00-\x1f\x7f-\x9f]/u);
+        assert.notMatch(detailOf(result.failure), /[\x00-\x1f\x7f-\x9f]/u);
         const acquisition = result.failure.cause;
         assert.instanceOf(acquisition, SshLaunchError);
         const ghFailure = acquisition instanceof SshLaunchError ? acquisition.cause : undefined;
@@ -432,13 +453,13 @@ describe("SSH archives from locally authenticated gh", () => {
         );
         if (mode === "valid") {
           assert.isTrue(Result.isSuccess(result));
-          assert.deepEqual(state.calls, ["probe", "upload", "launch"]);
+          assert.deepEqual(state.calls, ["probe", "upload", "launch", "cleanup"]);
           assert.deepEqual(state.uploads, [bytes]);
         } else {
           assert.isTrue(Result.isFailure(result));
           if (Result.isFailure(result)) {
             assert.instanceOf(result.failure, SshLaunchError);
-            assert.include(result.failure.message, "SHA-256 mismatch or malformed sidecar");
+            assert.include(detailOf(result.failure), "SHA-256 mismatch or malformed sidecar");
           }
           assert.deepEqual(state.calls, ["probe"]);
           assert.deepEqual(state.uploads, []);
@@ -543,7 +564,7 @@ describe("SSH archives from locally authenticated gh", () => {
       assert.isTrue(Result.isFailure(result));
       if (Result.isFailure(result)) {
         assertContext(result.failure, root);
-        assert.include(result.failure.message, "timed out");
+        assert.include(detailOf(result.failure), "timed out");
       }
       assert.isTrue(closed);
       assert.deepEqual(yield* fs.readDirectory(root), []);

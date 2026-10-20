@@ -6,7 +6,7 @@ import {
   EnvironmentId,
   ProviderInstanceId,
   ThreadId,
-} from "@t3tools/contracts";
+} from "@goat/contracts";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import { McpSchema, McpServer } from "effect/ai";
@@ -94,7 +94,7 @@ const layerDeviceServiceMock = Layer.mock(DeviceService.DeviceService)({
       platform: input.platform,
       openedAt: "2026-09-08T00:00:00.000Z",
     }),
-  // UDID-1 is open in the test thread; UDID-2 exists but belongs to another thread.
+
   sessionsForThread: (id) =>
     Effect.succeed(
       id === threadId
@@ -120,7 +120,7 @@ const layerTest = McpHttpServer.layerDeviceToolkit.pipe(
   Layer.provideMerge(McpServer.McpServer.layer),
   Layer.provideMerge(McpToolAccessTestkit.liveThreadsLayer),
   Layer.provideMerge(layerDeviceServiceMock),
-  Layer.provide(ServerConfig.layerTest(process.cwd(), { prefix: "t3-mcp-device-toolkit-test-" })),
+  Layer.provide(ServerConfig.layerTest(process.cwd(), { prefix: "goat-mcp-device-toolkit-test-" })),
   Layer.provide(NodeServices.layer),
 );
 
@@ -198,7 +198,7 @@ it.effect("rejects unavailable agent access before booting or opening a device",
         Layer.provideMerge(McpToolAccessTestkit.liveThreadsLayer),
         Layer.provide(layerUnavailable),
         Layer.provide(
-          ServerConfig.layerTest(process.cwd(), { prefix: "t3-mcp-device-toolkit-test-" }),
+          ServerConfig.layerTest(process.cwd(), { prefix: "goat-mcp-device-toolkit-test-" }),
         ),
         Layer.provide(NodeServices.layer),
       ),

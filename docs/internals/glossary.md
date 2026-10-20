@@ -1,21 +1,22 @@
 # Glossary
 
-Terms whose meaning matters across T3 Code. Architecture and lifecycle constraints belong in the
+Terms whose meaning matters across GOAT. Architecture and lifecycle constraints belong in the
 [overview](./overview.md), not in these definitions.
 
 ## Workspace and conversation
 
-| Term           | Meaning                                                                                           |
-| -------------- | ------------------------------------------------------------------------------------------------- |
-| Environment    | One running server and the machine, credentials, workspace access, and state it owns.             |
-| Client         | A web, desktop, or mobile UI connected to an environment. The desktop app can also host a server. |
-| Project        | An environment-local workspace record rooted at a directory.                                      |
-| Workspace root | The project's base filesystem directory on the environment.                                       |
-| Worktree       | A separate Git checkout a thread can use instead of the project's main checkout.                  |
-| Thread         | The durable conversation and work history for a project. It survives provider process exits.      |
-| Turn           | One user-to-agent cycle, a V2 run. Provider work can end before checkpoint and diff work settles. |
-| Activity       | A non-message timeline item, such as a tool action, approval, or failure.                         |
-| T3 home        | The base data directory. Runtime state normally lives under its `userdata` directory.             |
+| Term           | Meaning                                                                                               |
+| -------------- | ----------------------------------------------------------------------------------------------------- |
+| Environment    | One running server and the machine, credentials, workspace access, and state it owns.                 |
+| Client         | A web, desktop, or mobile UI connected to an environment. The desktop app can also host a server.     |
+| Project        | An environment-local workspace record rooted at a directory.                                          |
+| Workspace root | The project's base filesystem directory on the environment.                                           |
+| Worktree       | A separate Git checkout a thread can use instead of the project's main checkout.                      |
+| Thread         | The durable conversation and work history for a project. It survives provider process exits.          |
+| Turn           | One user-to-agent cycle, a V2 run. Provider work can end before checkpoint and diff work settles.     |
+| Side chat      | A hidden thread with sideChatOf set, opened beside its parent. Lists that hide subagents hide it too. |
+| Activity       | A non-message timeline item, such as a tool action, approval, or failure.                             |
+| T3 home        | The base data directory. Runtime state normally lives under its `userdata` directory.                 |
 
 ## Orchestration
 
@@ -33,16 +34,27 @@ Terms whose meaning matters across T3 Code. Architecture and lifecycle constrain
 
 | Term                | Meaning                                                                                                      |
 | ------------------- | ------------------------------------------------------------------------------------------------------------ |
-| Provider            | The agent runtime T3 Code controls, such as Codex or Claude Code.                                            |
+| Provider            | The agent runtime GOAT controls, such as Codex or Claude Code.                                               |
 | Driver              | The integration for a provider kind.                                                                         |
 | Provider instance   | One configured provider, with its own settings and lifecycle. Multiple instances can use the same driver.    |
-| Adapter             | The boundary translating a provider's native protocol into T3 Code operations and events.                    |
+| Adapter             | The boundary translating a provider's native protocol into GOAT operations and events.                       |
 | Session             | The provider runtime attached to a thread. A session can be stopped and resumed without deleting the thread. |
 | Runtime mode        | The thread's permission policy. See [permission modes](../user/permission-modes.md).                         |
 | Interaction mode    | How the agent approaches the task, such as planning. Separate from permission policy.                        |
 | Checkpoint          | A saved workspace state used for diffs and restore, stored as a hidden Git ref.                              |
 | Checkpoint baseline | The workspace state captured before the work being compared.                                                 |
 | Turn diff           | The workspace changes attributed to one turn.                                                                |
+
+## Fleet (proposed)
+
+These terms come from the [agentic Kubernetes](./agentic-k8s.md) proposal and describe nothing that runs yet.
+
+| Term           | Meaning                                                                                                                     |
+| -------------- | --------------------------------------------------------------------------------------------------------------------------- |
+| Goal           | A durable desired state, such as "these PRs merged with green CI", with workers, limits and a done condition.               |
+| Controller     | The server loop that compares each goal with observed threads, PRs and hosts and takes a few idempotent actions per pass.   |
+| Cordon         | A host marked so that no new goal work is placed on it. Running work stays. Drain also moves goal work off it between runs. |
+| Fallback chain | An ordered list of models or providers a goal's thread may move to when its current one hits a usage limit or fails.        |
 
 ## Pull requests
 

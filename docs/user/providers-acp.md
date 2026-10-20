@@ -37,7 +37,7 @@ without expanding shell expressions.
 ## Where agents run
 
 Registry agents always run on the machine that hosts your GOAT server. That stays true when you
-connect through `app.t3.codes`, T3 Connect, or a relay.
+connect from another device through direct pairing, Tailscale, or SSH.
 
 Agents install under `tools/<agent-id>/<version>/` inside GOAT home. GOAT verifies SHA-256 when the Registry entry
 provides one; entries without a checksum retain the Registry's HTTPS distribution guarantee.
@@ -111,7 +111,7 @@ When a registry agent asks for approval, GOAT answers by the thread's
 **Auto-accept edits** approves edits and shows the rest, and **Auto** and **Full access** approve
 automatically. File reads and searches never wait for approval.
 
-Devin runs its commands through GOAT's terminals, and those commands follow the thread's
+The local Devin ACP provider runs its commands through GOAT's terminals, and those commands follow the thread's
 permission mode. For other agents, GOAT shows the command, output, and exit status the agent
 reports but does not run or stop their terminals.
 
@@ -128,6 +128,30 @@ conversation from before the checkpoint.
 Registry instances are not used for GOAT's app-owned text generation, such as thread titles, commit
 messages, branch names, or pull request descriptions. Configure a text-generation-capable provider
 for those actions.
+
+## Devin Cloud
+
+Devin Cloud appears automatically in **Settings → Providers** and turns on when a Devin ACP
+provider is enabled. Sign in from the Devin Cloud card or its Devin ACP provider card. It uses that provider's
+executable and account; Devin 3000.11.1 or newer is required. If more than one Devin ACP provider
+is enabled, choose one in Devin Cloud settings. You can also add a custom Devin Cloud instance.
+Turn Devin Cloud off with its toggle; reset the cloud card to follow the Devin provider again.
+The project folder must already be trusted by Devin, and your Devin organization must have access
+to the repository.
+
+Push the branch you want Devin to start from, then select Devin Cloud for a new thread. Choose a
+Devin version in the model picker, and choose Ubuntu, macOS, or Windows in model options. macOS
+and Windows availability depends on your Devin plan. Local changes are not included. Work runs
+in Devin's cloud environment and creates no local checkpoints.
+The thread shows progress, the final response, and a matching PR link when Devin returns one.
+A completed response may still need more input or report a repository-access block.
+
+Follow-up messages continue the same cloud session. Stop waits for Devin to confirm cancellation.
+If GOAT loses tracking, the thread keeps its session link and blocks further messages while the
+prompt outcome is unknown. Reconnecting does not resend the original message.
+
+If Devin Cloud is not ready, run `goat provider diagnose --driver devinCloud` on the environment's
+machine. It lists what blocks it and the next step for each.
 
 ## Advanced configuration
 

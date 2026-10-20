@@ -10,16 +10,15 @@ const load = (env: Record<string, string>) =>
   OtelEnvironment.load.pipe(Effect.provide(ConfigProvider.layer(ConfigProvider.fromEnv({ env }))));
 
 const SPEC_OFF =
-  "OTEL_SDK_DISABLED is set, so no telemetry is exported, whatever configured it; set T3CODE_OTEL_SDK_DISABLED=false to export anyway";
-const T3_OFF =
-  "T3CODE_OTEL_SDK_DISABLED is set, so no telemetry is exported, whatever configured it";
+  "OTEL_SDK_DISABLED is set, so no telemetry is exported, whatever configured it; set GOAT_OTEL_SDK_DISABLED=false to export anyway";
+const GOAT_OFF =
+  "GOAT_OTEL_SDK_DISABLED is set, so no telemetry is exported, whatever configured it";
 const specIgnored = (value: string) =>
-  `OTEL_SDK_DISABLED=${value} was read as false; the OpenTelemetry specification recognizes only the string true, so use OTEL_SDK_DISABLED=true or T3CODE_OTEL_SDK_DISABLED to say it any other way`;
+  `OTEL_SDK_DISABLED=${value} was read as false; the OpenTelemetry specification recognizes only the string true, so use OTEL_SDK_DISABLED=true or GOAT_OTEL_SDK_DISABLED to say it any other way`;
 
 describe("OtelEnvironment", () => {
   it.effect.each([
     { name: "nothing set", env: {}, disabled: false, warnings: [] },
-    // OTEL_SDK_DISABLED follows the specification: only `true`, case-insensitively.
     { name: "spec true", env: { OTEL_SDK_DISABLED: "true" }, disabled: true, warnings: [SPEC_OFF] },
     { name: "spec True", env: { OTEL_SDK_DISABLED: "True" }, disabled: true, warnings: [SPEC_OFF] },
     {
@@ -41,36 +40,35 @@ describe("OtelEnvironment", () => {
       disabled: false,
       warnings: [specIgnored("yes")],
     },
-    // T3CODE_OTEL_SDK_DISABLED takes Config.Boolean's values, case-insensitively.
-    { name: "t3 1", env: { T3CODE_OTEL_SDK_DISABLED: "1" }, disabled: true, warnings: [T3_OFF] },
+    { name: "t3 1", env: { GOAT_OTEL_SDK_DISABLED: "1" }, disabled: true, warnings: [GOAT_OFF] },
     {
       name: "t3 TRUE",
-      env: { T3CODE_OTEL_SDK_DISABLED: "TRUE" },
+      env: { GOAT_OTEL_SDK_DISABLED: "TRUE" },
       disabled: true,
-      warnings: [T3_OFF],
+      warnings: [GOAT_OFF],
     },
-    { name: "t3 n", env: { T3CODE_OTEL_SDK_DISABLED: "n" }, disabled: false, warnings: [] },
+    { name: "t3 n", env: { GOAT_OTEL_SDK_DISABLED: "n" }, disabled: false, warnings: [] },
     {
       name: "t3 false overrides spec true",
-      env: { T3CODE_OTEL_SDK_DISABLED: "false", OTEL_SDK_DISABLED: "true" },
+      env: { GOAT_OTEL_SDK_DISABLED: "false", OTEL_SDK_DISABLED: "true" },
       disabled: false,
       warnings: [],
     },
     {
       name: "blank t3 falls through",
-      env: { T3CODE_OTEL_SDK_DISABLED: "  ", OTEL_SDK_DISABLED: "true" },
+      env: { GOAT_OTEL_SDK_DISABLED: "  ", OTEL_SDK_DISABLED: "true" },
       disabled: true,
       warnings: [SPEC_OFF],
     },
     {
       name: "unreadable t3 warns and falls through",
-      env: { T3CODE_OTEL_SDK_DISABLED: "maybe", OTEL_SDK_DISABLED: "true" },
+      env: { GOAT_OTEL_SDK_DISABLED: "maybe", OTEL_SDK_DISABLED: "true" },
       disabled: true,
-      warnings: ["T3CODE_OTEL_SDK_DISABLED=maybe is not a yes or a no and was ignored", SPEC_OFF],
+      warnings: ["GOAT_OTEL_SDK_DISABLED=maybe is not a yes or a no and was ignored", SPEC_OFF],
     },
     {
       name: "bad spec value still warns when t3 answered",
-      env: { T3CODE_OTEL_SDK_DISABLED: "false", OTEL_SDK_DISABLED: "yes" },
+      env: { GOAT_OTEL_SDK_DISABLED: "false", OTEL_SDK_DISABLED: "yes" },
       disabled: false,
       warnings: [specIgnored("yes")],
     },
@@ -196,13 +194,13 @@ describe("OtelEnvironment", () => {
       {
         name: "the kill switch wins outright over a valid endpoint",
         env: {
-          T3CODE_OTEL_SDK_DISABLED: "true",
+          GOAT_OTEL_SDK_DISABLED: "true",
           OTEL_EXPORTER_OTLP_ENDPOINT: "https://collector:4318/base",
         },
         traces: "Unset",
         metrics: "Unset",
         logs: "Unset",
-        warnings: [T3_OFF],
+        warnings: [GOAT_OFF],
       },
       {
         name: "an exporter of none turns off only its signal",
@@ -390,7 +388,7 @@ describe("OtelEnvironment", () => {
   });
 
   describe("resolveSignalEndpoint", () => {
-    const t3Export = {
+    const goatExport = {
       protocol: "http/json",
       headers: { "x-key": "t3" },
       exportIntervalMs: 5_000,
@@ -407,21 +405,21 @@ describe("OtelEnvironment", () => {
     });
     it.each([
       {
-        name: "T3CODE_OTLP_*_URL wins over an OTEL endpoint",
+        name: "GOAT_OTLP_*_URL wins over an OTEL endpoint",
         otel: withLogs(otelExport),
-        t3Url: "http://t3:4318/v1/logs",
-        expected: { url: "http://t3:4318/v1/logs", export: t3Export },
+        goatUrl: "http://t3:4318/v1/logs",
+        expected: { url: "http://t3:4318/v1/logs", export: goatExport },
       },
       {
-        name: "T3CODE_OTLP_*_URL wins over a signal the OTEL variables turned off",
+        name: "GOAT_OTLP_*_URL wins over a signal the OTEL variables turned off",
         otel: withLogs(OtelEnvironment.OtelSignal.Off()),
-        t3Url: "http://t3:4318/v1/logs",
-        expected: { url: "http://t3:4318/v1/logs", export: t3Export },
+        goatUrl: "http://t3:4318/v1/logs",
+        expected: { url: "http://t3:4318/v1/logs", export: goatExport },
       },
       {
         name: "an OTEL endpoint brings its headers and protocol over the fallback",
         otel: withLogs(otelExport),
-        t3Url: " ",
+        goatUrl: " ",
         expected: {
           url: "http://otel:4318/v1/logs",
           export: {
@@ -434,27 +432,27 @@ describe("OtelEnvironment", () => {
       {
         name: "a signal the OTEL variables turned off does not fall through",
         otel: withLogs(OtelEnvironment.OtelSignal.Off()),
-        t3Url: undefined,
+        goatUrl: undefined,
         expected: undefined,
       },
       {
         name: "an unset signal takes the first non-blank fallback",
         otel: withLogs(OtelEnvironment.OtelSignal.Unset()),
-        t3Url: undefined,
-        expected: { url: "http://settings:4318/v1/logs", export: t3Export },
+        goatUrl: undefined,
+        expected: { url: "http://settings:4318/v1/logs", export: goatExport },
       },
       {
         name: "the kill switch wins over everything",
         otel: withLogs(otelExport, true),
-        t3Url: "http://t3:4318/v1/logs",
+        goatUrl: "http://t3:4318/v1/logs",
         expected: undefined,
       },
-    ])("$name", ({ otel, t3Url, expected }) => {
+    ])("$name", ({ otel, goatUrl, expected }) => {
       assert.deepStrictEqual(
         OtelEnvironment.resolveSignalEndpoint(
           otel,
           "logs",
-          { url: t3Url, export: t3Export },
+          { url: goatUrl, export: goatExport },
           "",
           "http://settings:4318/v1/logs",
         ),
@@ -503,7 +501,6 @@ describe("OtelEnvironment", () => {
         assert.deepStrictEqual(
           resource.attributes
             .map((attribute) => attribute.key)
-            // Effect adds these to every resource.
             .filter((key) => !key.startsWith("telemetry.sdk.")),
           [...attributes, "service.name"],
         );

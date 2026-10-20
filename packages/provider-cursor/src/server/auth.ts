@@ -3,7 +3,7 @@ import {
   ProviderSetupError,
   type ProviderAuthState,
   type ProviderInstanceId,
-} from "@t3tools/contracts";
+} from "@goat/contracts";
 import * as Clock from "effect/Clock";
 import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
@@ -17,7 +17,7 @@ import * as Stream from "effect/Stream";
 import * as SubscriptionRef from "effect/SubscriptionRef";
 
 import { Cursor, InMemoryCredentialStore } from "./sdk.ts";
-import type { ProviderAuthController } from "@t3tools/provider-core/server/auth";
+import type { ProviderAuthController } from "@goat/provider-core/server/auth";
 
 const AUTH_TIMEOUT_MS = 300_000;
 
@@ -48,7 +48,6 @@ export interface CursorAuthOptions {
   readonly login?: (options: SdkLoginOptions) => Promise<SdkLoginResult>;
 }
 
-/** Each instance owns its browser credential; explicit API keys always take precedence. */
 export const makeCursorAuth = Effect.fn("makeCursorAuth")(function* (options: CursorAuthOptions) {
   const scope = yield* Scope.Scope;
   const crypto = yield* Crypto.Crypto;
@@ -111,7 +110,6 @@ export const makeCursorAuth = Effect.fn("makeCursorAuth")(function* (options: Cu
     return apiKey;
   });
 
-  // Keep SDK sessions and one-shot text generation inside instance-owned scopes.
   // Closing admission before draining these scopes prevents cached credentials surviving sign-out.
   const withAccess: CursorAuth["withAccess"] = (task) =>
     Effect.uninterruptibleMask((restore) =>
@@ -320,7 +318,7 @@ export const makeCursorAuth = Effect.fn("makeCursorAuth")(function* (options: Cu
                 operation: "start",
                 detail: "Cursor setup is already in progress.",
               });
-            const id = yield* crypto.randomUUIDv4.pipe(
+            const id = yield* crypto.randomUUIDv4().pipe(
               Effect.mapError(
                 (cause) =>
                   new ProviderSetupError({

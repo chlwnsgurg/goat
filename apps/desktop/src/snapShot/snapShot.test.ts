@@ -1,5 +1,5 @@
 import { it as effectIt } from "@effect/vitest";
-import * as HostProcess from "@t3tools/shared/HostProcess";
+import * as HostProcess from "@goat/shared/HostProcess";
 import * as Effect from "effect/Effect";
 import { describe, expect, it, vi } from "vite-plus/test";
 
@@ -331,6 +331,58 @@ describe("findAccessibleWindow", () => {
     title: "Editor",
     bounds: { x: 100, y: 200, width: 800, height: 600 },
   };
+
+  const chromeCapture = {
+    title: "Issues · pingdotgg/t3code",
+    bounds: captured.bounds,
+    platform: "darwin" as const,
+    bundleId: "com.google.Chrome",
+  };
+  const chromeWindow = {
+    name: `${chromeCapture.title} - Google Chrome – Profile`,
+    bounds: chromeCapture.bounds,
+    active: true,
+  };
+
+  it("uses a browser suffix only when no exact title matches", () => {
+    const exact = { name: chromeCapture.title, bounds: chromeCapture.bounds };
+    expect(findAccessibleWindow([chromeWindow, exact], chromeCapture)).toBe(exact);
+    expect(findAccessibleWindow([chromeWindow], chromeCapture)).toBe(chromeWindow);
+  });
+
+  it("rejects browser suffix matches with wrong bounds, page titles, or ambiguous windows", () => {
+    expect(
+      findAccessibleWindow(
+        [{ ...chromeWindow, bounds: { ...chromeWindow.bounds, x: 0 } }],
+        chromeCapture,
+      ),
+    ).toBeUndefined();
+    expect(
+      findAccessibleWindow([chromeWindow, { ...chromeWindow, active: false }], chromeCapture),
+    ).toBeUndefined();
+    expect(
+      findAccessibleWindow([chromeWindow], { ...chromeCapture, title: "Issues" }),
+    ).toBeUndefined();
+    expect(
+      findAccessibleWindow([chromeWindow], {
+        ...chromeCapture,
+        title: `${chromeCapture.title} - Google Chrome`,
+      }),
+    ).toBeUndefined();
+  });
+
+  it("keeps strict titles outside macOS Chrome and Chromium", () => {
+    for (const identity of [
+      { platform: "linux" as const, bundleId: "com.google.Chrome" },
+      { platform: "win32" as const, bundleId: "com.google.Chrome" },
+      { platform: "darwin" as const, bundleId: "com.example.Editor" },
+      { platform: "darwin" as const, bundleId: undefined },
+    ]) {
+      expect(
+        findAccessibleWindow([chromeWindow], { ...chromeCapture, ...identity }),
+      ).toBeUndefined();
+    }
+  });
 
   it("matches one window by its captured bounds", () => {
     const windows = [
@@ -709,7 +761,7 @@ describe("isWaylandSession", () => {
           const { createServer } = await import("node:net");
           const { tmpdir } = await import("node:os");
           const { join } = await import("node:path");
-          const runtimeDirectory = await mkdtemp(join(tmpdir(), "t3-wayland-"));
+          const runtimeDirectory = await mkdtemp(join(tmpdir(), "goat-wayland-"));
           const socketPath = join(runtimeDirectory, "wayland-0");
           const server = createServer();
           try {

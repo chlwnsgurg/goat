@@ -28,12 +28,14 @@ import {
   type VcsInitInput,
   type VcsListRefsInput,
   type VcsListRefsResult,
+  type WorktreesDirectoryStatus,
   type VcsPullResult,
   type VcsRemoveWorktreeInput,
   type VcsStatusInput,
   type VcsStatusResult,
   type WorktreeSubmodules,
-} from "@t3tools/contracts";
+} from "@goat/contracts";
+import * as HostProcess from "@goat/shared/HostProcess";
 import {
   makeGitVcsDriverCore,
   PATCH_RENDER_PREFIX_ARGS,
@@ -86,9 +88,7 @@ export interface GitStatusDetails {
 }
 
 export interface GitLocalStatusOptions {
-  /** Skip revision walks and return zero divergence counts for local-only consumers. */
   readonly includeDivergence?: boolean;
-  /** Also read the diff panel's Changes totals. Failures leave them out. */
   readonly includeBranchChanges?: boolean;
 }
 
@@ -120,26 +120,27 @@ export interface ExecuteGitProgress {
   }) => Effect.Effect<void, never>;
 }
 
-/**
- * Progress callbacks for `createWorktree`. Git prints `Updating files: 78% (2104/2700)`
- * to stderr during checkout, and `Submodule path 'x': checked out` during
- * submodule init. The tracker uses these to drive the worktree setup card.
- */
 export interface CreateWorktreeProgress {
   /**
-   * Fires once `git worktree add` has created and registered the directory,
-   * before the (possibly long) submodule step. Git refuses an existing path,
-   * so a path reported here belongs to this call and is safe to remove on
-   * cancel.
+   * Git refuses an existing path, so a path reported here belongs to this call and is safe to
+   * remove on cancel.
    */
   readonly onWorktreeClaimed?: (path: string) => Effect.Effect<void, never>;
+  /**
+   * Fires before checkout when the configured `worktreesDirectory` is
+   * unavailable and the worktree goes to the default directory instead.
+   */
+  readonly onWorktreesDirectoryFallback?: (
+    status: WorktreesDirectoryStatus & {
+      readonly unavailable: NonNullable<WorktreesDirectoryStatus["unavailable"]>;
+    },
+  ) => Effect.Effect<void, never>;
   readonly onCheckoutProgress?: (input: {
     percent: number;
     completed: number;
     total: number;
   }) => Effect.Effect<void, never>;
   readonly onSubmodulesStarted?: () => Effect.Effect<void, never>;
-  /** Fires when `.gitmodules` exists but the resolved submodule mode is `"none"`. */
   readonly onSubmodulesDisabled?: (input: {
     source: "settings" | "t3.json";
   }) => Effect.Effect<void, never>;
@@ -153,12 +154,10 @@ export interface CreateWorktreeProgress {
 export interface CreateWorktreeOptions {
   readonly progress?: CreateWorktreeProgress;
   /**
-   * The project-over-environment `worktreeSubmodules` setting. Null (or
-   * omitted, for callers without settings access) defers to the checkout's
-   * own t3.json.
+   * Null (or omitted, for callers without settings access) defers to the
+   * checkout's own t3.json.
    */
   readonly submodules?: WorktreeSubmodules | null;
-  /** The `worktreesDirectory` setting, used when the input has no explicit path. */
   readonly worktreesDirectory?: string;
 }
 
@@ -178,7 +177,6 @@ export interface GitCommitProgress {
 export interface GitCommitOptions {
   readonly timeoutMs?: number;
   readonly progress?: GitCommitProgress;
-  /** Stage the current working tree immediately before committing. */
   readonly stage?: { readonly filePaths?: readonly string[] };
 }
 
@@ -202,7 +200,6 @@ export interface GitRangeContext {
 }
 
 export interface GitRenameBranchInput {
-  /** Fail on a name collision instead of appending a numeric suffix. */
   exactName?: boolean;
   cwd: string;
   oldBranch: string;
@@ -336,6 +333,7 @@ export class GitVcsDriver extends Context.Service<
     readonly prepareCommitContext: (
       cwd: string,
       filePaths?: readonly string[],
+      options?: { readonly includePatch?: boolean },
     ) => Effect.Effect<GitPreparedCommitContext | null, GitCommandError>;
     readonly commit: (
       cwd: string,
@@ -362,6 +360,10 @@ export class GitVcsDriver extends Context.Service<
       cwd: string,
       key: string,
     ) => Effect.Effect<string | null, GitCommandError>;
+    readonly resolveBranchName: (
+      cwd: string,
+      refName: string,
+    ) => Effect.Effect<string | null, GitCommandError>;
     readonly listRefs: (
       input: VcsListRefsInput,
     ) => Effect.Effect<VcsListRefsResult, GitCommandError>;
@@ -373,14 +375,12 @@ export class GitVcsDriver extends Context.Service<
     readonly fetchPullRequestBranch: (
       input: GitFetchPullRequestBranchInput,
     ) => Effect.Effect<void, GitCommandError>;
-    /** Fetches `refs/pull/<n>/head` without writing a branch, for heads that exist nowhere else. */
     readonly fetchPullRequestHeadCommit: (
       input: GitFetchPullRequestHeadCommitInput,
     ) => Effect.Effect<GitResolveCommitResult, GitCommandError>;
     readonly resolveCommit: (
       input: GitResolveCommitInput,
     ) => Effect.Effect<GitResolveCommitResult, GitCommandError>;
-    /** Moves the branch checked out in `cwd` onto `targetCommit`, from inside that worktree. */
     readonly refreshCheckedOutBranch: (
       input: GitRefreshCheckedOutBranchInput,
     ) => Effect.Effect<GitRefreshCheckedOutBranchResult, GitCommandError>;
@@ -410,15 +410,18 @@ export class GitVcsDriver extends Context.Service<
     readonly removeWorktree: (
       input: VcsRemoveWorktreeInput,
     ) => Effect.Effect<void, GitCommandError>;
-    /** Drops worktree admin entries whose directory is already gone (`git worktree prune`). */
     readonly pruneWorktrees: (input: {
       readonly cwd: string;
     }) => Effect.Effect<void, GitCommandError>;
-    /**
-     * Absolute paths of every live worktree of the repository at `cwd`, the
-     * main checkout included. Worktrees whose directory is gone are left out.
-     */
     readonly listWorktreePaths: (cwd: string) => Effect.Effect<string[], GitCommandError>;
+    /**
+     * Absolute path of the worktree that has `branch` checked out, or null when
+     * no worktree of the repository at `cwd` has it.
+     */
+    readonly branchWorktreePath: (input: {
+      readonly cwd: string;
+      readonly branch: string;
+    }) => Effect.Effect<string | null, GitCommandError>;
     readonly deleteLocalBranch: (
       input: GitDeleteLocalBranchInput,
     ) => Effect.Effect<void, GitCommandError>;
@@ -434,7 +437,7 @@ export class GitVcsDriver extends Context.Service<
     readonly initRepo: (input: VcsInitInput) => Effect.Effect<void, GitCommandError>;
     readonly listLocalBranchNames: (cwd: string) => Effect.Effect<string[], GitCommandError>;
   }
->()("t3/vcs/GitVcsDriver") {}
+>()("goat/vcs/GitVcsDriver") {}
 
 const WORKSPACE_FILES_MAX_OUTPUT_BYTES = 16 * 1024 * 1024;
 const CHECKPOINT_RECOVERY_MAX_CANDIDATES = 64;
@@ -497,7 +500,8 @@ function parseGitRemoteVerboseOutput(
       continue;
     }
 
-    const match = /^(\S+)\s+(\S+)\s+\((fetch|push)\)$/.exec(trimmed);
+    // Partial clones append the promisor filter, e.g. `(fetch) [blob:none]`.
+    const match = /^(\S+)\s+(\S+)\s+\((fetch|push)\)(?:\s+\[[^\]]+\])?$/.exec(trimmed);
     if (!match) {
       continue;
     }
@@ -816,12 +820,16 @@ export const makeVcsDriverShape = Effect.fn("makeGitVcsDriverShape")(function* (
   // an unclean restart can leave 0-byte files under refs/t3/** that break every
   // later fetch and push. Checkpoint writes flush before they are published;
   // macOS defaults to writeout-only, which does not reach the disk either.
+  // On macOS, VcsProcess retries unsupported full flushes with plain fsync.
   const durableWrite = [
     "-c",
     "core.fsync=objects,reference",
     "-c",
     "core.fsyncMethod=fsync",
   ] as const;
+
+  // Existing workspaces can exceed MAX_PATH even when the user's Git config disables long paths.
+  const longPaths = (yield* HostProcess.Platform) === "win32" ? ["-c", "core.longpaths=true"] : [];
 
   const captureTree = Effect.fn("GitVcsDriver.captureTree")(function* (input: {
     readonly cwd: string;
@@ -833,22 +841,28 @@ export const makeVcsDriverShape = Effect.fn("makeGitVcsDriverShape")(function* (
       const paths = yield* execute({
         operation,
         cwd: input.cwd,
-        args: ["ls-files", "--others", "--exclude-standard", "-z", "--", "."],
+        args: [...longPaths, "ls-files", "--others", "--exclude-standard", "-z", "--", "."],
         maxOutputBytes: WORKSPACE_FILES_MAX_OUTPUT_BYTES,
       });
       if (paths.stdoutTruncated)
         return yield* new GitWorkspaceSnapshotError({ code: "unsupported_snapshot" });
       return splitNullSeparatedGitStdoutPaths(paths);
     });
+    // Scratch index writes must not expire the real index's sharedindex files.
     const indexConfig = [
+      ...longPaths,
       "-c",
       "core.fsmonitor=false",
       "-c",
       "sparse.expectFilesOutsideOfPatterns=false",
+      "-c",
+      "core.splitIndex=false",
+      "-c",
+      "splitIndex.sharedIndexExpire=never",
     ];
     const gitCommonDir = yield* resolveGitCommonDir(input.cwd);
-    const indexId = yield* crypto.randomUUIDv4.pipe(Effect.orDie);
-    const tempIndexPath = path.join(gitCommonDir, `t3-checkpoint-index-${indexId}`);
+    const indexId = yield* crypto.randomUUIDv4().pipe(Effect.orDie);
+    const tempIndexPath = path.join(gitCommonDir, `goat-checkpoint-index-${indexId}`);
     const commitEnv: NodeJS.ProcessEnv = {
       ...process.env,
       GIT_INDEX_FILE: tempIndexPath,
@@ -1020,7 +1034,7 @@ export const makeVcsDriverShape = Effect.fn("makeGitVcsDriverShape")(function* (
             // A fresh sparse index represents excluded directories without marking them deleted.
             args: sparseCheckout
               ? [...indexConfig, "-c", "index.sparse=true", "read-tree", "--reset", capturedHead!]
-              : ["read-tree", capturedHead!],
+              : [...indexConfig, "read-tree", capturedHead!],
             env: commitEnv,
           });
         }
@@ -1105,7 +1119,15 @@ export const makeVcsDriverShape = Effect.fn("makeGitVcsDriverShape")(function* (
                   const untracked = yield* execute({
                     operation,
                     cwd: input.cwd,
-                    args: ["ls-files", "--others", "--exclude-standard", "-z", "--", "."],
+                    args: [
+                      ...longPaths,
+                      "ls-files",
+                      "--others",
+                      "--exclude-standard",
+                      "-z",
+                      "--",
+                      ".",
+                    ],
                     env: commitEnv,
                     maxOutputBytes: WORKSPACE_FILES_MAX_OUTPUT_BYTES,
                   });
@@ -1297,11 +1319,20 @@ export const makeVcsDriverShape = Effect.fn("makeGitVcsDriverShape")(function* (
         yield* execute({
           operation,
           cwd: input.cwd,
-          args: ["restore", "--source", commitOid, "--worktree", "--staged", "--", "."],
+          args: [
+            ...longPaths,
+            "restore",
+            "--source",
+            commitOid,
+            "--worktree",
+            "--staged",
+            "--",
+            ".",
+          ],
         });
       }
       // Restoring away the last tracked file can remove a nested workspace directory.
-      yield* fileSystem.makeDirectory(input.cwd, { recursive: true }).pipe(
+      const recreateWorkspace = fileSystem.makeDirectory(input.cwd, { recursive: true }).pipe(
         Effect.mapError(
           (cause) =>
             new VcsProcessExitError({
@@ -1313,10 +1344,11 @@ export const makeVcsDriverShape = Effect.fn("makeGitVcsDriverShape")(function* (
             }),
         ),
       );
+      yield* recreateWorkspace;
       const cleaned = yield* execute({
         operation,
         cwd: input.cwd,
-        args: ["clean", "-fd", "--", "."],
+        args: [...longPaths, "clean", "-fd", "--", "."],
         allowNonZeroExit: true,
       });
       if (cleaned.exitCode !== 0) {
@@ -1337,13 +1369,15 @@ export const makeVcsDriverShape = Effect.fn("makeGitVcsDriverShape")(function* (
             detail: cleaned.stderr.trim() || "Could not clean the checkpoint workspace.",
           });
       }
+      // On Windows the same clean can remove './' and exit 0.
+      yield* recreateWorkspace;
 
       const headExists = yield* hasHeadCommit(input.cwd);
       if (headExists) {
         yield* execute({
           operation,
           cwd: input.cwd,
-          args: ["reset", "--quiet", "--", "."],
+          args: [...longPaths, "reset", "--quiet", "--", "."],
         });
       }
 
@@ -1434,7 +1468,6 @@ export const makeVcsDriverShape = Effect.fn("makeGitVcsDriverShape")(function* (
           `${input.toCheckpointRef}^{commit}`,
         ],
       });
-      // Each line is "<parent> <committer time>". The parent is the HEAD at capture.
       const [fromLine = "", toLine = ""] = heads.stdout.trimEnd().split("\n");
       const [startHead = "", capturedAt = ""] = fromLine.split(" ");
       const [endHead = ""] = toLine.split(" ");

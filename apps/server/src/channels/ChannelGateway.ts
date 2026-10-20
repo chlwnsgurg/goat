@@ -28,7 +28,7 @@ import {
   type ChannelReplyAddress,
   type ChannelRequester,
   type RuntimeMode,
-} from "@t3tools/contracts";
+} from "@goat/contracts";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
@@ -37,6 +37,7 @@ import * as Option from "effect/Option";
 
 import * as ChannelBotTimeline from "./ChannelBotTimeline.ts";
 import type { ChannelConnectionOwner, ChannelIngressContext } from "./ChannelIngressContext.ts";
+import * as ChannelBotHome from "./ChannelBotHome.ts";
 import * as ChannelLedger from "./ChannelLedger.ts";
 import * as ChannelTransport from "./ChannelTransport.ts";
 import * as ChannelWake from "./ChannelWake.ts";
@@ -90,7 +91,7 @@ export class ChannelGateway extends Context.Service<
       message: ChannelOutboundMessage,
     ) => Effect.Effect<ChannelDeliveryReceipt, ChannelGatewayError>;
   }
->()("t3/channels/ChannelGateway") {}
+>()("goat/channels/ChannelGateway") {}
 
 const RUNTIME_MODE_ORDER: ReadonlyArray<RuntimeMode> = [
   "approval-required",
@@ -152,6 +153,8 @@ const replyAddressKey = (address: ChannelReplyAddress) => {
         ":" +
         address.conversationKey
       );
+    case "imessage":
+      return JSON.stringify(["imessage", address.connectionId, address.chatGuid]);
   }
 };
 
@@ -209,6 +212,7 @@ const noticeDelivery = (
 
 const make = Effect.gen(function* () {
   const ledger = yield* ChannelLedger.ChannelLedger;
+  const home = yield* ChannelBotHome.ChannelBotHome;
   const registry = yield* ChannelTransport.ChannelTransportRegistry;
   const timeline = yield* ChannelBotTimeline.ChannelBotTimeline;
   const wake = yield* ChannelWake.ChannelWake;
@@ -259,13 +263,26 @@ const make = Effect.gen(function* () {
           }
           return;
         }
+        case "imessage": {
+          if (
+            caller.type !== "transport" ||
+            caller.kind !== "imessage" ||
+            caller.connectionId !== input.connectionId ||
+            address.kind !== "imessage" ||
+            address.connectionId !== input.connectionId ||
+            input.conversationKey !== address.chatGuid ||
+            input.attachments.length !== 0
+          )
+            return yield* forbidden();
+          return;
+        }
       }
     });
 
   /** Who is asking. Undefined means an unlinked transport account. */
   const resolveRequester = (input: ChannelIngestInput, context: ChannelIngressContext) =>
     Effect.gen(function* () {
-      if (input.kind !== "slack") {
+      if (input.kind !== "slack" && input.kind !== "imessage") {
         const requester: ChannelRequester = {
           ownerId: context.ownerId,
           principalId: context.principalId,
@@ -285,7 +302,7 @@ const make = Effect.gen(function* () {
         .findIdentity({ connectionId: input.connectionId, externalActorId })
         .pipe(Effect.mapError(ledgerFailure));
       if (identity === undefined) return undefined;
-      return effectiveRequester(context, identity, { originKind: "slack", externalActorId });
+      return effectiveRequester(context, identity, { originKind: input.kind, externalActorId });
     });
 
   const recordBotInput = (input: ChannelIngestInput, result: ChannelIngestResult) =>
@@ -321,6 +338,8 @@ const make = Effect.gen(function* () {
         // Workers report through channel_task_report, which checks their assignment.
         return yield* new ChannelGatewayError({ reason: "invalid_input" });
       }
+      if (input.kind === "goat" || input.kind === "mcp" || input.kind === "imessage")
+        yield* home.requireHome;
       yield* checkCaller(input, context);
       const requester = yield* resolveRequester(input, context);
       const stored = scopedForCaller(input, context);
@@ -376,10 +395,13 @@ const make = Effect.gen(function* () {
       if (
         caller.type !== "transport" ||
         caller.connectionId !== input.connectionId ||
-        input.replyAddress.kind !== caller.kind
+        input.replyAddress.kind !== caller.kind ||
+        ("connectionId" in input.replyAddress &&
+          input.replyAddress.connectionId !== input.connectionId)
       ) {
         return yield* forbidden();
       }
+      if (caller.kind === "imessage") yield* home.requireHome;
       const causeKey = "link:" + input.connectionId + ":" + input.idempotencyKey;
       const now = DateTime.formatIso(yield* DateTime.now);
       // Success and failure share one cause key, so a retried code keeps the first answer.
@@ -414,10 +436,13 @@ const make = Effect.gen(function* () {
       if (
         caller.type !== "transport" ||
         caller.connectionId !== input.connectionId ||
-        input.replyAddress.kind !== caller.kind
+        input.replyAddress.kind !== caller.kind ||
+        ("connectionId" in input.replyAddress &&
+          input.replyAddress.connectionId !== input.connectionId)
       ) {
         return yield* forbidden();
       }
+      if (caller.kind === "imessage") yield* home.requireHome;
       const causeKey = "notice:" + input.connectionId + ":" + input.idempotencyKey;
       const deliveryId = deliveryIdFor(causeKey);
       const existing = yield* ledger

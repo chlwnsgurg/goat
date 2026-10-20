@@ -1,6 +1,6 @@
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import { assert, it, vi } from "@effect/vitest";
-import { ProjectId } from "@t3tools/contracts";
+import { ProjectId } from "@goat/contracts";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
@@ -64,6 +64,14 @@ it.effect("resolves setup scripts through the standalone project service", () =>
         runOnWorktreeCreate: false,
         runOnSettle: true,
       },
+      {
+        id: "check",
+        name: "Check",
+        command: "vp test run",
+        icon: "test" as const,
+        runOnWorktreeCreate: false,
+        runAsCheck: true,
+      },
     ],
     createdAt: "2026-06-20T00:00:00.000Z",
     updatedAt: "2026-06-20T00:00:00.000Z",
@@ -100,13 +108,15 @@ it.effect("resolves setup scripts through the standalone project service", () =>
     });
     assert.equal(open.mock.calls[0]?.[0].cwd, "/repo-worktree");
     assert.deepEqual(open.mock.calls[0]?.[0].env, {
-      T3CODE_PROJECT_ROOT: "/repo",
-      T3CODE_WORKTREE_PATH: "/repo-worktree",
+      GOAT_PROJECT_ROOT: "/repo",
+      GOAT_WORKTREE_PATH: "/repo-worktree",
+      T3CODE_PROJECT_ROOT: "/repo", // goat-rename: legacy
+      T3CODE_WORKTREE_PATH: "/repo-worktree", // goat-rename: legacy
       COLORTERM: "",
       NO_COLOR: "1",
       FORCE_COLOR: "0",
     });
-    assert.equal(write.mock.calls[0]?.[0].data, "vp install\r");
+    assert.equal(write.mock.calls[0]?.[0].data, " vp install\r");
     const lines: string[] = [];
     const observed = yield* runner.runForThread({
       threadId: "thread-1",
@@ -120,6 +130,7 @@ it.effect("resolves setup scripts through the standalone project service", () =>
       },
     });
     assert.equal(observed.status, "started");
+    assert.match(write.mock.calls[1]?.[0].data ?? "", /^ \S/);
     const listener = listeners[0]!;
     yield* listener({
       type: "output",
@@ -138,10 +149,8 @@ it.effect("resolves setup scripts through the standalone project service", () =>
     });
     const settleTerminalId = settle.status === "started" ? settle.terminalId : "";
     assert.match(settleTerminalId, /^settle-clean-/);
-    assert.equal(write.mock.calls.at(-1)?.[0].data, "cargo clean\r");
+    assert.equal(write.mock.calls.at(-1)?.[0].data, " cargo clean\r");
 
-    // A clean run closes its shell once the prompt is back, not at the
-    // sentinel, so the prompt redraw is not taken for new activity.
     const observedSettle = yield* runner.runForThread({
       threadId: "thread-1",
       projectId,
@@ -150,9 +159,9 @@ it.effect("resolves setup scripts through the standalone project service", () =>
       observeCompletion: {},
     });
     const observedTerminalId = observedSettle.status === "started" ? observedSettle.terminalId : "";
-    // Each settle gets its own shell, so a busy one is never typed into.
     assert.notEqual(observedTerminalId, settleTerminalId);
-    const token = /__T3_SETUP_DONE___(\w+):/.exec(write.mock.calls.at(-1)?.[0].data ?? "")?.[1];
+    assert.match(write.mock.calls.at(-1)?.[0].data ?? "", /^ \S/);
+    const token = /__GOAT_SETUP_DONE___(\w+):/.exec(write.mock.calls.at(-1)?.[0].data ?? "")?.[1];
     const settleListener = listeners.at(-1)!;
     const completion = yield* Effect.forkChild(
       observedSettle.status === "started" && observedSettle.completion
@@ -163,7 +172,7 @@ it.effect("resolves setup scripts through the standalone project service", () =>
       type: "output",
       threadId: "thread-1",
       terminalId: observedTerminalId,
-      data: `\r\n__T3_SETUP_DONE___${token}:0\r\n`,
+      data: `\r\n__GOAT_SETUP_DONE___${token}:0\r\n`,
     });
     yield* Effect.yieldNow;
     assert.equal(closeIdle.mock.calls.length, 0);
@@ -178,5 +187,19 @@ it.effect("resolves setup scripts through the standalone project service", () =>
       threadId: "thread-1",
       terminalId: observedTerminalId,
     });
+
+    // A check in the shared checkout runs at the project root and claims no worktree.
+    const check = yield* runner.runForThread({
+      threadId: "thread-1",
+      projectId,
+      worktreePath: "/repo",
+      cwd: "/repo",
+      trigger: "check",
+    });
+    assert.match(check.status === "started" ? check.terminalId : "", /^check-check-/);
+    assert.equal(write.mock.calls.at(-1)?.[0].data, " vp test run\r");
+    assert.equal(open.mock.calls.at(-1)?.[0].cwd, "/repo");
+    assert.equal(open.mock.calls.at(-1)?.[0].worktreePath, null);
+    assert.notProperty(open.mock.calls.at(-1)?.[0].env ?? {}, "GOAT_WORKTREE_PATH");
   }).pipe(Effect.provide(layer));
 });

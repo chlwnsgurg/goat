@@ -1,4 +1,4 @@
-import { ThreadId } from "@t3tools/contracts";
+import { ThreadId } from "@goat/contracts";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -22,12 +22,11 @@ export class ResourceCleanupError extends Schema.TaggedError<ResourceCleanupErro
 
 export class ResourceCleanupService extends Context.Reference<{
   readonly cleanupTerminals: (threadId: string) => Effect.Effect<void, ResourceCleanupError>;
-  /** Closes every preview session of the thread; server browser tabs end with them. */
   readonly cleanupPreviews: (threadId: string) => Effect.Effect<void, ResourceCleanupError>;
   readonly cleanupAttachments: (
     attachmentIds: ReadonlyArray<string>,
   ) => Effect.Effect<void, ResourceCleanupError>;
-}>("t3/orchestration-v2/ResourceCleanupService", {
+}>("goat/orchestration-v2/ResourceCleanupService", {
   defaultValue: () => ({
     cleanupTerminals: () => Effect.void,
     cleanupPreviews: () => Effect.void,

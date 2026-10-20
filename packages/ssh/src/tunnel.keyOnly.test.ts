@@ -1,6 +1,6 @@
 import { assert, describe, it } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import * as NetService from "@t3tools/shared/Net";
+import * as NetService from "@goat/shared/Net";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Stream from "effect/Stream";
@@ -17,6 +17,7 @@ import {
   testNetService,
   uploadTarget,
   NODE_SCRIPT,
+  isRemoteLaunch,
 } from "./tunnel.fixture.ts";
 
 describe.each([
@@ -56,7 +57,7 @@ describe.each([
           };
         if (args.includes("-N")) return makeRunningProcess(() => undefined);
         return makeSuccessfulProcess(
-          args.includes("--")
+          isRemoteLaunch(args)
             ? '{"status":"ready","remotePort":3773,"selectedVersion":"0.1.0"}'
             : '{"credential":"fixture-pairing"}',
         );

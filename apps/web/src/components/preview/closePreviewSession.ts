@@ -1,10 +1,10 @@
-import type { AtomCommandResult } from "@t3tools/client-runtime/state/runtime";
+import type { AtomCommandResult } from "@goat/client-runtime/state/runtime";
 import type {
   EnvironmentId,
   PreviewCloseInput,
   PreviewSessionSnapshot,
   ScopedThreadRef,
-} from "@t3tools/contracts";
+} from "@goat/contracts";
 
 import { useClosedViewStore } from "~/closedViewStore";
 import { beginPreviewSessionClose, cancelPreviewSessionClose } from "~/previewStateStore";
@@ -19,10 +19,6 @@ interface ClosePreviewSessionInput<E> {
   readonly threadRef: ScopedThreadRef;
 }
 
-/**
- * Optimistically closes a preview while suppressing stale list responses for
- * the same tab. A failed close restores the last known snapshot.
- */
 export async function closePreviewSession<E>(
   input: ClosePreviewSessionInput<E>,
 ): Promise<AtomCommandResult<void, E>> {

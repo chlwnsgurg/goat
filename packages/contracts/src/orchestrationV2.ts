@@ -1,3 +1,9 @@
+import { Handoff, HandoffJson, HandoffActor, HandoffState } from "./handoff.ts";
+import {
+  MemoryCurrentAccess,
+  MemoryProviderCapabilities,
+  MemoryTaskGrantCeilingField,
+} from "./memory.ts";
 import { OrchestrationMessageContext } from "./composerContext.ts";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
@@ -237,7 +243,27 @@ export const OrchestrationV2ContextTransfer = Schema.Struct({
 });
 export type OrchestrationV2ContextTransfer = typeof OrchestrationV2ContextTransfer.Type;
 
+export const OrchestrationV2CloudSourceRestriction = Schema.Literals([
+  "published-ref",
+  "clean-pushed-sha",
+  "project-folder",
+]);
+export type OrchestrationV2CloudSourceRestriction =
+  typeof OrchestrationV2CloudSourceRestriction.Type;
+
 export const OrchestrationV2SessionCapabilities = Schema.Struct({
+  sourceRestriction: Schema.optional(OrchestrationV2CloudSourceRestriction).pipe(
+    Schema.withDecodingDefault(Effect.succeed("published-ref" as const)),
+  ),
+  executionLocation: Schema.optional(Schema.Literals(["local", "cloud"])).pipe(
+    Schema.withDecodingDefault(Effect.succeed("local" as const)),
+  ),
+  followUp: Schema.optional(
+    Schema.Struct({
+      supported: Schema.Boolean,
+      reason: Schema.optional(Schema.String),
+    }),
+  ).pipe(Schema.withDecodingDefault(Effect.succeed({ supported: true }))),
   supportsMultipleProviderThreadsPerSession: Schema.Boolean,
   supportsModelSwitchInSession: Schema.Boolean,
   supportsProviderSwitchingViaHandoff: Schema.Boolean,
@@ -343,13 +369,6 @@ export type OrchestrationV2CheckpointCapabilities =
   typeof OrchestrationV2CheckpointCapabilities.Type;
 
 export const OrchestrationV2RuntimePolicyCapabilities = Schema.Struct({
-  /**
-   * Where T3 runtime modes are actually enforced. "native" providers receive
-   * the approval and sandbox policy each turn and confine their own execution.
-   * "client-boundary" providers only have policy applied where T3 mediates the
-   * work (permission requests and client fs/terminal handlers); provider-owned
-   * execution is not confined, so sandbox guarantees are reduced.
-   */
   enforcement: Schema.Literals(["native", "client-boundary"]),
 });
 export type OrchestrationV2RuntimePolicyCapabilities =
@@ -364,6 +383,7 @@ export const OrchestrationV2IdentityCapabilities = Schema.Struct({
 export type OrchestrationV2IdentityCapabilities = typeof OrchestrationV2IdentityCapabilities.Type;
 
 export const OrchestrationV2ProviderCapabilities = Schema.Struct({
+  memory: Schema.optionalKey(MemoryProviderCapabilities),
   sessions: OrchestrationV2SessionCapabilities,
   threads: OrchestrationV2ThreadCapabilities,
   turns: OrchestrationV2TurnCapabilities,
@@ -392,7 +412,6 @@ export const OrchestrationV2LimitRecovery = Schema.Struct({
 });
 export type OrchestrationV2LimitRecovery = typeof OrchestrationV2LimitRecovery.Type;
 
-/** A choice update preserves omitted options for this same run and reset. */
 export const OrchestrationV2LimitRecoveryUpdate = Schema.Struct({
   runId: RunId,
   resetAt: IsoDateTime,
@@ -408,6 +427,19 @@ export const OrchestrationV2LimitRecoveryUpdate = Schema.Struct({
 );
 export type OrchestrationV2LimitRecoveryUpdate = typeof OrchestrationV2LimitRecoveryUpdate.Type;
 
+/**
+ * A side chat (`/side`) is a hidden thread that answers questions about its parent
+ * without adding to the parent's history. Clients keep it out of thread lists and show it
+ * beside the parent instead. Optional so older payloads and servers still decode.
+ */
+const SideChatOf = Schema.optional(Schema.NullOr(ThreadId));
+
+export function isSideChatThread(thread: {
+  readonly sideChatOf?: ThreadId | null | undefined;
+}): boolean {
+  return thread.sideChatOf != null;
+}
+
 export const OrchestrationV2AppThread = Schema.Struct({
   ...OrchestrationV2CreationFields,
   id: ThreadId,
@@ -419,17 +451,17 @@ export const OrchestrationV2AppThread = Schema.Struct({
   interactionMode: ProviderInteractionMode,
   branch: Schema.NullOr(TrimmedNonEmptyString),
   worktreePath: Schema.NullOr(TrimmedNonEmptyString),
-  /** Pull request the user linked to this thread (#8160); optional so
-      pre-linking servers still decode. */
   linkedPullRequest: Schema.optional(Schema.NullOr(ThreadLinkedPullRequest)),
   pullRequests: Schema.optional(Schema.Array(ThreadPullRequestLink)),
-  /** Pull request discovered from the thread's current branch. */
   branchPullRequest: Schema.optional(Schema.NullOr(ThreadLinkedPullRequest)),
   activeProviderThreadId: Schema.NullOr(ProviderThreadId),
   historyOrigin: Schema.optional(OrchestrationV2ThreadHistoryOrigin),
   lineage: OrchestrationV2AppThreadLineage,
   /** Who started this thread; absent for user-created threads and older servers. */
   launchedBy: Schema.optional(OrchestrationV2ThreadLauncher),
+  /** Who started this thread's cloud run outside GOAT, such as "Grok Bot"; descriptive only. */
+  externalLauncher: Schema.optional(Schema.String.check(Schema.isMaxLength(64))),
+  sideChatOf: SideChatOf,
   forkedFrom: Schema.NullOr(
     Schema.Union([
       Schema.Struct({ type: Schema.Literal("run"), threadId: ThreadId, runId: RunId }),
@@ -453,20 +485,15 @@ export const OrchestrationV2AppThread = Schema.Struct({
   unsettledAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
   snoozedUntil: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
   snoozedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
-  /** Manual wakes restart inactivity without changing the sidebar's sort position. */
   lastSnoozeWakeAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
   limitRecovery: Schema.optional(Schema.NullOr(OrchestrationV2LimitRecovery)),
   pinnedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
   autoSettleDisabledAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
-  // Fractional-index slot in the user-arranged pinned order. Optional so
-  // payloads from pre-reorder servers still decode.
   pinOrderKey: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
-  /** Fractional-index slot in the user-arranged active order. */
   activeOrderKey: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
   lastVisitedAt: Schema.NullOr(Schema.DateTimeUtc).pipe(
     Schema.withDecodingDefault(Effect.succeed(null)),
   ),
-  /** In-flight title regeneration marker; cleared when a new title lands. */
   titleRegeneration: Schema.optional(
     Schema.NullOr(
       Schema.Struct({
@@ -475,9 +502,7 @@ export const OrchestrationV2AppThread = Schema.Struct({
       }),
     ),
   ),
-  /** Latest accepted rollback. Only its failure is recorded in `rollbackFailure`. */
   rollbackRequestId: Schema.optional(CommandId),
-  /** Latest rollback that failed after every retry; cleared when the next rollback starts. */
   rollbackFailure: Schema.optional(
     Schema.NullOr(
       Schema.Struct({
@@ -491,9 +516,8 @@ export const OrchestrationV2AppThread = Schema.Struct({
 export type OrchestrationV2AppThread = typeof OrchestrationV2AppThread.Type;
 
 /**
- * A subagent the provider spawned on its own (Claude's Agent tool, Codex or
- * Cursor native subagents). The provider owns its conversation, so it cannot
- * take messages; T3 delegate_task children (`creationSource: "mcp"`) can.
+ * The provider owns its conversation, so it cannot take messages; T3 delegate_task children
+ * (`creationSource: "mcp"`) can.
  */
 export function isProviderNativeSubagentThread(
   thread: Pick<OrchestrationV2AppThread, "lineage" | "creationSource">,
@@ -548,17 +572,14 @@ export const OrchestrationV2DelegatedCompletionCohort = Schema.Struct({
 export type OrchestrationV2DelegatedCompletionCohort =
   typeof OrchestrationV2DelegatedCompletionCohort.Type;
 
-/** Background work that restart recovery cancelled; the next provider turn is told once. */
 export const OrchestrationV2RestartCancelledBackgroundWork = Schema.Struct({
   kind: Schema.Literals(["subagent", "shell", "monitor", "task"]),
   label: TrimmedNonEmptyString,
-  /** Stable identity (turn item or provider task id) so same-named work is not merged. */
   id: Schema.optional(TrimmedNonEmptyString),
 });
 export type OrchestrationV2RestartCancelledBackgroundWork =
   typeof OrchestrationV2RestartCancelledBackgroundWork.Type;
 
-/** Replaces a run's recorded restart-cancelled work without touching its lifecycle. */
 export const OrchestrationV2RunBackgroundWorkCancelled = Schema.Struct({
   runId: RunId,
   restartCancelledBackgroundWork: Schema.Array(OrchestrationV2RestartCancelledBackgroundWork),
@@ -586,10 +607,11 @@ export const OrchestrationV2ThreadLaunchWorkspaceStrategy = Schema.Union([
 export type OrchestrationV2ThreadLaunchWorkspaceStrategy =
   typeof OrchestrationV2ThreadLaunchWorkspaceStrategy.Type;
 
-/** Failure code on the error item a failed workspace preparation leaves. */
 export const ORCHESTRATION_V2_WORKSPACE_PREPARATION_FAILURE_CODE = "workspace_preparation_failed";
 
 export const OrchestrationV2Run = Schema.Struct({
+  memoryGrantCeiling: MemoryTaskGrantCeilingField,
+  currentMemoryAccess: Schema.optionalKey(MemoryCurrentAccess),
   id: RunId,
   threadId: ThreadId,
   ordinal: PositiveInt,
@@ -601,27 +623,17 @@ export const OrchestrationV2Run = Schema.Struct({
   activeAttemptId: Schema.NullOr(RunAttemptId),
   status: OrchestrationV2RunStatus,
   queuePosition: Schema.optional(Schema.NullOr(PositiveInt)),
-  /** Restart recovery holds the queue until the user explicitly resumes it. */
   queueHeld: Schema.optional(Schema.Boolean),
   requestedAt: Schema.DateTimeUtc,
   startedAt: Schema.NullOr(Schema.DateTimeUtc),
   completedAt: Schema.NullOr(Schema.DateTimeUtc),
   checkpointId: Schema.NullOr(CheckpointId),
   contextHandoffId: Schema.NullOr(ContextHandoffId),
-  /** Links server-generated restart continuations to the interrupted run. */
   restartContinuationOfRunId: Schema.optional(RunId),
+  usageLimitContinuationOfRunId: Schema.optional(RunId),
   /** The delegated task this run answers, including a follow-up in an existing child thread. */
   delegatedTaskId: Schema.optional(NodeId),
-  /**
-   * Set on wake runs (background notifications, delegated task results,
-   * restart continuations): when the work they continue started. Read it
-   * through orchestrationV2RunWorkStartedAt.
-   */
   workStartedAt: Schema.optional(Schema.DateTimeUtc),
-  /**
-   * Set by restart recovery on the thread's latest started run. Delivered to
-   * the provider with the first later run that reaches a provider turn.
-   */
   restartCancelledBackgroundWork: Schema.optional(
     Schema.Array(OrchestrationV2RestartCancelledBackgroundWork),
   ),
@@ -632,15 +644,10 @@ export const OrchestrationV2Run = Schema.Struct({
     }),
   ),
   delegatedCompletion: Schema.optional(OrchestrationV2DelegatedCompletionCohort),
-  /** How a launch prepares this run's workspace; prepared-run.retry repeats it. */
   workspacePreparation: Schema.optional(OrchestrationV2ThreadLaunchWorkspaceStrategy),
 });
 export type OrchestrationV2Run = typeof OrchestrationV2Run.Type;
 
-/**
- * When the work a run belongs to started. A wake does not start new work, so
- * working timers count from the prompt that did, not from the latest wake.
- */
 export function orchestrationV2RunWorkStartedAt(
   run: Pick<OrchestrationV2Run, "workStartedAt" | "startedAt" | "requestedAt">,
 ): OrchestrationV2Run["requestedAt"] {
@@ -719,8 +726,117 @@ export const OrchestrationV2RemoteSubagent = Schema.Struct({
   correlationId: TrimmedNonEmptyString,
 });
 export type OrchestrationV2RemoteSubagent = typeof OrchestrationV2RemoteSubagent.Type;
+/**
+ * The plan grows while the run executes: a phase a script only reaches at runtime joins the list
+ * when it starts, so a client must treat the list as append-only rather than as a fixed arc
+ * declared up front.
+ */
+export const OrchestrationV2WorkflowPhase = Schema.Struct({
+  index: NonNegativeInt,
+  title: TrimmedNonEmptyString,
+});
+export type OrchestrationV2WorkflowPhase = typeof OrchestrationV2WorkflowPhase.Type;
+
+/**
+ * Timestamps are epoch milliseconds rather than `DateTimeUtc` because only the top-level entity
+ * fields are remapped for the JSON wire shape (see `OrchestrationV2SubagentJson`), so a nested
+ * `DateTimeUtc` would never be encoded.
+ */
+export const OrchestrationV2WorkflowAgent = Schema.Struct({
+  index: NonNegativeInt,
+  label: TrimmedNonEmptyString,
+  agentId: Schema.optional(TrimmedNonEmptyString),
+  childThreadId: Schema.optional(ThreadId),
+  state: Schema.Literals(["queued", "running", "completed", "failed"]),
+  phaseIndex: Schema.optional(NonNegativeInt),
+  phaseTitle: Schema.optional(TrimmedNonEmptyString),
+  model: Schema.optional(TrimmedNonEmptyString),
+  attempt: Schema.optional(NonNegativeInt),
+  totalTokens: Schema.optional(NonNegativeInt),
+  toolCalls: Schema.optional(NonNegativeInt),
+  durationMs: Schema.optional(NonNegativeInt),
+  queuedAt: Schema.optional(NonNegativeInt),
+  startedAt: Schema.optional(NonNegativeInt),
+  prompt: Schema.optional(Schema.NonEmptyString),
+  result: Schema.optional(Schema.NonEmptyString),
+});
+export type OrchestrationV2WorkflowAgent = typeof OrchestrationV2WorkflowAgent.Type;
+
+export const OrchestrationV2WorkflowRunHandles = Schema.Struct({
+  runId: Schema.optional(TrimmedNonEmptyString),
+  transcriptDir: Schema.optional(TrimmedNonEmptyString),
+  scriptPath: Schema.optional(TrimmedNonEmptyString),
+});
+export type OrchestrationV2WorkflowRunHandles = typeof OrchestrationV2WorkflowRunHandles.Type;
+
+export const OrchestrationV2SubagentWorkflow = Schema.Struct({
+  name: Schema.optional(TrimmedNonEmptyString),
+  runHandles: Schema.optional(OrchestrationV2WorkflowRunHandles),
+  phases: Schema.Array(OrchestrationV2WorkflowPhase),
+  agents: Schema.Array(OrchestrationV2WorkflowAgent),
+  totalTokens: Schema.optional(NonNegativeInt),
+  toolCalls: Schema.optional(NonNegativeInt),
+  durationMs: Schema.optional(NonNegativeInt),
+});
+export type OrchestrationV2SubagentWorkflow = typeof OrchestrationV2SubagentWorkflow.Type;
+
+export const OrchestrationV2TaskRole = Schema.Literals([
+  "implementation",
+  "research",
+  "review",
+  "design",
+  "test",
+  "general",
+]);
+export type OrchestrationV2TaskRole = typeof OrchestrationV2TaskRole.Type;
+
+/** Nested timestamps stay strings so projection JSON round-trips preserve them. */
+export const ReviewLedgerDecisionInput = Schema.Struct({
+  kind: Schema.Literal("decision"),
+  findingId: TrimmedNonEmptyString.check(Schema.isMaxLength(512)),
+  severity: Schema.Literals(["critical", "high", "medium", "low", "info"]),
+  cites: Schema.NullOr(TrimmedNonEmptyString.check(Schema.isMaxLength(4_000))),
+  summary: TrimmedNonEmptyString.check(Schema.isMaxLength(4_000)),
+  decision: Schema.Literals(["accepted", "rebutted"]),
+  evidence: Schema.NullOr(
+    Schema.Struct({
+      kind: Schema.Literals(["command", "location", "commit", "test", "other"]),
+      ref: TrimmedNonEmptyString.check(Schema.isMaxLength(4_000)),
+      exitCode: Schema.optional(Schema.Int),
+    }),
+  ),
+});
+export const ReviewLedgerOutcomeInput = Schema.Struct({
+  kind: Schema.Literal("outcome"),
+  findingId: ReviewLedgerDecisionInput.fields.findingId,
+  link: Schema.Struct({
+    kind: Schema.Literals(["commit", "test", "revert", "issue", "other"]),
+    ref: TrimmedNonEmptyString.check(Schema.isMaxLength(4_000)),
+  }),
+});
+export const ReviewLedgerEntryInput = Schema.Union([
+  ReviewLedgerDecisionInput,
+  ReviewLedgerOutcomeInput,
+]);
+export type ReviewLedgerEntryInput = typeof ReviewLedgerEntryInput.Type;
+const ReviewLedgerRecordedFields = {
+  entryId: TrimmedNonEmptyString,
+  recordedAt: IsoDateTime,
+  recordedByRunId: Schema.NullOr(RunId),
+};
+export const ReviewLedgerEntry = Schema.Union([
+  Schema.Struct({ ...ReviewLedgerDecisionInput.fields, ...ReviewLedgerRecordedFields }),
+  Schema.Struct({
+    ...ReviewLedgerOutcomeInput.fields,
+    ...ReviewLedgerRecordedFields,
+    outcome: Schema.Literals(["later_confirmed", "unneeded"]),
+  }),
+]);
+export type ReviewLedgerEntry = typeof ReviewLedgerEntry.Type;
 
 export const OrchestrationV2Subagent = Schema.Struct({
+  memoryGrantCeiling: MemoryTaskGrantCeilingField,
+  currentMemoryAccess: Schema.optionalKey(MemoryCurrentAccess),
   id: NodeId,
   threadId: ThreadId,
   runId: Schema.NullOr(RunId),
@@ -737,6 +853,9 @@ export const OrchestrationV2Subagent = Schema.Struct({
   title: Schema.NullOr(Schema.String),
   model: Schema.NullOr(Schema.String),
   modelSelection: Schema.optional(ModelSelection),
+  role: Schema.optional(OrchestrationV2TaskRole),
+  parentModelSelection: Schema.optional(ModelSelection),
+  reviewLedger: Schema.optional(Schema.Array(ReviewLedgerEntry)),
   // Parent-wake policy for app-owned tasks: "always" offers a continuation on
   // every terminal (async delegations; queue_after_active sequences it behind
   // a live parent run), "settled_only" offers only when the parent has no
@@ -760,6 +879,7 @@ export const OrchestrationV2Subagent = Schema.Struct({
     "interrupted",
   ]),
   progress: Schema.optional(Schema.String),
+  workflow: Schema.optional(OrchestrationV2SubagentWorkflow),
   result: Schema.NullOr(Schema.String),
   startedAt: Schema.NullOr(Schema.DateTimeUtc),
   completedAt: Schema.NullOr(Schema.DateTimeUtc),
@@ -767,7 +887,6 @@ export const OrchestrationV2Subagent = Schema.Struct({
 });
 export type OrchestrationV2Subagent = typeof OrchestrationV2Subagent.Type;
 
-/** Idle work is resumable, but does not keep a turn or its subscription alive. */
 export function isOrchestrationV2WorkActive(
   status: OrchestrationV2ExecutionNode["status"],
 ): boolean {
@@ -811,7 +930,6 @@ export const OrchestrationV2ProviderSessionDetached = Schema.Struct({
 export type OrchestrationV2ProviderSessionDetached =
   typeof OrchestrationV2ProviderSessionDetached.Type;
 
-/** The literal `kind` a union member is stored and sent with. */
 function encodedKind(member: Schema.Top): string {
   const encoded = SchemaAST.toEncoded(member.ast);
   const kind = SchemaAST.isObjects(encoded)
@@ -823,16 +941,6 @@ function encodedKind(member: Schema.Top): string {
   throw new Error("Each member of a kind union needs a literal string `kind`.");
 }
 
-/**
- * A union tagged by `kind` that tolerates kinds this build does not know.
- * After the known members comes a decode-only arm: an object with an unknown
- * `kind`, or none, decodes through `fallback` to a known member instead of
- * failing, so a newer server can add kinds without breaking older clients and
- * rows written before a kind existed still load. `unknown` builds that arm's
- * input around the given `kind` field. A known kind whose fields do not decode
- * still fails. Kinds are the encoded ones, which a member may rename on decode.
- * The arm never encodes; values always match a known member first.
- */
 function kindUnionWithFallback<
   const Members extends ReadonlyArray<Schema.Top & { readonly Encoded: { readonly kind: string } }>,
   Unknown extends Schema.Top,
@@ -862,23 +970,18 @@ function kindUnionWithFallback<
 
 const PendingBackgroundTaskFields = {
   taskId: TrimmedNonEmptyString,
-  /** The work's name: a subagent's title, a command's description, a monitor's. */
   description: Schema.optional(TrimmedNonEmptyString),
+  /** The subagent task that started this work and waits on it. */
+  parentTaskId: Schema.optional(TrimmedNonEmptyString),
 };
 
-/**
- * Provider-owned background work that can outlive the root turn (for example a
- * Claude background Bash task). Associated with the provider thread so shared
- * runtimes cannot make an unrelated app thread look busy. Adapters pick the
- * kind; `background_task` is work they cannot name. Rosters persisted before
- * kinds existed carry no `kind` and load as `background_task`.
- */
 export const OrchestrationV2PendingBackgroundTask = kindUnionWithFallback(
   [
     Schema.Struct({
       ...PendingBackgroundTaskFields,
       kind: Schema.Literal("subagent"),
-      /** The subagent's own thread, when it has one. */
+      /** The owning provider thread's instance, populated in derived pending work. */
+      providerInstanceId: Schema.optional(ProviderInstanceId),
       childThreadId: Schema.optional(ThreadId),
     }),
     Schema.Struct({ ...PendingBackgroundTaskFields, kind: Schema.Literal("command") }),
@@ -886,21 +989,19 @@ export const OrchestrationV2PendingBackgroundTask = kindUnionWithFallback(
     Schema.Struct({ ...PendingBackgroundTaskFields, kind: Schema.Literal("background_task") }),
   ],
   (kind) => Schema.Struct({ ...PendingBackgroundTaskFields, kind }),
-  ({ taskId, description }) => ({
+  ({ taskId, description, parentTaskId }) => ({
     taskId,
     ...(description === undefined ? {} : { description }),
+    ...(parentTaskId === undefined ? {} : { parentTaskId }),
     kind: "background_task",
   }),
 );
 export type OrchestrationV2PendingBackgroundTask = typeof OrchestrationV2PendingBackgroundTask.Type;
 
-/** Provider and adapter metadata that should not overwrite the app thread's title. */
 export const OrchestrationV2ProviderThreadNativeMetadata = Schema.Struct({
-  /** Provider-reported selection for display, separate from the app's saved preferences. */
   modelSelection: Schema.optional(ModelSelection),
   title: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
   updatedAt: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
-  /** Version 2 scopes provider-derived item ids by provider instance. */
   itemIdentityVersion: Schema.optional(Schema.Literal(2)),
 });
 export type OrchestrationV2ProviderThreadNativeMetadata =
@@ -916,25 +1017,48 @@ export const OrchestrationV2ProviderGoalStatus = Schema.Literals([
 ]);
 export type OrchestrationV2ProviderGoalStatus = typeof OrchestrationV2ProviderGoalStatus.Type;
 
-/**
- * A provider-native goal set with `/goal` (Codex and Claude). The provider
- * keeps working until it judges the objective met and owns this state; T3
- * mirrors the latest native report. Usage fields are provider-specific.
- */
 export const OrchestrationV2ProviderGoal = Schema.Struct({
   objective: TrimmedNonEmptyString,
   status: OrchestrationV2ProviderGoalStatus,
-  /** Codex accounting for the goal across its turns. */
   tokensUsed: Schema.optional(NonNegativeInt),
   tokenBudget: Schema.optional(Schema.NullOr(NonNegativeInt)),
   timeUsedSeconds: Schema.optional(NonNegativeInt),
-  /** Claude: evaluator checks that found the goal unmet, and the latest reason. */
   checks: Schema.optional(NonNegativeInt),
   lastCheck: Schema.optional(Schema.String),
 });
 export type OrchestrationV2ProviderGoal = typeof OrchestrationV2ProviderGoal.Type;
 
+export const OrchestrationV2CloudTask = Schema.Struct({
+  taskId: TrimmedNonEmptyString,
+  // Providers persist the app run whose vendor submission was accepted.
+  acceptedAppRunId: Schema.optional(RunId),
+  url: Schema.optional(Schema.String),
+  title: Schema.optional(Schema.String),
+  status: Schema.Literals(["submitting", "running", "succeeded", "failed", "cancelled", "unknown"]),
+  tracking: Schema.Literals(["live", "polled", "link-only"]),
+  progress: Schema.optional(Schema.String),
+  summary: Schema.optional(Schema.String),
+  prUrl: Schema.optional(Schema.String),
+  branch: Schema.optional(Schema.String),
+  source: Schema.Struct({
+    repository: TrimmedNonEmptyString,
+    branch: TrimmedNonEmptyString,
+    sha: Schema.optional(TrimmedNonEmptyString),
+  }),
+  localChangesExcluded: Schema.Boolean,
+  localChangesIncluded: Schema.optional(Schema.Boolean),
+  error: Schema.optional(Schema.String),
+  updatedAt: IsoDateTime,
+  /**
+   * "registered": launched outside GOAT and registered afterwards. The first run attaches to
+   * the task and never submits a prompt.
+   */
+  attach: Schema.optional(Schema.Literal("registered")),
+});
+export type OrchestrationV2CloudTask = typeof OrchestrationV2CloudTask.Type;
+
 export const OrchestrationV2ProviderThread = Schema.Struct({
+  cloudTask: Schema.optional(OrchestrationV2CloudTask),
   id: ProviderThreadId,
   driver: ProviderDriverKind,
   providerInstanceId: ProviderInstanceId,
@@ -954,7 +1078,6 @@ export const OrchestrationV2ProviderThread = Schema.Struct({
       checkpointId: Schema.optional(CheckpointId),
     }),
   ),
-  // Optional Type so adapters can omit empty rosters; historical JSON decodes to [].
   pendingBackgroundTasks: Schema.optional(Schema.Array(OrchestrationV2PendingBackgroundTask)).pipe(
     Schema.withDecodingDefault(Effect.succeed([])),
   ),
@@ -964,7 +1087,6 @@ export const OrchestrationV2ProviderThread = Schema.Struct({
   nativeMetadata: Schema.optional(Schema.NullOr(OrchestrationV2ProviderThreadNativeMetadata)).pipe(
     Schema.withDecodingDefault(Effect.succeed(null)),
   ),
-  /** Native goal on this provider thread; rows written before goals decode to null. */
   goal: Schema.optional(Schema.NullOr(OrchestrationV2ProviderGoal)).pipe(
     Schema.withDecodingDefault(Effect.succeed(null)),
   ),
@@ -1007,13 +1129,11 @@ export const OrchestrationV2ContextHandoff = Schema.Struct({
   status: Schema.Literals(["pending", "ready", "failed", "superseded"]),
   summaryMessageId: Schema.NullOr(MessageId),
   summaryText: Schema.String,
-  // Optional fields keep existing preview events and projections readable without a migration.
   history: Schema.optional(
     Schema.Struct({
       messages: Schema.Array(OrchestrationV2HistoricalMessage),
       coverage: Schema.String,
       omittedItems: NonNegativeInt,
-      // IDs omitted during preparation, before the target's delivery budget is known.
       omittedItemIds: Schema.optional(Schema.Array(TurnItemId)),
     }),
   ),
@@ -1022,7 +1142,6 @@ export const OrchestrationV2ContextHandoff = Schema.Struct({
       nativeThreadId: Schema.String,
       status: Schema.Literals(["pending", "injected", "inline"]),
       itemIds: Schema.Array(TurnItemId),
-      // Covered by recovery instructions, but not present in native model history.
       omittedItemIds: Schema.optional(Schema.Array(TurnItemId)),
     }),
   ),
@@ -1033,7 +1152,6 @@ export const OrchestrationV2ContextHandoff = Schema.Struct({
 });
 export type OrchestrationV2ContextHandoff = typeof OrchestrationV2ContextHandoff.Type;
 
-/** Live context usage reported by the provider mid-turn (#8144). */
 export const OrchestrationV2ProviderTurnTokenUsage = Schema.Struct({
   usedTokens: NonNegativeInt,
   maxTokens: Schema.optional(Schema.NullOr(NonNegativeInt)),
@@ -1041,7 +1159,7 @@ export const OrchestrationV2ProviderTurnTokenUsage = Schema.Struct({
   cachedInputTokens: Schema.optional(NonNegativeInt),
   outputTokens: Schema.optional(NonNegativeInt),
   reasoningOutputTokens: Schema.optional(NonNegativeInt),
-  /** ISO timestamp of the provider's report; string so wire encoding is stable. */
+  promptCacheTtlMs: Schema.optional(PositiveInt),
   updatedAt: Schema.String,
 });
 export type OrchestrationV2ProviderTurnTokenUsage =
@@ -1070,8 +1188,7 @@ export const OrchestrationV2ProviderTurn = Schema.Struct({
 export type OrchestrationV2ProviderTurn = typeof OrchestrationV2ProviderTurn.Type;
 
 /**
- * The provider turn a run attempt is on or ended with. A Codex goal keeps one
- * run open across several native turns, so an attempt's first turn is not
+ * A Codex goal keeps one run open across several native turns, so an attempt's first turn is not
  * always its last.
  */
 export function latestProviderTurnForAttempt<
@@ -1113,28 +1230,21 @@ export type OrchestrationV2RuntimeRequest = typeof OrchestrationV2RuntimeRequest
 
 const SubagentNotificationSource = Schema.Struct({
   kind: Schema.Literal("subagent"),
-  /** The subagent's own thread, when the notification reports one subagent. */
   childThreadId: Schema.optional(ThreadId),
 });
 const CommandNotificationSource = Schema.Struct({ kind: Schema.Literal("command") });
 
 /**
- * What a notification reports on. Several pieces of work of one kind share
- * that kind; mixed or unnamed work is `background_task`.
- *
- * Sources are stored and sent in the shape clients before `subagent` and
- * `command` existed decode, since they reject a kind they do not know: a
- * command is `background_command`, and a subagent is `background_task` with
- * `work: "subagent"`, a field those clients ignore. Encoding picks the first
- * member that fits, so those come first. The plain `subagent` and `command`
- * members after them decode values that were already decoded once.
+ * Sources are stored and sent in the shape clients before `subagent` and `command` existed decode,
+ * since they reject a kind they do not know: a command is `background_command`, and a subagent is
+ * `background_task` with `work: "subagent"`, a field those clients ignore. Encoding picks the first
+ * member that fits, so those come first.
  */
 export const OrchestrationV2NotificationSource = kindUnionWithFallback(
   [
     Schema.Struct({
       kind: Schema.Literal("delegated_task"),
       taskIds: Schema.Array(NodeId),
-      /** The task's own thread, when the notification reports one task. */
       childThreadId: Schema.optional(ThreadId),
     }),
     Schema.Struct({
@@ -1166,7 +1276,6 @@ export const OrchestrationV2NotificationSource = kindUnionWithFallback(
       humanRequired: Schema.Boolean,
     }),
     Schema.Struct({ kind: Schema.Literal("background_task") }),
-    /** T3 Code itself, such as a restart continuing an interrupted turn. */
     Schema.Struct({ kind: Schema.Literal("system") }),
   ],
   (kind) => Schema.Struct({ kind }),
@@ -1174,11 +1283,8 @@ export const OrchestrationV2NotificationSource = kindUnionWithFallback(
 );
 export type OrchestrationV2NotificationSource = typeof OrchestrationV2NotificationSource.Type;
 
-// A notification records an observed event, not whether its payload has reached the agent.
-// Provider delivery, wake policy, and agent-facing instructions belong to the backend.
 export const OrchestrationV2Notification = Schema.Struct({
   source: OrchestrationV2NotificationSource,
-  // Item status describes this timeline record; outcome describes the reported work.
   outcome: Schema.Literals(["completed", "failed", "cancelled", "updated", "unknown"]),
   summary: TrimmedNonEmptyString,
   detail: Schema.optional(Schema.String),
@@ -1195,10 +1301,14 @@ export const OrchestrationV2ConversationMessage = Schema.Struct({
   notification: Schema.optional(OrchestrationV2Notification),
   ...OrchestrationV2CreationFields,
   scheduledTaskId: Schema.optional(ScheduledTaskId),
-  // The sending agent's thread in this environment, separate from the receiving thread.
   senderThreadId: Schema.optional(ThreadId),
   /** Channel metadata on GOAT bot messages; absent on every other thread. */
   channel: ForwardCompatibleOptional(ChannelMessageMeta),
+  /**
+   * The message is the script a provider-native workflow run executes, not prose. Clients show
+   * the workflow's opening instead and keep the script behind a disclosure.
+   */
+  workflowScript: Schema.optional(Schema.Boolean),
   id: MessageId,
   threadId: ThreadId,
   runId: Schema.NullOr(RunId),
@@ -1224,9 +1334,7 @@ export const OrchestrationV2PlanStep = Schema.Struct({
   id: TrimmedNonEmptyString,
   text: TrimmedNonEmptyString,
   status: Schema.Literals(["pending", "running", "completed"]),
-  /** Durable server-owned boundary used to calculate elapsed time. */
   durationAnchorAt: Schema.optional(IsoDateTime),
-  /** Elapsed time for a completed step. */
   durationMs: Schema.optional(NonNegativeInt),
 });
 export type OrchestrationV2PlanStep = typeof OrchestrationV2PlanStep.Type;
@@ -1244,7 +1352,6 @@ export const OrchestrationV2UserInputQuestion = Schema.Struct({
   ),
   multiSelect: Schema.optional(Schema.Boolean),
   allowCustomAnswer: Schema.optional(Schema.Boolean),
-  /** Editable initial text. Answers preserve whitespace and allow an empty string when present. */
   initialAnswer: Schema.optional(Schema.String),
   required: Schema.optional(Schema.Boolean),
 });
@@ -1331,7 +1438,6 @@ export const OrchestrationV2TurnItemStatus = Schema.Literals([
 
 export type OrchestrationV2TurnItemStatus = typeof OrchestrationV2TurnItemStatus.Type;
 
-/** One structured file operation reported by a provider inside a file_change item. */
 export const OrchestrationV2FileChangeDetail = Schema.Struct({
   operation: TrimmedNonEmptyString,
   path: TrimmedNonEmptyString,
@@ -1340,6 +1446,37 @@ export const OrchestrationV2FileChangeDetail = Schema.Struct({
   mimeType: Schema.optional(TrimmedNonEmptyString),
 });
 export type OrchestrationV2FileChangeDetail = typeof OrchestrationV2FileChangeDetail.Type;
+
+const OrchestrationV2CommandActionPath = TrimmedNonEmptyString.check(Schema.isMaxLength(4_096));
+
+/**
+ * What a shell command does when it only inspects the workspace: read a file,
+ * list files, or search. Clients show these as their own rows instead of a
+ * terminal row; anything else stays a plain command.
+ */
+export const OrchestrationV2CommandAction = Schema.Union([
+  Schema.Struct({ type: Schema.Literal("read"), path: OrchestrationV2CommandActionPath }),
+  Schema.Struct({
+    type: Schema.Literal("list"),
+    path: Schema.optional(OrchestrationV2CommandActionPath),
+  }),
+  Schema.Struct({
+    type: Schema.Literal("search"),
+    query: Schema.optional(TrimmedNonEmptyString.check(Schema.isMaxLength(1_024))),
+    path: Schema.optional(OrchestrationV2CommandActionPath),
+  }),
+]);
+export type OrchestrationV2CommandAction = typeof OrchestrationV2CommandAction.Type;
+
+export const ORCHESTRATION_V2_MAX_COMMAND_ACTIONS = 16;
+
+/**
+ * Present once the command was classified. Empty means a plain command, so
+ * the server does not classify it again with a weaker parser.
+ */
+const OrchestrationV2CommandActions = Schema.Array(OrchestrationV2CommandAction).check(
+  Schema.isMaxLength(ORCHESTRATION_V2_MAX_COMMAND_ACTIONS),
+);
 
 export const OrchestrationV2ProviderFailureClass = Schema.Literals([
   "usage_limit",
@@ -1357,25 +1494,17 @@ const OrchestrationV2ProviderFailureMessage = TrimmedNonEmptyString.check(
 const OrchestrationV2ProviderFailureCode = TrimmedNonEmptyString.check(Schema.isMaxLength(128));
 
 /**
- * Transport-safe failure information suitable for persistence and display.
- * Producers must redact credentials before constructing this value. The
- * schema bounds every provider-controlled string as a second line of defense.
+ * Producers must redact credentials before constructing this value.
  */
 export const OrchestrationV2ProviderFailure = Schema.Struct({
   class: OrchestrationV2ProviderFailureClass,
   message: OrchestrationV2ProviderFailureMessage,
   code: Schema.NullOr(OrchestrationV2ProviderFailureCode),
   retryable: Schema.NullOr(Schema.Boolean),
-  /** Reported reset time; absent when the provider cannot name one. */
   resetAt: Schema.optional(Schema.NullOr(IsoDateTime)),
 });
 export type OrchestrationV2ProviderFailure = typeof OrchestrationV2ProviderFailure.Type;
 
-/**
- * Provider-reported retry progress. Some providers expose all fields (Claude),
- * while others only expose `willRetry` and encode counters in display text
- * (Codex), so the protocol-specific values remain nullable.
- */
 export const OrchestrationV2ProviderRetry = Schema.Struct({
   attempt: PositiveInt,
   maxAttempts: Schema.NullOr(PositiveInt),
@@ -1440,19 +1569,21 @@ export const OrchestrationV2SecretRequestStatus = Schema.Literals([
 ]);
 export type OrchestrationV2SecretRequestStatus = typeof OrchestrationV2SecretRequestStatus.Type;
 
-/**
- * A secret an agent asked the user for. The value never passes through
- * orchestration: the item carries only what was asked and how it was answered.
- */
 const OrchestrationV2SecretRequestFields = {
   type: Schema.Literal("secret_request"),
   label: TrimmedNonEmptyString,
   reason: Schema.String,
   placeholder: Schema.optional(Schema.String),
   secretStatus: OrchestrationV2SecretRequestStatus,
+  handoff: Schema.optional(Handoff),
 } as const;
 
 export const OrchestrationV2TurnItem = Schema.Union([
+  Schema.Struct({
+    ...OrchestrationV2TurnItemBaseFields,
+    type: Schema.Literal("human_handoff"),
+    handoff: Handoff,
+  }),
   Schema.Struct({
     ...OrchestrationV2TurnItemBaseFields,
     type: Schema.Literal("notification"),
@@ -1466,6 +1597,7 @@ export const OrchestrationV2TurnItem = Schema.Union([
     scheduledTaskId: Schema.optional(ScheduledTaskId),
     senderThreadId: Schema.optional(ThreadId),
     channel: ForwardCompatibleOptional(ChannelMessageMeta),
+    workflowScript: OrchestrationV2ConversationMessage.fields.workflowScript,
     inputIntent: OrchestrationV2UserMessageInputIntent,
     text: Schema.String,
     context: Schema.optional(OrchestrationMessageContext),
@@ -1517,12 +1649,17 @@ export const OrchestrationV2TurnItem = Schema.Union([
     diffStr: Schema.optional(Schema.String),
     oldStr: Schema.optional(Schema.String),
     newStr: Schema.optional(Schema.String),
+    /** This edit alone as a git-style patch, from adapters that know it. Fetch it with getTurnItem. */
+    patch: Schema.optional(Schema.String),
+    /** Set on the wire when patch was withheld. */
+    patchOmitted: Schema.optional(Schema.Boolean),
     changes: Schema.optional(Schema.Array(OrchestrationV2FileChangeDetail)),
   }),
   Schema.Struct({
     ...OrchestrationV2TurnItemBaseFields,
     type: Schema.Literal("command_execution"),
     input: Schema.String,
+    commandActions: Schema.optional(OrchestrationV2CommandActions),
     output: Schema.optional(Schema.String),
     /** Set on the wire when output was withheld; fetch it with getTurnItem. */
     outputOmitted: Schema.optional(Schema.Boolean),
@@ -1547,9 +1684,7 @@ export const OrchestrationV2TurnItem = Schema.Union([
     requestId: RuntimeRequestId,
     requestKind: ProviderRequestKind,
     prompt: Schema.optional(Schema.String),
-    /** App requesting access, for mcp-elicitation approvals (#8058). */
     appName: Schema.optional(Schema.String),
-    /** Approval choices advertised by the provider (#8058). */
     options: Schema.optional(Schema.Array(ProviderApprovalOption)),
   }),
   Schema.Struct({
@@ -1596,9 +1731,6 @@ export const OrchestrationV2TurnItem = Schema.Union([
     toProviderThreadId: ProviderThreadId,
     fromProviderInstanceIds: Schema.Array(ProviderInstanceId),
     toProviderInstanceId: ProviderInstanceId,
-    // Model selections active on the covered source runs and the target
-    // model, so timelines can label the handoff by model rather than by
-    // provider instance id. Absent on items persisted before these fields.
     fromModelSelections: Schema.optional(Schema.Array(ModelSelection)),
     toModel: Schema.optional(Schema.String),
     strategy: Schema.Literals([
@@ -1662,19 +1794,12 @@ export const OrchestrationV2TurnItem = Schema.Union([
 ]);
 export type OrchestrationV2TurnItem = typeof OrchestrationV2TurnItem.Type;
 
-/**
- * Turn item types grow over time, so clients decode them forward-compatibly:
- * an item whose type this build does not know is dropped from snapshots and
- * history instead of failing the thread. A known type that does not decode
- * still fails. Arrays of projected rows filter on the row's nested item.
- */
 const isUnknownTurnItem = hasUnknownUnionTag(OrchestrationV2TurnItem.members, "type");
 
 const turnItemArray = <Members extends ReadonlyArray<Schema.Top & { readonly fields: object }>>(
   union: Schema.Union<Members>,
 ) => ForwardCompatibleUnionArray(union.members, "type");
 
-/** Projected rows whose nested item may be of a type this build does not know. */
 const projectedTurnItemArray = <Row extends Schema.Top, Item extends Schema.Top>(
   row: Row,
   rowWithUnknownItem: Item,
@@ -1758,6 +1883,11 @@ export const OrchestrationV2DomainEvent = Schema.Union([
       "thread.provider-switched",
     ]),
     payload: OrchestrationV2AppThread,
+  }),
+  Schema.Struct({
+    ...OrchestrationV2EventBase.fields,
+    type: Schema.Literal("thread.pull-request-link-updated"),
+    payload: ThreadPullRequestLink,
   }),
   Schema.Struct({
     ...OrchestrationV2EventBase.fields,
@@ -1895,6 +2025,14 @@ export const OrchestrationV2ThreadProjection = Schema.Struct({
 });
 export type OrchestrationV2ThreadProjection = typeof OrchestrationV2ThreadProjection.Type;
 
+export const OrchestrationV2ThreadTranscript = Schema.Struct({
+  threadId: ThreadId,
+  title: Schema.String,
+  updatedAt: Schema.DateTimeUtc,
+  items: Schema.Array(OrchestrationV2ProjectedTurnItem),
+});
+export type OrchestrationV2ThreadTranscript = typeof OrchestrationV2ThreadTranscript.Type;
+
 export const OrchestrationV2ShellThreadStatus = Schema.Union([
   Schema.Literal("idle"),
   OrchestrationV2RunStatus,
@@ -1905,6 +2043,8 @@ export const OrchestrationV2PendingRuntimeRequestSummary = Schema.Struct({
   id: RuntimeRequestId,
   kind: OrchestrationV2RuntimeRequest.fields.kind,
   createdAt: Schema.DateTimeUtc,
+  /** False for async questions the run keeps working past. Absent from older servers. */
+  blocking: Schema.optional(Schema.Boolean),
 });
 export type OrchestrationV2PendingRuntimeRequestSummary =
   typeof OrchestrationV2PendingRuntimeRequestSummary.Type;
@@ -1929,14 +2069,15 @@ export const OrchestrationV2ThreadShell = Schema.Struct({
   interactionMode: ProviderInteractionMode,
   branch: Schema.NullOr(TrimmedNonEmptyString),
   worktreePath: Schema.NullOr(TrimmedNonEmptyString),
-  /** Pull request the user linked to this thread (#8160). */
   linkedPullRequest: Schema.optional(Schema.NullOr(ThreadLinkedPullRequest)),
   pullRequests: Schema.optional(Schema.Array(ThreadPullRequestLink)),
-  /** Pull request discovered from the thread's current branch. */
   branchPullRequest: Schema.optional(Schema.NullOr(ThreadLinkedPullRequest)),
   lineage: OrchestrationV2AppThreadLineage,
   /** Who started this thread; absent for user-created threads and older servers. */
   launchedBy: Schema.optional(OrchestrationV2ThreadLauncher),
+  /** Who started this thread's cloud run outside GOAT, such as "Grok Bot"; descriptive only. */
+  externalLauncher: Schema.optional(Schema.String.check(Schema.isMaxLength(64))),
+  sideChatOf: SideChatOf,
   forkedFrom: Schema.NullOr(OrchestrationV2AppThread.fields.forkedFrom),
   activeProviderThreadId: Schema.NullOr(ProviderThreadId),
   historyOrigin: Schema.optional(OrchestrationV2ThreadHistoryOrigin),
@@ -1945,10 +2086,6 @@ export const OrchestrationV2ThreadShell = Schema.Struct({
   latestRunStartedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
   latestRunCompletedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
   activeRunId: Schema.NullOr(RunId),
-  /**
-   * orchestrationV2RunWorkStartedAt of the activity-owning run: a wake keeps
-   * the start of the work it continues; request time while preparing.
-   */
   activityRunStartedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
   activityRunStatus: Schema.optional(
     Schema.NullOr(Schema.Literals(["preparing", "starting", "running", "waiting"])),
@@ -1966,18 +2103,12 @@ export const OrchestrationV2ThreadShell = Schema.Struct({
    */
   latestUserAuthoredMessageAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
   hasActionableProposedPlan: Schema.Boolean,
-  // Normalized post-settlement background work for sidebar Waiting pills.
-  // Empty when the latest root run is still active or no pending work remains.
   pendingBackgroundTasks: Schema.optional(Schema.Array(OrchestrationV2PendingBackgroundTask)).pipe(
     Schema.withDecodingDefault(Effect.succeed([])),
   ),
-  // Distinct provider instances that have owned a root provider thread here,
-  // in first-use order, so lists can show where a handed-off thread has been.
-  // Omitted by servers that predate it; decodes to [].
   providerInstanceHistory: Schema.optional(Schema.Array(ProviderInstanceId)).pipe(
     Schema.withDecodingDefault(Effect.succeed([])),
   ),
-  /** Native goal on the active provider thread; omitted by servers without goals. */
   goal: Schema.optional(Schema.NullOr(OrchestrationV2ProviderGoal)),
   itemCount: NonNegativeInt,
   visibleItemCount: NonNegativeInt,
@@ -1990,19 +2121,11 @@ export const OrchestrationV2ThreadShell = Schema.Struct({
   snoozedUntil: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
   snoozedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
   limitRecovery: Schema.optional(Schema.NullOr(OrchestrationV2LimitRecovery)),
-  /** Omitted by servers that predate thread pinning. */
   pinnedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
   autoSettleDisabledAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
-  /** Slot in the user-arranged pinned order; omitted by pre-reorder servers. */
   pinOrderKey: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
-  /** Slot in the user-arranged active order; omitted by pre-reorder servers. */
   activeOrderKey: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
-  /**
-   * Omitted by servers that predate server-side visited tracking; clients fall
-   * back to their local visited state when the field is absent.
-   */
   lastVisitedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
-  /** In-flight title regeneration marker; null/absent when no request is pending. */
   titleRegeneration: Schema.optional(
     Schema.NullOr(
       Schema.Struct({
@@ -2036,11 +2159,6 @@ export const OrchestrationV2ShellStreamItem = Schema.Union([
   Schema.Struct({
     kind: Schema.Literal("snapshot"),
     snapshot: OrchestrationV2ShellSnapshot,
-    /**
-     * Workspace roots whose repository-identity resolution completed for this
-     * enrichment refresh. Omitted on authoritative HTTP/initial WebSocket
-     * snapshots. Older clients ignore the field.
-     */
     resolvedRepositoryIdentityRoots: Schema.optionalKey(Schema.Array(Schema.String)),
   }),
   Schema.Struct({
@@ -2239,6 +2357,11 @@ const OrchestrationV2TurnItemJsonBaseFields = {
 export const OrchestrationV2TurnItemJson = Schema.Union([
   Schema.Struct({
     ...OrchestrationV2TurnItemJsonBaseFields,
+    type: Schema.Literal("human_handoff"),
+    handoff: HandoffJson,
+  }),
+  Schema.Struct({
+    ...OrchestrationV2TurnItemJsonBaseFields,
     type: Schema.Literal("notification"),
     ...OrchestrationV2Notification.fields,
   }),
@@ -2250,6 +2373,7 @@ export const OrchestrationV2TurnItemJson = Schema.Union([
     scheduledTaskId: Schema.optional(ScheduledTaskId),
     senderThreadId: Schema.optional(ThreadId),
     channel: ForwardCompatibleOptional(ChannelMessageMeta),
+    workflowScript: OrchestrationV2ConversationMessage.fields.workflowScript,
     inputIntent: OrchestrationV2UserMessageInputIntent,
     text: Schema.String,
     context: Schema.optional(OrchestrationMessageContext),
@@ -2301,12 +2425,17 @@ export const OrchestrationV2TurnItemJson = Schema.Union([
     diffStr: Schema.optional(Schema.String),
     oldStr: Schema.optional(Schema.String),
     newStr: Schema.optional(Schema.String),
+    /** This edit alone as a git-style patch, from adapters that know it. Fetch it with getTurnItem. */
+    patch: Schema.optional(Schema.String),
+    /** Set on the wire when patch was withheld. */
+    patchOmitted: Schema.optional(Schema.Boolean),
     changes: Schema.optional(Schema.Array(OrchestrationV2FileChangeDetail)),
   }),
   Schema.Struct({
     ...OrchestrationV2TurnItemJsonBaseFields,
     type: Schema.Literal("command_execution"),
     input: Schema.String,
+    commandActions: Schema.optional(OrchestrationV2CommandActions),
     output: Schema.optional(Schema.String),
     /** Set on the wire when output was withheld; fetch it with getTurnItem. */
     outputOmitted: Schema.optional(Schema.Boolean),
@@ -2331,9 +2460,7 @@ export const OrchestrationV2TurnItemJson = Schema.Union([
     requestId: RuntimeRequestId,
     requestKind: ProviderRequestKind,
     prompt: Schema.optional(Schema.String),
-    /** App requesting access, for mcp-elicitation approvals (#8058). */
     appName: Schema.optional(Schema.String),
-    /** Approval choices advertised by the provider (#8058). */
     options: Schema.optional(Schema.Array(ProviderApprovalOption)),
   }),
   Schema.Struct({
@@ -2417,6 +2544,7 @@ export const OrchestrationV2TurnItemJson = Schema.Union([
   Schema.Struct({
     ...OrchestrationV2TurnItemJsonBaseFields,
     ...OrchestrationV2SecretRequestFields,
+    handoff: Schema.optional(HandoffJson),
   }),
   Schema.Struct({
     ...OrchestrationV2TurnItemJsonBaseFields,
@@ -2586,6 +2714,11 @@ export const OrchestrationV2DomainEventJson = Schema.Union([
   }),
   Schema.Struct({
     ...OrchestrationV2JsonEventBaseFields,
+    type: Schema.Literal("thread.pull-request-link-updated"),
+    payload: ThreadPullRequestLink,
+  }),
+  Schema.Struct({
+    ...OrchestrationV2JsonEventBaseFields,
     type: Schema.Literal("run.created"),
     payload: OrchestrationV2RunJson,
   }),
@@ -2702,6 +2835,7 @@ export type OrchestrationV2StoredEventJson = typeof OrchestrationV2StoredEventJs
 export const OrchestrationV2Command = Schema.Union([
   Schema.Struct({
     type: Schema.Literal("thread.create"),
+    memoryGrantCeiling: MemoryTaskGrantCeilingField,
     ...OrchestrationV2CreationFields,
     commandId: CommandId,
     threadId: ThreadId,
@@ -2720,10 +2854,16 @@ export const OrchestrationV2Command = Schema.Union([
           strength: Schema.Literal("strong"),
         }),
         metadata: Schema.optional(OrchestrationV2ProviderThreadNativeMetadata),
+        /** A cloud task started outside GOAT; the thread follows it from its first run. */
+        cloudTask: Schema.optional(OrchestrationV2CloudTask),
       }),
     ),
     /** Agent thread or user action that started this thread; descriptive only. */
     launchedBy: Schema.optional(OrchestrationV2ThreadLauncher),
+    /** Who started this thread's cloud run outside GOAT, such as "Grok Bot"; descriptive only. */
+    externalLauncher: Schema.optional(Schema.String.check(Schema.isMaxLength(64))),
+    /** Makes the new thread a side chat of this thread. */
+    sideChatOf: Schema.optional(ThreadId),
   }),
   Schema.Struct({
     type: Schema.Literal("thread.archive"),
@@ -2756,10 +2896,9 @@ export const OrchestrationV2Command = Schema.Union([
     settledAt: Schema.optional(Schema.DateTimeUtc),
   }),
   /**
-   * Server-internal settlement (#8600): dispatched by the settlement sweep,
-   * never by clients. Rejected when the thread changed after `snapshotAt` or
-   * carries any explicit settled override, so automatic settlement can never
-   * race a user action or clobber an explicit un-settle.
+   * Rejected when the thread changed after `snapshotAt` or carries any explicit
+   * settled override, so automatic settlement can never race a user action or
+   * clobber an explicit un-settle.
    */
   Schema.Struct({
     type: Schema.Literal("thread.auto-settle"),
@@ -2796,9 +2935,6 @@ export const OrchestrationV2Command = Schema.Union([
     type: Schema.Literal("thread.pin"),
     commandId: CommandId,
     threadId: ThreadId,
-    // Initial slot in the user-arranged pinned order (see thread.pin.reorder).
-    // Optional: clients on pre-reorder servers omit it, and the pinned block
-    // falls back to creation order for keyless threads.
     orderKey: Schema.optional(TrimmedNonEmptyString),
   }),
   Schema.Struct({
@@ -2810,10 +2946,6 @@ export const OrchestrationV2Command = Schema.Union([
     type: Schema.Literal("thread.pin.reorder"),
     commandId: CommandId,
     threadId: ThreadId,
-    // Fractional-index key: pinned threads sort lexicographically by these
-    // keys, so a drag writes one key to one thread — neighbors are never
-    // touched. Clients compute a key that sorts between the dropped
-    // position's neighbors.
     orderKey: TrimmedNonEmptyString,
   }),
   Schema.Struct({
@@ -2826,11 +2958,6 @@ export const OrchestrationV2Command = Schema.Union([
     type: Schema.Literal("thread.visit"),
     commandId: CommandId,
     threadId: ThreadId,
-    /**
-     * Watermark of the thread state the viewer has seen (typically the shell's
-     * updatedAt). The server keeps the maximum of the stored and supplied
-     * values, so replays and out-of-order deliveries cannot move it backwards.
-     */
     visitedAt: IsoDateTime,
   }),
   Schema.Struct({
@@ -2843,11 +2970,11 @@ export const OrchestrationV2Command = Schema.Union([
     commandId: CommandId,
     threadId: ThreadId,
     title: Schema.optional(TrimmedNonEmptyString),
-    /** Kick off (true) or abandon (false) an async title regeneration. */
     regenerateTitle: Schema.optional(Schema.Boolean),
     branch: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
     worktreePath: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
     expectedWorktreePath: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
+    expectedBranch: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
     /** Reject unless no message or run has landed on this thread. */
     expectedEmpty: Schema.optional(Schema.Boolean),
     limitRecovery: Schema.optional(Schema.NullOr(OrchestrationV2LimitRecoveryUpdate)),
@@ -2876,14 +3003,12 @@ export const OrchestrationV2Command = Schema.Union([
     snapshot: ThreadPullRequestSnapshot,
     stack: Schema.NullOr(ThreadPullRequestStack),
   }),
-  /** Start or stop the server watching a linked pull request for this thread's agent. */
   Schema.Struct({
     type: Schema.Literal("thread.pull-request.watch"),
     commandId: CommandId,
     threadId: ThreadId,
     ...ThreadPullRequestKey.fields,
     watching: Schema.Boolean,
-    /** Links the pull request first when starting a watch on one the thread has not linked. */
     link: Schema.optional(
       Schema.Struct({ url: TrimmedNonEmptyString, source: ThreadPullRequestLinkSource }),
     ),
@@ -2938,6 +3063,7 @@ export const OrchestrationV2Command = Schema.Union([
   }),
   Schema.Struct({
     type: Schema.Literal("message.dispatch"),
+    memoryGrantCeiling: MemoryTaskGrantCeilingField,
     notification: Schema.optional(OrchestrationV2Notification),
     ...OrchestrationV2CreationFields,
     scheduledTaskId: Schema.optional(ScheduledTaskId),
@@ -2948,7 +3074,6 @@ export const OrchestrationV2Command = Schema.Union([
     text: Schema.String,
     context: Schema.optional(OrchestrationMessageContext),
     attachments: Schema.Array(ChatAttachment),
-    /** Seed the temporary title and generate a durable replacement for the first message. */
     titleSeed: Schema.optional(TrimmedNonEmptyString),
     modelSelection: Schema.optional(ModelSelection),
     sourcePlanRef: Schema.optional(Schema.Struct({ threadId: ThreadId, planId: PlanId })),
@@ -2956,7 +3081,6 @@ export const OrchestrationV2Command = Schema.Union([
     usageLimitContinuationOfRunId: Schema.optional(RunId),
     manualContinuationOfRunId: Schema.optional(RunId),
     usageLimitRecoveryRequestId: Schema.optional(CommandId),
-    /** Resolve untargeted delivery against the server's serialized thread state. */
     deliveryIntent: Schema.optional(Schema.Literals(["auto", "steer", "restart"])),
     delegatedCompletion: Schema.optional(
       Schema.Struct({
@@ -2972,7 +3096,15 @@ export const OrchestrationV2Command = Schema.Union([
       }),
       Schema.Struct({ type: Schema.Literal("steer_active"), targetRunId: RunId }),
       Schema.Struct({ type: Schema.Literal("restart_active"), targetRunId: RunId }),
-      Schema.Struct({ type: Schema.Literal("queue_after_active") }),
+      Schema.Struct({
+        type: Schema.Literal("queue_after_active"),
+        /**
+         * The run this message waited for. The queue is refused when that run
+         * stopped blocking or Stop reached it, so the message never starts a turn
+         * after a Stop.
+         */
+        behindRunId: Schema.optional(RunId),
+      }),
       Schema.Struct({ type: Schema.Literal("start_immediately") }),
     ]),
   }),
@@ -2982,7 +3114,6 @@ export const OrchestrationV2Command = Schema.Union([
     threadId: ThreadId,
     runId: RunId,
   }),
-  /** Provider acceptance of a mailbox delivery; distinct from the agent reading its result. */
   Schema.Struct({
     type: Schema.Literal("notification.delivery.accept"),
     commandId: CommandId,
@@ -3003,12 +3134,18 @@ export const OrchestrationV2Command = Schema.Union([
     runId: RunId,
     failure: OrchestrationV2ProviderFailure,
   }),
-  /** Puts a run whose workspace preparation failed back into preparation. */
   Schema.Struct({
     type: Schema.Literal("prepared-run.retry"),
     commandId: CommandId,
     threadId: ThreadId,
     runId: RunId,
+  }),
+  Schema.Struct({
+    type: Schema.Literal("subagent.stop"),
+    commandId: CommandId,
+    threadId: ThreadId,
+    runId: RunId,
+    subagentId: NodeId,
   }),
   Schema.Struct({
     type: Schema.Literal("run.interrupt"),
@@ -3092,6 +3229,8 @@ export const OrchestrationV2Command = Schema.Union([
     targetThreadId: ThreadId,
     sourcePoint: OrchestrationV2ThreadForkSourcePoint,
     title: Schema.optional(TrimmedNonEmptyString),
+    /** Makes the fork a side chat of its source thread. */
+    sideChat: Schema.optional(Schema.Boolean),
     createdAt: Schema.optional(Schema.DateTimeUtc),
   }),
   Schema.Struct({
@@ -3105,6 +3244,9 @@ export const OrchestrationV2Command = Schema.Union([
   }),
   Schema.Struct({
     type: Schema.Literal("delegated_task.request"),
+    role: Schema.optional(OrchestrationV2TaskRole),
+    parentModelSelection: Schema.optional(ModelSelection),
+    memoryGrantCeiling: MemoryTaskGrantCeilingField,
     ...OrchestrationV2CreationFields,
     commandId: CommandId,
     parentThreadId: ThreadId,
@@ -3115,6 +3257,7 @@ export const OrchestrationV2Command = Schema.Union([
     modelSelection: ModelSelection,
     runtimeMode: RuntimeMode,
     interactionMode: ProviderInteractionMode,
+    workspaceStrategy: Schema.optional(OrchestrationV2ThreadLaunchWorkspaceStrategy),
     // Omitted behaves as "settled_only" (no wake while the parent has a live
     // run); producers that want fire-and-forget wakes must set "always".
     completionWake: Schema.optional(Schema.Literals(["always", "settled_only"])),
@@ -3126,6 +3269,16 @@ export const OrchestrationV2Command = Schema.Union([
     parentThreadId: ThreadId,
     taskId: NodeId,
     completionWake: Schema.Literals(["always", "settled_only"]),
+  }),
+  Schema.Struct({
+    type: Schema.Literal("delegated_task.review-ledger.append"),
+    commandId: CommandId,
+    parentThreadId: ThreadId,
+    taskId: NodeId,
+    entries: Schema.Array(ReviewLedgerEntryInput).check(
+      Schema.isMinLength(1),
+      Schema.isMaxLength(100),
+    ),
   }),
   Schema.Struct({
     type: Schema.Literal("delegated_task.completion-delivery.acknowledge"),
@@ -3166,7 +3319,26 @@ export type OrchestrationV2Command = typeof OrchestrationV2Command.Type;
  */
 const OrchestrationV2InternalCommand = Schema.Union([
   Schema.Struct({
+    type: Schema.Literal("handoff.create"),
+    commandId: CommandId,
+    threadId: ThreadId,
+    runId: RunId,
+    nodeId: NodeId,
+    handoff: Handoff,
+  }),
+  Schema.Struct({
+    type: Schema.Literal("handoff.transition"),
+    commandId: CommandId,
+    threadId: ThreadId,
+    handoffId: TurnItemId,
+    state: HandoffState,
+    actor: HandoffActor,
+  }),
+  Schema.Struct({
     type: Schema.Literal("delegated_task.remote.register"),
+    role: Schema.optional(OrchestrationV2TaskRole),
+    parentModelSelection: Schema.optional(ModelSelection),
+    memoryGrantCeiling: MemoryTaskGrantCeilingField,
     ...OrchestrationV2CreationFields,
     commandId: CommandId,
     parentThreadId: ThreadId,
@@ -3203,8 +3375,9 @@ const OrchestrationV2InternalCommand = Schema.Union([
 
   /**
    * Records what a pull request watch saw, and wakes the agent in the same transaction when
-   * `wake` is set. Rejected once the watch started at `startedAt` has ended, and a wake is
-   * rejected on a settled or archived thread, so a read that raced either changes nothing.
+   * `wake` is set, or adds `note` to the timeline without starting a turn. Rejected once the
+   * watch started at `startedAt` has ended, and a wake is rejected on a settled or archived
+   * thread, so a read that raced either changes nothing.
    */
   Schema.Struct({
     type: Schema.Literal("thread.pull-request-watch.sync"),
@@ -3212,8 +3385,9 @@ const OrchestrationV2InternalCommand = Schema.Union([
     threadId: ThreadId,
     ...ThreadPullRequestKey.fields,
     startedAt: IsoDateTime,
-    /** The watch to record, or null to end it. */
     watch: Schema.NullOr(ThreadPullRequestWatch),
+    /** With `watch: null`, the state the ended watch keeps instead of its last saved one. */
+    endedWatch: Schema.optional(ThreadPullRequestWatch),
     wake: Schema.optional(
       Schema.Struct({
         messageId: MessageId,
@@ -3221,8 +3395,8 @@ const OrchestrationV2InternalCommand = Schema.Union([
         notification: OrchestrationV2Notification,
       }),
     ),
+    note: Schema.optional(OrchestrationV2Notification),
   }),
-  /** Records that the provider rollback `requestId` failed for good. */
   Schema.Struct({
     type: Schema.Literal("checkpoint.rollback.fail"),
     commandId: CommandId,
@@ -3230,24 +3404,24 @@ const OrchestrationV2InternalCommand = Schema.Union([
     requestId: CommandId,
     message: TrimmedNonEmptyString,
   }),
-  /**
-   * Follows a Stop once its provider returned: background work the settled
-   * thread still shows on that provider thread is no longer reported by any
-   * provider process, so it is marked interrupted. Only the stopped turn's run
-   * and older runs are settled; a later run's work is its own.
-   */
   Schema.Struct({
     type: Schema.Literal("thread.background-work.settle"),
     commandId: CommandId,
     threadId: ThreadId,
     providerThreadId: ProviderThreadId,
     providerTurnId: ProviderTurnId,
+    subagent: Schema.optional(
+      Schema.Struct({
+        id: NodeId,
+        stoppedAt: Schema.DateTimeUtc,
+        outcome: Schema.Struct({
+          status: Schema.Literals(["completed", "failed", "cancelled"]),
+          completedAt: Schema.DateTimeUtc,
+          result: Schema.NullOr(Schema.String),
+        }),
+      }),
+    ),
   }),
-  /**
-   * Stop for one thread, whatever it is doing: interrupts its running turn, holds its queue,
-   * ends its pull request watches, and drops pending delegated-task wakes. Nothing to stop is
-   * an accepted no-op. Delegated tasks under the thread get their own `thread.stop`.
-   */
   Schema.Struct({
     type: Schema.Literal("thread.stop"),
     commandId: CommandId,
@@ -3260,6 +3434,14 @@ const OrchestrationV2InternalCommand = Schema.Union([
      */
     stopCascadeFrom: Schema.optional(ThreadId),
   }),
+  /** Records a server notice on an existing thread without starting provider work. */
+  Schema.Struct({
+    type: Schema.Literal("thread.notice.record"),
+    commandId: CommandId,
+    threadId: ThreadId,
+    recordKey: TrimmedNonEmptyString,
+    message: TrimmedNonEmptyString,
+  }),
   /**
    * Writes one GOAT bot message or task chip without a provider run. Internal so no client
    * can put words in the bot's mouth; the channel gateway sends it after the ledger commits.
@@ -3271,11 +3453,13 @@ const OrchestrationV2InternalCommand = Schema.Union([
     record: ChannelTimelineRecord,
   }),
   /**
-   * Records or updates a secret an agent asked the user for. Internal so no
-   * client can mark a request saved without the value being stored.
+   * Internal so no client can mark a request saved without the value being
+   * stored.
    */
   Schema.Struct({
     type: Schema.Literal("secret_request.record"),
+    actor: Schema.optional(HandoffActor),
+    environmentId: Schema.optional(EnvironmentId),
     commandId: CommandId,
     threadId: ThreadId,
     runId: RunId,
@@ -3289,7 +3473,6 @@ const OrchestrationV2InternalCommand = Schema.Union([
 ]);
 export type OrchestrationV2InternalCommand = typeof OrchestrationV2InternalCommand.Type;
 
-/** Everything the server's orchestrator accepts: client commands plus internal ones. */
 export type OrchestrationV2ServerCommand = OrchestrationV2Command | OrchestrationV2InternalCommand;
 
 export const ORCHESTRATION_V2_WS_METHODS = {
@@ -3302,12 +3485,49 @@ export const ORCHESTRATION_V2_WS_METHODS = {
   getArchivedShellSnapshot: "orchestration.getArchivedShellSnapshot",
   getThreadProjection: "orchestration.getThreadProjection",
   getWorkflowScript: "orchestration.getWorkflowScript",
+  stopWorkflow: "orchestration.stopWorkflow",
   getTurnItem: "orchestration.getTurnItem",
   launchThread: "orchestration.launchThread",
   subscribeArchivedShell: "orchestration.subscribeArchivedShell",
   subscribeShell: "orchestration.subscribeShell",
   subscribeThread: "orchestration.subscribeThread",
+  subscribeCommandOutput: "orchestration.subscribeCommandOutput",
 } as const;
+
+export const OrchestrationV2SubscribeCommandOutputInput = Schema.Struct({
+  threadId: ThreadId,
+  itemId: TurnItemId,
+});
+export type OrchestrationV2SubscribeCommandOutputInput =
+  typeof OrchestrationV2SubscribeCommandOutputInput.Type;
+
+/**
+ * Output of one command row, separate from the thread stream so it is never
+ * persisted as events and only reaches clients that show the row expanded.
+ * `replace` carries the whole bounded tail (first frame, or after the client
+ * fell behind); `append` extends it. Text is terminal output, not display
+ * text: `replace` carries the cleaned tail plus the cursor and style escapes
+ * needed to resume, and `append` carries raw chunks. Clients must feed both
+ * through `appendTerminalOutput` from `@goat/shared/terminalOutput`.
+ * The stream ends after a frame with `running: false`.
+ */
+export const OrchestrationV2CommandOutputFrame = Schema.Struct({
+  kind: Schema.Literals(["replace", "append"]),
+  text: Schema.String,
+  /** Earlier output was dropped to keep the tail bounded. */
+  truncated: Schema.Boolean,
+  running: Schema.Boolean,
+});
+export type OrchestrationV2CommandOutputFrame = typeof OrchestrationV2CommandOutputFrame.Type;
+
+export class OrchestrationV2CommandOutputError extends Schema.TaggedError<OrchestrationV2CommandOutputError>()(
+  "OrchestrationV2CommandOutputError",
+  {
+    threadId: ThreadId,
+    message: Schema.String,
+    cause: Schema.optional(Schema.Defect()),
+  },
+) {}
 
 export const OrchestrationV2ArchivedShellSnapshot = Schema.Struct({
   schemaVersion: PositiveInt,
@@ -3337,6 +3557,7 @@ export type OrchestrationV2ArchivedShellStreamItem =
   typeof OrchestrationV2ArchivedShellStreamItem.Type;
 
 export const OrchestrationV2ThreadLaunchInput = Schema.Struct({
+  memoryGrantCeiling: MemoryTaskGrantCeilingField,
   commandId: CommandId,
   creationSource: Schema.optional(OrchestrationV2CreationSource),
   threadId: Schema.optional(ThreadId),
@@ -3378,38 +3599,16 @@ export type OrchestrationV2GetThreadProjectionInput =
   typeof OrchestrationV2GetThreadProjectionInput.Type;
 
 export const OrchestrationV2SubscribeShellInput = Schema.Struct({
-  /**
-   * When provided, the server skips the initial full shell snapshot and instead
-   * replays shell events after this sequence before streaming live events.
-   * Clients that already hold a cached (or HTTP-loaded) shell snapshot pass its
-   * sequence here so the subscription resumes without re-sending the entire
-   * projects/threads list (overlapping events are deduped by sequence on the
-   * client).
-   */
   afterSequence: Schema.optionalKey(NonNegativeInt),
-  /** Requests a marker between initial catch-up and live delivery. */
   requestCompletionMarker: Schema.optionalKey(Schema.Boolean),
 });
 export type OrchestrationV2SubscribeShellInput = typeof OrchestrationV2SubscribeShellInput.Type;
 
 export const OrchestrationV2SubscribeThreadInput = Schema.Struct({
   threadId: ThreadId,
-  /**
-   * When provided, the server skips the initial snapshot frame and instead
-   * replays events after this sequence before streaming live events. Clients
-   * that load the snapshot over HTTP pass the snapshot's sequence here so the
-   * live subscription resumes without a gap (overlapping events are deduped by
-   * sequence on the client).
-   */
   afterSequence: Schema.optionalKey(NonNegativeInt),
-  /** Requests a marker between initial catch-up and live delivery. */
   requestCompletionMarker: Schema.optionalKey(Schema.Boolean),
-  /** Allows snapshot fallbacks to contain a bounded, pageable history window. */
   acceptBoundedSnapshot: Schema.optionalKey(Schema.Boolean),
-  /**
-   * Allows bounded snapshot fallbacks to omit `projection.turnItems` entries
-   * that repeat local visible rows. See `turnItemsOmitLocalVisible`.
-   */
   acceptCompactTurnItems: Schema.optionalKey(Schema.Boolean),
 });
 export type OrchestrationV2SubscribeThreadInput = typeof OrchestrationV2SubscribeThreadInput.Type;
@@ -3418,37 +3617,25 @@ export const OrchestrationV2ThreadDetailSnapshot = Schema.Struct({
   snapshotSequence: NonNegativeInt,
   projection: OrchestrationV2ThreadProjection,
   /**
-   * Progressive history metadata. Omitted on full-projection caches and older
-   * clients. When present with hasMoreHistory/cursor, the projection is a
-   * bounded window and must not be treated as a complete timeline.
+   * When present with hasMoreHistory/cursor, the projection is a bounded window and must not be
+   * treated as a complete timeline.
    */
   historyCursor: Schema.optionalKey(Schema.NullOr(TrimmedNonEmptyString)),
   hasMoreHistory: Schema.optionalKey(Schema.Boolean),
-  /**
-   * Max local turn ordinal from the authoritative full projection at snapshot
-   * time. Optional for backward-compatible warm cache entries.
-   */
   latestLocalTurnOrdinal: Schema.optionalKey(Schema.NullOr(NonNegativeInt)),
 });
 export type OrchestrationV2ThreadDetailSnapshot = typeof OrchestrationV2ThreadDetailSnapshot.Type;
 
 /**
- * Progressive cold open: full control-plane projection arrays with only a
- * recent window of timeline rows. `historyCursor` is opaque; clients must not
- * parse it. Resume live events with `afterSequence = snapshotSequence`.
+ * `historyCursor` is opaque; clients must not parse it. Resume live events with `afterSequence =
+ * snapshotSequence`.
  */
 export const OrchestrationV2ThreadBoundedSnapshot = Schema.Struct({
   snapshotSequence: NonNegativeInt,
   projection: OrchestrationV2ThreadProjection,
   historyCursor: Schema.NullOr(TrimmedNonEmptyString),
   hasMoreHistory: Schema.Boolean,
-  /**
-   * Max local turn ordinal over the authoritative full projection turnItems.
-   * Clients use this as a partial-timeline watermark when the bounded window
-   * has no local rows (inherited-only).
-   */
   latestLocalTurnOrdinal: Schema.NullOr(NonNegativeInt),
-  /** True when complete turns or required live control state exceed the usual byte budget. */
   payloadBudgetExceeded: Schema.optional(Schema.Boolean),
   /**
    * Set only for clients that opted in: `projection.turnItems` omits the items
@@ -3459,7 +3646,6 @@ export const OrchestrationV2ThreadBoundedSnapshot = Schema.Struct({
 });
 export type OrchestrationV2ThreadBoundedSnapshot = typeof OrchestrationV2ThreadBoundedSnapshot.Type;
 
-/** Older timeline page for progressive history. Rows are chronological. */
 export const OrchestrationV2ThreadHistoryPage = Schema.Struct({
   snapshotSequence: NonNegativeInt,
   items: projectedTurnItemArray(
@@ -3481,12 +3667,15 @@ const knownDomainEventTypes: ReadonlySet<string> = new Set(
   }),
 );
 
+export function isKnownOrchestrationV2EventType(type: string): boolean {
+  return knownDomainEventTypes.has(type);
+}
+
 /**
  * A thread event whose type this build does not know, or a turn-item.updated
  * carrying a turn item type it does not know. Newer servers add both; older
  * clients decode them to this case and skip them, still advancing their resume
- * cursor, instead of failing the whole subscription. A known type whose payload
- * does not decode still fails. Decode-only: servers never send it.
+ * cursor, instead of failing the whole subscription.
  */
 const OrchestrationV2UnknownThreadStreamEvent = Schema.Struct({
   kind: Schema.Literal("event"),
@@ -3528,15 +3717,10 @@ export const OrchestrationV2ThreadStreamItem = Schema.Union([
     kind: Schema.Literal("snapshot"),
     snapshotSequence: NonNegativeInt,
     projection: OrchestrationV2ThreadProjection,
-    /**
-     * Progressive history metadata is present on bounded socket fallbacks and
-     * absent on legacy-compatible full snapshots.
-     */
     historyCursor: Schema.optionalKey(Schema.NullOr(TrimmedNonEmptyString)),
     hasMoreHistory: Schema.optionalKey(Schema.Boolean),
     latestLocalTurnOrdinal: Schema.optionalKey(Schema.NullOr(NonNegativeInt)),
     payloadBudgetExceeded: Schema.optionalKey(Schema.Boolean),
-    /** Same meaning as on `OrchestrationV2ThreadBoundedSnapshot`. */
     turnItemsOmitLocalVisible: Schema.optionalKey(Schema.Literal(true)),
   }),
   Schema.Struct({
@@ -3587,18 +3771,46 @@ export class OrchestrationV2ThreadLaunchError extends Schema.TaggedError<Orchest
   },
 ) {}
 
+export const OrchestrationV2StopWorkflowInput = Schema.Struct({
+  threadId: ThreadId,
+  subagentId: NodeId,
+});
+export type OrchestrationV2StopWorkflowInput = typeof OrchestrationV2StopWorkflowInput.Type;
+
+export class OrchestrationV2StopWorkflowError extends Schema.TaggedError<OrchestrationV2StopWorkflowError>()(
+  "OrchestrationV2StopWorkflowError",
+  {
+    threadId: ThreadId,
+    subagentId: NodeId,
+    reason: Schema.Literals(["not-running", "unsupported", "unavailable", "stop-failed"]),
+    cause: Schema.optional(Schema.Defect()),
+  },
+) {
+  override get message(): string {
+    switch (this.reason) {
+      case "not-running":
+        return "This workflow is no longer running.";
+      case "unsupported":
+        return "This provider cannot stop a workflow.";
+      case "unavailable":
+        return "This workflow has no live provider task.";
+      case "stop-failed":
+        return "Failed to stop the workflow.";
+    }
+  }
+}
+
 export const OrchestrationV2RpcError = Schema.Union([
   OrchestrationV2DispatchCommandError,
   OrchestrationV2GetThreadProjectionError,
   OrchestrationV2GetShellSnapshotError,
   OrchestrationV2ThreadLaunchError,
+  OrchestrationV2StopWorkflowError,
 ]);
 export type OrchestrationV2RpcError = typeof OrchestrationV2RpcError.Type;
 
 export const OrchestrationV2GetWorkflowScriptInput = Schema.Struct({
   threadId: ThreadId,
-  /** Absolute path from the workflow's runHandles.scriptPath. The server
-   * re-derives containment; the client value is a hint, never trusted. */
   scriptPath: TrimmedNonEmptyString,
 });
 export type OrchestrationV2GetWorkflowScriptInput =
@@ -3612,15 +3824,46 @@ export const OrchestrationV2GetWorkflowScriptResult = Schema.Struct({
 export type OrchestrationV2GetWorkflowScriptResult =
   typeof OrchestrationV2GetWorkflowScriptResult.Type;
 
+const WORKFLOW_FILE_ERROR_MESSAGES = {
+  "invalid-path": "Workflow files must be absolute paths with the expected extension.",
+  "root-unavailable": "Workflow file root unavailable.",
+  "not-found": "Workflow file not found.",
+  "outside-root": "Path is outside the workflow files root.",
+  "wrong-extension": "Resolved file has the wrong extension.",
+  "not-regular-file": "Workflow file is not a regular file.",
+  "changed-during-read": "Workflow file changed between resolution and open.",
+  "read-failed": "Workflow file read failed.",
+} as const;
+
+export class OrchestrationWorkflowFileError extends Schema.TaggedError<OrchestrationWorkflowFileError>()(
+  "OrchestrationWorkflowFileError",
+  {
+    reason: Schema.Literals([
+      "invalid-path",
+      "root-unavailable",
+      "not-found",
+      "outside-root",
+      "wrong-extension",
+      "not-regular-file",
+      "changed-during-read",
+      "read-failed",
+    ]),
+    path: Schema.String,
+    cause: Schema.optional(Schema.Defect()),
+  },
+) {
+  override get message(): string {
+    return WORKFLOW_FILE_ERROR_MESSAGES[this.reason];
+  }
+}
+
 export const OrchestrationV2GetTurnItemInput = Schema.Struct({
   threadId: ThreadId,
   itemId: TurnItemId,
-  /** The item updatedAt the client last saw. Only keys the client cache. */
   revision: Schema.optional(Schema.String),
 });
 export type OrchestrationV2GetTurnItemInput = typeof OrchestrationV2GetTurnItemInput.Type;
 
-/** One persisted turn item with its full, size-bounded input and output. */
 export const OrchestrationV2GetTurnItemResult = Schema.Struct({
   item: Schema.NullOr(OrchestrationV2TurnItem),
 });
@@ -3661,7 +3904,6 @@ export class OrchestrationGetWorkflowScriptError extends Schema.TaggedError<Orch
 
 export const OrchestrationV2SearchThreadInput = Schema.Struct({
   threadId: ThreadId,
-  // Match the skill labels displayed by this client, including custom display names.
   skills: Schema.optionalKey(
     Schema.Array(
       Schema.Struct({
@@ -3672,7 +3914,6 @@ export const OrchestrationV2SearchThreadInput = Schema.Struct({
   ),
   query: TrimmedNonEmptyString.check(Schema.isMaxLength(200)),
   index: Schema.optionalKey(NonNegativeInt),
-  // Select relative to an entry identity so updates before it do not shift navigation.
   offset: Schema.optionalKey(Schema.Int),
   start: Schema.optionalKey(
     Schema.Struct({ entryId: TrimmedNonEmptyString, occurrence: NonNegativeInt }),
@@ -3686,13 +3927,11 @@ export const OrchestrationV2ThreadFindMatch = Schema.Struct({
   occurrence: NonNegativeInt,
 });
 export const OrchestrationV2SearchThreadResult = Schema.Struct({
-  // Omitted by older servers. An early match has no final ordinal or total yet.
   complete: Schema.optionalKey(Schema.Boolean),
   snapshotSequence: NonNegativeInt,
   totalMatches: NonNegativeInt,
   activeIndex: NonNegativeInt,
   match: Schema.NullOr(OrchestrationV2ThreadFindMatch),
-  // Counts and identities around the selection let clients step without another round trip.
   navigation: Schema.optionalKey(
     Schema.Array(
       Schema.Struct({
@@ -3740,6 +3979,10 @@ export const OrchestrationV2RpcSchemas = {
     input: OrchestrationV2GetThreadProjectionInput,
     output: OrchestrationV2ThreadProjection,
   },
+  stopWorkflow: {
+    input: OrchestrationV2StopWorkflowInput,
+    output: Schema.Void,
+  },
   getWorkflowScript: {
     input: OrchestrationV2GetWorkflowScriptInput,
     output: OrchestrationV2GetWorkflowScriptResult,
@@ -3763,6 +4006,10 @@ export const OrchestrationV2RpcSchemas = {
   subscribeThread: {
     input: OrchestrationV2SubscribeThreadInput,
     output: OrchestrationV2ThreadStreamItem,
+  },
+  subscribeCommandOutput: {
+    input: OrchestrationV2SubscribeCommandOutputInput,
+    output: OrchestrationV2CommandOutputFrame,
   },
 } as const;
 

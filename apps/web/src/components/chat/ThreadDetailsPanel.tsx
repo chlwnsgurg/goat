@@ -4,22 +4,28 @@ import type {
   ProjectScript,
   ResolvedKeybindingsConfig,
   ThreadId,
-} from "@t3tools/contracts";
+} from "@goat/contracts";
 
-import type { DraftId } from "../../composerDraftStore";
+import { deriveCloudTaskState } from "@goat/client-runtime/state/cloud-task";
+import { useAtomValue } from "@effect/atom-react";
+import { type DraftId, useComposerDraftStore } from "../../composerDraftStore";
+import { useThreadProjection, useThreadShell } from "../../state/entities";
+import { serverEnvironment } from "../../state/server";
 import { type EnvMode, type EnvironmentOption } from "../BranchToolbar.logic";
 import { BranchToolbar } from "../BranchToolbar";
-import GitActionsControl from "../GitActionsControl";
+import BaseGitActionsControl from "../GitActionsControl";
 import ProjectScriptsControl, {
   type NewProjectScriptInput,
   type ProjectScriptActionResult,
 } from "../ProjectScriptsControl";
-import type { ComponentProps } from "react";
+import { memo, type ComponentProps } from "react";
 import { ThreadDetailsCard } from "./ThreadDetailsCard";
 import { OpenInPicker } from "./OpenInPicker";
 import { ThreadDetailsSection } from "./ThreadDetailsSection";
 import { ThreadAutomationsPanel } from "./ThreadAutomationsPanel";
 import { ThreadRelationshipsPanel } from "./ThreadRelationshipsControl";
+
+const GitActionsControl = memo(BaseGitActionsControl);
 
 export interface ThreadDetailsPanelProps
   extends
@@ -38,15 +44,16 @@ export interface ThreadDetailsPanelProps
   keybindings: ResolvedKeybindingsConfig;
   availableEditors: ReadonlyArray<EditorId>;
   showOpenInPicker: boolean;
+  openInShortcutEnabled: boolean;
   gitCwd: string | null;
   isGitRepo: boolean;
   envLocked: boolean;
   availableEnvironments: readonly EnvironmentOption[];
+  environmentsWithoutProject: readonly EnvironmentOption[];
   autoEnvironmentLabel?: string | undefined;
   onAutoEnvironment?: (() => void) | undefined;
-  onEnvironmentChange: (environmentId: EnvironmentId) => void;
+  onEnvironmentChange?: (environmentId: EnvironmentId) => void;
   onEnvModeChange: (mode: EnvMode) => void;
-  /** The thread's env mode as ChatView resolves it. */
   envMode: EnvMode;
   activeThreadBranchOverride?: string | null;
   onActiveThreadBranchOverrideChange?: (branch: string | null) => void;
@@ -65,6 +72,19 @@ export interface ThreadDetailsPanelProps
 }
 
 export function ThreadDetailsPanel(props: ThreadDetailsPanelProps) {
+  const activeThreadRef = { environmentId: props.environmentId, threadId: props.threadId };
+  const thread = useThreadShell(props.draftId ? null : activeThreadRef);
+  const projection = useThreadProjection(props.draftId ? null : activeThreadRef)?.projection;
+  const selectedInstanceId = useComposerDraftStore(
+    (store) =>
+      store.getComposerDraft(props.draftId ?? activeThreadRef)?.activeProvider ??
+      projection?.thread.providerInstanceId ??
+      thread?.providerInstanceId,
+  );
+  const selectedProvider = useAtomValue(
+    serverEnvironment.providersValueAtom(props.environmentId),
+  )?.find((provider) => provider.instanceId === selectedInstanceId);
+  const { showLocalWorkspace } = deriveCloudTaskState(projection, selectedProvider);
   const branchToolbarProps = {
     showGitControls: props.isGitRepo,
     sshDestination: props.sshDestination,
@@ -108,12 +128,15 @@ export function ThreadDetailsPanel(props: ThreadDetailsPanelProps) {
             showHeading={false}
           >
             <div className="flex flex-col">
-              {density === "full" ? (
+              {density === "full" && showLocalWorkspace ? (
                 <BranchToolbar
                   layout="panel"
                   panelSection="workspace"
                   availableEnvironments={props.availableEnvironments}
-                  onEnvironmentChange={props.onEnvironmentChange}
+                  environmentsWithoutProject={props.environmentsWithoutProject}
+                  {...(props.onEnvironmentChange
+                    ? { onEnvironmentChange: props.onEnvironmentChange }
+                    : {})}
                   autoEnvironmentLabel={props.autoEnvironmentLabel}
                   onAutoEnvironment={props.onAutoEnvironment}
                   {...branchToolbarProps}
@@ -126,6 +149,7 @@ export function ThreadDetailsPanel(props: ThreadDetailsPanelProps) {
                   environmentId={props.environmentId}
                   availableEditors={props.availableEditors}
                   openInCwd={props.gitCwd}
+                  enableShortcut={props.openInShortcutEnabled}
                   displayMode="panel"
                 />
               ) : null}
@@ -145,7 +169,7 @@ export function ThreadDetailsPanel(props: ThreadDetailsPanelProps) {
             </div>
           </ThreadDetailsSection>
 
-          {props.gitCwd ? (
+          {props.gitCwd && showLocalWorkspace ? (
             <ThreadDetailsSection
               headingId="thread-details-version-control-heading"
               title="Version Control"
@@ -161,10 +185,7 @@ export function ThreadDetailsPanel(props: ThreadDetailsPanelProps) {
                     displayMode="panel"
                     compact={density !== "full"}
                     gitCwd={props.gitCwd}
-                    activeThreadRef={{
-                      environmentId: props.environmentId,
-                      threadId: props.threadId,
-                    }}
+                    activeThreadRef={activeThreadRef}
                     {...(props.draftId ? { draftId: props.draftId } : {})}
                     {...(props.onOpenChanges ? { onOpenChanges: props.onOpenChanges } : {})}
                   />

@@ -7,8 +7,9 @@ import {
   AssetPreviewTypeValidationError,
   ThreadId,
   TurnItemId,
-} from "@t3tools/contracts";
-import { PROJECT_FAVICON_FALLBACK_MARKER } from "@t3tools/shared/projectFavicon";
+} from "@goat/contracts";
+import { PROJECT_FAVICON_FALLBACK_MARKER } from "@goat/shared/projectFavicon";
+import { MCP_APP_MAX_HTML_BYTES } from "@goat/shared/mcpApp";
 import { describe, expect, it } from "@effect/vitest";
 import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
@@ -27,16 +28,16 @@ import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
 import * as ServerConfig from "../config.ts";
 import * as Orchestrator from "../orchestration-v2/Orchestrator.ts";
 import * as ProjectFaviconResolver from "../project/ProjectFaviconResolver.ts";
-import * as T3ProjectFileLoader from "../project/T3ProjectFileLoader.ts";
+import * as GoatProjectFileLoader from "../project/GoatProjectFileLoader.ts";
 import * as WorkspacePaths from "../workspace/WorkspacePaths.ts";
 import { assetFileResponse } from "../http.ts";
-import { ASSET_ROUTE_PREFIX, issueAssetUrl, resolveAsset } from "./AssetAccess.ts";
+import { ASSET_ROUTE_PREFIX, issueAssetUrl, readMcpAppHtml, resolveAsset } from "./AssetAccess.ts";
 import * as NativeAppIconResolver from "./NativeAppIconResolver.ts";
 import { openMediaFile } from "./MediaFile.ts";
-import { symlinksSupported } from "@t3tools/shared/testing/symlinks";
-import * as GitHubCredentials from "@t3tools/source-control-github/server/GitHubCredentials";
+import { symlinksSupported } from "@goat/shared/testing/symlinks";
+import * as GitHubCredentials from "@goat/source-control-github/server/GitHubCredentials";
 import { githubMediaResponse } from "./GitHubMediaFetch.ts";
-import * as HostProcess from "@t3tools/shared/HostProcess";
+import * as HostProcess from "@goat/shared/HostProcess";
 
 vi.mock("node:fs/promises", async (importOriginal) => {
   const actual = await importOriginal<typeof NodeFSP>();
@@ -44,9 +45,8 @@ vi.mock("node:fs/promises", async (importOriginal) => {
 });
 
 const layerConfig = ServerConfig.ServerConfig.layerTest(process.cwd(), {
-  prefix: "t3-asset-access-test-",
+  prefix: "goat-asset-access-test-",
 });
-// A PNG header is enough for the dimension read: signature, then IHDR width and height.
 const screenshotPng = new Uint8Array(24);
 screenshotPng.set([
   0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13, 0x49, 0x48, 0x44, 0x52,
@@ -114,13 +114,71 @@ const layerTest = Layer.mergeAll(
   WorkspacePaths.layer,
   ProjectFaviconResolver.layer.pipe(
     Layer.provide(WorkspacePaths.layer),
-    Layer.provide(T3ProjectFileLoader.layer),
+    Layer.provide(GoatProjectFileLoader.layer),
   ),
   NativeAppIconResolver.layer.pipe(Layer.provide(layerConfig)),
   ServerSecretStore.layer.pipe(Layer.provide(layerConfig)),
 ).pipe(Layer.provideMerge(NodeServices.layer));
 
 describe("AssetAccess", () => {
+  describe("readMcpAppHtml", () => {
+    it.effect("accepts snapshots at the stored HTML byte limit", () =>
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const directory = yield* fileSystem.makeTempDirectoryScoped({ prefix: "goat-mcp-html-" });
+        const file = path.join(directory, "app.html");
+        const limit = MCP_APP_MAX_HTML_BYTES + 128 * 1024;
+        yield* fileSystem.writeFile(file, new Uint8Array(limit).fill(120));
+
+        const bytes = yield* readMcpAppHtml(file);
+        expect(bytes?.byteLength).toBe(limit);
+        expect(bytes?.every((byte) => byte === 120)).toBe(true);
+      }).pipe(Effect.provide(NodeServices.layer)),
+    );
+
+    it.effect("rejects snapshots one byte past the limit and much larger files", () =>
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const directory = yield* fileSystem.makeTempDirectoryScoped({ prefix: "goat-mcp-html-" });
+        const file = path.join(directory, "app.html");
+        const limit = MCP_APP_MAX_HTML_BYTES + 128 * 1024;
+        for (const size of [limit + 1, limit * 2]) {
+          yield* fileSystem.writeFile(file, new Uint8Array(size).fill(120));
+          expect(yield* readMcpAppHtml(file)).toBeNull();
+        }
+      }).pipe(Effect.provide(NodeServices.layer)),
+    );
+
+    it.effect("preserves UTF-8 bytes across stream chunks and accepts empty snapshots", () =>
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const directory = yield* fileSystem.makeTempDirectoryScoped({ prefix: "goat-mcp-html-" });
+        const file = path.join(directory, "app.html");
+        for (const html of ["", "<body>" + "☃".repeat(100_000) + "</body>"]) {
+          const expected = new TextEncoder().encode(html);
+          yield* fileSystem.writeFile(file, expected);
+          const bytes = yield* readMcpAppHtml(file);
+          expect(bytes?.byteLength).toBe(expected.byteLength);
+          expect(bytes && new TextDecoder().decode(bytes)).toBe(html);
+        }
+      }).pipe(Effect.provide(NodeServices.layer)),
+    );
+
+    it.effect("preserves filesystem failures instead of reporting oversized HTML", () =>
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const directory = yield* fileSystem.makeTempDirectoryScoped({ prefix: "goat-mcp-html-" });
+        const error = yield* readMcpAppHtml(path.join(directory, "missing.html")).pipe(Effect.flip);
+        expect(error._tag).toBe("PlatformError");
+        expect(error.reason._tag).toBe("NotFound");
+      }).pipe(Effect.provide(NodeServices.layer)),
+    );
+  });
+
   it.effect("loads private media immediately after login with the GitHub credential", () => {
     let lookups = 0;
     const authorizations: Array<string | undefined> = [];
@@ -133,7 +191,6 @@ describe("AssetAccess", () => {
       expect((yield* githubMediaResponse(asset, {})).status).toBe(404);
       expect((yield* githubMediaResponse(asset, {})).status).toBe(200);
       expect((yield* githubMediaResponse(asset, {})).status).toBe(200);
-      // Caching the token is GitHubCredentials' job; this asks it every time.
       expect(lookups).toBe(3);
       expect(authorizations).toEqual([undefined, "Bearer signed-in", "Bearer signed-in"]);
     }).pipe(
@@ -190,7 +247,6 @@ describe("AssetAccess", () => {
         Effect.flip,
       );
       expect(missing._tag).toBe("AssetWorkspaceAssetNotFoundError");
-      // Larger than a provider turn accepts, so it is never decoded.
       const oversized = yield* issueAssetUrl({
         resource: { ...resource, itemId: oversizedScreenshotItem.id },
       }).pipe(Effect.flip);
@@ -202,8 +258,8 @@ describe("AssetAccess", () => {
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
-      const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-media-root-" });
-      const outside = yield* fs.makeTempDirectoryScoped({ prefix: "t3-media-outside-" });
+      const root = yield* fs.makeTempDirectoryScoped({ prefix: "goat-media-root-" });
+      const outside = yield* fs.makeTempDirectoryScoped({ prefix: "goat-media-outside-" });
       for (const [name, mimeType] of [
         ["screenshot.png", "image/png"],
         ["recording.mp4", "video/mp4"],
@@ -238,7 +294,7 @@ describe("AssetAccess", () => {
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
-      const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-media-dimensions-" });
+      const root = yield* fs.makeTempDirectoryScoped({ prefix: "goat-media-dimensions-" });
       const png = Uint8Array.from([
         0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13, 0x49, 0x48, 0x44, 0x52, 0, 0,
         0x06, 0x40, 0, 0, 0x03, 0x84,
@@ -262,7 +318,7 @@ describe("AssetAccess", () => {
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
-      const directory = yield* fs.makeTempDirectoryScoped({ prefix: "t3-media-relative-" });
+      const directory = yield* fs.makeTempDirectoryScoped({ prefix: "goat-media-relative-" });
       const root = path.join(directory, "workspace");
       yield* fs.makeDirectory(root);
       for (const relativePath of ["screenshot.png", "../recording.mp4"]) {
@@ -288,7 +344,7 @@ describe("AssetAccess", () => {
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
-      const directory = yield* fs.makeTempDirectoryScoped({ prefix: "t3-media-home-" });
+      const directory = yield* fs.makeTempDirectoryScoped({ prefix: "goat-media-home-" });
       const home = path.join(directory, "var", "home", "alice");
       const filePath = path.join(home, "Downloads", "repro.mp4");
       yield* fs.makeDirectory(path.dirname(filePath), { recursive: true });
@@ -336,7 +392,7 @@ describe("AssetAccess", () => {
       Effect.gen(function* () {
         const fs = yield* FileSystem.FileSystem;
         const path = yield* Path.Path;
-        const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-media-validation-" });
+        const root = yield* fs.makeTempDirectoryScoped({ prefix: "goat-media-validation-" });
         for (const name of ["report.md", "secret.txt", "secret.%70ng", "secret.png#private.txt"]) {
           const filePath = path.join(root, name);
           yield* fs.writeFileString(filePath, "not media");
@@ -374,7 +430,7 @@ describe("AssetAccess", () => {
       Effect.gen(function* () {
         const fs = yield* FileSystem.FileSystem;
         const path = yield* Path.Path;
-        const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-media-symlink-" });
+        const root = yield* fs.makeTempDirectoryScoped({ prefix: "goat-media-symlink-" });
         const filePath = path.join(root, "actual.svg");
         const aliasPath = path.join(root, "alias.png");
         const replacementPath = path.join(root, "other.svg");
@@ -406,7 +462,7 @@ describe("AssetAccess", () => {
       Effect.gen(function* () {
         const fs = yield* FileSystem.FileSystem;
         const path = yield* Path.Path;
-        const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-media-open-file-" });
+        const root = yield* fs.makeTempDirectoryScoped({ prefix: "goat-media-open-file-" });
         const filePath = path.join(root, "recording.mp4");
         const savedPath = path.join(root, "saved.mp4");
         const secretPath = path.join(root, "secret.txt");
@@ -445,7 +501,7 @@ describe("AssetAccess", () => {
       Effect.gen(function* () {
         const fs = yield* FileSystem.FileSystem;
         const path = yield* Path.Path;
-        const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-media-open-race-" });
+        const root = yield* fs.makeTempDirectoryScoped({ prefix: "goat-media-open-race-" });
         const filePath = path.join(root, "recording.mp4");
         const secretPath = path.join(root, "secret.txt");
         yield* fs.writeFileString(filePath, "video");
@@ -481,7 +537,7 @@ describe("AssetAccess", () => {
       Effect.gen(function* () {
         const fs = yield* FileSystem.FileSystem;
         const path = yield* Path.Path;
-        const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-media-open-rejected-" });
+        const root = yield* fs.makeTempDirectoryScoped({ prefix: "goat-media-open-rejected-" });
         const filePath = path.join(root, "recording.mp4");
         const secretPath = path.join(root, "secret.txt");
         yield* fs.writeFileString(filePath, "video");
@@ -515,7 +571,7 @@ describe("AssetAccess", () => {
       Effect.gen(function* () {
         const fs = yield* FileSystem.FileSystem;
         const path = yield* Path.Path;
-        const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-media-parent-race-" });
+        const root = yield* fs.makeTempDirectoryScoped({ prefix: "goat-media-parent-race-" });
         const publicDirectory = path.join(root, "public");
         const privateDirectory = path.join(root, "private");
         yield* fs.makeDirectory(publicDirectory);
@@ -534,8 +590,6 @@ describe("AssetAccess", () => {
         );
         const savedDirectory = path.join(root, "saved");
         const realpathSpy = vi.mocked(NodeFSP.realpath).mockImplementationOnce(async () => {
-          // A pathname-only guard can see the original parents during realpath,
-          // but the private file during both lstat calls and open.
           await native.unlink(publicDirectory);
           await native.rename(savedDirectory, publicDirectory);
           const canonical = await native.realpath(canonicalPath);
@@ -571,7 +625,7 @@ describe("AssetAccess", () => {
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
-      const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-media-replacement-" });
+      const root = yield* fs.makeTempDirectoryScoped({ prefix: "goat-media-replacement-" });
       const filePath = path.join(root, "recording.mp4");
       yield* fs.writeFileString(filePath, "original");
       const input = {
@@ -622,7 +676,7 @@ describe("AssetAccess", () => {
       const fileSystem = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
       const root = yield* fileSystem.makeTempDirectoryScoped({
-        prefix: "t3-asset-workspace-",
+        prefix: "goat-asset-workspace-",
       });
       const htmlPath = path.join(root, "report.html");
       const cssPath = path.join(root, "report.css");
@@ -663,10 +717,10 @@ describe("AssetAccess", () => {
       const fileSystem = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
       const root = yield* fileSystem.makeTempDirectoryScoped({
-        prefix: "t3-asset-root-",
+        prefix: "goat-asset-root-",
       });
       const outside = yield* fileSystem.makeTempDirectoryScoped({
-        prefix: "t3-asset-outside-",
+        prefix: "goat-asset-outside-",
       });
       const htmlPath = path.join(outside, "report.html");
       yield* fileSystem.writeFileString(htmlPath, "<p>outside</p>");
@@ -697,7 +751,7 @@ describe("AssetAccess", () => {
       const fileSystem = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
       const root = yield* fileSystem.makeTempDirectoryScoped({
-        prefix: "t3-asset-draft-",
+        prefix: "goat-asset-draft-",
       });
       const htmlPath = path.join(root, "report.html");
       const cssPath = path.join(root, "report.css");
@@ -731,10 +785,10 @@ describe("AssetAccess", () => {
       const fileSystem = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
       const root = yield* fileSystem.makeTempDirectoryScoped({
-        prefix: "t3-asset-draft-root-",
+        prefix: "goat-asset-draft-root-",
       });
       const outside = yield* fileSystem.makeTempDirectoryScoped({
-        prefix: "t3-asset-draft-outside-",
+        prefix: "goat-asset-draft-outside-",
       });
       const clipPath = path.join(outside, "clip.mp4");
       yield* fileSystem.writeFileString(clipPath, "video");
@@ -762,7 +816,7 @@ describe("AssetAccess", () => {
       const fileSystem = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
       const root = yield* fileSystem.makeTempDirectoryScoped({
-        prefix: "t3-asset-draft-fallback-",
+        prefix: "goat-asset-draft-fallback-",
       });
       const htmlPath = path.join(root, "report.html");
       yield* fileSystem.writeFileString(htmlPath, "<p>draft</p>");
@@ -787,7 +841,7 @@ describe("AssetAccess", () => {
       const fileSystem = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
       const root = yield* fileSystem.makeTempDirectoryScoped({
-        prefix: "t3-asset-permission-root-",
+        prefix: "goat-asset-permission-root-",
       });
       const htmlPath = path.join(root, "report.html");
       yield* fileSystem.writeFileString(htmlPath, "<p>report</p>");
@@ -829,7 +883,7 @@ describe("AssetAccess", () => {
       const fileSystem = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
       const root = yield* fileSystem.makeTempDirectoryScoped({
-        prefix: "t3-asset-image-workspace-",
+        prefix: "goat-asset-image-workspace-",
       });
       const assetsDirectory = path.join(root, "assets");
       const imagePath = path.join(assetsDirectory, "icon.png");
@@ -864,7 +918,7 @@ describe("AssetAccess", () => {
     Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
-      const root = yield* fileSystem.makeTempDirectoryScoped({ prefix: "t3-preview-literal-" });
+      const root = yield* fileSystem.makeTempDirectoryScoped({ prefix: "goat-preview-literal-" });
       const directory = path.join(root, "assets#archive");
       yield* fileSystem.makeDirectory(directory);
 
@@ -903,6 +957,48 @@ describe("AssetAccess", () => {
     }).pipe(Effect.provide(layerTest)),
   );
 
+  it.effect("signs MCP render intent only for inline HTML attachments", () =>
+    Effect.gen(function* () {
+      const config = yield* ServerConfig.ServerConfig;
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      yield* fs.makeDirectory(config.attachmentsDir, { recursive: true });
+      for (const extension of ["html", "pdf"]) {
+        const attachmentId = `thread-1-00000000-0000-4000-8000-000000000031-${extension}`;
+        yield* fs.writeFileString(
+          path.join(config.attachmentsDir, `${attachmentId}.${extension}`),
+          "capture",
+        );
+        for (const disposition of ["inline", "attachment"] as const) {
+          const result = yield* issueAssetUrl({
+            resource: {
+              _tag: "attachment",
+              attachmentId,
+              disposition,
+              renderIntent: "mcp-app",
+            },
+          });
+          const suffix = result.relativeUrl.slice(`${ASSET_ROUTE_PREFIX}/`.length);
+          const separator = suffix.indexOf("/");
+          const asset = yield* resolveAsset(
+            suffix.slice(0, separator),
+            suffix.slice(separator + 1),
+          );
+          if (asset?.kind !== "file") throw new Error("Expected attachment file");
+          expect("renderIntent" in asset ? asset.renderIntent : undefined).toBe(
+            extension === "html" && disposition === "inline" ? "mcp-app" : undefined,
+          );
+          const token = suffix.slice(0, separator);
+          const [payload, signature] = token.split(".");
+          const claims = JSON.parse(Buffer.from(payload!, "base64url").toString("utf8"));
+          claims.renderIntent = claims.renderIntent ? undefined : "mcp-app";
+          const tampered = `${Buffer.from(JSON.stringify(claims)).toString("base64url")}.${signature}`;
+          expect(yield* resolveAsset(tampered, suffix.slice(separator + 1))).toBeNull();
+        }
+      }
+    }).pipe(Effect.provide(layerTest)),
+  );
+
   it.effect("issues exact attachment capabilities by attachment id", () =>
     Effect.gen(function* () {
       const config = yield* ServerConfig.ServerConfig;
@@ -924,6 +1020,34 @@ describe("AssetAccess", () => {
         kind: "file",
         path: attachmentPath,
       });
+    }).pipe(Effect.provide(layerTest)),
+  );
+
+  it.effect("signs the same HTML page URL within an expiry window", () =>
+    Effect.gen(function* () {
+      const config = yield* ServerConfig.ServerConfig;
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const attachmentId = "thread-1-00000000-0000-4000-8000-000000000001-html";
+      yield* fileSystem.makeDirectory(config.attachmentsDir, { recursive: true });
+      yield* fileSystem.writeFileString(
+        path.join(config.attachmentsDir, `${attachmentId}.html`),
+        "<p>render</p>",
+      );
+      const bucketMs = 30 * 60 * 1000;
+      const issue = issueAssetUrl({
+        resource: { _tag: "attachment", attachmentId, disposition: "inline" },
+      });
+      yield* TestClock.setTime(bucketMs + 1);
+      const first = yield* issue;
+      yield* TestClock.adjust("20 minutes");
+      const second = yield* issue;
+      yield* TestClock.adjust("10 minutes");
+      const next = yield* issue;
+
+      expect(second.relativeUrl).toBe(first.relativeUrl);
+      expect(first.expiresAt).toBe(4 * bucketMs);
+      expect(next.expiresAt).toBe(5 * bucketMs);
     }).pipe(Effect.provide(layerTest)),
   );
 
@@ -958,6 +1082,93 @@ describe("AssetAccess", () => {
       });
     }).pipe(Effect.provide(layerTest)),
   );
+
+  it.effect("infers playable attachment media from the stored extension", () =>
+    Effect.gen(function* () {
+      const config = yield* ServerConfig.ServerConfig;
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      yield* fileSystem.makeDirectory(config.attachmentsDir, { recursive: true });
+
+      for (const [extension, mimeType, expectedMimeType] of [
+        ["mp4", "application/octet-stream", "video/mp4"],
+        ["mov", "binary/octet-stream", "video/quicktime"],
+        ["m4v", "", "video/mp4"],
+        ["webm", undefined, "video/webm"],
+        ["m4a", "application/octet-stream", "audio/mp4"],
+      ] as const) {
+        const attachmentId = `thread-1-00000000-0000-4000-8000-000000000011-${extension}`;
+        const attachmentPath = path.join(config.attachmentsDir, `${attachmentId}.${extension}`);
+        yield* fileSystem.writeFileString(attachmentPath, "0123456789");
+        const result = yield* issueAssetUrl({
+          resource: {
+            _tag: "attachment",
+            attachmentId,
+            fileName: "misleading.html",
+            ...(mimeType !== undefined ? { mimeType } : {}),
+          },
+        });
+        const suffix = result.relativeUrl.slice(`${ASSET_ROUTE_PREFIX}/`.length);
+        const separator = suffix.indexOf("/");
+        const asset = yield* resolveAsset(suffix.slice(0, separator), suffix.slice(separator + 1));
+        expect(asset).toMatchObject({
+          kind: "file",
+          path: attachmentPath,
+          mimeType: expectedMimeType,
+        });
+        if (asset?.kind !== "file") throw new Error("Expected attachment file");
+        expect(asset).not.toHaveProperty("download");
+
+        const response = HttpServerResponse.toWeb(yield* assetFileResponse(asset, "bytes=1-2"));
+        expect(response.status).toBe(206);
+        expect(response.headers.get("content-type")).toBe(expectedMimeType);
+        expect(response.headers.get("content-disposition")).toBeNull();
+        expect(response.headers.get("accept-ranges")).toBe("bytes");
+        expect(response.headers.get("content-range")).toBe("bytes 1-2/10");
+        expect(yield* Effect.promise(() => response.text())).toBe("12");
+      }
+    }).pipe(Effect.provide(layerTest)),
+  );
+
+  it.effect("keeps explicit non-media types and generic HTML and SVG as downloads", () =>
+    Effect.gen(function* () {
+      const config = yield* ServerConfig.ServerConfig;
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      yield* fileSystem.makeDirectory(config.attachmentsDir, { recursive: true });
+
+      for (const [extension, mimeType, fileName, expectedContentType] of [
+        ["mp4", "application/pdf", "clip.mp4", "application/pdf"],
+        ["html", "application/octet-stream", "page.html", "application/octet-stream"],
+        ["svg", "application/octet-stream", "icon.svg", "application/octet-stream"],
+        ["pdf", "application/octet-stream", "misleading.mp4", "application/octet-stream"],
+      ] as const) {
+        const attachmentId = `thread-1-00000000-0000-4000-8000-000000000012-${extension}`;
+        const attachmentPath = path.join(config.attachmentsDir, `${attachmentId}.${extension}`);
+        yield* fileSystem.writeFileString(attachmentPath, "content");
+        const result = yield* issueAssetUrl({
+          resource: { _tag: "attachment", attachmentId, fileName, mimeType },
+        });
+        const suffix = result.relativeUrl.slice(`${ASSET_ROUTE_PREFIX}/`.length);
+        const separator = suffix.indexOf("/");
+        const asset = yield* resolveAsset(suffix.slice(0, separator), suffix.slice(separator + 1));
+        expect(asset).toMatchObject({
+          kind: "file",
+          path: attachmentPath,
+          fileName,
+          mimeType,
+          download: true,
+        });
+        if (asset?.kind !== "file") throw new Error("Expected attachment file");
+
+        const response = HttpServerResponse.toWeb(yield* assetFileResponse(asset));
+        expect(response.headers.get("content-type")).toBe(expectedContentType);
+        expect(response.headers.get("content-disposition")).toContain("attachment;");
+        expect(response.headers.get("accept-ranges")).toBeNull();
+      }
+    }).pipe(Effect.provide(layerTest)),
+  );
+
   it.effect("issues signed native application icon capabilities", () =>
     Effect.gen(function* () {
       const result = yield* issueAssetUrl({
@@ -1041,6 +1252,58 @@ describe("AssetAccess", () => {
     }).pipe(Effect.provide(layerTest)),
   );
 
+  it.effect("serves HEIC and HEIF previews inline using the stored attachment extension", () =>
+    Effect.gen(function* () {
+      const config = yield* ServerConfig.ServerConfig;
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      yield* fileSystem.makeDirectory(config.attachmentsDir, { recursive: true });
+      for (const [extension, expectedMimeType] of [
+        ["heic", "image/heic"],
+        ["heif", "image/heif"],
+      ] as const) {
+        const attachmentId = `thread-1-00000000-0000-4000-8000-000000000014-${extension}`;
+        const attachmentPath = path.join(config.attachmentsDir, `${attachmentId}.${extension}`);
+        yield* fileSystem.writeFileString(attachmentPath, "image bytes");
+        for (const disposition of ["inline", "attachment"] as const) {
+          const result = yield* issueAssetUrl({
+            resource: {
+              _tag: "attachment",
+              attachmentId,
+              fileName: "misleading.html",
+              mimeType: "application/octet-stream",
+              disposition,
+            },
+          });
+          const suffix = result.relativeUrl.slice(`${ASSET_ROUTE_PREFIX}/`.length);
+          const separator = suffix.indexOf("/");
+          const asset = yield* resolveAsset(
+            suffix.slice(0, separator),
+            suffix.slice(separator + 1),
+          );
+          expect(asset).toEqual({
+            kind: "file",
+            path: attachmentPath,
+            fileName: "misleading.html",
+            mimeType: disposition === "inline" ? expectedMimeType : "application/octet-stream",
+            ...(disposition === "attachment" ? { download: true } : {}),
+          });
+          if (asset?.kind !== "file") throw new Error("Expected attachment file");
+          const response = HttpServerResponse.toWeb(yield* assetFileResponse(asset));
+          expect(response.headers.get("content-type")).toBe(
+            disposition === "inline" ? expectedMimeType : "application/octet-stream",
+          );
+          if (disposition === "inline") {
+            expect(response.headers.get("content-disposition")).toBeNull();
+          } else {
+            expect(response.headers.get("content-disposition")).toContain("attachment;");
+          }
+          expect(yield* Effect.promise(() => response.text())).toBe("image bytes");
+        }
+      }
+    }).pipe(Effect.provide(layerTest)),
+  );
+
   it.effect("keeps inline requests for other attachment types as downloads", () =>
     Effect.gen(function* () {
       const config = yield* ServerConfig.ServerConfig;
@@ -1073,7 +1336,7 @@ describe("AssetAccess", () => {
       const fileSystem = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
       const root = yield* fileSystem.makeTempDirectoryScoped({
-        prefix: "t3-asset-favicon-",
+        prefix: "goat-asset-favicon-",
       });
       const faviconPath = path.join(root, "favicon.svg");
       const initialFavicon = "<svg>a</svg>";
@@ -1131,7 +1394,7 @@ describe("AssetAccess", () => {
       const fileSystem = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
       const root = yield* fileSystem.makeTempDirectoryScoped({
-        prefix: "t3-asset-favicon-override-",
+        prefix: "goat-asset-favicon-override-",
       });
       yield* fileSystem.makeDirectory(path.join(root, "brand"));
       yield* fileSystem.writeFileString(path.join(root, "brand", "custom.svg"), "<svg />");
@@ -1152,10 +1415,10 @@ describe("AssetAccess", () => {
       const fileSystem = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
       const root = yield* fileSystem.makeTempDirectoryScoped({
-        prefix: "t3-asset-favicon-workspace-",
+        prefix: "goat-asset-favicon-workspace-",
       });
       const pictures = yield* fileSystem.makeTempDirectoryScoped({
-        prefix: "t3-asset-favicon-pictures-",
+        prefix: "goat-asset-favicon-pictures-",
       });
       const externalPath = path.join(pictures, "custom.png");
       const siblingPath = path.join(pictures, "sibling.png");
@@ -1190,7 +1453,7 @@ describe("AssetAccess", () => {
       const fileSystem = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
       const root = yield* fileSystem.makeTempDirectoryScoped({
-        prefix: "t3-asset-favicon-hint-",
+        prefix: "goat-asset-favicon-hint-",
       });
       yield* fileSystem.makeDirectory(path.join(root, "brand"));
       yield* fileSystem.writeFileString(path.join(root, "brand", "hint.svg"), "<svg>hint</svg>");
@@ -1211,7 +1474,7 @@ describe("AssetAccess", () => {
       const fileSystem = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
       const root = yield* fileSystem.makeTempDirectoryScoped({
-        prefix: "t3-asset-favicon-automatic-",
+        prefix: "goat-asset-favicon-automatic-",
       });
       yield* fileSystem.makeDirectory(path.join(root, "brand"));
       yield* fileSystem.writeFileString(path.join(root, "brand", "saved.svg"), "<svg>saved</svg>");
@@ -1231,7 +1494,7 @@ describe("AssetAccess", () => {
       const fileSystem = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
       const root = yield* fileSystem.makeTempDirectoryScoped({
-        prefix: "t3-asset-favicon-icns-",
+        prefix: "goat-asset-favicon-icns-",
       });
       const icns = new Uint8Array(8 + 8 + screenshotPng.length);
       icns.set(new TextEncoder().encode("icns"));
@@ -1263,7 +1526,7 @@ describe("AssetAccess", () => {
       const fileSystem = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
       const root = yield* fileSystem.makeTempDirectoryScoped({
-        prefix: "t3-asset-favicon-type-",
+        prefix: "goat-asset-favicon-type-",
       });
       yield* fileSystem.writeFileString(path.join(root, "secret.txt"), "not an image");
 
@@ -1282,7 +1545,7 @@ describe("AssetAccess", () => {
       const fileSystem = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
       const root = yield* fileSystem.makeTempDirectoryScoped({
-        prefix: "t3-asset-favicon-expiry-",
+        prefix: "goat-asset-favicon-expiry-",
       });
       yield* fileSystem.writeFileString(path.join(root, "favicon.svg"), "<svg />");
 
@@ -1305,7 +1568,7 @@ describe("AssetAccess", () => {
     Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;
       const root = yield* fileSystem.makeTempDirectoryScoped({
-        prefix: "t3-asset-favicon-error-",
+        prefix: "goat-asset-favicon-error-",
       });
       const platformCause = PlatformError.systemError({
         _tag: "PermissionDenied",
@@ -1353,18 +1616,14 @@ describe("AssetAccess", () => {
         kind: "github-media",
         url: "https://github.com/user-attachments/assets/1a1842fb-6383-492f-873c-57aa0033fa6c",
         cwd: "/repo",
-        // The signed URL's own expiry, which is how long a client may keep the bytes.
         expiresAt: attachment.expiresAt,
       });
 
-      // A `blob` link addresses the page; only the raw host answers a credential with bytes.
       const committed = yield* issue("https://github.com/owner/repo/blob/main/docs/shot.png");
       expect(yield* resolve(committed.relativeUrl)).toMatchObject({
         url: "https://raw.githubusercontent.com/owner/repo/main/docs/shot.png",
       });
 
-      // The pre-`user-attachments` form, Git LFS bytes, and a name no `decodeURIComponent`
-      // accepts all arrive from real bodies.
       const legacy = yield* issue("https://github.com/owner/repo/assets/45952064/1a1842fb");
       expect(yield* resolve(legacy.relativeUrl)).toMatchObject({
         url: "https://github.com/owner/repo/assets/45952064/1a1842fb",

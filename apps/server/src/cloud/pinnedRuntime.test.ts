@@ -17,9 +17,6 @@ import {
   type PinnedRuntimeProgress,
 } from "./pinnedRuntime.ts";
 
-// Every install fetches the release archive, checks it against SHA256SUMS,
-// and unpacks it with tar. The fake client serves both files; the fake runner
-// stands in for tar and drops the executable where extraction would.
 const version = "1.2.3";
 const archiveName = `goat-${version}-linux-x64.tar.gz`;
 const archiveBytes = new TextEncoder().encode("not really a tarball");
@@ -63,11 +60,57 @@ const extractingRunner = (fs: FileSystem.FileSystem, path: Path.Path, commands: 
   });
 
 it.layer(NodeServices.layer)("ensurePinnedRuntimeInstalled", (it) => {
+  it.effect("reuses a verified cache only while its executable matches the install record", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const baseDir = yield* fs.makeTempDirectoryScoped({ prefix: "goat-pinned-verified-" });
+      const requests: string[] = [];
+      const checksums = yield* validChecksums;
+      const install = (verifyCachedInstall: boolean) =>
+        ensurePinnedRuntimeInstalled({
+          baseDir,
+          version,
+          fs,
+          path,
+          platform: "linux",
+          arch: "x64",
+          httpClient: releaseHttpClient(checksums, requests),
+          runner: extractingRunner(fs, path),
+          validate: () => Effect.void,
+          verifyCachedInstall,
+        });
+      const paths = yield* install(true);
+      assert.lengthOf(requests, 2);
+
+      // Unchanged bytes: no download, no checksum fetch.
+      yield* install(true);
+      assert.lengthOf(requests, 2);
+
+      // Replaced bytes behind an intact sentinel are reinstalled from the verified release.
+      yield* fs.writeFileString(paths.entryPath, "#!/bin/sh\necho tampered\n");
+      yield* install(true);
+      assert.lengthOf(requests, 4);
+      assert.isTrue(requests[2]!.endsWith("/SHA256SUMS"));
+      assert.equal(yield* fs.readFileString(paths.entryPath), "#!/bin/sh\n");
+
+      // An install from before records counts as unverified.
+      yield* fs.remove(path.join(paths.versionDir, ".install-record"));
+      yield* install(true);
+      assert.lengthOf(requests, 6);
+
+      // Callers that do not ask keep the plain sentinel check.
+      yield* fs.writeFileString(paths.entryPath, "#!/bin/sh\necho tampered\n");
+      yield* install(false);
+      assert.lengthOf(requests, 6);
+    }),
+  );
+
   it.effect("installs the verified release archive as the runtime executable", () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
-      const baseDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-pinned-archive-" });
+      const baseDir = yield* fs.makeTempDirectoryScoped({ prefix: "goat-pinned-archive-" });
       const requests: string[] = [];
       const commands: string[] = [];
       const upstream = path.join(baseDir, "runtime", "versions", version);
@@ -111,7 +154,7 @@ it.layer(NodeServices.layer)("ensurePinnedRuntimeInstalled", (it) => {
       Effect.gen(function* () {
         const fs = yield* FileSystem.FileSystem;
         const path = yield* Path.Path;
-        const baseDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-pinned-progress-" });
+        const baseDir = yield* fs.makeTempDirectoryScoped({ prefix: "goat-pinned-progress-" });
         const firstChunk = yield* Deferred.make<void>();
         let archiveController: ReadableStreamDefaultController<Uint8Array> | undefined;
         const checksums = yield* validChecksums;
@@ -176,7 +219,7 @@ it.layer(NodeServices.layer)("ensurePinnedRuntimeInstalled", (it) => {
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
-      const baseDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-pinned-progress-failed-" });
+      const baseDir = yield* fs.makeTempDirectoryScoped({ prefix: "goat-pinned-progress-failed-" });
       const checksums = yield* validChecksums;
       const progress: PinnedRuntimeProgress[] = [];
       let cancelled = false;
@@ -232,7 +275,7 @@ it.layer(NodeServices.layer)("ensurePinnedRuntimeInstalled", (it) => {
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
-      const baseDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-pinned-archive-bad-" });
+      const baseDir = yield* fs.makeTempDirectoryScoped({ prefix: "goat-pinned-archive-bad-" });
       const commands: string[] = [];
       const error = yield* ensurePinnedRuntimeInstalled({
         baseDir,
@@ -259,7 +302,7 @@ it.layer(NodeServices.layer)("ensurePinnedRuntimeInstalled", (it) => {
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
-      const baseDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-pinned-runtime-test-" });
+      const baseDir = yield* fs.makeTempDirectoryScoped({ prefix: "goat-pinned-runtime-test-" });
       const finalPaths = pinnedRuntimePaths(path, baseDir, version, "linux");
       let validatedDirectory = "";
 
@@ -291,7 +334,7 @@ it.layer(NodeServices.layer)("ensurePinnedRuntimeInstalled", (it) => {
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
-      const baseDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-pinned-runtime-test-" });
+      const baseDir = yield* fs.makeTempDirectoryScoped({ prefix: "goat-pinned-runtime-test-" });
       const finalPaths = pinnedRuntimePaths(path, baseDir, version, "linux");
 
       yield* ensurePinnedRuntimeInstalled({
@@ -321,7 +364,7 @@ it.layer(NodeServices.layer)("ensurePinnedRuntimeInstalled", (it) => {
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
-      const baseDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-pinned-runtime-repair-" });
+      const baseDir = yield* fs.makeTempDirectoryScoped({ prefix: "goat-pinned-runtime-repair-" });
       const finalPaths = pinnedRuntimePaths(path, baseDir, version, "linux");
       yield* fs.makeDirectory(finalPaths.versionDir, { recursive: true });
       yield* fs.writeFileString(path.join(finalPaths.versionDir, "partial"), "incomplete\n");
@@ -347,7 +390,7 @@ it.layer(NodeServices.layer)("ensurePinnedRuntimeInstalled", (it) => {
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
-      const baseDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-pinned-runtime-repair-" });
+      const baseDir = yield* fs.makeTempDirectoryScoped({ prefix: "goat-pinned-runtime-repair-" });
       const finalPaths = pinnedRuntimePaths(path, baseDir, version, "linux");
       yield* fs.makeDirectory(path.dirname(finalPaths.entryPath), { recursive: true });
       yield* fs.writeFileString(finalPaths.entryPath, "broken\n");
@@ -384,7 +427,9 @@ it.layer(NodeServices.layer)("ensurePinnedRuntimeInstalled", (it) => {
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
-      const baseDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-pinned-runtime-interrupt-" });
+      const baseDir = yield* fs.makeTempDirectoryScoped({
+        prefix: "goat-pinned-runtime-interrupt-",
+      });
       const started = yield* Deferred.make<void>();
       const runner = ProcessRunner.ProcessRunner.of({
         run: () => Deferred.succeed(started, undefined).pipe(Effect.andThen(Effect.never)),

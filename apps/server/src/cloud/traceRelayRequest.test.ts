@@ -3,7 +3,7 @@ import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 import * as Tracer from "effect/Tracer";
 import { HttpServerRequest } from "effect/http";
-import { RelayClientTracer } from "@t3tools/shared/relayTracing";
+import { RelayClientTracer } from "@goat/shared/relayTracing";
 
 import {
   traceAuthenticatedRelayRequest,
@@ -100,8 +100,6 @@ describe("relay request tracing boundary", () => {
         new Request("https://environment.example.test/api/orchestration/threads/thread-1"),
       );
 
-      // Shaped like a real handler: an Effect.fn span whose service call runs
-      // on the local tracer.
       const handler = Effect.fn("environment.orchestration.threadSnapshot")(function* () {
         yield* Effect.void.pipe(
           Effect.withSpan("sql.execute"),

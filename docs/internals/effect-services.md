@@ -39,7 +39,7 @@ with per-call context, such as a thread id, adds it with `Effect.annotateCurrent
 
 One module per service, in this order: imports, errors and schemas, the `Context.Service` tag with
 its interface inline, `make`, then `layer`. [`WorkspacePaths.ts`](../../apps/server/src/workspace/WorkspacePaths.ts)
-and [`T3ProjectFileLoader.ts`](../../apps/server/src/project/T3ProjectFileLoader.ts) are good
+and [`GoatProjectFileLoader.ts`](../../apps/server/src/project/GoatProjectFileLoader.ts) are good
 references.
 
 ```ts
@@ -70,7 +70,7 @@ export const layer = Layer.effect(Foo, make);
   `import * as Effect from "effect/Effect"`, never `import { Effect } from "effect"`. Consumers use
   a service module the same way: `import * as Foo from "./Foo.ts"`, then `yield* Foo.Foo` and
   `Foo.layer`. Never `import { layer as fooLayer }`. Named imports are fine for packages like
-  `@t3tools/contracts` and for modules used only for a pure helper, error, schema, config value, or
+  `@goat/contracts` and for modules used only for a pure helper, error, schema, config value, or
   type. A barrel exposes a whole service module as `export * as TokenStore from "./tokenStore.ts"`,
   not as renamed `make` and `layer` exports.
 - **Interface.** No standalone `FooShape`; name the type `Foo["Service"]`.

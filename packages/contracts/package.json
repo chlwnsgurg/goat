@@ -1,6 +1,6 @@
 {
-  "name": "@t3tools/contracts",
-  "version": "0.1.0",
+  "name": "@goat/contracts",
+  "version": "0.1.1",
   "private": true,
   "files": [
     "dist"
@@ -18,10 +18,26 @@
     "./relay": {
       "types": "./src/relay.ts",
       "import": "./src/relay.ts"
+    },
+    "./legacyT3Names": {
+      "types": "./src/legacyT3Names.ts",
+      "import": "./src/legacyT3Names.ts"
+    },
+    "./adoptLegacyEnv": {
+      "types": "./src/adoptLegacyEnv.ts",
+      "import": "./src/adoptLegacyEnv.ts"
+    },
+    "./agentSurface": {
+      "types": "./src/agentSurface/registry.ts",
+      "import": "./src/agentSurface/registry.ts"
+    },
+    "./agentSurface/html": {
+      "types": "./src/agentSurface/html.ts",
+      "import": "./src/agentSurface/html.ts"
     }
   },
   "scripts": {
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc-rs --noEmit",
     "test": "vp test run --config ../../vite.config.ts --dir ."
   },
   "dependencies": {

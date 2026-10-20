@@ -8,9 +8,9 @@ import {
   WsRpcGroup,
   type OrchestrationProjectShell,
   type OrchestrationV2ThreadShell,
-} from "@t3tools/contracts";
-import type { RelayAgentActivityState } from "@t3tools/contracts/relay";
-import { projectThreadAwarenessV2 } from "@t3tools/shared/agentAwareness";
+} from "@goat/contracts";
+import type { RelayAgentActivityState } from "@goat/contracts/relay";
+import { projectThreadAwarenessV2 } from "@goat/shared/agentAwareness";
 import * as Cause from "effect/Cause";
 import * as Option from "effect/Option";
 import * as Clock from "effect/Clock";
@@ -88,7 +88,6 @@ const main = Effect.gen(function* () {
   );
   const layerSocketConstructor = Layer.succeed(
     Socket.WebSocketConstructor,
-    // Socket.makeWebSocket only ever passes its `protocols` option here.
     (url, protocols) =>
       new NodeSocket.NodeWS.WebSocket(url, protocols as string | string[] | undefined, {
         headers: { authorization: `Bearer ${connection.bearerToken}` },
@@ -172,7 +171,6 @@ const main = Effect.gen(function* () {
           }
           const state = item.kind === "thread.updated" ? next.get(item.thread.id) : undefined;
           const previous = state ? states.get(state.threadId) : undefined;
-          // A fresh subscription restores ongoing work without announcing old completions.
           const now = yield* Clock.currentTimeMillis;
           const alert =
             state && state.phase !== previous?.phase && item.kind !== "snapshot"

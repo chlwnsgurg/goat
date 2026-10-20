@@ -1,6 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 
-import { COMPOSER_CONTEXT_CLIPBOARD_MIME } from "@t3tools/shared/composerContextClipboard";
+import { GOAT_CONTEXT_CLIPBOARD_ATTRIBUTE } from "@goat/contracts/legacyT3Names";
+
+import { COMPOSER_CONTEXT_CLIPBOARD_MIME } from "@goat/shared/composerContextClipboard";
 
 import {
   ClipboardApiUnavailableError,
@@ -55,7 +57,7 @@ describe("writeTextToClipboard", () => {
     const items = write.mock.calls[0]![0] as Array<{ data: Record<string, Blob> }>;
     const html = await items[0]!.data["text/html"]!.text();
     expect(html).toContain(rich);
-    expect(html).toContain("data-t3-context-fragment=");
+    expect(html).toContain(`${GOAT_CONTEXT_CLIPBOARD_ATTRIBUTE}=`);
   });
 
   it("reports unavailable clipboard support with structural context", async () => {
@@ -111,7 +113,6 @@ describe("writeTextToClipboard", () => {
       });
 
       const pendingCopy = writeTextToClipboard("remote command", "command");
-      // The fallback must run during the original user gesture, before any await.
       expect(execCommand).toHaveBeenCalledWith("copy");
       if (result === "success") {
         await expect(pendingCopy).resolves.toBe(true);

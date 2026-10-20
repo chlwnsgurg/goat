@@ -51,6 +51,7 @@ export class ElectronApp extends Context.Service<
      */
     readonly systemLocale: Effect.Effect<string>;
     readonly whenReady: Effect.Effect<void, ElectronAppWhenReadyError>;
+    readonly requestSingleInstanceLock: Effect.Effect<boolean>;
     readonly quit: Effect.Effect<void>;
     readonly exit: (code: number) => Effect.Effect<void>;
     readonly relaunch: (options: Electron.RelaunchOptions) => Effect.Effect<void>;
@@ -81,7 +82,7 @@ export class ElectronApp extends Context.Service<
       listener: (...args: Args) => void,
     ) => Effect.Effect<void, never, Scope.Scope>;
   }
->()("@t3tools/desktop/electron/ElectronApp") {}
+>()("@goat/desktop/electron/ElectronApp") {}
 
 const addScopedAppListener = <Args extends ReadonlyArray<unknown>>(
   eventName: string,
@@ -137,6 +138,7 @@ export const make = ElectronApp.of({
       catch: (cause) => new ElectronAppWhenReadyError({ isPackaged, cause }),
     });
   }),
+  requestSingleInstanceLock: Effect.sync(() => Electron.app.requestSingleInstanceLock()),
   quit: Effect.sync(() => {
     Electron.app.quit();
   }),

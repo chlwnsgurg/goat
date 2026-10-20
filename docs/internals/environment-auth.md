@@ -7,9 +7,13 @@ identity and relay credentials belong to a separate trust boundary, described in
 ## Authority survives transport changes
 
 Pairing delegates a set of scopes. Exchanging a bootstrap credential can narrow
-that grant but cannot widen it. Ordinary pairing does not grant access-management
-or relay-management authority. Creating another pairing link requires both
-`access:write` and every scope being delegated. The
+that grant but cannot widen it. The default grant includes access and relay
+management: `terminal:operate` is a shell as the server's user and
+`orchestration:operate` can start a full-access agent, and either can mint a
+session with every scope through `t3 auth session issue`, so withholding
+management from the default would not be a boundary. A narrower client gets
+explicit scopes. Creating another pairing link requires both `access:write` and
+every scope being delegated. The
 [auth handlers](../../apps/server/src/auth/http.ts) enforce this at issuance;
 client labels and device metadata have no authorization role.
 
@@ -25,7 +29,7 @@ vocabulary gives these grants a familiar meaning.
 
 ### MCP clients are a separate audience
 
-Agents T3 Code did not launch sign in to `/mcp` through a narrow OAuth
+Agents GOAT did not launch sign in to `/mcp` through a narrow OAuth
 authorization-code server ([McpOAuth](../../apps/server/src/auth/McpOAuth.ts)).
 It accepts loopback redirect URIs for agents on the user's machine and any
 HTTPS redirect for hosted agents (ChatGPT, bots). An HTTPS redirect means a
@@ -48,6 +52,17 @@ path rejects that subject, because the RPC surface would let the agent act
 above its ceiling. Inside MCP the credential sets the limits and tool
 parameters only pick targets; see
 [threadAccess](../../apps/server/src/mcp/threadAccess.ts).
+
+`goat auth client create` issues the same `mcp-client` session directly for
+long-running orchestrators. Only this path can add `orchestration:approve`,
+which lets the client answer provider approvals over MCP. OAuth never grants
+it: one approval click must not also hand over approvals. Agents inside a
+thread never get it either, so a provider cannot approve its own escalation.
+The orchestrator decider accepts an approval from a `client` responder and
+refuses one from an `agent`, so the MCP layer must check the scope before it
+sends a `client` responder. When the client reaches a thread on an SSH host,
+the launching environment asks that host for a session with the scope only if
+its own caller holds it.
 
 Issuer and resource URLs come from the request's Host and
 `X-Forwarded-Proto`, so one server answers over loopback, Tailscale Serve and a
@@ -83,7 +98,7 @@ do not follow this replacement rule.
 
 ### Reusable dev credential
 
-Web development environments can accept one `T3CODE_DEV_AUTH_TOKEN` across
+Web development environments can accept one `GOAT_DEV_AUTH_TOKEN` across
 worktrees and ports on one hostname. The token and startup URLs that contain it
 grant administrative access. Desktop and non-development servers ignore it. See
 the [development runbook](../operations/development.md#reusable-dev-credential)

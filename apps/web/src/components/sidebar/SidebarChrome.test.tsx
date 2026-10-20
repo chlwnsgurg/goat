@@ -6,7 +6,8 @@ import { afterEach, beforeEach, expect, it, vi } from "vite-plus/test";
 
 vi.mock("@tanstack/react-router", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@tanstack/react-router")>()),
-  useLocation: () => "/",
+  useLocation: ({ select }: { select: (location: { pathname: string }) => unknown }) =>
+    select({ pathname: "/" }),
   useParams: () => ({}),
   Link: ({ to, ...props }: ComponentProps<"a"> & { to: string }) => <a href={to} {...props} />,
 }));
@@ -29,19 +30,48 @@ vi.mock("../goatBot/useGoatBotWaitingCount", () => ({
     ),
 }));
 
-import { SidebarBrandWidthProbe, SidebarCollapsedBrand } from "./SidebarChrome";
+import { publishSidebarPriorityCount } from "../Sidebar.logic";
+import {
+  SidebarBrandWidthProbe,
+  SidebarChromeHeader,
+  SidebarCollapsedBrand,
+} from "./SidebarChrome";
+
+const brandState = vi.hoisted(() => ({
+  channel: "stable" as "stable" | "dev" | "nightly",
+  mode: "pill" as "pill" | "none",
+}));
+vi.mock("./brandChannel", () => ({ useBrandChannel: () => brandState.channel }));
+vi.mock("../../hooks/useSettings", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../hooks/useSettings")>()),
+  useEnvironmentIdentificationMode: () => brandState.mode,
+}));
+vi.mock("../ui/sidebar", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../ui/sidebar")>()),
+  SidebarTrigger: () => <button aria-label="Toggle main sidebar" />,
+}));
+vi.mock("./SidebarViewToggles", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./SidebarViewToggles")>()),
+  SidebarViewToggles: () => null,
+}));
 
 let root: Root | undefined;
 let container: HTMLDivElement;
 
 beforeEach(() => {
+  vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
   botState.count = undefined;
+  brandState.channel = "stable";
+  brandState.mode = "pill";
+  publishSidebarPriorityCount(0);
 });
 
 afterEach(async () => {
   await act(() => root?.unmount());
   container?.remove();
   root = undefined;
+  publishSidebarPriorityCount(null);
+  vi.unstubAllGlobals();
 });
 
 async function renderBrand(visible: boolean) {
@@ -84,7 +114,7 @@ it("renders the no-drag global agent link while the sidebar is collapsed", async
   );
 });
 
-it("keeps the waiting badge in both brand width probes as the count changes", async () => {
+it("keeps the waiting badge in both width probes, with the wordmark in both", async () => {
   await renderBrand(false);
   await act(() =>
     root?.render(
@@ -115,4 +145,65 @@ it("keeps the waiting badge in both brand width probes as the count changes", as
     ),
   );
   expect(container.textContent?.trim()).toBe("GOATGOAT");
+});
+
+it("updates the width probe badge when Priority gains, changes and loses threads", async () => {
+  await renderBrand(false);
+  await act(() => root?.render(<SidebarBrandWidthProbe onWidthChange={() => {}} />));
+  expect(container.textContent).toBe("GOAT");
+  await act(() => publishSidebarPriorityCount(9));
+  expect(container.textContent).toBe("GOAT9");
+  await act(() => publishSidebarPriorityCount(101));
+  expect(container.textContent).toBe("GOAT101");
+  await act(() => publishSidebarPriorityCount(0));
+  expect(container.textContent).toBe("GOAT");
+});
+
+it.each([
+  ["dev", "pill", "Dev"],
+  ["nightly", "pill", "Nightly"],
+  ["dev", "none", null],
+  ["stable", "pill", null],
+] as const)("shows %s in %s mode in both placements and probes", async (channel, mode, label) => {
+  brandState.channel = channel;
+  brandState.mode = mode;
+  await renderBrand(false);
+  await act(() =>
+    root?.render(
+      <>
+        <div data-placement="expanded">
+          <SidebarChromeHeader isElectron />
+        </div>
+        <div data-placement="collapsed">
+          <SidebarCollapsedBrand visible onWidthChange={() => {}} />
+        </div>
+        <div data-placement="expanded-probe">
+          <SidebarBrandWidthProbe onWidthChange={() => {}} />
+        </div>
+        <div data-placement="collapsed-probe">
+          <SidebarCollapsedBrand visible={false} onWidthChange={() => {}} />
+        </div>
+      </>,
+    ),
+  );
+  const placements = container.querySelectorAll("[data-placement]");
+  expect(placements).toHaveLength(4);
+  for (const placement of placements) {
+    const pill = placement.querySelector('[data-environment-identification="pill"]');
+    expect(pill?.textContent ?? null).toBe(label);
+    expect(placement.querySelector(".font-brand")?.textContent?.trim()).toBe("GOAT");
+  }
+  for (const placement of Array.from(placements).slice(0, 2)) {
+    const pill = placement.querySelector('[data-environment-identification="pill"]');
+    if (pill) {
+      expect(pill.closest('[aria-hidden="true"]')).toBeNull();
+      expect(pill.closest('[class*="no-drag"]')).toBeNull();
+    }
+  }
+  const expandedHeader = placements[0]?.firstElementChild;
+  expect(expandedHeader?.classList.contains("drag-region")).toBe(true);
+  expect(expandedHeader?.firstElementChild?.matches('span[aria-hidden="true"]')).toBe(
+    label !== null,
+  );
+  expect(placements[1]?.querySelector('span[aria-hidden="true"].h-0\\.5')).toBeNull();
 });

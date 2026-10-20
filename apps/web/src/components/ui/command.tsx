@@ -1,7 +1,7 @@
 "use client";
 
 import { Dialog as CommandDialogPrimitive } from "@base-ui/react/dialog";
-import { SearchIcon } from "lucide-react";
+import { SearchIcon } from "~/components/solar";
 import type * as React from "react";
 import { cn } from "~/lib/utils";
 import {
@@ -125,14 +125,13 @@ function CommandList({ className, ...props }: React.ComponentProps<typeof Autoco
   );
 }
 
-// Pair with a LegendList child; the list owns scrolling and spacing.
 function CommandListVirtualized({
   className,
   ...props
 }: React.ComponentProps<typeof AutocompleteListVirtualized>) {
   return (
     <AutocompleteListVirtualized
-      className={cn("flex max-h-[inherit] flex-col", className)}
+      className={cn("flex max-h-[inherit] min-h-0 flex-col", className)}
       data-slot="command-list"
       {...props}
     />

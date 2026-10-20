@@ -7,6 +7,7 @@ import {
   type PreviewAutomationDragInput,
   type PreviewAutomationEvaluateInput,
   type PreviewAutomationHoverInput,
+  type PreviewAutomationReloadInput,
   type PreviewAutomationNetworkEntry,
   type PreviewAutomationPressInput,
   type PreviewAutomationScrollInput,
@@ -16,16 +17,19 @@ import {
   type PreviewAutomationTypeInput,
   type PreviewAutomationUploadInput,
   type PreviewAutomationWaitForInput,
-} from "@t3tools/contracts";
+} from "@goat/contracts";
 import { constVoid } from "effect/Function";
-import type { CDPSession, Locator, Page } from "playwright-core";
+import type { CDPSession, Frame, Locator, Page } from "playwright-core";
 import * as NodeCrypto from "node:crypto";
 import { BrowserControlInterrupted } from "./SessionControl.ts";
 
 const MAX_EVALUATION_BYTES = 64_000;
 const MAX_VISIBLE_TEXT_LENGTH = 20_000;
 const MAX_SCREENSHOT_WIDTH = 1280;
-const WAIT_POLL_MS = 100;
+const MAX_FULL_PAGE_WIDTH = 3840;
+const MAX_FULL_PAGE_HEIGHT = 16_384;
+const MAX_FULL_PAGE_BYTES = 8 * 1024 * 1024;
+const PNG_SIGNATURE = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
 export const DIAGNOSTIC_BUFFER_LIMIT = 200;
 
 export class ServerBrowserOperationError extends Error {
@@ -64,6 +68,50 @@ export const toOperationError = (cause: unknown): ServerBrowserOperationError =>
 };
 
 const DEFAULT_TIMEOUT_MS = 15_000;
+
+/** Real Chromium history, including same-document entries whose response is null. */
+export const navigateHistory = async (
+  page: Page,
+  cdp: CDPSession,
+  operation: "back" | "forward" | "reload",
+  input: PreviewAutomationReloadInput,
+  timeout: number,
+  assertControl: () => void,
+) => {
+  const options = {
+    timeout: input.timeoutMs ?? timeout,
+    waitUntil:
+      input.readiness === "domContentLoaded" ? ("domcontentloaded" as const) : ("load" as const),
+  };
+  if (operation === "reload" && input.ignoreCache !== true) {
+    assertControl();
+    invalidateRefs(page);
+    await page.reload(options);
+    return;
+  }
+  let entryId: number | undefined;
+  if (operation !== "reload") {
+    const history = await cdp.send("Page.getNavigationHistory");
+    const index = history.currentIndex + (operation === "back" ? -1 : 1);
+    entryId = history.entries[index]?.id;
+    if (entryId === undefined) {
+      throw new ServerBrowserOperationError(
+        "PreviewAutomationExecutionError",
+        `No ${operation} history entry exists for this browser tab.`,
+      );
+    }
+  }
+  assertControl();
+  invalidateRefs(page);
+  // Install the waiter before sending CDP: an acknowledgement alone does not
+  // prove that Electron's guest page actually committed a navigation.
+  await Promise.all([
+    page.waitForNavigation(options),
+    operation === "reload"
+      ? cdp.send("Page.reload", { ignoreCache: true })
+      : cdp.send("Page.navigateToHistoryEntry", { entryId: entryId! }),
+  ]);
+};
 
 const pageRefs = new WeakMap<Page, { generation: string; refs: Map<string, string> }>();
 // A compact runtime namespace prevents old refs from aliasing after a server restart.
@@ -118,14 +166,12 @@ const targetLocator = (
   return page.locator(selector);
 };
 
-/** Shows the agent's pointer to viewers before an action lands at that point. */
 export type PointerReporter = (
   point: { readonly x: number; readonly y: number },
   phase: "move" | "click",
 ) => Promise<void>;
 const noPointer: PointerReporter = async () => {};
 
-/** The viewport point an action will hit: the target's center after scrolling it into view. */
 const targetPoint = async (
   page: Page,
   locator: Locator | null,
@@ -145,10 +191,239 @@ const SNAPSHOT_SCRIPT = `(() => {
     url: location.href,
     title: document.title,
     loading: document.readyState !== "complete",
-    visibleText: (document.body?.innerText || "").slice(0, ${MAX_VISIBLE_TEXT_LENGTH}),
+    visibleText: document.body?.innerText || "",
     interactiveElements: [],
   };
 })()`;
+
+const MASKED_VALUE = "••••••••";
+// The broker waits 15s for the host; a snapshot, retry included, answers well before.
+const SNAPSHOT_TIMEOUT_MS = 10_000;
+// How long a frame in another process gets to answer; one that crashed never does.
+const FRAME_ANSWER_MS = 1_000;
+
+// Values the page draws as dots (password fields, and text fields whose CSS
+// draws dots), normalized like accessible text. Open shadow roots included.
+const DOTTED_SCRIPT = `(() => {
+  const values = [];
+  const visit = (root) => {
+    for (const element of root.querySelectorAll("*")) {
+      if (element.shadowRoot) visit(element.shadowRoot);
+      const field = element.localName === "input" || element.localName === "textarea";
+      if (!field && !element.isContentEditable) continue;
+      const dots = getComputedStyle(element).getPropertyValue("-webkit-text-security");
+      if (element.type !== "password" && (dots === "none" || dots === "")) continue;
+      // Raw as page text shows it, and normalized as the tree does.
+      for (const value of field ? [element.value, element.defaultValue] : [element.textContent ?? ""])
+        values.push(value, value.replace(/[\\u200b\\u00ad]/g, "").trim().replace(/\\s+/g, " "));
+    }
+  };
+  visit(document);
+  return [...new Set(values.filter((value) => value.trim()))];
+})()`;
+
+const pageChanged = () =>
+  new ServerBrowserOperationError(
+    "PreviewAutomationExecutionError",
+    "The page changed while capturing its snapshot. Take another snapshot.",
+  );
+
+const tooBusy = () =>
+  new ServerBrowserOperationError(
+    "PreviewAutomationTimeoutError",
+    "The page was too busy to capture a snapshot in time. Wait for it to settle and take another snapshot.",
+  );
+
+const VALUE_TOO_LONG = "A password field holds a value too long to hide, so no snapshot was taken.";
+const FULL_PAGE_TOO_LARGE =
+  "The full-page screenshot exceeds the 3840 × 16384 pixel or 8 MiB limit, even at reduced scale. Use a viewport snapshot instead.";
+// A second capture would fail the same way; this one already tried every scale.
+const NOT_RETRIED = new Set([VALUE_TOO_LONG, FULL_PAGE_TOO_LARGE]);
+
+/** A frame in another process keeps one CDP session, so none pile up across snapshots. */
+const frameSessions = new WeakMap<Frame, Promise<CDPSession>>();
+
+/** The value, or undefined when it fails or takes longer than a frame may. */
+const answered = <A>(promise: Promise<A>) => {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const late = new Promise<undefined>((resolve) => {
+    timer = setTimeout(() => resolve(undefined), FRAME_ANSWER_MS);
+  });
+  return Promise.race([promise.catch(() => undefined), late]).finally(() => clearTimeout(timer));
+};
+
+/**
+ * Reads dotted values in isolated worlds, where page script can't change what `value`
+ * returns, through the CDP session of the process each frame renders in. A frame in
+ * another process that can't be attached, as in desktop tabs where only the page can,
+ * is read in the page's own world, where its script can change `value`. `read` gives
+ * each reader's values, or undefined for one that didn't answer, and fails when the
+ * page's own frames don't or frames came or went.
+ */
+const openReaders = async (page: Page, cdp: CDPSession) => {
+  const frames = page.frames();
+  const owners = new Map<Frame, CDPSession | null | undefined>(
+    await Promise.all(
+      frames.map(async (frame) => {
+        if (frame === page.mainFrame()) return [frame, cdp] as const;
+        const session = frameSessions.get(frame) ?? page.context().newCDPSession(frame);
+        frameSessions.set(frame, session);
+        try {
+          return [frame, await session] as const;
+        } catch (cause) {
+          frameSessions.delete(frame);
+          // CdpRelay refuses all but the page. Any other refusal reads the frame through its
+          // parent's session, which fails the read if the frame isn't there.
+          const desktop = String(cause).includes("Only this preview tab's page can be attached");
+          return [frame, desktop ? null : undefined] as const;
+        }
+      }),
+    ),
+  );
+  const ownerOf = (frame: Frame): CDPSession | null => {
+    const owner = owners.get(frame);
+    if (owner !== undefined) return owner;
+    const parent = frame.parentFrame();
+    return parent ? ownerOf(parent) : null;
+  };
+  const sessionReader = (frame: Frame, session: CDPSession) => {
+    const owned = frames.filter((each) => ownerOf(each) === session);
+    const open = async () => {
+      const { frameTree } = await session.send("Page.getFrameTree");
+      const ids = (node: typeof frameTree): Array<string> => [
+        node.frame.id,
+        ...(node.childFrames ?? []).flatMap(ids),
+      ];
+      // A frame Playwright knows but this session doesn't would go unread.
+      if (ids(frameTree).length !== owned.length) throw pageChanged();
+      return Promise.all(
+        ids(frameTree).map(async (frameId) => {
+          const world = await session.send("Page.createIsolatedWorld", {
+            frameId,
+            worldName: "t3-preview",
+          });
+          return world.executionContextId;
+        }),
+      );
+    };
+    let contexts: ReturnType<typeof open> | undefined;
+    const read = async () => {
+      const values = (contexts ??= open()).then((ids) =>
+        Promise.all(
+          ids.map(async (contextId) => {
+            const { result, exceptionDetails } = await session.send("Runtime.evaluate", {
+              contextId,
+              expression: DOTTED_SCRIPT,
+              returnByValue: true,
+            });
+            if (exceptionDetails) throw pageChanged();
+            return result.value as Array<string>;
+          }),
+        ),
+      );
+      try {
+        return (await values).flat();
+      } catch (cause) {
+        // The frame may have moved to another process; the next snapshot opens a new session.
+        if (session !== cdp) {
+          frameSessions.delete(frame);
+          void session.detach().catch(constVoid);
+        }
+        throw cause;
+      }
+    };
+    return { frames: owned, read };
+  };
+  const readers = [
+    sessionReader(page.mainFrame(), cdp),
+    ...frames.flatMap((frame) => {
+      const owner = owners.get(frame);
+      if (owner) return owner === cdp ? [] : [sessionReader(frame, owner)];
+      const own = () => frame.evaluate(DOTTED_SCRIPT) as Promise<Array<string>>;
+      return ownerOf(frame) === null ? [{ frames: [frame], read: own }] : [];
+    }),
+  ];
+  return {
+    readers,
+    /** Readers that didn't answer `before` aren't asked again. */
+    read: async (before?: ReadonlyArray<unknown>) => {
+      const now = page.frames();
+      // A frame added since the readers opened has none.
+      if (now.length !== frames.length || now.some((frame, i) => frame !== frames[i])) {
+        throw pageChanged();
+      }
+      return Promise.all(
+        readers.map((reader, i) => {
+          if (i === 0) return reader.read().catch(() => Promise.reject(pageChanged()));
+          return before && !before[i] ? undefined : answered(reader.read());
+        }),
+      );
+    },
+  };
+};
+
+/**
+ * Matches each value as the snapshot prints it: raw, as a JSON name, as a
+ * quoted value, and with '' for each quote inside a quoted key. A value under
+ * four characters only matches between non-word characters; inside other words
+ * it would mask unrelated text.
+ */
+const dottedPattern = (values: ReadonlyArray<string>) => {
+  const sources = values
+    .flatMap((value) => {
+      const json = JSON.stringify(value).slice(1, -1);
+      // Playwright writes control characters like JSON does, with \xNN for the unnamed ones.
+      const quoted = value.replace(/[\\"\p{Cc}]/gu, (char) =>
+        '\\"\b\f\n\r\t'.includes(char)
+          ? JSON.stringify(char).slice(1, -1)
+          : `\\x${char.charCodeAt(0).toString(16).padStart(2, "0")}`,
+      );
+      const forms = [value, json, quoted].flatMap((form) => [form, form.replaceAll("'", "''")]);
+      return [...new Set(forms)].map((form) => ({ form, word: value.length < 4 }));
+    })
+    // Longest first, so a form inside another never leaves the rest showing.
+    .toSorted((a, b) => b.form.length - a.form.length)
+    .map(({ form, word }) => {
+      const literal = form.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      return word ? `(?<![\\p{L}\\p{N}_])${literal}(?![\\p{L}\\p{N}_])` : literal;
+    });
+  if (sources.length === 0) return undefined;
+  const pattern = new RegExp(sources.join("|"), "gu");
+  try {
+    // Compiles it now, for one-byte and two-byte text: one too large fails only when it
+    // first runs on each, naming every value.
+    pattern.test("");
+    pattern.test("\u2022");
+  } catch {
+    throw new ServerBrowserOperationError("PreviewAutomationExecutionError", VALUE_TOO_LONG);
+  }
+  return pattern;
+};
+
+// `- role "name" [attribute]...: value`, the key single-quoted when it holds ": ". A name
+// that starts and ends with "/" prints unquoted. Only Playwright's own attributes count, so
+// text around a value in a name can't pass for one.
+const TREE_LINE =
+  /^(\s*- '?[^\s"':]+)( "(?:[^"\\]|\\.)*"| \/(?:.*?\/)?)?((?: \[(?:active|checked(?:=mixed)?|disabled|expanded|level=\d+|pressed(?:=mixed)?|selected|ref=(?:f\d+)?e\d+|cursor=pointer|box=-?\d+,-?\d+,\d+,\d+)\])*'?)(:.*)?$/;
+
+/**
+ * Masks each value on a line, except one that only matches inside the role or attributes,
+ * so refs keep working. A "/.../" name has no closing mark, so a value can seem to cross it.
+ */
+const maskTree = (tree: string, dotted: RegExp) =>
+  tree
+    .split("\n")
+    .map((line) => {
+      const node = TREE_LINE.exec(line);
+      const name = node?.[1]?.length ?? 0;
+      const attributes = name + (node?.[2]?.length ?? 0);
+      const end = attributes + (node?.[3]?.length ?? 0);
+      const kept = (from: number, to: number) => to <= name || (from >= attributes && to <= end);
+      return line.replace(dotted, (match: string, offset: number) =>
+        kept(offset, offset + match.length) ? match : MASKED_VALUE,
+      );
+    })
+    .join("\n");
 
 // Scaled captures repaint live screencasts, so callers pause them. Clips use document offsets.
 export const captureViewport = async (
@@ -175,36 +450,132 @@ export const captureViewport = async (
   return data;
 };
 
-export const snapshot = async (input: {
+// Bounds, PNG checks, and scale retries adapted from Emanuele-web04/synara @ 566efb1b1.
+// Copyright (c) 2026 Emanuele Di Pietro. MIT license; see the repository LICENSE.
+/** Captures at CSS resolution or lower without changing viewport, scroll, or emulation. */
+const captureFullPage = async (cdp: CDPSession) => {
+  const { cssContentSize } = await cdp.send("Page.getLayoutMetrics");
+  if (!Number.isFinite(cssContentSize.width) || !Number.isFinite(cssContentSize.height)) {
+    throw new ServerBrowserOperationError(
+      "PreviewAutomationExecutionError",
+      "The browser did not report valid document dimensions for a full-page screenshot.",
+    );
+  }
+  const width = Math.min(MAX_FULL_PAGE_WIDTH, Math.max(1, Math.ceil(cssContentSize.width)));
+  const height = Math.min(MAX_FULL_PAGE_HEIGHT, Math.max(1, Math.ceil(cssContentSize.height)));
+  const clipped = width < cssContentSize.width || height < cssContentSize.height;
+  // CSS clips and image pixels differ across native and emulated Retina tabs. Bound
+  // the actual PNG to the CSS clip so Retina captures cannot exceed CSS resolution.
+  for (const scale of [1, 0.75, 0.5, 0.25]) {
+    const { data } = await cdp.send("Page.captureScreenshot", {
+      format: "png",
+      fromSurface: true,
+      captureBeyondViewport: true,
+      clip: { x: 0, y: 0, width, height, scale },
+    });
+    const byteLength = Buffer.byteLength(data, "base64");
+    if (byteLength > MAX_FULL_PAGE_BYTES) continue;
+    const header = Buffer.from(data.slice(0, 32), "base64");
+    if (
+      header.length < 24 ||
+      !header.subarray(0, 8).equals(PNG_SIGNATURE) ||
+      header.subarray(12, 16).toString("ascii") !== "IHDR"
+    ) {
+      throw new ServerBrowserOperationError(
+        "PreviewAutomationExecutionError",
+        "The browser returned an invalid full-page PNG. Try another snapshot.",
+      );
+    }
+    const imageWidth = header.readUInt32BE(16);
+    const imageHeight = header.readUInt32BE(20);
+    if (imageWidth < 1 || imageHeight < 1 || imageWidth > width || imageHeight > height) continue;
+    return {
+      mimeType: "image/png" as const,
+      data,
+      width: imageWidth,
+      height: imageHeight,
+      fullPage: true,
+      clipped,
+      byteLength,
+    };
+  }
+  throw new ServerBrowserOperationError("PreviewAutomationExecutionError", FULL_PAGE_TOO_LARGE);
+};
+
+type SnapshotInput = {
   readonly page: Page;
   readonly cdp: CDPSession;
   readonly renderScale: number;
+  readonly fullPage?: boolean | undefined;
   readonly consoleEntries: ReadonlyArray<PreviewAutomationConsoleEntry>;
   readonly networkEntries: ReadonlyArray<PreviewAutomationNetworkEntry>;
   readonly actionTimeline: PreviewAutomationSnapshot["actionTimeline"];
-}): Promise<PreviewAutomationSnapshot> => {
+};
+
+const capture = async (
+  input: SnapshotInput,
+  deadline: number,
+): Promise<PreviewAutomationSnapshot> => {
   const viewport = input.page.viewportSize() ?? { width: 1280, height: 800 };
   const scale = Math.min(1, MAX_SCREENSHOT_WIDTH / (viewport.width * input.renderScale));
   const state = refsFor(input.page);
   invalidateRefs(input.page);
   const generation = state.generation;
-  const [page, tree, data] = await Promise.all([
+  const { readers, read } = await openReaders(input.page, input.cdp);
+  const before = await read();
+  const capture = input.fullPage
+    ? captureFullPage(input.cdp)
+    : captureViewport(input.page, input.cdp, { format: "png", scale }).then((data) => ({
+        mimeType: "image/png" as const,
+        data,
+        width: Math.round(viewport.width * input.renderScale * scale),
+        height: Math.round(viewport.height * input.renderScale * scale),
+      }));
+  // Taken between the reads, so a value that changes during either fails the comparison.
+  // Awaited after the tree: a capture that fails has finished its tree before a retry starts.
+  const pageAndScreenshot = Promise.all([
     input.page.evaluate(SNAPSHOT_SCRIPT) as Promise<
       Pick<
         PreviewAutomationSnapshot,
         "url" | "title" | "loading" | "visibleText" | "interactiveElements"
       >
     >,
-    input.page.ariaSnapshot({ mode: "ai", boxes: true, timeout: DEFAULT_TIMEOUT_MS }),
-    captureViewport(input.page, input.cdp, { format: "png", scale }),
+    capture,
   ]);
-  if (state.generation !== generation) {
-    throw new ServerBrowserOperationError(
-      "PreviewAutomationExecutionError",
-      "The page changed while capturing its snapshot. Take another snapshot.",
-    );
+  void pageAndScreenshot.catch(constVoid);
+  let tree: string;
+  let dotted: ReturnType<typeof dottedPattern>;
+  try {
+    // Leaves time for the second read; a frame that never loads holds the tree until then.
+    tree = await input.page.ariaSnapshot({
+      mode: "ai",
+      boxes: true,
+      timeout: Math.max(1, deadline - Date.now() - 2_000),
+    });
+    const after = await read(before);
+    // A value that changed meanwhile may be in the tree under neither reading.
+    if (after.some((values, i) => values && JSON.stringify(values) !== JSON.stringify(before[i])))
+      throw pageChanged();
+    dotted = dottedPattern(after.flatMap((values) => values ?? []));
+    // A frame that didn't answer both times, such as one that crashed, can only hold values the
+    // tree shows if the tree shows its content.
+    const unread = readers.flatMap((reader, i) => (after[i] ? [] : reader.frames));
+    const filled = /^\s*- iframe (?:\[active\] )?\[ref=(\S+?)\].*:$/gm;
+    for (const [, ref] of unread.length ? tree.matchAll(filled) : []) {
+      const iframe = await input.page.locator(`aria-ref=${ref}`).elementHandle({ timeout: 2_000 });
+      if (!iframe) throw pageChanged();
+      const frame = await iframe.contentFrame();
+      void iframe.dispose().catch(constVoid);
+      if (frame && unread.includes(frame)) throw tooBusy();
+    }
+  } catch (cause) {
+    await pageAndScreenshot.catch(constVoid);
+    throw cause;
   }
-  const accessibilityTree = tree
+  const [page, screenshot] = await pageAndScreenshot;
+  if (state.generation !== generation) throw pageChanged();
+  const mask = (text: string) => (dotted ? text.replace(dotted, MASKED_VALUE) : text);
+  const accessibilityTree = (dotted ? maskTree(tree, dotted) : tree)
     .slice(0, MAX_VISIBLE_TEXT_LENGTH)
     .replace(/\[ref=((?:f\d+)?e\d+)\]/g, (_match, nativeRef: string) => {
       const ref = `t3-${generation}-${nativeRef}`;
@@ -213,17 +584,45 @@ export const snapshot = async (input: {
     });
   return {
     ...page,
+    // Text that holds a value would otherwise show where the tree masked it. Masked before
+    // the cut, so a value crossing it can't leave its start showing.
+    visibleText: mask(page.visibleText).slice(0, MAX_VISIBLE_TEXT_LENGTH),
     accessibilityTree,
     consoleEntries: [...input.consoleEntries],
     networkEntries: [...input.networkEntries],
     actionTimeline: [...input.actionTimeline],
-    screenshot: {
-      mimeType: "image/png",
-      data,
-      width: Math.round(viewport.width * input.renderScale * scale),
-      height: Math.round(viewport.height * input.renderScale * scale),
-    },
+    screenshot,
   };
+};
+
+/** Snapshots begun per page; observers' snapshots aren't queued, so two can overlap. */
+const snapshotTurns = new WeakMap<Page, number>();
+
+export const snapshot = async (input: SnapshotInput): Promise<PreviewAutomationSnapshot> => {
+  const deadline = Date.now() + SNAPSHOT_TIMEOUT_MS;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const expired = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(tooBusy()), SNAPSHOT_TIMEOUT_MS);
+  });
+  const turn = (snapshotTurns.get(input.page) ?? 0) + 1;
+  snapshotTurns.set(input.page, turn);
+  // A page that changed mid-capture, like one rotating ads, has usually settled by a second
+  // try. None starts late or after another snapshot began, since it would revoke the refs of
+  // whichever snapshot came next.
+  const captured = capture(input, deadline).catch((cause: unknown) =>
+    Date.now() < deadline &&
+    snapshotTurns.get(input.page) === turn &&
+    !(cause instanceof Error && NOT_RETRIED.has(cause.message))
+      ? capture(input, deadline)
+      : Promise.reject(cause),
+  );
+  try {
+    return await Promise.race([captured, expired]);
+  } catch (cause) {
+    throw cause instanceof Error && cause.name === "TimeoutError" ? tooBusy() : cause;
+  } finally {
+    clearTimeout(timer);
+  }
 };
 
 /**
@@ -319,7 +718,6 @@ export const type = async (page: Page, input: PreviewAutomationTypeInput) => {
   await page.keyboard.insertText(input.text);
 };
 
-/** Hovering by locator moves the real mouse, so CSS :hover and pointer events both apply. */
 export const hover = async (
   page: Page,
   input: PreviewAutomationHoverInput,
@@ -341,7 +739,6 @@ export const select = async (
 ): Promise<PreviewAutomationSelectResult> => {
   const locator = targetLocator(page, input)!;
   const timeout = input.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-  // Each entry matches an option by value first, then by its visible label.
   const options = await locator.evaluate(
     (element) =>
       element.tagName === "SELECT"
@@ -380,8 +777,8 @@ export const drag = async (
   const source = targetLocator(page, { locator: input.source })!;
   const target = targetLocator(page, { locator: input.target })!;
   await pointer(await targetPoint(page, source, {}, timeout), "move");
-  // The cursor travels with the drag; the page sees one continuous gesture. Observe the drag's
-  // outcome as it starts: a rejection nobody handles while the cursor moves exits the server.
+  // Observe the drag's outcome as it starts: a rejection nobody handles while the cursor
+  // moves exits the server.
   const dragFailure = source.dragTo(target, { timeout }).then(
     () => null,
     (error: unknown) => ({ error }),
@@ -392,7 +789,6 @@ export const drag = async (
   if (failure) throw failure.error;
 };
 
-/** Sets files on one file input; false when no locator or selector names one. */
 export const setInputFiles = async (page: Page, input: PreviewAutomationUploadInput) => {
   const locator = targetLocator(page, input);
   if (locator === null) return false;
@@ -464,34 +860,115 @@ export const evaluate = async (
   return value;
 };
 
-export const waitFor = async (page: Page, input: PreviewAutomationWaitForInput) => {
+/** Native Playwright waits share one deadline; recheck the conjunction on the current document. */
+export const waitFor = async (
+  page: Page,
+  input: PreviewAutomationWaitForInput,
+  signal?: AbortSignal,
+) => {
+  signal?.throwIfAborted();
   const timeoutMs = input.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const deadline = Date.now() + timeoutMs;
-  const locator = targetLocator(page, input);
-  const { text, urlIncludes } = input;
-  const checks: Array<() => Promise<boolean>> = [];
-  // Like the desktop host: the selector must match an element, visible or not.
-  if (locator !== null) checks.push(async () => (await locator.count()) > 0);
-  if (text !== undefined) {
-    // A navigation can destroy the context mid-check; that counts as not yet.
-    checks.push(() =>
-      page
-        .evaluate(`(document.body?.innerText ?? "").includes(${JSON.stringify(text)})`)
-        .then((found) => found === true)
-        .catch(() => false),
+  const target = targetLocator(page, input);
+  // Legacy presence checks accepted multiple matches, including hidden elements.
+  const locator = input.state === undefined ? target?.first() : target;
+  const state = input.state ?? "attached";
+  const loadState =
+    input.loadState === "domContentLoaded"
+      ? "domcontentloaded"
+      : input.loadState === "networkIdle"
+        ? "networkidle"
+        : input.loadState;
+  const documentCondition = `(() => (
+    ${input.text === undefined ? "true" : `(document.body?.innerText ?? "").includes(${JSON.stringify(input.text)})`}
+    && ${input.urlIncludes === undefined ? "true" : `location.href.includes(${JSON.stringify(input.urlIncludes)})`}
+  ))()`;
+  const conditions = [
+    ...(locator ? [`locator:${state}`] : []),
+    ...(input.text === undefined ? [] : ["text"]),
+    ...(input.urlIncludes === undefined ? [] : ["url"]),
+    ...(input.loadState === undefined ? [] : [`load:${input.loadState}`]),
+  ];
+  const timeout = () =>
+    new ServerBrowserOperationError(
+      "PreviewAutomationTimeoutError",
+      `Waited ${timeoutMs}ms without all conditions holding: ${conditions.join(", ")}.`,
     );
-  }
-  if (urlIncludes !== undefined) checks.push(async () => page.url().includes(urlIncludes));
-  for (;;) {
-    const results = await Promise.all(checks.map((check) => check()));
-    if (results.every(Boolean)) return;
-    if (Date.now() >= deadline) {
-      throw new ServerBrowserOperationError(
-        "PreviewAutomationTimeoutError",
-        `Waited ${timeoutMs}ms without every condition holding.`,
-      );
+  let stopped = false;
+  const remaining = () => {
+    signal?.throwIfAborted();
+    if (stopped || Date.now() >= deadline) throw timeout();
+    return Math.max(1, deadline - Date.now());
+  };
+  let documentVersion = 0;
+  const navigated = (frame: import("playwright-core").Frame) => {
+    if (frame === page.mainFrame()) documentVersion++;
+  };
+  page.on("framenavigated", navigated);
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let abort: (() => void) | undefined;
+  const interrupted = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(timeout()), timeoutMs);
+    abort = () => reject(signal?.reason);
+    signal?.addEventListener("abort", abort, { once: true });
+  });
+  const wait = async () => {
+    for (;;) {
+      remaining();
+      await Promise.all([
+        locator?.waitFor({ state, timeout: remaining() }),
+        ...(input.text === undefined && input.urlIncludes === undefined
+          ? []
+          : [
+              page
+                .waitForFunction(documentCondition, undefined, { timeout: remaining() })
+                .then((handle) => handle.dispose()),
+            ]),
+      ]);
+      remaining();
+      const version = documentVersion;
+      // Wait after URL/text resolve so an old document's completed load cannot satisfy a new one.
+      if (loadState !== undefined) await page.waitForLoadState(loadState, { timeout: remaining() });
+      remaining();
+      const [locatorMatches, documentMatches] = await Promise.all([
+        locator === null || locator === undefined
+          ? true
+          : state === "visible"
+            ? locator.isVisible()
+            : state === "hidden"
+              ? locator.isHidden()
+              : locator.count().then((count) => (state === "detached" ? count === 0 : count > 0)),
+        input.text === undefined && input.urlIncludes === undefined
+          ? true
+          : page.evaluate(documentCondition).catch((cause: unknown) => {
+              // Navigation can destroy the old execution context. Retry only that transition.
+              if (
+                cause instanceof Error &&
+                /execution context was destroyed|cannot find context/i.test(cause.message)
+              )
+                return false;
+              throw cause;
+            }),
+      ]);
+      remaining();
+      // Revalidate snapshot refs after a navigation even if the native locator happened to settle.
+      if (target) targetLocator(page, input);
+      if (version === documentVersion && locatorMatches && documentMatches === true) return;
     }
-    await new Promise((resolve) => setTimeout(resolve, WAIT_POLL_MS));
+  };
+  try {
+    await Promise.race([wait(), interrupted]);
+  } catch (cause) {
+    signal?.throwIfAborted();
+    if (cause instanceof Error && cause.name === "TimeoutError") throw timeout();
+    throw cause;
+  } finally {
+    // Playwright's read-only wait has no AbortSignal API. It may settle until its deadline,
+    // but cannot start another check or hold the control queue after takeover/timeout.
+    stopped = true;
+    clearTimeout(timer);
+    if (abort) signal?.removeEventListener("abort", abort);
+    page.off("framenavigated", navigated);
   }
 };
 
@@ -513,8 +990,6 @@ export const parseNetError = (errorText: string) => {
   return { description, code: NET_ERROR_CODES[description] ?? -2 };
 };
 
-// Browser-side encoding avoids ffmpeg. Resizes are letterboxed into the first frame;
-// the agent cursor is drawn here so it never changes the page under test.
 export const RECORDING_ENCODER_SCRIPT = `(() => {
   const canvas = document.createElement("canvas");
   const context = canvas.getContext("2d");
@@ -574,7 +1049,7 @@ export const RECORDING_ENCODER_SCRIPT = `(() => {
       context.restore();
     }
   };
-  window.__t3Recorder = {
+  window.__goatRecorder = {
     async frame(base64, cssWidth) {
       if (tooLarge) return false;
       const bytes = Uint8Array.from(atob(base64), (char) => char.charCodeAt(0));

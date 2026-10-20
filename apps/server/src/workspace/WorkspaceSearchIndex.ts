@@ -24,8 +24,8 @@ import type {
   ProjectSearchContentsInput,
   ProjectSearchContentsResult,
   ProjectSearchEntriesResult,
-} from "@t3tools/contracts";
-import { isProjectFaviconPath } from "@t3tools/shared/projectFavicon";
+} from "@goat/contracts";
+import { isProjectFaviconPath } from "@goat/shared/projectFavicon";
 
 // fff-node stays external to the CLI bundle because it dlopens a native
 // library. A static `import` of an external package is a hard error inside a
@@ -125,7 +125,7 @@ export class WorkspaceSearchIndex extends Context.Service<
       WorkspaceSearchIndexRefreshFailed | WorkspaceSearchIndexScanTimedOut
     >;
   }
->()("t3/workspace/WorkspaceSearchIndex") {}
+>()("goat/workspace/WorkspaceSearchIndex") {}
 
 function toPosixPath(input: string): string {
   return input.replaceAll("\\", "/");
@@ -240,8 +240,6 @@ function buildContentSearchQuery(input: Omit<ProjectSearchContentsInput, "cwd">)
   if (input.caseSensitive) {
     return { searchQuery: input.query, regexMode: input.useRegex };
   }
-  // Plain mode relies on smart case: an all-lowercase needle matches
-  // case-insensitively. Regex mode needs an explicit inline flag instead.
   return input.useRegex
     ? { searchQuery: `(?i)${input.query}`, regexMode: true }
     : { searchQuery: input.query.toLowerCase(), regexMode: false };
@@ -260,13 +258,9 @@ function mapContentMatchRanges(
 }
 
 /**
- * Whole-word filtering happens after the grep rather than by wrapping the
- * pattern in boundary regex: consuming boundaries such as `(?:^|\W)` swallow
- * the separator between adjacent matches and widen the reported ranges, and
- * `\b` cannot match punctuation-edged queries at all. Matching VS Code, a
- * match edge is a word boundary when it touches the line edge, the
- * neighbouring character is not a word character, or the match's own edge
- * character is not a word character.
+ * Whole-word filtering happens after the grep rather than by wrapping the pattern in boundary
+ * regex: consuming boundaries such as `(?:^|\W)` swallow the separator between adjacent matches
+ * and widen the reported ranges, and `\b` cannot match punctuation-edged queries at all.
  */
 function isWholeWordRange(
   line: string,
@@ -511,7 +505,6 @@ export const make = Effect.fn("WorkspaceSearchIndex.make")(function* (
         finder.grep(searchQuery, {
           mode: regexMode ? "regex" : "plain",
           smartCase: !input.caseSensitive && !regexMode,
-          // A single dense file must not consume the whole result page.
           maxMatchesPerFile: Math.min(CONTENT_SEARCH_MAX_MATCHES_PER_FILE, rawPageSize),
           pageSize: rawPageSize,
           cursor: nextCursor,
@@ -548,11 +541,6 @@ export const make = Effect.fn("WorkspaceSearchIndex.make")(function* (
 export const WORKSPACE_SEARCH_INDEX_VARIANTS = ["paths", "content"] as const;
 export type WorkspaceSearchIndexVariant = (typeof WORKSPACE_SEARCH_INDEX_VARIANTS)[number];
 
-/**
- * Composite LayerMap key so the lightweight path index and the on-demand
- * content-search index of the same workspace are separate resources with
- * independent lifecycles. "\n" cannot appear in a filesystem path.
- */
 export const workspaceSearchIndexKey = (cwd: string, variant: WorkspaceSearchIndexVariant) =>
   `${variant}\n${cwd}`;
 
@@ -568,11 +556,6 @@ function parseWorkspaceSearchIndexKey(key: string): {
 }
 
 /**
- * A layer factory is required because every index is scoped to a concrete
- * workspace root and variant. WorkspaceSearchIndexMap owns memoization and
- * idle cleanup; using a default cwd here would mix resources from different
- * workspaces.
- *
  * @public Service construction is part of the canonical Effect module API.
  */
 export const layer = (key: string) => {
@@ -581,7 +564,7 @@ export const layer = (key: string) => {
 };
 
 export class WorkspaceSearchIndexMap extends LayerMap.Service<WorkspaceSearchIndexMap>()(
-  "t3/workspace/WorkspaceSearchIndexMap",
+  "goat/workspace/WorkspaceSearchIndexMap",
   {
     lookup: layer,
     idleTimeToLive: WORKSPACE_INDEX_IDLE_TTL,

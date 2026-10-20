@@ -1,0 +1,107 @@
+import * as M from "@goat/contracts";
+import * as Clock from "effect/Clock";
+import * as Context from "effect/Context";
+import * as DateTime from "effect/DateTime";
+import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
+import * as Store from "./MemoryStore.ts";
+import * as Quota from "./MemoryQuotaService.ts";
+
+export class MemoryFtsMaintenance extends Context.Service<
+  MemoryFtsMaintenance,
+  {
+    readonly cycle: (
+      environmentId: M.EnvironmentId,
+    ) => Effect.Effect<M.MemoryFtsAdmissionStatus, Store.MemoryStorageError>;
+    readonly status: (
+      environmentId: M.EnvironmentId,
+    ) => Effect.Effect<M.MemoryFtsAdmissionStatus, Store.MemoryStorageError>;
+    readonly markChanged: (
+      environmentId: M.EnvironmentId,
+      changes: number,
+    ) => Effect.Effect<void, Store.MemoryStorageError>;
+    readonly repair: (
+      target: Store.MemoryIndexTarget,
+    ) => Effect.Effect<boolean, Store.MemoryStorageError | Store.MemoryCapacityError>;
+  }
+>()("goat/memory/MemoryFtsMaintenance") {}
+const admissionStatus = (state: Store.MemoryFtsState): M.MemoryFtsAdmissionStatus => ({
+  state: state.state,
+  changedAtUtc:
+    state.changedAt === null ? null : DateTime.formatIso(DateTime.makeUnsafe(state.changedAt)),
+  lastMeasuredAtUtc:
+    state.measuredAt === null ? null : DateTime.formatIso(DateTime.makeUnsafe(state.measuredAt)),
+  allocatedBytes: state.allocatedBytes,
+  measurementStatus: state.measurementStatus,
+});
+const make = Effect.gen(function* () {
+  const store = yield* Store.MemoryStore;
+  const quota = yield* Quota.MemoryQuotaService;
+  const status = Effect.fn("MemoryFtsMaintenance.status")(function* (
+    environmentId: M.EnvironmentId,
+  ) {
+    return admissionStatus(yield* store.ftsState(environmentId));
+  });
+  const markChanged = Effect.fn("MemoryFtsMaintenance.markChanged")(function* (
+    environmentId: M.EnvironmentId,
+    changes: number,
+  ) {
+    yield* store.transact(
+      Effect.gen(function* () {
+        const state = yield* store.ftsState(environmentId);
+        yield* store.putFtsState({
+          ...state,
+          changedRows: Math.min(state.changedRows + Math.max(0, Math.floor(changes)), 2147483647),
+          mergePending: state.mergePending || changes >= M.MEMORY_FTS_MERGE_TRIGGER_CHANGES,
+        });
+      }),
+    );
+  });
+  const cycle = Effect.fn("MemoryFtsMaintenance.cycle")(function* (environmentId: M.EnvironmentId) {
+    const now = yield* Clock.currentTimeMillis;
+    const previous = yield* store.ftsState(environmentId);
+    const measured = yield* store.measureAllocation();
+    const bytes = measured.ftsBytes;
+    const braked =
+      previous.state === "braked" ||
+      (bytes !== null && bytes >= M.MEMORY_FTS_ALLOCATED_BRAKE_BYTES);
+    const needed =
+      previous.mergePending ||
+      previous.changedRows >= M.MEMORY_FTS_MERGE_TRIGGER_CHANGES ||
+      (previous.lastMergeAt ?? 0) + M.MEMORY_FTS_MERGE_INTERVAL_MS <= now ||
+      (bytes !== null && bytes >= M.MEMORY_FTS_ALLOCATED_WARNING_BYTES);
+    let state: Store.MemoryFtsState = {
+      ...previous,
+      state: braked ? "braked" : "open",
+      changedAt: previous.state === (braked ? "braked" : "open") ? previous.changedAt : now,
+      allocatedBytes: bytes,
+      measurementStatus: bytes === null ? "unavailable" : "available",
+      measuredAt: bytes === null ? previous.measuredAt : now,
+      mergePending: needed,
+    };
+    // Persist the sampled brake before publishing any refreshed status or starting repair.
+    yield* store.putFtsState(state);
+    if (needed && (yield* store.mergeFts())) {
+      const after = yield* store.measureAllocation();
+      const canResume =
+        after.ftsBytes !== null && after.ftsBytes < M.MEMORY_FTS_ALLOCATED_RESUME_BYTES;
+      state = {
+        ...state,
+        state: canResume ? "open" : state.state,
+        changedAt: canResume && state.state === "braked" ? now : state.changedAt,
+        allocatedBytes: after.ftsBytes,
+        measurementStatus: after.ftsBytes === null ? "unavailable" : "available",
+        measuredAt: after.ftsBytes === null ? state.measuredAt : now,
+        lastMergeAt: now,
+        changedRows: 0,
+        mergePending:
+          after.ftsBytes === null || after.ftsBytes >= M.MEMORY_FTS_ALLOCATED_WARNING_BYTES,
+      };
+      yield* store.putFtsState(state);
+    }
+    yield* quota.recordStorageSample(environmentId);
+    return admissionStatus(state);
+  });
+  return MemoryFtsMaintenance.of({ status, cycle, markChanged, repair: store.index });
+});
+export const layer = Layer.effect(MemoryFtsMaintenance, make);

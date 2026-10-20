@@ -6,17 +6,12 @@ import * as Option from "effect/Option";
 import * as DesktopEnvironment from "./DesktopEnvironment.ts";
 import { makeComponentLogger } from "./DesktopObservability.ts";
 
-// A desktop install puts no `goat` on PATH, so commands the server asks a person
-// to run (`sudo goat browser setup`) had nothing to call. The app keeps a small
-// launcher for its bundled CLI in the T3 home, which is never on PATH and so
-// never shadows another `goat`, and the server names it by absolute path in those
-// commands through T3CODE_CLI_PATH. An AppImage mounts somewhere new each run,
-// so its launcher mounts the AppImage itself instead of pointing into it.
+// An AppImage mounts somewhere new each run, so its launcher mounts the
+// AppImage itself instead of pointing into it.
 const { logInfo, logWarning } = makeComponentLogger("desktop-cli-shim");
 
 export const MARKER = "Written by GOAT: runs the desktop app's bundled goat CLI.";
 
-/** Server entry inside the app, relative to its server root (an asar archive when packaged). */
 const SERVER_ENTRY = "apps/server/dist/bin.mjs";
 
 const shellWord = (value: string) => `'${value.replaceAll("'", `'"'"'`)}'`;
@@ -32,40 +27,46 @@ export type CliShimTarget =
   | { readonly kind: "windows"; readonly executable: string; readonly entry: string };
 
 /**
- * The launcher script. Electron runs the server as plain Node with
- * `ELECTRON_RUN_AS_NODE`, which reads the entry from inside the asar archive.
- * The launcher's own path and the app's T3 home are written in, so the command
- * the server shows is absolute and `sudo`, which clears the environment, still
- * runs against this install's home.
+ * Electron runs the server as plain Node with `ELECTRON_RUN_AS_NODE`, which
+ * reads the entry from inside the asar archive. The launcher's own path and the
+ * app's GOAT home are written in, so the command the server shows is absolute and
+ * `sudo`, which clears the environment, still runs against this install's home.
  */
 export const renderCliShim = (input: {
   readonly target: CliShimTarget;
   readonly shimPath: string;
-  readonly t3Home: string;
+  readonly goatHome: string;
 }) => {
   const { target } = input;
   if (target.kind === "windows") {
-    const utf8 = [target.executable, target.entry, input.shimPath, input.t3Home].some((value) =>
+    const utf8 = [target.executable, target.entry, input.shimPath, input.goatHome].some((value) =>
       [...value].some((character) => character.codePointAt(0)! > 0x7f),
     );
-    const restore = utf8 ? ["chcp %t3_codepage% >nul"] : [];
+    const restore = utf8 ? ["chcp %goat_codepage% >nul"] : [];
     return [
       "@echo off",
       `rem ${MARKER}`,
       // Delayed expansion would rewrite `!name!` in paths and arguments.
       "setlocal EnableExtensions DisableDelayedExpansion",
-      // The file is UTF-8. Only a non-ASCII path needs the console switched to
-      // UTF-8 to read it; a Ctrl-C that ends the batch skips the restore, so the
-      // switch is left out for the common all-ASCII install.
+      // Only a non-ASCII path needs the console switched to UTF-8 to read it; a
+      // Ctrl-C that ends the batch skips the restore, so the switch is left out
+      // for the common all-ASCII install.
       ...(utf8
         ? [
-            `for /f "tokens=2 delims=:." %%c in ('chcp') do set "t3_codepage=%%c"`,
+            `for /f "tokens=2 delims=:." %%c in ('chcp') do set "goat_codepage=%%c"`,
             "chcp 65001 >nul",
           ]
         : []),
-      `set "T3CODE_CLI_PATH=${cmdText(input.shimPath)}"`,
-      `if not defined T3CODE_HOME set "T3CODE_HOME=${cmdText(input.t3Home)}"`,
+      `set "GOAT_CLI_PATH=${cmdText(input.shimPath)}"`,
+      // A home set before the GOAT rename keeps winning over the default. goat-rename: legacy
+      'if not defined GOAT_HOME if defined T3CODE_HOME set "GOAT_HOME=%T3CODE_HOME%"', // goat-rename: legacy
+      `if not defined GOAT_HOME set "GOAT_HOME=${cmdText(input.goatHome)}"`,
+      // The app this shim points at may be a build from before the GOAT rename.
+      'set "T3CODE_CLI_PATH=%GOAT_CLI_PATH%"', // goat-rename: legacy
+      'set "T3CODE_HOME=%GOAT_HOME%"', // goat-rename: legacy
       'set "ELECTRON_RUN_AS_NODE=1"',
+      // Electron's Windows executable starts without stdin; this tells the CLI to reopen the console.
+      'set "GOAT_DESKTOP_CLI_LAUNCHER=1"',
       // A goto, not a parenthesized block: "Program Files (x86)" would close the block early.
       `if exist ${cmdWord(target.executable)} goto run`,
       ...restore,
@@ -73,18 +74,21 @@ export const renderCliShim = (input: {
       "exit /b 127",
       ":run",
       `${cmdWord(target.executable)} ${cmdWord(target.entry)} %*`,
-      'set "t3_exit=%ERRORLEVEL%"',
+      'set "goat_exit=%ERRORLEVEL%"',
       ...restore,
-      "exit /b %t3_exit%",
+      "exit /b %goat_exit%",
       "",
     ].join("\r\n");
   }
   const header = [
     "#!/bin/sh",
     `# ${MARKER}`,
-    `export T3CODE_CLI_PATH=${shellWord(input.shimPath)}`,
-    `home=${shellWord(input.t3Home)}`,
-    'export T3CODE_HOME="${T3CODE_HOME:-$home}"',
+    `export GOAT_CLI_PATH=${shellWord(input.shimPath)}`,
+    `home=${shellWord(input.goatHome)}`,
+    // A home set before the GOAT rename keeps winning over the default.
+    'export GOAT_HOME="${GOAT_HOME:-${T3CODE_HOME:-$home}}"', // goat-rename: legacy
+    // The app this shim points at may be a build from before the GOAT rename.
+    'export T3CODE_CLI_PATH="$GOAT_CLI_PATH" T3CODE_HOME="$GOAT_HOME"', // goat-rename: legacy
     "export ELECTRON_RUN_AS_NODE=1",
     `app=${shellWord(target.kind === "appimage" ? target.appImage : target.executable)}`,
     'if [ ! -x "$app" ]; then',
@@ -125,7 +129,6 @@ export const renderCliShim = (input: {
   ].join("\n");
 };
 
-/** Where the packaged app keeps its launcher: `<T3 home>/bin/goat`, `goat.cmd` on Windows. */
 export const launcherPath = (environment: DesktopEnvironment.DesktopEnvironment["Service"]) =>
   environment.path.join(
     environment.baseDir,
@@ -133,11 +136,6 @@ export const launcherPath = (environment: DesktopEnvironment.DesktopEnvironment[
     environment.platform === "win32" ? "goat.cmd" : "goat",
   );
 
-/**
- * Writes the packaged app's launcher to `<T3 home>/bin` and returns its path
- * for the backend's T3CODE_CLI_PATH. Development builds run from a checkout
- * and get none.
- */
 export const install = Effect.gen(function* () {
   const environment = yield* DesktopEnvironment.DesktopEnvironment;
   if (!environment.isPackaged) return Option.none<string>();
@@ -154,21 +152,18 @@ export const install = Effect.gen(function* () {
           appImage,
           executableName: path.basename(process.execPath),
         }),
-        // macOS and .deb installs live at a fixed path, so the launcher runs the app directly.
         onNone: () => ({ kind: "direct" as const, executable: process.execPath, entry }),
       });
-  const content = renderCliShim({ target, shimPath, t3Home: environment.baseDir });
+  const content = renderCliShim({ target, shimPath, goatHome: environment.baseDir });
 
   return yield* Effect.gen(function* () {
     const existing = yield* fs.readFileString(shimPath).pipe(Effect.option);
     if (Option.isSome(existing) && !existing.value.includes(MARKER)) {
-      // Someone else's file; leave it, and let commands fall back to plain `goat`.
       yield* logWarning("leaving a goat launcher the app did not write", { shimPath });
       return Option.none<string>();
     }
     if (Option.getOrUndefined(existing) !== content) {
       yield* fs.makeDirectory(path.dirname(shimPath), { recursive: true });
-      // Written beside the launcher and renamed over it, so a running `goat` never reads half a file.
       const staging = `${shimPath}.${process.pid}.tmp`;
       yield* fs.writeFileString(staging, content, { mode: 0o755 });
       yield* fs.rename(staging, shimPath);
@@ -176,7 +171,6 @@ export const install = Effect.gen(function* () {
     }
     return Option.some(shimPath);
   }).pipe(
-    // Best-effort: nothing here may block the backend's start; commands then fall back to plain `goat`.
     Effect.catchCause((cause) =>
       logWarning("could not install goat launcher", { shimPath, cause: Cause.pretty(cause) }).pipe(
         Effect.as(Option.none<string>()),

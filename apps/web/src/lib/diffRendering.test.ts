@@ -6,11 +6,50 @@ import {
   buildFileDiffIdentityKey,
   buildFileDiffRenderKey,
   buildPatchCacheKey,
+  findPatchFile,
   getDiffLineStat,
   getRenderablePatch,
   resolveFileDiffPath,
   resolveFileDiffPreviousPath,
 } from "./diffRendering";
+
+describe("findPatchFile", () => {
+  const patch = [
+    "diff --git a/index.ts b/index.ts",
+    "--- a/index.ts",
+    "+++ b/index.ts",
+    "@@ -1 +1 @@",
+    "-a",
+    "+b",
+    "diff --git a/src/index.ts b/src/index.ts",
+    "--- a/src/index.ts",
+    "+++ b/src/index.ts",
+    "@@ -1 +1 @@",
+    "-c",
+    "+d",
+  ].join("\n");
+  const files = (() => {
+    const renderable = getRenderablePatch(patch, "find-patch-file");
+    return renderable?.kind === "files" ? renderable.files : [];
+  })();
+
+  it("matches a provider's absolute path on the remote host to the repository-relative patch", () => {
+    const file = findPatchFile(files, "/Users/jun/.goat/worktrees/goat/fix-x/src/index.ts");
+    expect(file && resolveFileDiffPath(file)).toBe("src/index.ts");
+  });
+
+  it("compares inside the workspace by relative path, so a reverted file matches nothing", () => {
+    const root = "/Users/jun/.goat/worktrees/goat/fix-x";
+    expect(findPatchFile(files, `${root}/index.ts`, root)?.name).toBe("index.ts");
+    expect(findPatchFile(files, `${root}/lib/index.ts`, root)).toBeNull();
+  });
+
+  it("matches relative and Windows paths, and misses unrelated files", () => {
+    expect(findPatchFile(files, "./index.ts")?.name).toBe("index.ts");
+    expect(findPatchFile(files, "C:\\repo\\src\\index.ts")?.name).toBe("src/index.ts");
+    expect(findPatchFile(files, "/repo/other/index.tsx")).toBeNull();
+  });
+});
 
 describe("buildPatchCacheKey", () => {
   it("normalizes outer whitespace before hashing", () => {
@@ -36,6 +75,15 @@ describe("buildPatchCacheKey", () => {
 });
 
 describe("getRenderablePatch", () => {
+  it("keeps a hunk's trailing blank context line", () => {
+    const renderable = getRenderablePatch(
+      "diff --git a/a.ts b/a.ts\n--- a/a.ts\n+++ b/a.ts\n@@ -1,2 +1,2 @@\n-a\n+b\n \n",
+      "trailing-context",
+    );
+    const hunk = renderable?.kind === "files" ? renderable.files[0]?.hunks[0] : undefined;
+    expect(hunk?.unifiedLineCount).toBe(3);
+  });
+
   it("hides indentation changes around inserted JSX without moving review lines", () => {
     const patch = [
       "diff --git a/item.tsx b/item.tsx",
@@ -369,7 +417,6 @@ describe("getDiffLineStat", () => {
 });
 
 describe("a file whose name a patch header cannot carry plainly", () => {
-  /** How git writes such a name, and so how every provider's patch arrives here. */
   const quotedPatch = (written: string) =>
     [
       `diff --git "a/${written}" "b/${written}"`,
@@ -393,8 +440,6 @@ describe("a file whose name a patch header cannot carry plainly", () => {
   };
 
   it("is the name the host knows, not the part of it before the tab", () => {
-    // The path is what a viewed mark, a review comment and a file read are all asked for by, so a
-    // name read short is a mark put on a path the host has never heard of.
     expect(pathOf(quotedPatch("tab\\tfile.txt"))).toBe("tab\tfile.txt");
   });
 

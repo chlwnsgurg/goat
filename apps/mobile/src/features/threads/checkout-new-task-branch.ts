@@ -1,17 +1,12 @@
-import type { EnvironmentProject } from "@t3tools/client-runtime/state/shell";
-import type { VcsRef } from "@t3tools/client-runtime/state/vcs";
-import {
-  type AtomCommandResult,
-  mapAtomCommandResult,
-} from "@t3tools/client-runtime/state/runtime";
-import type { VcsSwitchRefInput, VcsSwitchRefResult } from "@t3tools/contracts";
+import type { EnvironmentProject } from "@goat/client-runtime/state/shell";
+import type { VcsRef } from "@goat/client-runtime/state/vcs";
+import { type AtomCommandResult, mapAtomCommandResult } from "@goat/client-runtime/state/runtime";
+import type { VcsSwitchRefInput, VcsSwitchRefResult } from "@goat/contracts";
 import * as Cause from "effect/Cause";
 import { AsyncResult } from "effect/reactivity";
 
 import { shouldCheckoutNewTaskBranch } from "./new-task-context-presentation";
 
-/** Resolve a composer branch only after its checkout succeeds. Existing worktrees
- * and new-worktree base selections already identify a separate workspace. */
 export async function checkoutNewTaskBranch<E>(input: {
   readonly branch: VcsRef;
   readonly project: Pick<EnvironmentProject, "environmentId" | "workspaceRoot"> | null;

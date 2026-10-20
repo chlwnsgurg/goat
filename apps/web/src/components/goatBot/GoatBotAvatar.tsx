@@ -1,11 +1,11 @@
 import { cn } from "~/lib/utils";
 
-import { T3Wordmark } from "../T3Wordmark";
+import { GoatWordmark } from "../GoatWordmark";
 
 const CIRCLE = { sm: "size-5", md: "size-7", lg: "size-12" } as const;
-const MARK = { sm: "size-3", md: "size-4", lg: "size-7" } as const;
+const MARK = { sm: "size-3.5", md: "size-5", lg: "size-8" } as const;
 
-/** GOAT Bot's face: the goat mark on the bot's own color. */
+/** GOAT Bot's face: the goat mark on a theme-aware neutral circle. */
 export function GoatBotAvatar({
   size = "md",
   className,
@@ -17,12 +17,12 @@ export function GoatBotAvatar({
     <span
       aria-hidden
       className={cn(
-        "inline-flex shrink-0 items-center justify-center rounded-full bg-goat-bubble text-goat-bubble-foreground",
+        "inline-flex shrink-0 items-center justify-center rounded-full border border-goat-avatar-border bg-goat-avatar text-goat-avatar-foreground",
         CIRCLE[size],
         className,
       )}
     >
-      <T3Wordmark className={MARK[size]} />
+      <GoatWordmark className={MARK[size]} />
     </span>
   );
 }

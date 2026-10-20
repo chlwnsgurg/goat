@@ -1,12 +1,14 @@
 import { describe, expect, it } from "vite-plus/test";
 import { getDesktopUpdateStatusText } from "./desktopUpdate.logic";
-import type { DesktopUpdateActionResult, DesktopUpdateState } from "@t3tools/contracts";
+import type { DesktopUpdateActionResult, DesktopUpdateState } from "@goat/contracts";
 
 import {
   canCheckForUpdate,
   getArm64IntelBuildWarningDescription,
   getDesktopUpdateActionError,
   getDesktopUpdateButtonTooltip,
+  getDesktopUpdateDisabledReason,
+  getDesktopUpdateIdleTooltip,
   getDesktopUpdateInstallConfirmationMessage,
   getDesktopUpdateReleaseHistoryUrl,
   getDesktopUpdateReleaseUrl,
@@ -60,6 +62,26 @@ describe("desktop update button state", () => {
     };
     expect(resolveDesktopUpdateButtonAction(state)).toBe("download");
     expect(getDesktopUpdateButtonTooltip(state)).toContain("Click to retry");
+  });
+
+  it("says when the same version did not apply before", () => {
+    const state: DesktopUpdateState = {
+      ...baseState,
+      status: "downloaded",
+      availableVersion: "1.1.0",
+      downloadedVersion: "1.1.0",
+      notAppliedVersion: "1.1.0",
+    };
+    expect(getDesktopUpdateButtonTooltip(state)).toBe(
+      "Update 1.1.0 did not apply. Click to retry.",
+    );
+    expect(
+      getDesktopUpdateButtonTooltip({
+        ...state,
+        availableVersion: "1.2.0",
+        downloadedVersion: "1.2.0",
+      }),
+    ).toContain("1.2.0 downloaded");
   });
 
   it("keeps install action available after an install error", () => {
@@ -186,13 +208,37 @@ describe("getDesktopUpdateActionError", () => {
 
 describe("desktop update UI helpers", () => {
   it("builds the stable release URL for a downloaded version", () => {
-    expect(getDesktopUpdateReleaseUrl("0.0.30")).toBe(
+    expect(getDesktopUpdateReleaseUrl("0.0.30", "")).toBe(
       "https://github.com/goat-si/goat-releases/releases/tag/v0.0.30",
     );
   });
 
+  it("uses the configured desktop update repository for release URLs", () => {
+    expect(getDesktopUpdateReleaseUrl("1.2.3", "JustYannicc/t3code")).toBe(
+      "https://github.com/JustYannicc/t3code/releases/tag/v1.2.3",
+    );
+    expect(getDesktopUpdateReleaseHistoryUrl("JustYannicc/t3code")).toBe(
+      "https://github.com/JustYannicc/t3code/releases",
+    );
+  });
+
+  it.each([
+    "owner/repo/extra",
+    "owner#notes/repo",
+    "owner/repo#notes",
+    "owner?tab=notes/repo",
+    "owner/repo?tab=notes",
+  ])("falls back to the GOAT releases for an invalid configured repository: %s", (repository) => {
+    expect(getDesktopUpdateReleaseHistoryUrl(repository)).toBe(
+      "https://github.com/goat-si/goat-releases/releases",
+    );
+    expect(getDesktopUpdateReleaseUrl("1.2.3", repository)).toBe(
+      "https://github.com/goat-si/goat-releases/releases/tag/v1.2.3",
+    );
+  });
+
   it("builds the nightly release URL without dropping its version suffix", () => {
-    expect(getDesktopUpdateReleaseUrl("0.0.30-nightly.20260728.931")).toBe(
+    expect(getDesktopUpdateReleaseUrl("0.0.30-nightly.20260728.931", "")).toBe(
       "https://github.com/goat-si/goat-releases/releases/tag/v0.0.30-nightly.20260728.931",
     );
   });
@@ -203,7 +249,7 @@ describe("desktop update UI helpers", () => {
   });
 
   it("builds the release history URL", () => {
-    expect(getDesktopUpdateReleaseHistoryUrl()).toBe(
+    expect(getDesktopUpdateReleaseHistoryUrl("")).toBe(
       "https://github.com/goat-si/goat-releases/releases",
     );
   });
@@ -345,6 +391,30 @@ describe("canCheckForUpdate", () => {
 });
 
 describe("getDesktopUpdateButtonTooltip", () => {
+  it("keeps administrator advice next to the app action without blocking checks", () => {
+    const state: DesktopUpdateState = {
+      ...baseState,
+      status: "downloaded",
+      downloadedVersion: "1.2.4",
+      installationNotice: "Ask an administrator. Servers can still update independently.",
+    };
+    expect(getDesktopUpdateButtonTooltip(state)).toContain("Click to restart and install");
+    expect(getDesktopUpdateButtonTooltip(state)).toContain(state.installationNotice);
+    expect(canCheckForUpdate(state)).toBe(true);
+    expect(resolveDesktopUpdateButtonAction(state)).toBe("install");
+  });
+
+  it("shows the installation restriction instead of a generic disabled status", () => {
+    const state: DesktopUpdateState = {
+      ...baseState,
+      enabled: false,
+      status: "disabled",
+      message: "Move GOAT to Applications. Servers can still update independently.",
+    };
+    expect(getDesktopUpdateButtonTooltip(state)).toBe(state.message);
+    expect(getDesktopUpdateStatusText(state)).toBe(state.message);
+    expect(canCheckForUpdate(state)).toBe(false);
+  });
   it("returns 'Up to date' for non-actionable states", () => {
     expect(getDesktopUpdateButtonTooltip({ ...baseState, status: "idle" })).toBe("Up to date");
     expect(getDesktopUpdateButtonTooltip({ ...baseState, status: "up-to-date" })).toBe(
@@ -394,4 +464,35 @@ it("does not show recovery advice when the updater is disabled", () => {
   expect(
     getDesktopUpdateStatusText({ ...baseState, enabled: false, recoveryStatus: "restoring" }),
   ).toBe("Automatic updates are disabled.");
+});
+
+describe("disabled update reason", () => {
+  const disabledState: DesktopUpdateState = {
+    ...baseState,
+    enabled: false,
+    status: "disabled",
+    message: "Automatic updates are only available in packaged production builds.",
+  };
+
+  it("explains why checking is unavailable", () => {
+    expect(getDesktopUpdateDisabledReason(disabledState)).toBe(
+      "Automatic updates are only available in packaged production builds.",
+    );
+    expect(getDesktopUpdateIdleTooltip(disabledState)).toEqual({
+      title: "Updates unavailable",
+      detail: "Automatic updates are only available in packaged production builds.",
+    });
+    expect(getDesktopUpdateDisabledReason({ ...disabledState, message: null })).toBe(
+      "Automatic updates are not available in this build.",
+    );
+  });
+
+  it("keeps the check prompt when updates are available", () => {
+    expect(getDesktopUpdateDisabledReason(baseState)).toBeNull();
+    expect(getDesktopUpdateDisabledReason(null)).toBeNull();
+    expect(getDesktopUpdateIdleTooltip(baseState)).toEqual({
+      title: "Check for updates",
+      detail: null,
+    });
+  });
 });

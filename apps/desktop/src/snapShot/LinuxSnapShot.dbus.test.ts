@@ -27,7 +27,7 @@ const hasDbus =
   NodeChildProcess.spawnSync("gdbus", ["help"]).status === 0;
 
 it.runIf(hasDbus)("captures through real D-Bus marshalling on a private bus", async () => {
-  const directory = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-private-dbus-"));
+  const directory = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "goat-private-dbus-"));
   let daemon: NodeChildProcess.ChildProcess | undefined;
   let server: MessageBus | undefined;
   const clients: LinuxCaptureConnection[] = [];
@@ -94,7 +94,7 @@ it.runIf(hasDbus)("captures through real D-Bus marshalling on a private bus", as
       } else if (message.member === "GetExtensionInfo") {
         server!.send(
           Message.newMethodReturn(message, "a{sv}", [
-            { state: new Variant("d", shellExtensionState), version: new Variant("d", 2) },
+            { state: new Variant("d", shellExtensionState), version: new Variant("d", 3) },
           ]),
         );
       } else if (message.member === "EnableExtension" || message.member === "DisableExtension") {
@@ -224,7 +224,6 @@ it.runIf(hasDbus)("captures through real D-Bus marshalling on a private bus", as
       "--method",
       "com.t3tools.SnapShot.Capture",
     ];
-    // Exercise the actual command copied to Niri's configuration, including gdbus introspection.
     await new Promise<void>((resolve, reject) => {
       NodeChildProcess.execFile(
         "gdbus",

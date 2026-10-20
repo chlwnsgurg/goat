@@ -3,17 +3,19 @@ import type {
   OrchestrationV2ContextHandoff,
   OrchestrationV2ThreadProjection,
   OrchestrationV2TurnItem,
-} from "@t3tools/contracts";
+} from "@goat/contracts";
 import {
   compactDynamicToolOutput,
   omitToolOutputImageData,
   toolOutputImages,
   toolOutputIndicatesFailure,
-} from "@t3tools/shared/toolOutput";
+} from "@goat/shared/toolOutput";
 
 const MAX_DETAIL_STRING_BYTES = 32_768;
 const MAX_DYNAMIC_VALUE_BYTES = 16_384;
 const MAX_ON_DEMAND_BYTES = 256 * 1024;
+
+type FileChangeItem = Extract<OrchestrationV2TurnItem, { type: "file_change" }>;
 
 function truncateDetail(
   value: string | undefined,
@@ -34,6 +36,33 @@ function truncateDetail(
   return `${prefix}\n… output truncated for transport`;
 }
 
+/**
+ * Clients never receive more than this (see projectTurnItemForWire), so a full
+ * diff of a large file would only grow the database and the heap that reads it
+ * back.
+ */
+export function boundFileChangeForStorage(item: OrchestrationV2TurnItem): OrchestrationV2TurnItem {
+  if (item.type !== "file_change") return item;
+  const { diffStr, oldStr, newStr, patch } = item;
+  // A cut patch cannot be parsed, so a larger edit falls back to the checkpoint diff.
+  const patchTooLarge =
+    patch !== undefined &&
+    (patch.length > MAX_ON_DEMAND_BYTES || Buffer.byteLength(patch, "utf8") > MAX_ON_DEMAND_BYTES);
+  const bounded = {
+    ...item,
+    ...(diffStr === undefined ? {} : { diffStr: truncateDetail(diffStr) }),
+    ...(oldStr === undefined ? {} : { oldStr: truncateDetail(oldStr) }),
+    ...(newStr === undefined ? {} : { newStr: truncateDetail(newStr) }),
+  };
+  if (patchTooLarge) delete bounded.patch;
+  return !patchTooLarge &&
+    bounded.diffStr === diffStr &&
+    bounded.oldStr === oldStr &&
+    bounded.newStr === newStr
+    ? item
+    : bounded;
+}
+
 function summarizeDynamicValue(value: unknown): unknown {
   let serialized: string;
   try {
@@ -50,7 +79,6 @@ function summarizeDynamicValue(value: unknown): unknown {
     serialized = "Unserializable tool output";
   }
 
-  // Preserve the first nonblank normalized line, but stop after the preview.
   // Splitting and normalizing every line can allocate far more than the input.
   const start = /\S/u.exec(serialized)?.index;
   let firstLine = start === undefined ? "Large tool output" : "";
@@ -81,8 +109,6 @@ export function projectTurnItemForWire(item: OrchestrationV2TurnItem): Orchestra
     }
     case "command_execution": {
       const { output, ...projected } = item;
-      // Clients used this preview to recognize provider-reported failures. Keep
-      // the outcome without retaining or serializing the output that proved it.
       const failed =
         item.outputIndicatesFailure === true ||
         (item.exitCode !== undefined && item.exitCode !== 0) ||
@@ -95,13 +121,7 @@ export function projectTurnItemForWire(item: OrchestrationV2TurnItem): Orchestra
       };
     }
     case "file_change": {
-      // File identity and counts are enough for activity. Full diffs already
-      // have a dedicated read path and remain intact in persistence.
-      const { diffStr, oldStr: _old, newStr: _new, ...projected } = item;
-      // A failed edit stores the provider's error where the diff would be.
-      return item.status === "failed" && diffStr?.trim()
-        ? { ...projected, diffStr: truncateDetail(diffStr) }
-        : projected;
+      return projectFileChangeForWire(item);
     }
     case "subagent":
       return {
@@ -125,6 +145,18 @@ export function projectTurnItemForWire(item: OrchestrationV2TurnItem): Orchestra
   }
 }
 
+/**
+ * The patch stays behind a flag so a transcript frame stays small; a client fetches it with
+ * getTurnItem when the row opens. A failed edit's diffStr holds the provider's error.
+ */
+function projectFileChangeForWire(item: FileChangeItem): FileChangeItem {
+  const { diffStr, oldStr: _old, newStr: _new, patch, patchOmitted, ...projected } = item;
+  if (item.status === "failed") {
+    return diffStr?.trim() ? { ...projected, diffStr: truncateDetail(diffStr) } : projected;
+  }
+  return patch?.trim() || patchOmitted === true ? { ...projected, patchOmitted: true } : projected;
+}
+
 function hasDynamicValue(value: unknown): boolean {
   if (value === undefined || value === null) return false;
   if (typeof value === "string") return value.trim().length > 0;
@@ -137,7 +169,6 @@ function boundDynamicValue(value: unknown): unknown {
   if (typeof value === "string") return truncateDetail(value, MAX_ON_DEMAND_BYTES);
   let json: string;
   try {
-    // Compact, so measuring does not inflate the value; clients indent it.
     json = JSON.stringify(value) ?? String(value);
   } catch {
     return "Unserializable tool value";
@@ -148,9 +179,8 @@ function boundDynamicValue(value: unknown): unknown {
 }
 
 /**
- * A tool output for a detail read, without image bytes. When the rest is too
- * large to send whole, its truncated text still comes with the image markers,
- * in order, so clients can load each image by index.
+ * When the rest is too large to send whole, its truncated text still comes with
+ * the image markers, in order, so clients can load each image by index.
  */
 function boundToolOutput(output: unknown): unknown {
   const omitted = omitToolOutputImageData(output);
@@ -165,11 +195,6 @@ function boundToolOutput(output: unknown): unknown {
       ];
 }
 
-/**
- * Projects one item for an on-demand detail read: keeps the input and output
- * the timeline withholds, bounded so a huge result cannot stall the socket.
- * Image bytes are left out; clients load them as `tool-output-image` assets.
- */
 export function projectTurnItemForDetail(item: OrchestrationV2TurnItem): OrchestrationV2TurnItem {
   switch (item.type) {
     case "command_execution":
@@ -193,8 +218,13 @@ export function projectTurnItemForDetail(item: OrchestrationV2TurnItem): Orchest
           item.result === null ? null : (truncateDetail(item.result, MAX_ON_DEMAND_BYTES) ?? null),
       };
     case "handoff":
-    case "file_change":
       return projectTurnItemForWire(item);
+    case "file_change": {
+      const { patchOmitted: _omitted, ...projected } = projectFileChangeForWire(item);
+      return item.status === "failed" || !item.patch?.trim()
+        ? projected
+        : { ...projected, patch: item.patch };
+    }
     default:
       return item;
   }

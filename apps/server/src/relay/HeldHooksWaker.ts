@@ -1,3 +1,4 @@
+import { isGoatConnectEnabled } from "@goat/shared/goatConnect";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Schedule from "effect/Schedule";
@@ -8,11 +9,6 @@ import { readHoldWebhooksWhileOffline, readRelayConnection } from "../cloud/conf
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import { makeRelayEnvironmentClient } from "./relayEnvironmentClient.ts";
 
-/**
- * Tells T3 Connect this environment is reachable again, so the relay delivers
- * the webhook requests it held while we were offline now rather than at its
- * next backoff step. Nothing happens unless the environment opted in.
- */
 const wakeHeldHooks = Effect.fn("HeldHooksWaker.wake")(function* () {
   if (!(yield* readHoldWebhooksWhileOffline)) return false;
   const connection = yield* readRelayConnection;
@@ -24,13 +20,12 @@ const wakeHeldHooks = Effect.fn("HeldHooksWaker.wake")(function* () {
   return pending;
 });
 
-/** Wakes held webhooks each time the managed tunnel connects. */
 export const layer = Layer.effectDiscard(
   Effect.gen(function* () {
+    if (!isGoatConnectEnabled()) return;
     const runtime = yield* CloudManagedEndpointRuntime.CloudManagedEndpointRuntime;
     const wake = wakeHeldHooks().pipe(
       Effect.timeout("10 seconds"),
-      // The relay retries on its own schedule too, so a few tries are enough.
       Effect.retry({ schedule: Schedule.exponential("2 seconds"), times: 3 }),
       Effect.tap((pending) =>
         pending ? Effect.logInfo("T3 Connect is delivering held webhook requests") : Effect.void,

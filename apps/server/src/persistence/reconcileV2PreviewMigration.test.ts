@@ -1,5 +1,5 @@
 import { assert, describe, it } from "@effect/vitest";
-import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
+import * as NodeSqliteClient from "@goat/shared/nodeSqliteClient";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Migrator from "effect/sql/Migrator";
@@ -10,7 +10,6 @@ import PullRequestFilesViewed from "./Migrations/053_PullRequestFilesViewed.ts";
 import RemoveRedundantProjectionIndexes from "./Migrations/056_RemoveRedundantProjectionIndexes.ts";
 import OrchestrationV2 from "./Migrations/055_OrchestrationV2.ts";
 
-// The V2 schema is unchanged from the published September 15–16 previews.
 const seedPreview = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
   yield* runMigrations({ toMigrationInclusive: 52 });
@@ -28,6 +27,39 @@ const seedPreview = Effect.gen(function* () {
 });
 
 describe("V2 preview upgrade", () => {
+  it.effect.each([false, true])(
+    "rejects preview memory evidence before reconciliation (old ledger: %s)",
+    (withOldMemoryLedger) =>
+      Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient;
+        yield* seedPreview;
+        yield* sql`CREATE TABLE memory_items (body TEXT)`;
+        yield* sql`INSERT INTO memory_items VALUES ('synthetic preview memory')`;
+        if (withOldMemoryLedger) {
+          yield* sql`INSERT INTO effect_sql_migrations (migration_id, name) VALUES (70, 'Memory')`;
+        }
+        const ledger = yield* sql`SELECT * FROM effect_sql_migrations ORDER BY migration_id`;
+        const schema = yield* sql`SELECT * FROM sqlite_master ORDER BY type, name`;
+        const body = yield* sql`SELECT * FROM memory_items`;
+        const imports = yield* sql`SELECT * FROM orchestration_v2_legacy_imports`;
+        const result = yield* Effect.flip(runMigrations());
+        // Check preservation before the error message so moving only the preflight exposes writes.
+        assert.deepStrictEqual(
+          yield* sql`SELECT * FROM effect_sql_migrations ORDER BY migration_id`,
+          ledger,
+        );
+        assert.deepStrictEqual(yield* sql`SELECT * FROM sqlite_master ORDER BY type, name`, schema);
+        assert.deepStrictEqual(yield* sql`SELECT * FROM memory_items`, body);
+        assert.deepStrictEqual(yield* sql`SELECT * FROM orchestration_v2_legacy_imports`, imports);
+        assert.instanceOf(result, Migrator.MigrationError);
+        assert.strictEqual(result.kind, "BadState");
+        assert.strictEqual(
+          result.message,
+          "Unreleased memory DB is incompatible; reset this sandbox's memory development state and restart.",
+        );
+      }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
+  );
+
   it.effect("upgrades a published preview without replaying V2 or losing import progress", () =>
     Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient;
@@ -41,10 +73,34 @@ describe("V2 preview upgrade", () => {
         [58, "WebhookRelayDeliveries"],
         [59, "McpAppModelContext"],
         [60, "ThreadSnapshotWindowIndexes"],
-        [61, "ServerActivityIndexes"],
-        [62, "RemoteReports"],
-        [63, "RemoteDispatches"],
-        [64, "ChannelLedger"],
+        [61, "PullRequestReviewGuides"],
+        [62, "ThreadFailureLookupIndex"],
+        [63, "DropUnusedV1Projections"],
+        [64, "CanonicalizeThreadPullRequestLinks"],
+        [65, "ServerActivityIndexes"],
+        [66, "RemoteReports"],
+        [67, "RemoteDispatches"],
+        [68, "ChannelLedger"],
+        [69, "RemoteDispatchQuestions"],
+        [70, "ThreadRunResults"],
+        [71, "RemoteReportRelay"],
+        [72, "ProjectionTurnItemRequestIndex"],
+        [73, "Memory"],
+        [74, "MemoryHubSync"],
+        [75, "MemorySearchCounters"],
+        [76, "MemoryTaskGrantCeiling"],
+        [77, "MemoryImportLineage"],
+        [78, "MemoryCheckpointAccounting"],
+        [79, "MemoryReportLifecycle"],
+        [80, "MemoryUsageCounters"],
+        [81, "MemoryRevertResults"],
+        [82, "HandoffLookupIndex"],
+        [83, "MemoryLastReadySpace"],
+        [84, "MemoryHubAdministered"],
+        [85, "MemoryCheckpointLifecycle"],
+        [86, "FleetGoals"],
+        [87, "FleetHealth"],
+        [88, "ThreadRunObservedChecks"],
       ]);
       assert.deepStrictEqual(yield* runMigrations(), []);
       assert.deepStrictEqual(yield* sql`SELECT * FROM orchestration_v2_legacy_imports`, imports);
@@ -128,10 +184,34 @@ describe("V2 preview upgrade", () => {
         [58, "WebhookRelayDeliveries"],
         [59, "McpAppModelContext"],
         [60, "ThreadSnapshotWindowIndexes"],
-        [61, "ServerActivityIndexes"],
-        [62, "RemoteReports"],
-        [63, "RemoteDispatches"],
-        [64, "ChannelLedger"],
+        [61, "PullRequestReviewGuides"],
+        [62, "ThreadFailureLookupIndex"],
+        [63, "DropUnusedV1Projections"],
+        [64, "CanonicalizeThreadPullRequestLinks"],
+        [65, "ServerActivityIndexes"],
+        [66, "RemoteReports"],
+        [67, "RemoteDispatches"],
+        [68, "ChannelLedger"],
+        [69, "RemoteDispatchQuestions"],
+        [70, "ThreadRunResults"],
+        [71, "RemoteReportRelay"],
+        [72, "ProjectionTurnItemRequestIndex"],
+        [73, "Memory"],
+        [74, "MemoryHubSync"],
+        [75, "MemorySearchCounters"],
+        [76, "MemoryTaskGrantCeiling"],
+        [77, "MemoryImportLineage"],
+        [78, "MemoryCheckpointAccounting"],
+        [79, "MemoryReportLifecycle"],
+        [80, "MemoryUsageCounters"],
+        [81, "MemoryRevertResults"],
+        [82, "HandoffLookupIndex"],
+        [83, "MemoryLastReadySpace"],
+        [84, "MemoryHubAdministered"],
+        [85, "MemoryCheckpointLifecycle"],
+        [86, "FleetGoals"],
+        [87, "FleetHealth"],
+        [88, "ThreadRunObservedChecks"],
       ]);
     }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
   );

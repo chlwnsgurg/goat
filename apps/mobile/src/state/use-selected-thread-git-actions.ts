@@ -1,22 +1,19 @@
 import { useCallback, useEffect, useEffectEvent, useMemo } from "react";
 
-import { EnvironmentProject, EnvironmentThreadShell } from "@t3tools/client-runtime/state/shell";
-import type { AtomCommandResult } from "@t3tools/client-runtime/state/runtime";
+import { EnvironmentProject, EnvironmentThreadShell } from "@goat/client-runtime/state/shell";
+import type { AtomCommandResult } from "@goat/client-runtime/state/runtime";
 import {
   type GitActionRequestInput,
   type VcsActionOperation,
   type VcsRef,
-} from "@t3tools/client-runtime/state/vcs";
+} from "@goat/client-runtime/state/vcs";
 import {
   AuthOrchestrationOperateScope,
   AuthSourceControlWriteScope,
   EnvironmentAuthorizationError,
   type GitRunStackedActionResult,
-} from "@t3tools/contracts";
-import {
-  dedupeRemoteBranchesWithLocalMatches,
-  sanitizeFeatureBranchName,
-} from "@t3tools/shared/git";
+} from "@goat/contracts";
+import { dedupeRemoteBranchesWithLocalMatches, sanitizeFeatureBranchName } from "@goat/shared/git";
 import * as Cause from "effect/Cause";
 import { AsyncResult } from "effect/reactivity";
 
@@ -142,10 +139,7 @@ export function useSelectedThreadGitActions() {
   );
 
   // Shell updates replace the selected thread object many times per second while a
-  // turn streams, so key the refresh on primitives. The server publishes status after
-  // each turn finishes; this only seeds status when the selection or cwd changes, and
-  // again on reconnect because the server's cached status can miss changes made while
-  // the app was away.
+  // turn streams, so key the refresh on primitives.
   const selectedEnvironmentId = selectedThread?.environmentId ?? null;
   const selectedThreadId = selectedThread?.id ?? null;
   const hasSelectedThreadProject = selectedThreadProject !== null;
@@ -392,7 +386,6 @@ export function useSelectedThreadGitActions() {
             ...(input.commitMessage ? { commitMessage: input.commitMessage } : {}),
             ...(input.featureBranch ? { featureBranch: input.featureBranch } : {}),
             ...(input.filePaths?.length ? { filePaths: [...input.filePaths] } : {}),
-            // A pull request the action opens is linked to the thread it ran beside.
             threadId: thread.id,
           });
           if (AsyncResult.isFailure(result)) {

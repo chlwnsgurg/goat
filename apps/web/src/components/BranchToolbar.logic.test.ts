@@ -1,4 +1,4 @@
-import { EnvironmentId, type VcsRef } from "@t3tools/contracts";
+import { EnvironmentId, type VcsRef } from "@goat/contracts";
 import { describe, expect, it } from "vite-plus/test";
 import {
   dedupeRemoteBranchesWithLocalMatches,
@@ -12,8 +12,8 @@ import {
   resolveBranchTriggerLabel,
   resolveBranchToolbarPrBranch,
   resolveBranchToolbarValue,
-  resolveLocalCheckoutBranchMismatch,
   resolveWorkspaceChipLabel,
+  resolveCheckoutBranchMismatch,
   sanitizeNewRefName,
   shouldIncludeBranchPickerItem,
   shouldShowComposerContextStrip,
@@ -214,10 +214,10 @@ describe("resolveBranchToolbarPrBranch", () => {
   });
 });
 
-describe("resolveLocalCheckoutBranchMismatch", () => {
+describe("resolveCheckoutBranchMismatch", () => {
   it("detects when a local thread is associated with a different branch than the checkout", () => {
     expect(
-      resolveLocalCheckoutBranchMismatch({
+      resolveCheckoutBranchMismatch({
         effectiveEnvMode: "local",
         activeWorktreePath: null,
         activeThreadBranch: "feature/thread",
@@ -226,12 +226,13 @@ describe("resolveLocalCheckoutBranchMismatch", () => {
     ).toEqual({
       threadBranch: "feature/thread",
       currentBranch: "feature/current",
+      canRestoreThreadBranch: true,
     });
   });
 
   it("ignores matching local checkout state", () => {
     expect(
-      resolveLocalCheckoutBranchMismatch({
+      resolveCheckoutBranchMismatch({
         effectiveEnvMode: "local",
         activeWorktreePath: null,
         activeThreadBranch: "feature/thread",
@@ -240,20 +241,34 @@ describe("resolveLocalCheckoutBranchMismatch", () => {
     ).toBeNull();
   });
 
-  it("ignores dedicated worktrees because their checkout is already thread-scoped", () => {
+  it("warns about worktree branch drift without restore, but ignores a pending rename status", () => {
+    const worktree = {
+      effectiveEnvMode: "worktree" as const,
+      activeWorktreePath: "/repo/.t3/worktrees/feature-thread",
+      activeThreadBranch: "t3code/fix-sidebar",
+    };
+
     expect(
-      resolveLocalCheckoutBranchMismatch({
-        effectiveEnvMode: "worktree",
-        activeWorktreePath: "/repo/.t3/worktrees/feature-thread",
-        activeThreadBranch: "feature/thread",
-        currentGitBranch: "feature/current",
+      resolveCheckoutBranchMismatch({
+        ...worktree,
+        currentGitBranch: "t3code/1a2b3c4d",
       }),
     ).toBeNull();
+    expect(
+      resolveCheckoutBranchMismatch({
+        ...worktree,
+        currentGitBranch: "feature/checkout",
+      }),
+    ).toEqual({
+      threadBranch: worktree.activeThreadBranch,
+      currentBranch: "feature/checkout",
+      canRestoreThreadBranch: false,
+    });
   });
 
   it("ignores new-worktree base selection before a worktree exists", () => {
     expect(
-      resolveLocalCheckoutBranchMismatch({
+      resolveCheckoutBranchMismatch({
         effectiveEnvMode: "worktree",
         activeWorktreePath: null,
         activeThreadBranch: "feature/base",
@@ -691,8 +706,6 @@ describe("shouldIncludeBranchPickerItem", () => {
     ).toBe(false);
   });
 
-  // Typing a spaced name must still surface the ref it would have been created
-  // as, or the picker shows nothing at all for that query.
   it("surfaces an existing ref matching the sanitized query", () => {
     expect(
       shouldIncludeBranchPickerItem({
@@ -704,8 +717,6 @@ describe("shouldIncludeBranchPickerItem", () => {
     ).toBe(true);
   });
 
-  // A partial query has to reach the ref it would have been created as, so
-  // searching "hello w" still finds an existing hello-world.
   it("surfaces a ref from a partial query containing a space", () => {
     expect(
       shouldIncludeBranchPickerItem({
@@ -729,10 +740,6 @@ describe("shouldIncludeBranchPickerItem", () => {
   });
 });
 
-// Git rejects ASCII space and the ASCII control characters in ref names, so a
-// typed name like "new branch" can only ever fail. Replacing exactly those can
-// turn a failing name into a working one without touching a name git already
-// accepts, including one holding non-ASCII whitespace such as U+00A0.
 describe("sanitizeNewRefName", () => {
   it("replaces a space with a dash", () => {
     expect(sanitizeNewRefName("new branch")).toBe("new-branch");
@@ -750,8 +757,6 @@ describe("sanitizeNewRefName", () => {
     expect(sanitizeNewRefName("new\tbranch")).toBe("new-branch");
   });
 
-  // git accepts U+00A0, U+2009 and other non-ASCII whitespace in ref names, so
-  // rewriting them would silently create a ref the user never typed.
   it("preserves whitespace that git accepts", () => {
     expect(sanitizeNewRefName("new\u00a0branch")).toBe("new\u00a0branch");
     expect(sanitizeNewRefName("new\u2009branch")).toBe("new\u2009branch");
@@ -773,8 +778,6 @@ describe("sanitizeNewRefName", () => {
     expect(sanitizeNewRefName("   ")).toBe("");
   });
 
-  // Scoped deliberately to whitespace: git accepts consecutive dashes, so
-  // collapsing them would rewrite names the user may have typed on purpose.
   it("does not collapse dashes the user typed", () => {
     expect(sanitizeNewRefName("new - branch")).toBe("new---branch");
     expect(sanitizeNewRefName("foo--bar")).toBe("foo--bar");
@@ -846,7 +849,7 @@ it("shows the saved SSH label before transfer", () => {
       sshSelected: true,
       savedLabel: "Saved host",
     }),
-  ).toBe("Worktree · Saved host");
+  ).toBe("SSH · Saved host");
   expect(
     resolveSshWorkspaceLabel({ workspaceLabel: "Local", sshSelected: false, savedLabel: null }),
   ).toBe("Local");
@@ -858,5 +861,5 @@ it("shows unavailable SSH rather than a local worktree after profile removal", (
       sshSelected: true,
       savedLabel: null,
     }),
-  ).toBe("Worktree · unavailable SSH connection");
+  ).toBe("SSH · unavailable connection");
 });

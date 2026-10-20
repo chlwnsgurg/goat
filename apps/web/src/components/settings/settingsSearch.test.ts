@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vite-plus/test";
-import { EnvironmentId } from "@t3tools/contracts";
+import { EnvironmentId } from "@goat/contracts";
 
 import {
   filterAvailableSettingsSearchItems,
@@ -45,6 +45,37 @@ const ITEMS: ReadonlyArray<SettingsSearchItem> = [
 ];
 
 describe("searchSettings", () => {
+  it.each(["hub", "phone qr", "pair phone"])("routes %s to the hub card", (query) => {
+    const match = searchSettings(query).find((item) => item.id === "hub-device");
+    expect(match).toMatchObject({
+      title: "Use this device as a hub",
+      to: "/settings/connections",
+    });
+    expect(match?.targetId ?? match?.id).toBe("hub-device");
+  });
+
+  it("routes the existing Tailscale search entry to its moved hub control", () => {
+    const entry = SETTINGS_SEARCH_ITEMS.find((item) => item.id === "tailscale-https");
+    expect(entry?.targetId).toBe("hub-device");
+  });
+
+  it("finds the existing saved environment section by Add device", () => {
+    expect(searchSettings("add device").map((item) => item.id)).toContain("remote-environments");
+    expect(searchableSetting("remote-environments").id).toBe("remote-environments");
+  });
+  it.each(["OTel", "OTLP", "telemetry export", "Grafana"])(
+    "finds environment telemetry settings for %s",
+    (query) => {
+      expect(searchSettings(query)).toContainEqual(
+        expect.objectContaining({
+          id: "telemetry-export",
+          to: "/settings/diagnostics",
+          targetId: "telemetry-export",
+          scope: "environment",
+        }),
+      );
+    },
+  );
   it.each(["send shortcut", "multiline", "new line"])("finds Send shortcut for %s", (query) => {
     expect(searchSettings(query).map((item) => item.id)).toContain("send-shortcut");
   });
@@ -170,6 +201,17 @@ describe("searchSettings", () => {
       hasThreadAutoSettlement: false,
     });
 
+    expect(available).toContainEqual(
+      expect.objectContaining({
+        id: "goat-connect-coming-soon",
+        title: "GOAT Connect · Coming soon",
+        to: "/settings/connections",
+      }),
+    );
+    expect(searchSettings("Tailscale guide", available).map((item) => item.id)).toContain(
+      "goat-connect-coming-soon",
+    );
+
     const gatedIds = new Set<string>([
       "follow-change-request-templates",
       "git-fetch-interval",
@@ -178,6 +220,8 @@ describe("searchSettings", () => {
       "provider-health-check-interval",
       "cursor-keychain-usage",
       "source-control-writer-model",
+      "review-guide-model",
+      "review-guide-instructions",
       "source-control-writing-style",
       "t3-connect",
       "hold-webhooks-while-offline",
@@ -227,7 +271,6 @@ describe("searchSettings", () => {
     expect(remoteOnly).not.toContain("t3-connect");
     expect(remoteOnly).not.toContain("publish-agent-activity");
     expect(remoteOnly).not.toContain("wsl-backend");
-    // Browsers without access:write still render CloudLinkRow for their host.
     const browser = filterAvailableSettingsSearchItems(availability).map((item) => item.id);
     expect(browser).toContain("publish-agent-activity");
   });
@@ -374,6 +417,9 @@ describe("searchSettings", () => {
     ["default model", "default-model", "/settings/general"],
     ["new threads", "new-threads", "/settings/general"],
     ["agent browser access", "agent-browser-access", "/settings/integrations"],
+    ["goat bot home", "goat-bot-home", "/settings/goat-bot"],
+    ["slack", "slack-connection", "/settings/goat-bot"],
+    ["imessage", "imessage-channel", "/settings/goat-bot"],
     ["automatically pull", "automatic-pull", "/settings/source-control"],
     ["actions", "project-actions", "/settings/projects"],
     ["project overview", "project-overview", "/settings/projects"],
@@ -397,6 +443,15 @@ describe("searchSettings", () => {
 });
 
 describe("settings search targets", () => {
+  it("requires an environment for the resolved telemetry export destination", () => {
+    const result = searchSettings("OpenTelemetry export").find(
+      (item) => item.id === "telemetry-export",
+    )!;
+    const target = getSettingsSearchTargetScope(result.targetId ?? result.id)!;
+    expect(isSettingsSearchScopeAvailable(target.scope, "all")).toBe(false);
+    expect(isSettingsSearchScopeAvailable(target.scope, "project")).toBe(false);
+    expect(isSettingsSearchScopeAvailable(target.scope, "environment")).toBe(true);
+  });
   it.each([
     "auto-settle-inactive-threads",
     "auto-settle-merged-threads",
@@ -575,3 +630,10 @@ describe("sidebar view search", () => {
     },
   );
 });
+
+it.each(["memory", "sharing", "forget", "conflict", "revert", "source access"])(
+  "keeps Memory reachable through settings search: %s",
+  (query) => {
+    expect(searchSettings(query).some((item) => item.to === "/settings/memory")).toBe(true);
+  },
+);

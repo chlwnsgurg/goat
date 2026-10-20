@@ -1,4 +1,4 @@
-import { AuthOrchestrationOperateScope, AuthSourceControlWriteScope } from "@t3tools/contracts";
+import { AuthOrchestrationOperateScope, AuthSourceControlWriteScope } from "@goat/contracts";
 import * as Cause from "effect/Cause";
 import { AsyncResult } from "effect/reactivity";
 import { beforeEach, describe, expect, it, vi } from "vite-plus/test";
@@ -226,8 +226,6 @@ describe("thread Git mutation permissions", () => {
 
   it("refreshes the worktree status when the metadata update is denied after checkout", async () => {
     state.scopes.add(AuthOrchestrationOperateScope);
-    // Git already switched the branch, so the sheet must show it even though the
-    // thread record could not be updated.
     state.afterGitAction = () => state.scopes.delete(AuthOrchestrationOperateScope);
     expect(
       await useSelectedThreadGitActions().onCheckoutSelectedThreadBranch("feature"),

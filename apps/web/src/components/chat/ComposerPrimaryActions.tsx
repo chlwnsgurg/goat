@@ -1,12 +1,18 @@
 import { memo, type MouseEventHandler, type PointerEventHandler } from "react";
-import { CheckIcon, ChevronDownIcon, ChevronLeftIcon, Minimize2Icon, PlayIcon } from "lucide-react";
-import { CornerUpRight, ListPlus } from "lucide";
+import {
+  ArrowUpIcon,
+  CheckIcon,
+  ChevronDownIcon,
+  ChevronLeftIcon,
+  MinimizeIcon as Minimize2Icon,
+  PlayIcon,
+  SquareIcon,
+} from "~/components/solar";
+import { CornerUpRight, ListPlus } from "~/components/solar/nodes";
 import { MorphIcon } from "~/components/MorphIcon";
-import { useEnvironmentIdentificationMode } from "~/hooks/useSettings";
 import { formatContextWindowTokens } from "~/lib/contextWindow";
 import { cn } from "~/lib/utils";
 import { useShortcutModifierState } from "../../shortcutModifierState";
-import { StageBackdropButtonArt, useSidebarStageBackdropVariant } from "../SidebarStageBackdrop";
 import { Button } from "../ui/button";
 import { Menu, MenuItem, MenuPopup, MenuTrigger } from "../ui/menu";
 import { Spinner } from "../ui/spinner";
@@ -15,7 +21,7 @@ import { composerFloatingLayerProps } from "./composerEventScope";
 import {
   alternateComposerDispatchAction,
   resolveComposerDispatchMode,
-} from "@t3tools/client-runtime/state/composer-dispatch";
+} from "@goat/client-runtime/state/composer-dispatch";
 
 interface PendingActionState {
   questionIndex: number;
@@ -29,11 +35,10 @@ interface ComposerPrimaryActionsProps {
   compact: boolean;
   canOperateThread: boolean;
   pendingAction: PendingActionState | null;
-  /** The turn is running: sending steers or queues instead of starting a turn. */
   isRunning: boolean;
-  /** Stop can reach a run, including one still preparing or starting. */
   canInterrupt: boolean;
   followUpBehavior?: "queue" | "steer";
+  canSteer?: boolean;
   alternateShortcutLabel?: string | null;
   showPlanFollowUpPrompt: boolean;
   promptHasText: boolean;
@@ -51,9 +56,7 @@ interface ComposerPrimaryActionsProps {
   onPreviousPendingQuestion: () => void;
   onInterrupt: () => void;
   onImplementPlanInNewThread: () => void;
-  /** Tokens a stale session would re-read. When set, a Compact chip shows the count and Enter compacts first. */
   compactBeforeSendTokens?: number | null;
-  /** The Compact chip is turned off, so the next send keeps full history. */
   keepFullHistory?: boolean;
   onToggleKeepFullHistory?: () => void;
 }
@@ -76,10 +79,8 @@ const formatPendingPrimaryActionLabel = (input: {
   return input.questionIndex > 0 ? "Submit answers" : "Submit answer";
 };
 
-// The composer's labeled primary actions (Submit, Refine, Implement) share the send button's
-// message-action pill, so they are composer-owned buttons rather than restyled Buttons.
 const messageActionPillClassName =
-  "relative inline-flex h-7 shrink-0 cursor-pointer items-center justify-center gap-1.5 whitespace-nowrap rounded-full bg-message-action font-medium text-base text-message-action-foreground shadow-xs shadow-message-action/24 outline-none hover:bg-message-action-hover focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring focus-visible:ring-offset-1 focus-visible:ring-offset-background disabled:pointer-events-none disabled:opacity-64 disabled:shadow-none sm:text-sm pointer-coarse:after:absolute pointer-coarse:after:size-full pointer-coarse:after:min-h-11";
+  "relative inline-flex h-7 shrink-0 cursor-pointer items-center justify-center gap-1.5 whitespace-nowrap rounded-full bg-composer-send font-medium text-base text-message-action-foreground shadow-xs shadow-message-action/24 outline-none hover:bg-message-action focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring focus-visible:ring-offset-1 focus-visible:ring-offset-background disabled:pointer-events-none disabled:opacity-64 disabled:shadow-none sm:text-sm pointer-coarse:after:absolute pointer-coarse:after:size-full pointer-coarse:after:min-h-11";
 
 /**
  * Round primary actions (send, stop) stay within the footer's 28px control row, visually no
@@ -101,6 +102,7 @@ export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
   isRunning,
   canInterrupt,
   followUpBehavior = "steer",
+  canSteer = true,
   alternateShortcutLabel = null,
   showPlanFollowUpPrompt,
   promptHasText,
@@ -125,20 +127,17 @@ export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
   const pointerFocusProps = preserveComposerFocusOnPointerDown
     ? { onPointerDown: preventPointerFocus }
     : undefined;
-  const environmentIdentificationMode = useEnvironmentIdentificationMode();
   const shortcutModifiers = useShortcutModifierState();
   const isQueuing =
     !isEditingQueuedMessage &&
     resolveComposerDispatchMode({
       running: isRunning,
       activeTurnDefault: followUpBehavior,
+      canSteer,
       alternateModifier: shortcutModifiers.metaKey || shortcutModifiers.ctrlKey,
     }) === "queue";
   const alternateAction = alternateComposerDispatchAction(followUpBehavior);
   const isSendDisabled = !canOperateThread || sendDisabledReason !== null;
-  const stageBackdropVariant = useSidebarStageBackdropVariant(
-    environmentIdentificationMode === "artwork",
-  );
 
   const renderStopGenerationButton = () => (
     <Tooltip key="interrupt">
@@ -148,7 +147,7 @@ export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
             type="button"
             className={cn(
               composerRoundActionClassName,
-              "cursor-pointer bg-destructive/90 text-white shadow-xs shadow-destructive/24 inset-shadow-control-highlight transition-colors duration-150 hover:bg-destructive active:inset-shadow-control-pressed active:shadow-none",
+              "cursor-pointer bg-composer-stop text-white shadow-xs shadow-destructive/24 inset-shadow-control-highlight transition-colors duration-150 hover:bg-destructive active:inset-shadow-control-pressed active:shadow-none",
             )}
             {...pointerFocusProps}
             disabled={!canOperateThread}
@@ -159,9 +158,7 @@ export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
           />
         }
       >
-        <svg width="10" height="10" viewBox="0 0 12 12" fill="currentColor" aria-hidden="true">
-          <rect x="2" y="2" width="8" height="8" rx="1.5" />
-        </svg>
+        <SquareIcon className="size-3 fill-current" aria-hidden="true" />
       </TooltipTrigger>
       <TooltipPopup>Interrupt</TooltipPopup>
     </Tooltip>
@@ -312,7 +309,7 @@ export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
     submitStatus ??
     (compactsBeforeSend
       ? `Summarize ${compactTokens} tokens of history, then send`
-      : isRunning && !isEditingQueuedMessage
+      : isRunning && !isEditingQueuedMessage && canSteer
         ? `Click to ${followUpBehavior}, Ctrl/⌘-click${alternateShortcutLabel ? ` or ${alternateShortcutLabel}` : ""} to ${alternateAction}`
         : submitLabel);
 
@@ -322,9 +319,7 @@ export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
       className={cn(
         composerRoundActionClassName,
         "isolate shadow-xs transition-all duration-150 enabled:cursor-pointer enabled:inset-shadow-control-highlight hover:scale-105 active:inset-shadow-control-pressed active:shadow-none disabled:pointer-events-none disabled:opacity-64 disabled:shadow-none disabled:hover:scale-100",
-        stageBackdropVariant
-          ? "bg-transparent text-white enabled:shadow-black/24 enabled:hover:brightness-110"
-          : "bg-message-action text-message-action-foreground enabled:shadow-message-action/24 hover:bg-message-action-hover",
+        "bg-composer-send text-message-action-foreground enabled:shadow-message-action/24 hover:bg-message-action",
       )}
       {...pointerFocusProps}
       onClick={showResume ? onResume : onSubmitMessage}
@@ -337,15 +332,6 @@ export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
       }
       aria-label={submitStatus ?? submitLabel}
     >
-      {stageBackdropVariant ? (
-        // The art clips itself so the button can extend its touch overlay past the circle.
-        <span
-          className="pointer-events-none absolute inset-0 -z-10 overflow-hidden rounded-full"
-          aria-hidden="true"
-        >
-          <StageBackdropButtonArt variant={stageBackdropVariant} />
-        </span>
-      ) : null}
       {isConnecting || isSendBusy ? (
         <Spinner size="sm" aria-hidden="true" />
       ) : showResume ? (
@@ -355,15 +341,7 @@ export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
       ) : isRunning ? (
         <MorphIcon className="size-3" icon={isQueuing ? ListPlus : CornerUpRight} />
       ) : (
-        <svg width="12" height="12" viewBox="0 0 14 14" fill="none" aria-hidden="true">
-          <path
-            d="M7 11.5V2.5M7 2.5L3 6.5M7 2.5L11 6.5"
-            stroke="currentColor"
-            strokeWidth="1.8"
-            strokeLinecap="round"
-            strokeLinejoin="round"
-          />
-        </svg>
+        <ArrowUpIcon className="size-3.5" aria-hidden="true" />
       )}
     </button>
   );

@@ -5,21 +5,58 @@ When a server is behind your web or desktop app, an update notice appears in the
 conversation and **Settings → Connections**. Update the machine named in that
 notice.
 
+## Update everything at once
+
+The update button sits above Settings in the icon bar on the left edge of the
+window; in narrow windows it is at the bottom of the sidebar. It updates every
+connected machine in one step: outdated providers, then servers that are behind, then
+the desktop app you are using. Servers move to the
+version your desktop app is installing, or to your web app's version. A
+background service stays on its current release channel. A remote desktop app
+installs the latest release from its own channel. Hover the button to see what
+it will update: the first line says whether it is a GOAT app update, provider or
+server updates, or everything.
+
+While it runs, the button widens to show progress. It names a machine that is
+taking longer than usual, and offers **Retry** for a server that failed. Click
+it to see every machine. The desktop app restarts once each server has started
+its own restart, after a short countdown. Choose **Later** to keep working and
+restart from the update button when you are ready. A server still restarting
+finishes on its own, and the button keeps showing it after the desktop app
+restarts.
+
+Server updates appear only after that version is published to npm. Remote
+desktop apps do not wait for npm. The confirmation lists each machine it skips
+and why, such as a machine that is offline or needs a manual update. Use the
+notice or **Settings → Connections** for those.
+
+If a desktop app restarts on its old version, GOAT tells you the update did
+not apply. It does not install that version again on its own, even when another
+device asks. Use the update button on that machine to retry.
+
+The confirmation counts the running threads that the restarts will interrupt,
+and how many can resume afterwards. See **Continue threads after restarts**
+below.
+
 ## Before you update
 
 Server updates restart the connection and can interrupt active agents and
 terminal commands. Saved threads, settings, and project files remain.
 
-**Settings → General → Continue threads after restarts** is off by default.
-Enable it to resume supported active threads after an update, crash, or machine
+**Settings → General → Continue threads after restarts** is on by default.
+It resumes supported active threads after an update, crash, or machine
 restart. Changes are saved to connected environments that support this setting;
 update older servers first. If a supported environment was offline or has a
 different value, use **Apply to all** in Settings after it connects.
 GOAT must start again on that machine;
 the setting does not enable automatic startup. Terminal commands may still be
 interrupted, and threads without saved provider resume state need a new message.
-If you previously enabled continuation for updates, enable this setting once
-to allow recovery without a connected client.
+A thread that finished its turn to wait on a monitor, subagent, or background task
+is woken and told that this work stopped. A background shell, such as a dev server,
+does not wake it; the thread learns about it with your next message.
+A thread is not resumed while it waits for your approval, answer, or secret, or
+while it is archived, snoozed, or settled. After three automatic resumes in a row,
+the thread waits for your next message.
 
 Updates from the previous orchestration system preserve conversation transcripts but cannot carry
 every kind of runtime history forward. Read [Threads from older GOAT versions](./thread-migration.md)
@@ -36,11 +73,25 @@ refused rather than running half-upgraded:
 
 Update the side the notice names, then reconnect.
 
+For an SSH connection, **Update runtime** in **Settings → Connections** matches the
+host to the version of the machine that owns that connection. It does not install a
+newer release than that machine runs. Check the connection there for its runtime
+version, progress, and any update waiting for running work. Updating this app also
+moves its SSH hosts' runtimes after it restarts. The matching runtime archive must
+be available from a published GOAT release or a configured release mirror.
+
+An agent can request an update when the runtime is idle, then check its status
+while work continues. To update immediately, approve **Update now** in the
+requesting thread or in the owning desktop app. Running work gets up to a minute
+to finish before the restart; cancelling leaves the runtime running. Removing a
+saved connection also leaves it running. To remove GOAT's managed host entry and
+stop an idle runtime GOAT owns, use **Forget host**; remote projects and files stay.
+
 ## Desktop app updates
 
-The GOAT desktop app follows the nightly channel and downloads each new nightly
-by itself. Once it is downloaded, the app restarts to install it when every
-local server reports that no agent work is running.
+GOAT (Nightly) downloads each new nightly by itself, and GOAT downloads each
+new stable release. Once an update is downloaded, the app restarts to install
+it when every local server reports that no agent work is running.
 
 Choose the behaviour in **Settings → General → Update installation**:
 
@@ -56,6 +107,11 @@ SSH move to the app's version the next time they are idle; until then the
 connection notice says the runtime will be replaced when its work finishes.
 
 ## Update a connected server
+
+Background services automatically update within their stable or nightly release
+channel when idle. This is on by default; turn it off in **Settings → General →
+Automatic server updates** for the selected environments. Preview and development
+builds do not update automatically.
 
 The offered action depends on how the server runs:
 
@@ -91,6 +147,10 @@ update can roll back to the previous version. If the update still fails:
 2. Check that you updated the server's machine, not only the device you are using.
 3. For a command-line server, stop it and relaunch the exact version shown in the notice.
 
+Only one server can use a GOAT home directory at a time. If startup reports that
+another server owns it, stop that server before retrying, or use a separate home
+directory and pair with the running server.
+
 ## Update providers
 
 **Settings → Providers** shows provider updates for the selected environment.
@@ -110,7 +170,9 @@ The same page lets you refresh provider status and update supported providers.
 These controls require a connected environment and permission to operate it.
 Provider update checks and restart continuation preferences are in
 **Settings → Maintenance**. If provider update checks are disabled, enable them
-there before refreshing to find newer versions.
+there before refreshing to find newer versions. The same setting controls whether
+GOAT downloads model catalog updates, so with it off new models may not appear
+until you enable it and refresh provider status.
 
 Install App Store or Google Play releases as usual. The mobile app can also
 download updates in the background and apply them when you next leave the app.

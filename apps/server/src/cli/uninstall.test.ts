@@ -3,7 +3,7 @@ import { assert, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
-import * as HostProcess from "@t3tools/shared/HostProcess";
+import * as HostProcess from "@goat/shared/HostProcess";
 
 import { findOwnedLauncher } from "./uninstall.ts";
 
@@ -12,7 +12,7 @@ it.layer(NodeServices.layer)("t3 uninstall launcher", (it) => {
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
-      const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-uninstall-" });
+      const root = yield* fs.makeTempDirectoryScoped({ prefix: "goat-uninstall-" });
       const versionsDir = path.join(root, "runtime/goat/versions");
       const exe = path.join(versionsDir, "1.0.0/goat");
       const otherExe = path.join(root, "other/runtime/goat/versions/1.0.0/goat");

@@ -1,7 +1,7 @@
 "use client";
 
-import type { DesktopPreviewPointerEvent } from "@t3tools/contracts";
-import { MousePointer2 } from "lucide-react";
+import type { DesktopPreviewPointerEvent } from "@goat/contracts";
+import { MousePointerIcon as MousePointer2 } from "~/components/solar";
 import { useEffect, useState } from "react";
 
 import { useBrowserPointerStore } from "~/browser/browserPointerStore";
@@ -57,7 +57,6 @@ function AgentBrowserCursorEvent(props: {
   );
 }
 
-/** The agent's pointer at a surface position; it fades once the agent stops acting. */
 export function AgentCursorMark(props: {
   readonly phase: "move" | "click";
   readonly sequence: number;

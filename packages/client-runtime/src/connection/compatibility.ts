@@ -2,19 +2,32 @@ import {
   ORCHESTRATION_PROTOCOL_QUERY_PARAM,
   ORCHESTRATION_PROTOCOL_VERSION,
   type ExecutionEnvironmentDescriptor,
-} from "@t3tools/contracts";
+} from "@goat/contracts";
+import { orchestrationProtocolRangeOf } from "@goat/shared/sshRuntimeProtocol";
 
 import { ConnectionBlockedError } from "./model.ts";
 
+/**
+ * A client always speaks its own orchestration protocol; a server may still serve older ones,
+ * which it advertises as its range. The client connects when that range includes its version.
+ */
 export function orchestrationProtocolCompatibilityError(
   descriptor: ExecutionEnvironmentDescriptor,
 ): ConnectionBlockedError | null {
-  // Servers shipped before negotiation use the original wire protocol.
-  const serverProtocolVersion = descriptor.orchestrationProtocolVersion ?? 1;
-  if (serverProtocolVersion === ORCHESTRATION_PROTOCOL_VERSION) {
+  const served = orchestrationProtocolRangeOf(descriptor);
+  if (served === null) {
+    return new ConnectionBlockedError({
+      reason: "unsupported",
+      detail: `${descriptor.label} reports an unreadable protocol range, so GOAT cannot tell whether this app can talk to it. Update GOAT on ${descriptor.label} or this app.`,
+    });
+  }
+  if (
+    served.min <= ORCHESTRATION_PROTOCOL_VERSION &&
+    ORCHESTRATION_PROTOCOL_VERSION <= served.max
+  ) {
     return null;
   }
-  return serverProtocolVersion > ORCHESTRATION_PROTOCOL_VERSION
+  return served.min > ORCHESTRATION_PROTOCOL_VERSION
     ? new ConnectionBlockedError({
         reason: "unsupported",
         detail: `This client is not supported by this server. Update your app or use a compatible release to connect to ${descriptor.label}.`,
@@ -26,7 +39,6 @@ export function orchestrationProtocolCompatibilityError(
       });
 }
 
-/** Whether this client can drive the host's update remotely. */
 function canSelfUpdate(descriptor: ExecutionEnvironmentDescriptor): boolean {
   const { serverSelfUpdate, desktopAppUpdate } = descriptor.capabilities;
   return (

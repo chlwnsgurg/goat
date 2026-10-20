@@ -1,3 +1,4 @@
+import { LEGACY_ENVIRONMENT_BOOTSTRAP_TOKEN_TYPE } from "@goat/contracts/legacyT3Names";
 import {
   AuthAccessTokenType,
   type AuthClientPresentationMetadata,
@@ -5,8 +6,8 @@ import {
   AuthTokenExchangeGrantType,
   type ClientConnectionMethod,
   type AuthEnvironmentScope,
-} from "@t3tools/contracts";
-import { encodeOAuthScope } from "@t3tools/shared/oauthScope";
+} from "@goat/contracts";
+import { encodeOAuthScope } from "@goat/shared/oauthScope";
 import * as Effect from "effect/Effect";
 import { environmentEndpointUrl } from "../environment/endpoint.ts";
 import {
@@ -37,8 +38,6 @@ const clientMetadataTokenExchangeFields = (
   };
 };
 
-// The server reads these off the /ws upgrade URL next to wsTicket. Optional on
-// both ends: old servers ignore unknown params, old clients never send them.
 export const appendClientConnectionParams = (
   url: URL,
   clientMetadata: AuthClientPresentationMetadata | undefined,
@@ -83,6 +82,47 @@ export const appendClientConnectionParams = (
   }
 };
 
+/** Older servers reject the GOAT URN before consuming the bootstrap token. Retry once. */
+const exchangeBootstrapToken = Effect.fn(function* (input: {
+  readonly httpBaseUrl: string;
+  readonly credential: string;
+  readonly scopes?: ReadonlyArray<AuthEnvironmentScope>;
+  readonly clientMetadata?: AuthClientPresentationMetadata;
+  readonly dpopProof?: string;
+  readonly timeoutMs?: number;
+}) {
+  const client = yield* makeEnvironmentHttpApiGroupClient(input.httpBaseUrl, "auth");
+  const request = (
+    subjectTokenType:
+      | typeof AuthEnvironmentBootstrapTokenType
+      | typeof LEGACY_ENVIRONMENT_BOOTSTRAP_TOKEN_TYPE,
+  ) =>
+    executeEnvironmentHttpRequest(
+      environmentEndpointUrl(input.httpBaseUrl, "/oauth/token"),
+      input.timeoutMs ?? DEFAULT_REMOTE_REQUEST_TIMEOUT_MS,
+      client.token({
+        headers: input.dpopProof ? { dpop: input.dpopProof } : {},
+        payload: {
+          grant_type: AuthTokenExchangeGrantType,
+          subject_token: input.credential,
+          subject_token_type: subjectTokenType,
+          requested_token_type: AuthAccessTokenType,
+          ...(input.scopes ? { scope: encodeOAuthScope(input.scopes) } : {}),
+          ...clientMetadataTokenExchangeFields(input.clientMetadata),
+        },
+      }),
+    );
+  return yield* request(AuthEnvironmentBootstrapTokenType).pipe(
+    Effect.catchTags({
+      RemoteEnvironmentAuthUndeclaredStatusError: (error) =>
+        error.status === 400
+          ? request(LEGACY_ENVIRONMENT_BOOTSTRAP_TOKEN_TYPE)
+          : Effect.fail(error),
+      EnvironmentRequestInvalidError: () => request(LEGACY_ENVIRONMENT_BOOTSTRAP_TOKEN_TYPE),
+    }),
+  );
+});
+
 export const exchangeRemoteDpopAccessToken = Effect.fn(
   "clientRuntime.authorization.exchangeRemoteDpopAccessToken",
 )(function* (input: {
@@ -93,23 +133,7 @@ export const exchangeRemoteDpopAccessToken = Effect.fn(
   readonly dpopProof: string;
   readonly timeoutMs?: number;
 }) {
-  const client = yield* makeEnvironmentHttpApiGroupClient(input.httpBaseUrl, "auth");
-  const response = yield* executeEnvironmentHttpRequest(
-    environmentEndpointUrl(input.httpBaseUrl, "/oauth/token"),
-    input.timeoutMs ?? DEFAULT_REMOTE_REQUEST_TIMEOUT_MS,
-    client.token({
-      headers: { dpop: input.dpopProof },
-      payload: {
-        grant_type: AuthTokenExchangeGrantType,
-        subject_token: input.credential,
-        subject_token_type: AuthEnvironmentBootstrapTokenType,
-        requested_token_type: AuthAccessTokenType,
-        ...(input.scopes ? { scope: encodeOAuthScope(input.scopes) } : {}),
-        ...clientMetadataTokenExchangeFields(input.clientMetadata),
-      },
-    }),
-  );
-  return response;
+  return yield* exchangeBootstrapToken(input);
 });
 
 export const bootstrapRemoteBearerSession = Effect.fn(
@@ -121,22 +145,7 @@ export const bootstrapRemoteBearerSession = Effect.fn(
   readonly clientMetadata?: AuthClientPresentationMetadata;
   readonly timeoutMs?: number;
 }) {
-  const client = yield* makeEnvironmentHttpApiGroupClient(input.httpBaseUrl, "auth");
-  return yield* executeEnvironmentHttpRequest(
-    environmentEndpointUrl(input.httpBaseUrl, "/oauth/token"),
-    input.timeoutMs ?? DEFAULT_REMOTE_REQUEST_TIMEOUT_MS,
-    client.token({
-      headers: {},
-      payload: {
-        grant_type: AuthTokenExchangeGrantType,
-        subject_token: input.credential,
-        subject_token_type: AuthEnvironmentBootstrapTokenType,
-        requested_token_type: AuthAccessTokenType,
-        ...(input.scopes ? { scope: encodeOAuthScope(input.scopes) } : {}),
-        ...clientMetadataTokenExchangeFields(input.clientMetadata),
-      },
-    }),
-  );
+  return yield* exchangeBootstrapToken(input);
 });
 
 export const fetchRemoteSessionState = Effect.fn(

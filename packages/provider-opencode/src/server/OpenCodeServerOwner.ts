@@ -24,9 +24,8 @@ export class OpenCodeServerOwner extends Context.Service<
       use: (server: OpenCodeRuntime.OpenCodeServerProcess) => Effect.Effect<A, E, R>,
     ) => Effect.Effect<A, E | OpenCodeRuntime.OpenCodeRuntimeError, R>;
   }
->()("@t3tools/provider-opencode/server/OpenCodeServerOwner") {}
+>()("@goat/provider-opencode/server/OpenCodeServerOwner") {}
 
-/** Owns the lazy local OpenCode server shared by one provider instance. */
 export const make = Effect.fn("OpenCodeServerOwner.make")(function* (input: {
   readonly binaryPath: string;
   readonly directory: string;

@@ -3,10 +3,15 @@
  *
  * Completion comes from the worker thread's own runs, read from its projection: the task's
  * current run must finish `completed`, with no open question, no answer still on its way, no
- * provider background work, and no pending restart continuation. Process exit, a last assistant
- * sentence, or an explicit "completed" report alone never finish a task. Reading the projection
- * (rather than counting events) makes a replayed or missed event harmless: every pass decides
- * from the current state, and a finished task cannot finish again.
+ * provider background work, no pull request watch, and no pending restart continuation. Process
+ * exit, a last assistant sentence, or an explicit "completed" report alone never finish a task.
+ * Reading the projection (rather than counting events) makes a replayed or missed event harmless:
+ * every pass decides from the current state, and a finished task cannot finish again.
+ *
+ * Each pass also records what the worker thread shows besides its run status (linked pull
+ * requests, native questions and approvals, a usage-limit wait) as `task.worker.observed`. A run
+ * that stopped on a usage limit keeps the task alive: GOAT resumes the worker after the reset, or
+ * shows that a person has to.
  *
  * Workers may also report progress, questions, and proposed completion with channel_task_report;
  * the caller's thread and generation must match the task's assignment.
@@ -15,20 +20,63 @@
  */
 import {
   ChannelGatewayError,
+  channelWorkerObservationEquals,
+  CommandId,
   type ChannelTaskEventId,
+  type ChannelTask,
   type ChannelTaskReportInput,
+  type ChannelWorkerRunStatus,
   type OrchestrationV2Run,
   type ThreadId,
-} from "@t3tools/contracts";
+} from "@goat/contracts";
+import { latestExecutedRun } from "@goat/shared/orchestrationV2ThreadError";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as SqlClient from "effect/sql/SqlClient";
 
 import * as ThreadManagement from "../orchestration-v2/ThreadManagementService.ts";
+import { readStoredThreadResultReport } from "../threadResults/ThreadResultService.ts";
 import * as ChannelLedger from "./ChannelLedger.ts";
-import { questionIdFor } from "./channelIds.ts";
+import { questionIdFor, workerLaunchIdsFor } from "./channelIds.ts";
+import { settleCompletedRun } from "./channelRunOutcome.ts";
 import { commitTransition } from "./channelTaskWrites.ts";
+import {
+  completionHoldCount,
+  isThreadMissing,
+  newApprovals,
+  needsYouFromRuntimeRequests,
+  subagentRequests,
+  observeWorker,
+  pullRequestsFromLinks,
+  usageLimitWait,
+  type UsageLimitWait,
+} from "./channelWorkerObservation.ts";
+
+/** A worker run's own state, apart from the task it serves. */
+const workerRunStatus = (
+  status: OrchestrationV2Run["status"],
+  needsYou: boolean,
+): ChannelWorkerRunStatus => {
+  switch (status) {
+    case "completed":
+      return "finished";
+    case "cancelled":
+      return "stopped";
+    case "failed":
+    case "interrupted":
+      return "failed";
+    default:
+      return needsYou ? "waiting" : "running";
+  }
+};
+
+/** How far back, and how many per pass, finished tasks have their runs read into history. */
+const RUN_HISTORY_DAYS = 7;
+const RUN_HISTORY_PER_PASS = 20;
+/** How long a finished task without a thread waits for a launch that may still land. */
+const NO_THREAD_GRACE_MS = 120_000;
 
 const TERMINAL_RUN_STATUSES = new Set([
   "completed",
@@ -38,7 +86,8 @@ const TERMINAL_RUN_STATUSES = new Set([
   "rolled_back",
 ]);
 
-const BACKGROUND_HOLD = "background";
+/** The completion hold a worker gets while its finished run still has background work. */
+export const BACKGROUND_HOLD = "background";
 
 export class ChannelWorkerReports extends Context.Service<
   ChannelWorkerReports,
@@ -55,11 +104,12 @@ export class ChannelWorkerReports extends Context.Service<
       callerThreadId: ThreadId | undefined,
     ) => Effect.Effect<void, ChannelGatewayError>;
   }
->()("t3/channels/ChannelWorkerReports") {}
+>()("goat/channels/ChannelWorkerReports") {}
 
 const make = Effect.gen(function* () {
   const ledger = yield* ChannelLedger.ChannelLedger;
   const threads = yield* ThreadManagement.ThreadManagementService;
+  const sql = yield* SqlClient.SqlClient;
 
   const lastAssistantText = (threadId: ThreadId, run: OrchestrationV2Run) =>
     threads
@@ -77,7 +127,85 @@ const make = Effect.gen(function* () {
         Effect.orElseSucceed(() => undefined),
       );
 
+  /**
+   * Whether `run` stopped on a usage limit, and how it continues. A reset ahead with no choice
+   * made for this run arms automatic resume for the worker thread, the same recovery a person turns
+   * on for a thread, so channel work continues after the limit without anyone watching.
+   * `"unknown"` means the thread could not be read; the caller decides nothing this pass.
+   */
+  const workerUsageLimit = (threadId: ThreadId, run: OrchestrationV2Run) =>
+    Effect.gen(function* (): Effect.fn.Return<UsageLimitWait | "unknown" | undefined> {
+      const shell = yield* threads.getThreadShell(threadId).pipe(Effect.option);
+      if (shell._tag === "None") return "unknown";
+      const wait = usageLimitWait(shell.value, run, yield* DateTime.now);
+      if (wait?.arm === undefined) return wait;
+      const { resetAt, resetMs } = wait.arm;
+      const armed = yield* threads
+        .dispatch({
+          type: "thread.metadata.update",
+          commandId: CommandId.make(`channel-limit-arm:${threadId}:${run.id}:${resetMs}`),
+          threadId,
+          limitRecovery: { runId: run.id, resetAt, autoResume: true, snooze: false },
+        })
+        .pipe(
+          Effect.as(true),
+          Effect.catchCause((cause) =>
+            Effect.logWarning("channels.worker.limit-recovery-arm-failed", {
+              threadId,
+              cause,
+            }).pipe(Effect.as(false)),
+          ),
+        );
+      // A refused arm leaves the limit to a person; the next pass tries again with the same id.
+      return armed
+        ? { resetAt }
+        : { resetAt, ...(wait.needsYou === undefined ? {} : { needsYou: wait.needsYou }) };
+    });
+
   /** One task against its worker's current runs. True when the ledger changed. */
+  /**
+   * Records the task's runs from the one it is bound to onward, each with its own state. A run is
+   * written only when its state changed, so a quiet worker costs no writes.
+   */
+  const recordRuns = (
+    task: ChannelTask,
+    runs: ReadonlyArray<OrchestrationV2Run>,
+    floor: number,
+    needsYou: boolean,
+  ) =>
+    Effect.gen(function* () {
+      const worker = task.worker;
+      if (worker === undefined) return true;
+      const known = new Map(
+        (yield* ledger.listWorkerRuns([task.taskId])).map((run) => [run.runId, run]),
+      );
+      const now = DateTime.formatIso(yield* DateTime.now);
+      const latestOrdinal = runs.at(-1)?.ordinal;
+      for (const run of runs) {
+        if (run.ordinal < floor) continue;
+        // Only the newest run can be waiting on a person; earlier ones have ended.
+        const status = workerRunStatus(run.status, needsYou && run.ordinal === latestOrdinal);
+        const before = known.get(run.id);
+        if (before?.status === status) continue;
+        const ended = status === "running" || status === "waiting" ? undefined : now;
+        yield* ledger.upsertWorkerRun({
+          runId: run.id,
+          taskId: task.taskId,
+          generation: worker.generation,
+          threadId: worker.threadId,
+          status,
+          startedAt: before?.startedAt ?? DateTime.formatIso(run.requestedAt),
+          updatedAt: now,
+          ...(ended === undefined ? {} : { endedAt: before?.endedAt ?? ended }),
+        });
+      }
+      return true;
+    }).pipe(
+      Effect.catch((cause) =>
+        Effect.logWarning("channel worker run not recorded", { cause }).pipe(Effect.as(false)),
+      ),
+    );
+
   const reconcileTask = (stored: ChannelLedger.ChannelStoredTask, owner: string) =>
     Effect.gen(function* () {
       const task = stored.task;
@@ -85,10 +213,16 @@ const make = Effect.gen(function* () {
       // Workers on another machine report through ChannelRemoteWorkers.
       if (worker === undefined || worker.host !== undefined) return false;
       const records = yield* threads
-        .getThreadRecords(worker.threadId, ["runs", "providerThreads"])
+        .getThreadRecords(worker.threadId, [
+          "runs",
+          "providerThreads",
+          "runtimeRequests",
+          "subagents",
+        ])
         .pipe(Effect.option);
       if (records._tag === "None") return false;
       const runs = records.value.runs.toSorted((left, right) => left.ordinal - right.ordinal);
+      const pullRequestLinks = records.value.thread.pullRequests;
       const bound = runs.find((run) => run.id === worker.runId);
 
       // An answer was sent to the worker: wait for the run it starts before judging anything.
@@ -117,9 +251,75 @@ const make = Effect.gen(function* () {
         if (rebound === undefined) return false;
         const reread = yield* ledger.getTask(task.taskId);
         if (reread === undefined) return true;
+        // Someone else wrote after this pass's write (a follow-up and its fence, say): the runs
+        // read above may no longer be the task's, so judge again on the next pass.
+        if (reread.task.version !== rebound.version) return true;
         latest = reread;
       }
+
+      // A follow-up queued behind a usage-limited run cannot start until the limit is resumed, so
+      // the limit belongs to the newest run the worker thread executed, even once the task is bound
+      // to the queued run. Runs cancelled before they started never executed.
+      const limitedRun = current.status === "queued" ? latestExecutedRun(runs) : current;
+      const limitRead =
+        limitedRun?.status === "failed"
+          ? yield* workerUsageLimit(worker.threadId, limitedRun)
+          : undefined;
+      if (limitRead === "unknown") return latest !== stored;
+      const limit = limitRead;
+      const observed = observeWorker({
+        pullRequests: pullRequestsFromLinks(pullRequestLinks),
+        needsYou: [
+          ...needsYouFromRuntimeRequests(records.value.runtimeRequests, () => worker.threadId),
+          // A subagent waiting on an approval or answer blocks the work as much as the worker.
+          ...needsYouFromRuntimeRequests(
+            yield* subagentRequests(records.value.subagents, (threadId) =>
+              threads.getThreadRecords(threadId, ["runtimeRequests", "subagents"]),
+            ),
+            (request) => request.threadId,
+          ),
+          ...(limit?.needsYou === undefined ? [] : [limit.needsYou]),
+        ],
+        usageLimitResetAt: limit?.resetAt,
+      });
+      if (!channelWorkerObservationEquals(latest.task.observed, observed)) {
+        // A new approval becomes an approve/deny card for a person; an MCP requester is an agent,
+        // and agents never answer approvals.
+        const card =
+          latest.task.requester.originKind !== "mcp" &&
+          newApprovals(latest.task.observed?.needsYou, observed.needsYou).length > 0;
+        const wrote = yield* commitTransition(
+          ledger,
+          latest,
+          {
+            type: "task.worker.observed",
+            payload: { generation: latest.task.generation, observed },
+          },
+          { owner, ...(card ? { narrate: true } : {}) },
+        );
+        if (wrote === undefined) return latest !== stored;
+        const reread = yield* ledger.getTask(task.taskId);
+        if (reread === undefined) return true;
+        if (reread.task.version !== wrote.version) return true;
+        latest = reread;
+      }
+
+      // From the generation's first run, so a run rebound past before it was seen ending still
+      // gets its final state.
+      const launched = runs.find(
+        (run) => run.userMessageId === workerLaunchIdsFor(task.taskId, worker.generation).messageId,
+      );
+      yield* recordRuns(
+        latest.task,
+        runs,
+        launched?.ordinal ?? bound?.ordinal ?? 0,
+        observed.needsYou.length > 0,
+      );
+
       if (!TERMINAL_RUN_STATUSES.has(current.status)) return latest !== stored;
+      // A follow-up or answer recorded but not yet sent belongs to this work; the run read above
+      // has not seen it, so it cannot be the last word.
+      if (yield* ledger.hasPendingForward(task.taskId)) return latest !== stored;
       // A worker that asked a question and stopped waits for the answer; one whose run failed or
       // was stopped while waiting has ended the task all the same.
       const waitingForAnswer =
@@ -137,17 +337,32 @@ const make = Effect.gen(function* () {
         .pipe(Effect.orElseSucceed(() => false));
       if (continuationPending) return latest !== stored;
 
+      // A usage limit is a pause: the continuation run GOAT or a person starts rebinds the task.
+      if (limit !== undefined) return latest !== stored;
+
       if (current.status === "completed") {
-        const backgroundPending = records.value.providerThreads.some(
-          (providerThread) => (providerThread.pendingBackgroundTasks ?? []).length > 0,
-        );
-        if (backgroundPending) {
+        const held =
+          completionHoldCount({
+            current,
+            runs,
+            providerThreads: records.value.providerThreads,
+            pullRequests: pullRequestLinks,
+          }) > 0;
+        if (held) {
           if (latest.completionHold !== BACKGROUND_HOLD) {
             yield* ledger.setCompletionHold({ owner, taskId: task.taskId, hold: BACKGROUND_HOLD });
           }
           return true;
         }
-        const summary =
+        // The worker's own report decides failed, cancelled and blocked; an unreadable report
+        // waits for the next pass rather than settling as "no report".
+        const reportRead = yield* readStoredThreadResultReport(worker.threadId, current.id).pipe(
+          Effect.provideService(SqlClient.SqlClient, sql),
+          Effect.option,
+        );
+        if (reportRead._tag === "None") return latest !== stored;
+        const reported = reportRead.value?.report;
+        const fallbackSummary =
           (yield* lastAssistantText(worker.threadId, current)) ??
           (latest.task.proposedCompletion?.runId === current.id
             ? latest.task.proposedCompletion.summary
@@ -155,10 +370,13 @@ const make = Effect.gen(function* () {
         yield* commitTransition(
           ledger,
           latest,
-          {
-            type: "task.completed",
-            payload: { generation: task.generation, runId: current.id, summary },
-          },
+          settleCompletedRun({
+            task: latest.task,
+            runId: current.id,
+            reported,
+            fallbackSummary,
+            now: DateTime.formatIso(yield* DateTime.now),
+          }),
           { owner, narrate: true, completionHold: null },
         );
         return true;
@@ -194,6 +412,76 @@ const make = Effect.gen(function* () {
       let changed = 0;
       for (const stored of active) {
         if (yield* reconcileTask(stored, owner)) changed += 1;
+      }
+      // A finished task's runs are read into history until all of them have ended, even when
+      // the task ended first (stopped, or settled by the worker's own report) or its launch
+      // never bound a worker, in which case its thread is the one the generation derives.
+      const now = yield* DateTime.now;
+      const since = DateTime.formatIso(DateTime.subtract(now, { days: RUN_HISTORY_DAYS }));
+      for (const finished of yield* ledger.listUnsettledRunHistory({
+        since,
+        limit: RUN_HISTORY_PER_PASS,
+      })) {
+        const generation = finished.worker?.generation ?? finished.generation;
+        const ids = workerLaunchIdsFor(finished.taskId, generation);
+        const worker = finished.worker ?? {
+          environmentId: finished.target!.environmentId,
+          threadId: ids.threadId,
+          generation,
+        };
+        const settle = ledger.settleRunHistory({
+          taskId: finished.taskId,
+          now: DateTime.formatIso(now),
+        });
+        const records = yield* threads
+          .getThreadRecords(worker.threadId, ["runs"])
+          .pipe(Effect.result);
+        if (records._tag === "Failure") {
+          // Only a thread that does not exist means the launch never landed; any other failed
+          // read is tried again next pass.
+          if (
+            isThreadMissing(records.failure) &&
+            DateTime.toEpochMillis(now) - Date.parse(finished.updatedAt) > NO_THREAD_GRACE_MS
+          ) {
+            yield* settle;
+          }
+          continue;
+        }
+        const runs = records.success.runs.toSorted((left, right) => left.ordinal - right.ordinal);
+        const launched = runs.find((run) => run.userMessageId === ids.messageId);
+        const recorded = yield* recordRuns(
+          { ...finished, worker },
+          runs,
+          launched?.ordinal ?? 0,
+          false,
+        );
+        if (recorded && runs.every((run) => TERMINAL_RUN_STATUSES.has(run.status))) {
+          yield* settle;
+        }
+      }
+      // Runs recorded as running or waiting whose task has ended (stopped, or settled by the
+      // worker's own report) still end on their own; record how.
+      const activeIds = new Set(active.map((stored) => stored.task.taskId as string));
+      const open = (yield* ledger.listOpenWorkerRuns()).filter(
+        (run) => !activeIds.has(run.taskId) && run.host === undefined,
+      );
+      for (const threadId of new Set(open.map((run) => run.threadId))) {
+        const records = yield* threads
+          .getThreadRecords(threadId as ThreadId, ["runs"])
+          .pipe(Effect.option);
+        if (records._tag === "None") continue;
+        const now = DateTime.formatIso(yield* DateTime.now);
+        for (const recorded of open.filter((run) => run.threadId === threadId)) {
+          const run = records.value.runs.find((candidate) => candidate.id === recorded.runId);
+          const status = run === undefined ? "stopped" : workerRunStatus(run.status, false);
+          if (status === recorded.status) continue;
+          yield* ledger.upsertWorkerRun({
+            ...recorded,
+            status,
+            updatedAt: now,
+            ...(status === "running" || status === "waiting" ? {} : { endedAt: now }),
+          });
+        }
       }
       return changed;
     });

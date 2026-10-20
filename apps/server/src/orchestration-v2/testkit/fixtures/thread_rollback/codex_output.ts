@@ -1,5 +1,5 @@
 import { assert } from "@effect/vitest";
-import type { ProviderReplayTranscript } from "@t3tools/contracts";
+import type { ProviderReplayTranscript } from "@goat/contracts";
 
 import type { OrchestratorV2ScenarioResult } from "../../OrchestratorScenario.ts";
 import {
@@ -60,7 +60,6 @@ export function assertThreadRollbackOutput(
     THREAD_ROLLBACK_AFTER_PROMPT,
   ]);
   assertVisibleUserMessagesExclude(projection, [THREAD_ROLLBACK_SECOND_PROMPT]);
-  // Codex's own context was rewound: the post-rollback recall omits the reverted turn.
   const recall = projection.turnItems.findLast((item) => item.type === "assistant_message");
   assert.include(recall?.type === "assistant_message" ? recall.text : "", "first turn complete");
   assert.notInclude(recall?.type === "assistant_message" ? recall.text : "", "second turn");

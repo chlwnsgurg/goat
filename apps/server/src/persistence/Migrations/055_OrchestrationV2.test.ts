@@ -4,7 +4,7 @@ import * as Layer from "effect/Layer";
 import * as SqlClient from "effect/sql/SqlClient";
 
 import { migrationEntries, runMigrations } from "../Migrations.ts";
-import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
+import * as NodeSqliteClient from "@goat/shared/nodeSqliteClient";
 
 const layer = it.layer(Layer.mergeAll(NodeSqliteClient.layer({ filename: ":memory:" })));
 
@@ -13,7 +13,7 @@ layer("055_OrchestrationV2", (it) => {
     Effect.sync(() => {
       assert.deepStrictEqual(
         migrationEntries.map(([id]) => id),
-        Array.from({ length: 64 }, (_, index) => index + 1),
+        Array.from({ length: 88 }, (_, index) => index + 1),
       );
     }),
   );
@@ -32,10 +32,34 @@ layer("055_OrchestrationV2", (it) => {
         [58, "WebhookRelayDeliveries"],
         [59, "McpAppModelContext"],
         [60, "ThreadSnapshotWindowIndexes"],
-        [61, "ServerActivityIndexes"],
-        [62, "RemoteReports"],
-        [63, "RemoteDispatches"],
-        [64, "ChannelLedger"],
+        [61, "PullRequestReviewGuides"],
+        [62, "ThreadFailureLookupIndex"],
+        [63, "DropUnusedV1Projections"],
+        [64, "CanonicalizeThreadPullRequestLinks"],
+        [65, "ServerActivityIndexes"],
+        [66, "RemoteReports"],
+        [67, "RemoteDispatches"],
+        [68, "ChannelLedger"],
+        [69, "RemoteDispatchQuestions"],
+        [70, "ThreadRunResults"],
+        [71, "RemoteReportRelay"],
+        [72, "ProjectionTurnItemRequestIndex"],
+        [73, "Memory"],
+        [74, "MemoryHubSync"],
+        [75, "MemorySearchCounters"],
+        [76, "MemoryTaskGrantCeiling"],
+        [77, "MemoryImportLineage"],
+        [78, "MemoryCheckpointAccounting"],
+        [79, "MemoryReportLifecycle"],
+        [80, "MemoryUsageCounters"],
+        [81, "MemoryRevertResults"],
+        [82, "HandoffLookupIndex"],
+        [83, "MemoryLastReadySpace"],
+        [84, "MemoryHubAdministered"],
+        [85, "MemoryCheckpointLifecycle"],
+        [86, "FleetGoals"],
+        [87, "FleetHealth"],
+        [88, "ThreadRunObservedChecks"],
       ]);
       assert.deepStrictEqual(yield* runMigrations(), []);
 
@@ -62,10 +86,34 @@ layer("055_OrchestrationV2", (it) => {
         { migration_id: 58, name: "WebhookRelayDeliveries" },
         { migration_id: 59, name: "McpAppModelContext" },
         { migration_id: 60, name: "ThreadSnapshotWindowIndexes" },
-        { migration_id: 61, name: "ServerActivityIndexes" },
-        { migration_id: 62, name: "RemoteReports" },
-        { migration_id: 63, name: "RemoteDispatches" },
-        { migration_id: 64, name: "ChannelLedger" },
+        { migration_id: 61, name: "PullRequestReviewGuides" },
+        { migration_id: 62, name: "ThreadFailureLookupIndex" },
+        { migration_id: 63, name: "DropUnusedV1Projections" },
+        { migration_id: 64, name: "CanonicalizeThreadPullRequestLinks" },
+        { migration_id: 65, name: "ServerActivityIndexes" },
+        { migration_id: 66, name: "RemoteReports" },
+        { migration_id: 67, name: "RemoteDispatches" },
+        { migration_id: 68, name: "ChannelLedger" },
+        { migration_id: 69, name: "RemoteDispatchQuestions" },
+        { migration_id: 70, name: "ThreadRunResults" },
+        { migration_id: 71, name: "RemoteReportRelay" },
+        { migration_id: 72, name: "ProjectionTurnItemRequestIndex" },
+        { migration_id: 73, name: "Memory" },
+        { migration_id: 74, name: "MemoryHubSync" },
+        { migration_id: 75, name: "MemorySearchCounters" },
+        { migration_id: 76, name: "MemoryTaskGrantCeiling" },
+        { migration_id: 77, name: "MemoryImportLineage" },
+        { migration_id: 78, name: "MemoryCheckpointAccounting" },
+        { migration_id: 79, name: "MemoryReportLifecycle" },
+        { migration_id: 80, name: "MemoryUsageCounters" },
+        { migration_id: 81, name: "MemoryRevertResults" },
+        { migration_id: 82, name: "HandoffLookupIndex" },
+        { migration_id: 83, name: "MemoryLastReadySpace" },
+        { migration_id: 84, name: "MemoryHubAdministered" },
+        { migration_id: 85, name: "MemoryCheckpointLifecycle" },
+        { migration_id: 86, name: "FleetGoals" },
+        { migration_id: 87, name: "FleetHealth" },
+        { migration_id: 88, name: "ThreadRunObservedChecks" },
       ]);
 
       const tables = yield* sql<{ readonly name: string }>`

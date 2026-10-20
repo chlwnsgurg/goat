@@ -1,7 +1,7 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, describe, it } from "@effect/vitest";
-import { ProviderInstanceId, ProviderSessionId, ThreadId } from "@t3tools/contracts";
-import { resolveSelfInvocation } from "@t3tools/shared/nodeRuntime";
+import { ProviderInstanceId, ProviderSessionId, ThreadId } from "@goat/contracts";
+import { resolveSelfInvocation } from "@goat/shared/nodeRuntime";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -14,32 +14,32 @@ import * as HttpClientResponse from "effect/http/HttpClientResponse";
 import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 import * as EffectAcpErrors from "effect-acp/errors";
 
-import * as ProviderHost from "@t3tools/provider-core/server/ProviderHost";
-import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
-import * as TestProviderHost from "@t3tools/provider-testing/TestProviderHost";
+import * as ProviderHost from "@goat/provider-core/server/ProviderHost";
+import * as McpProviderSessions from "@goat/provider-core/server/McpProviderSessions";
+import * as TestProviderHost from "@goat/provider-testing/TestProviderHost";
 import * as ServerSettings from "../../serverSettings.ts";
 import type {
   AcpRegistryAvailableCommands,
   AcpRegistryLiveConfiguration,
-} from "@t3tools/provider-acp-registry/testing";
-import * as AcpRegistrySupport from "@t3tools/provider-acp-registry/server/AcpRegistrySupport";
-import * as AcpRegistryRuntimeCoordinator from "@t3tools/provider-acp-registry/server/AcpRegistryRuntimeCoordinator";
-import { ACP_SESSION_MODE_OPTION_ID } from "@t3tools/provider-acp/server/sessionConfig";
-import * as AcpSessionRuntime from "@t3tools/provider-acp/server/AcpSessionRuntime";
-import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
+} from "@goat/provider-acp-registry/testing";
+import * as AcpRegistrySupport from "@goat/provider-acp-registry/server/AcpRegistrySupport";
+import * as AcpRegistryRuntimeCoordinator from "@goat/provider-acp-registry/server/AcpRegistryRuntimeCoordinator";
+import { ACP_SESSION_MODE_OPTION_ID } from "@goat/provider-acp/server/sessionConfig";
+import * as AcpSessionRuntime from "@goat/provider-acp/server/AcpSessionRuntime";
+import * as IdAllocator from "@goat/provider-core/server/IdAllocator";
 import {
   decodeAcpReplayTranscript,
   makeAcpReplayCompletenessAssertion,
   makeAcpReplayRuntime,
 } from "./AcpAdapterV2.testkit.ts";
-import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
+import * as ProviderAdapter from "@goat/provider-core/server/ProviderAdapter";
 import { BUILT_IN_PROVIDER_ADAPTER_DRIVER_KINDS_V2 } from "../builtInProviderAdapterDrivers.ts";
-import { AcpRegistryAdapterV2Driver } from "@t3tools/provider-acp-registry/server";
+import { AcpRegistryAdapterV2Driver } from "@goat/provider-acp-registry/server";
 import {
   ACP_REGISTRY_PROVIDER,
   makeAcpRegistryAdapterV2,
   acpRegistryPromptFailure,
-} from "@t3tools/provider-acp-registry/testing";
+} from "@goat/provider-acp-registry/testing";
 
 const registryUrl = "https://registry.test/registry.json";
 const decodeAcpRegistryAdapterSettings = Schema.decodeUnknownEffect(
@@ -84,7 +84,6 @@ const layerRegistry = Layer.succeed(
   ),
 );
 
-// Adapters given an explicit runtime never resolve through the catalog.
 const layerInjectedRuntimeCatalog = Layer.mock(AcpRegistrySupport.AcpRegistryCatalog)({
   resolve: () => Effect.die("the runtime is injected"),
 });
@@ -160,9 +159,6 @@ describe("AcpRegistryAdapterV2", () => {
       options: ["ask", "auto"].map((value) => ({ value, name: value })),
     });
 
-    // A scripted ACP v1 agent: initialize, session/new answered with `setup`,
-    // then the frames T3 must send (and the agent's answers) to apply the
-    // user's stored pick from the agent's mode picker.
     const openWithStoredModePick = Effect.fn("openWithStoredModePick")(function* (input: {
       readonly setup: unknown;
       readonly modeFrames: ReadonlyArray<Frame>;
@@ -172,7 +168,7 @@ describe("AcpRegistryAdapterV2", () => {
       const fileSystem = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
       const replayDir = yield* fileSystem.makeTempDirectoryScoped({
-        prefix: "t3-acp-registry-mode-pick-",
+        prefix: "goat-acp-registry-mode-pick-",
       });
       const statusPath = path.join(replayDir, "status.json");
       const transcript = yield* decodeAcpReplayTranscript(
@@ -230,8 +226,6 @@ describe("AcpRegistryAdapterV2", () => {
           }),
         })
         .pipe(Effect.scoped);
-      // Closing the session stops the agent, which writes its replay status in
-      // the same tick as its last answer. The script must be consumed exactly.
       yield* makeAcpReplayCompletenessAssertion(fileSystem, statusPath, transcript);
     });
 
@@ -295,7 +289,7 @@ describe("AcpRegistryAdapterV2", () => {
                     command: process.execPath,
                     args: [mockAgentPath],
                     cwd: input.cwd,
-                    env: { T3_ACP_SESSION_LIFECYCLE: "1" },
+                    env: { GOAT_ACP_SESSION_LIFECYCLE: "1" },
                   },
                   authMethodId: "test",
                 }).pipe(
@@ -364,8 +358,8 @@ describe("AcpRegistryAdapterV2", () => {
         instanceId,
         settings,
         environment: {
-          T3_ACP_SESSION_LIFECYCLE: "1",
-          T3_ACP_COMMAND_ADVERTISEMENT_DELAY_MS: "750",
+          GOAT_ACP_SESSION_LIFECYCLE: "1",
+          GOAT_ACP_COMMAND_ADVERTISEMENT_DELAY_MS: "750",
         },
       }).pipe(
         Effect.provide(

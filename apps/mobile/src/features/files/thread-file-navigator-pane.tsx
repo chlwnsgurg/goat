@@ -1,8 +1,8 @@
-import { resolveFilesystemReadAccess } from "@t3tools/client-runtime/state/filesystem";
+import { resolveFilesystemReadAccess } from "@goat/client-runtime/state/filesystem";
 import { environmentSession } from "../../state/session";
-import type { EnvironmentId } from "@t3tools/contracts";
-import { SymbolView } from "../../components/AppSymbol";
-import { MaterialScreenContent } from "../../components/MaterialScreenContent";
+import type { EnvironmentId } from "@goat/contracts";
+import { SymbolView } from "../../components/ui/AppSymbol";
+import { ScreenContent } from "../../components/ui/ScreenContent";
 import { useCallback, useMemo, useState, type ComponentProps } from "react";
 import { Platform, Pressable, View, type NativeSyntheticEvent } from "react-native";
 import {
@@ -13,8 +13,8 @@ import {
   SearchBar,
 } from "react-native-screens";
 
-import { AppText as Text, AppTextInput as TextInput } from "../../components/AppText";
-import { MaterialFilesHeader } from "./MaterialFilesHeader";
+import { AppText as Text, AppTextInput as TextInput } from "../../components/ui/AppText";
+import { FilesHeader } from "./FilesHeader";
 import { nativeHeaderScrollEdgeEffects } from "../../native/StackHeader";
 import { useUniwindTheme } from "../../lib/useUniwindTheme";
 import { useEnvironmentQuery } from "../../state/query";
@@ -99,6 +99,7 @@ export function ThreadFileNavigatorPane(props: {
       isPending={fileAccess.isPending || entriesQuery.isPending}
       isRefreshing={entriesQuery.isRefreshing}
       searchQuery={searchQuery}
+      searchResultPaths={entriesQuery.searchResultPaths}
       searchTruncated={entriesQuery.searchTruncated}
       selectedPath={props.selectedPath}
       onPreviewFile={handlePreviewFile}
@@ -172,7 +173,7 @@ export function ThreadFileNavigatorPane(props: {
         style={{ paddingTop: Platform.OS === "android" ? 0 : props.headerInset }}
       >
         {Platform.OS === "android" ? (
-          <MaterialFilesHeader
+          <FilesHeader
             projectName={props.projectName}
             searchQuery={searchQuery}
             onSearchQueryChange={setSearchQuery}
@@ -181,7 +182,7 @@ export function ThreadFileNavigatorPane(props: {
         ) : (
           <View className="h-12 flex-row items-center gap-2 px-3">
             <View className="min-w-0 flex-1">
-              <Text className="text-sm font-t3-bold text-foreground">Files</Text>
+              <Text className="text-sm font-goat-bold text-foreground">Files</Text>
               <Text className="text-xs text-foreground-muted" numberOfLines={1}>
                 {props.projectName}
               </Text>
@@ -223,7 +224,7 @@ export function ThreadFileNavigatorPane(props: {
           </View>
         ) : null}
       </View>
-      <MaterialScreenContent insetHorizontal>{fileTree}</MaterialScreenContent>
+      <ScreenContent insetHorizontal>{fileTree}</ScreenContent>
     </View>
   );
 }

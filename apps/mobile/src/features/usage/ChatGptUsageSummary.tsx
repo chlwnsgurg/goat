@@ -1,8 +1,8 @@
 import { useAtomValue } from "@effect/atom-react";
-import type { EnvironmentId } from "@t3tools/contracts";
-import { CHATGPT_USAGE_URL, collectExternalUsageLinks } from "@t3tools/shared/usageLimits";
+import type { EnvironmentId } from "@goat/contracts";
+import { CHATGPT_USAGE_URL, collectExternalUsageLinks } from "@goat/shared/usageLimits";
 import { Linking, Pressable, View } from "react-native";
-import { AppText as Text } from "../../components/AppText";
+import { AppText as Text } from "../../components/ui/AppText";
 import { ProviderIcon } from "../../components/ProviderIcon";
 import { environmentPresentations } from "../../state/presentation";
 
@@ -11,7 +11,7 @@ export function ChatGptUsageSummary({
 }: {
   selectedEnvironmentIds: ReadonlySet<EnvironmentId> | null;
 }) {
-  const presentations = useAtomValue(environmentPresentations.presentationsAtom);
+  const presentations = useAtomValue(environmentPresentations.presentationsWithProvidersAtom);
   const selected =
     selectedEnvironmentIds === null
       ? presentations
@@ -30,7 +30,7 @@ export function ChatGptUsageSummary({
           className="min-h-11 justify-center"
           onPress={() => void Linking.openURL(usage.url).catch(() => undefined)}
         >
-          <Text className="text-sm font-t3-medium text-primary">Manage usage</Text>
+          <Text className="text-sm font-goat-medium text-primary">Manage usage</Text>
         </Pressable>
       </View>
       <Text className="text-xs text-foreground-muted">

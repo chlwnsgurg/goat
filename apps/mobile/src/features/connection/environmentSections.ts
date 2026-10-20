@@ -1,5 +1,8 @@
-import type { EnvironmentId } from "@t3tools/contracts";
-import type { RelayClientEnvironmentRecord } from "@t3tools/contracts/relay";
+import { type ConnectionCatalogEntry, connectionRoutes } from "@goat/client-runtime/connection";
+import { isGoatConnectEnabled } from "@goat/shared/goatConnect";
+import * as Option from "effect/Option";
+import type { EnvironmentId } from "@goat/contracts";
+import type { RelayClientEnvironmentRecord } from "@goat/contracts/relay";
 import type { ConnectedEnvironmentSummary } from "../../state/remote-runtime-types";
 
 export interface EnvironmentSectionsInput {
@@ -13,10 +16,6 @@ export interface EnvironmentSections {
   readonly availableCloudEnvironments: ReadonlyArray<RelayClientEnvironmentRecord>;
 }
 
-/**
- * Ids of the environments that already occupy a T3 Connect slot. A backend saved directly is
- * not one of them, so it must not suppress the cloud environment that happens to share its id.
- */
 export function relayManagedEnvironmentIds(
   environments: ReadonlyArray<{
     readonly environmentId: EnvironmentId;
@@ -31,6 +30,13 @@ export function relayManagedEnvironmentIds(
 }
 
 export function splitEnvironmentSections(input: EnvironmentSectionsInput): EnvironmentSections {
+  if (!isGoatConnectEnabled()) {
+    return {
+      localEnvironments: input.connectedEnvironments,
+      connectedCloudEnvironments: [],
+      availableCloudEnvironments: [],
+    };
+  }
   const savedEnvironmentIds = relayManagedEnvironmentIds(input.connectedEnvironments);
 
   return {
@@ -44,4 +50,17 @@ export function splitEnvironmentSections(input: EnvironmentSectionsInput): Envir
       (environment) => !savedEnvironmentIds.has(environment.environmentId),
     ),
   };
+}
+
+export function isGoatConnectOnlyEnvironment(entry: ConnectionCatalogEntry | undefined): boolean {
+  return (
+    entry !== undefined &&
+    connectionRoutes(entry).every((route) => {
+      const profile = Option.getOrNull(route.profile);
+      return (
+        route.target._tag === "RelayConnectionTarget" ||
+        (profile?._tag === "BearerConnectionProfile" && profile.authorization === "t3-connect")
+      );
+    })
+  );
 }

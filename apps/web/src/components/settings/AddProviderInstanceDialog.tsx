@@ -2,11 +2,14 @@
 
 import { ProviderInstanceIcon } from "../chat/ProviderInstanceIcon";
 
+import { useAtomValue } from "@effect/atom-react";
 import { Radio as RadioPrimitive } from "@base-ui/react/radio";
-import { CheckIcon } from "lucide-react";
-import { useMemo, useState } from "react";
-import { squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime";
+import { CheckIcon } from "~/components/solar";
+import { useState } from "react";
+import { squashAtomCommandFailure } from "@goat/client-runtime/state/runtime";
 import {
+  DEFAULT_OPENCODEX_BASE_URL,
+  type CodexModelRoute,
   type AcpRegistrySearchAgent,
   AuthProvidersManageScope,
   ProviderInstanceId,
@@ -14,7 +17,7 @@ import {
   type EnvironmentId,
   type ProviderInstanceConfig,
   type ProviderInstanceEnvironmentVariable,
-} from "@t3tools/contracts";
+} from "@goat/contracts";
 
 import {
   useEnvironmentSettings,
@@ -24,6 +27,7 @@ import {
 import { cn } from "../../lib/utils";
 import { normalizeProviderAccentColor } from "../../providerInstances";
 import { readEnvironmentScope, useEnvironmentScope } from "../../state/session";
+import { EMPTY_SERVER_PROVIDERS, serverEnvironment } from "../../state/server";
 import { Button } from "../ui/button";
 import { ChatGptConnectionButton } from "./ChatGptConnectionButton";
 import { Dialog } from "../ui/dialog";
@@ -40,11 +44,13 @@ import { WizardPanel, WizardPopup, WizardHeader, WizardFooter } from "../ui/wiza
 import {
   ADD_PROVIDER_WIZARD_STEPS,
   ACP_REGISTRY_WIZARD_STEPS,
-  LOCAL_ACP_WIZARD_STEPS,
   deriveAvailableInstanceId,
   resolveAcpRegistryWizardNavigation,
   resolveWizardNavigation,
+  setupStepIndex,
+  summarizeDriverSetupState,
   updateProviderIdentityDraft,
+  type DriverSetupBadge,
   type ProviderIdentityDraft,
   type WizardNavigation,
 } from "./AddProviderInstanceDialog.logic";
@@ -56,11 +62,8 @@ import { AddManagedCodexAccountDialog } from "./CodexSetupSection";
 import { ProviderEnvironmentSection } from "./ProviderInstanceCard";
 
 /**
- * Normalize a user-provided label into a slug suffix for the instance id.
- * The full id is formed by prefixing the driver slug. For example, label "Work" on
- * driver "codex" becomes `codex_work`. Output is trimmed to 48 chars so the
- * final composed id stays under the 64-char slug cap enforced by
- * `ProviderInstanceId` in `@t3tools/contracts`.
+ * Output is trimmed to 48 chars so the final composed id stays under the 64-char slug cap
+ * enforced by `ProviderInstanceId` in `@goat/contracts`.
  */
 function slugifyLabel(value: string): string {
   return value
@@ -84,7 +87,6 @@ const EMPTY_CONFIG_DRAFT: Record<string, unknown> = {};
 /**
  * Validate an instance id against the same slug rules the server applies in
  * `ProviderInstanceId` (see `packages/contracts/src/providerInstance.ts`).
- * Returns a user-facing error string, or `null` if valid.
  */
 function validateInstanceId(id: string, existing: ReadonlySet<string>): string | null {
   if (id.length === 0) return "Instance ID is required.";
@@ -96,12 +98,33 @@ function validateInstanceId(id: string, existing: ReadonlySet<string>): string |
   return null;
 }
 
+const DRIVER_SETUP_BADGES: Record<
+  DriverSetupBadge,
+  { readonly label: string; readonly variant: "success" | "outline" | "warning" }
+> = {
+  signedIn: { label: "Signed in", variant: "success" },
+  installed: { label: "Installed", variant: "outline" },
+  missing: { label: "Not installed", variant: "warning" },
+};
+
+export interface AddProviderInstanceResult {
+  readonly instanceId: ProviderInstanceId;
+  readonly signedIn: boolean;
+}
+
 interface AddProviderInstanceDialogProps {
   readonly open: boolean;
   readonly environmentId: EnvironmentId;
   readonly environmentLabel: string;
   readonly onOpenChange: (open: boolean) => void;
+  readonly initialCodexRoute?: CodexModelRoute | undefined;
+  /** Preselects a driver on the provider list. */
+  readonly initialDriver?: ProviderDriverKind | undefined;
+  /** Opens straight to the setup step of an instance that already exists. */
+  readonly initialInstanceId?: ProviderInstanceId | undefined;
   readonly onCreated?: (instanceId: ProviderInstanceId) => void;
+  /** Called when the dialog closes after an instance was created or opened for setup. */
+  readonly onFinished?: (result: AddProviderInstanceResult) => void;
 }
 
 export function AddProviderInstanceDialog({
@@ -110,16 +133,43 @@ export function AddProviderInstanceDialog({
   environmentLabel,
   onOpenChange,
   onCreated,
+  onFinished,
+  initialCodexRoute,
+  initialDriver,
+  initialInstanceId,
 }: AddProviderInstanceDialogProps) {
   const settings = useEnvironmentSettings(environmentId);
   const persistProviderInstance = usePersistEnvironmentProviderInstanceMutation(environmentId);
   const canManageProviders = useEnvironmentScope(environmentId, AuthProvidersManageScope);
+  const providers =
+    useAtomValue(serverEnvironment.providersValueAtom(environmentId)) ?? EMPTY_SERVER_PROVIDERS;
+  const initialInstanceDriver = initialInstanceId
+    ? (settings.providerInstances?.[initialInstanceId]?.driver ??
+      providers.find((provider) => provider.instanceId === initialInstanceId)?.driver)
+    : undefined;
+  const startDriver = initialInstanceDriver ?? initialDriver ?? DEFAULT_DRIVER_KIND;
+  const startStep = initialInstanceId
+    ? setupStepIndex(
+        startDriver === ACP_REGISTRY_DRIVER_KIND
+          ? ACP_REGISTRY_WIZARD_STEPS
+          : ADD_PROVIDER_WIZARD_STEPS,
+      )
+    : 0;
 
-  const [wizardStep, setWizardStep] = useState(0);
+  const homePreset = initialCodexRoute === "opencodex";
+  const [wizardStep, setWizardStep] = useState(homePreset ? 1 : startStep);
   const [addingChatGptAccount, setAddingChatGptAccount] = useState(false);
-  const [driver, setDriver] = useState<ProviderDriverKind>(DEFAULT_DRIVER_KIND);
+  const [driver, setDriver] = useState<ProviderDriverKind>(startDriver);
   const [identityByDriver, setIdentityByDriver] = useState<Record<string, ProviderIdentityDraft>>(
-    {},
+    homePreset
+      ? {
+          codex: {
+            label: "Codex · OpenCodex Home",
+            accentColor: "",
+            instanceIdOverride: "codex_home",
+          },
+        }
+      : {},
   );
   const [selectedAcp, setSelectedAcp] = useState<AcpRegistrySearchAgent | null>(null);
   const [localEnvironment, setLocalEnvironment] = useState<
@@ -130,19 +180,80 @@ export function AddProviderInstanceDialog({
   const [isPreparingRegistryAgent, setIsPreparingRegistryAgent] = useState(false);
   // Driver-specific config drafts keyed by driver so toggling between drivers
   // during the same dialog session does not lose in-progress input.
-  const [configByDriver, setConfigByDriver] = useState<Record<string, Record<string, unknown>>>({});
+  const [configByDriver, setConfigByDriver] = useState<Record<string, Record<string, unknown>>>(
+    homePreset
+      ? {
+          codex: {
+            setupMode: "existing",
+            modelRoute: "opencodex",
+            opencodexBaseUrl: DEFAULT_OPENCODEX_BASE_URL,
+          },
+        }
+      : {},
+  );
   // Errors are suppressed until the user has tried to submit once. After that
   // they update live so fixing the problem clears the message in place.
   const [hasAttemptedSubmit, setHasAttemptedSubmit] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
-  const [createdInstanceId, setCreatedInstanceId] = useState<ProviderInstanceId | null>(null);
+  const [createdInstanceId, setCreatedInstanceId] = useState<ProviderInstanceId | null>(
+    initialInstanceId ?? null,
+  );
+  const createdProvider = createdInstanceId
+    ? providers.find((provider) => provider.instanceId === createdInstanceId)
+    : undefined;
+
+  const handleOpenChange = (nextOpen: boolean, signedIn?: boolean) => {
+    if (!nextOpen) {
+      if (createdInstanceId) {
+        onFinished?.({
+          instanceId: createdInstanceId,
+          signedIn: signedIn ?? createdProvider?.auth.status === "authenticated",
+        });
+      }
+      setWizardStep(homePreset ? 1 : startStep);
+      setAddingChatGptAccount(false);
+      setDriver(startDriver);
+      setIdentityByDriver(
+        homePreset
+          ? {
+              codex: {
+                label: "Codex · OpenCodex Home",
+                accentColor: "",
+                instanceIdOverride: "codex_home",
+              },
+            }
+          : {},
+      );
+      setConfigByDriver(
+        homePreset
+          ? {
+              codex: {
+                setupMode: "existing",
+                modelRoute: "opencodex",
+                opencodexBaseUrl: DEFAULT_OPENCODEX_BASE_URL,
+              },
+            }
+          : {},
+      );
+      setSelectedAcp(null);
+      setLocalEnvironment([]);
+      setIsManualAcpConfiguration(false);
+      setIsRegistryLoading(false);
+      setIsPreparingRegistryAgent(false);
+      setHasAttemptedSubmit(false);
+      setIsSaving(false);
+      setCreatedInstanceId(initialInstanceId ?? null);
+    }
+    onOpenChange(nextOpen);
+  };
 
   // Codex and Claude run at their default slots before they are configured, so
   // those ids stay reserved; other unconfigured default slots are free to take.
-  const existingIds = useMemo(
-    () => new Set(["codex", "claudeAgent", ...Object.keys(settings.providerInstances ?? {})]),
-    [settings.providerInstances],
-  );
+  const existingIds = new Set([
+    "codex",
+    "claudeAgent",
+    ...Object.keys(settings.providerInstances ?? {}),
+  ]);
 
   const driverOption = providerClients.get(driver) ?? DEFAULT_DRIVER_OPTION;
   const isAcpRegistry = driver === ACP_REGISTRY_DRIVER_KIND;
@@ -164,10 +275,7 @@ export function AddProviderInstanceDialog({
       label,
       existingIds,
     );
-  const driverSettingsFields = useMemo(
-    () => deriveProviderSettingsFields(driverOption),
-    [driverOption],
-  );
+  const driverSettingsFields = deriveProviderSettingsFields(driverOption);
   const instanceIdError = validateInstanceId(instanceId, existingIds);
   const showInstanceIdError = hasAttemptedSubmit && instanceIdError !== null;
   const identityStep = 1;
@@ -175,6 +283,8 @@ export function AddProviderInstanceDialog({
 
   const configDraft = configByDriver[driver] ?? EMPTY_CONFIG_DRAFT;
   const isLocalAcp = isAcpRegistry && isManualAcpConfiguration && configDraft.source === "local";
+  const wizardSteps = isAcpRegistry ? ACP_REGISTRY_WIZARD_STEPS : ADD_PROVIDER_WIZARD_STEPS;
+  const setupStep = setupStepIndex(wizardSteps);
   const localCommandPath =
     typeof configDraft.commandPath === "string" ? configDraft.commandPath.trim() : "";
   const manualAgentId = typeof configDraft.agentId === "string" ? configDraft.agentId.trim() : "";
@@ -191,7 +301,7 @@ export function AddProviderInstanceDialog({
         previewLabel,
         null,
       ] as const)
-    : ([driverOption.label, previewLabel, null] as const);
+    : ([driverOption.label, previewLabel, null, null] as const);
   const setConfigDraft = (config: Record<string, unknown> | undefined) => {
     setConfigByDriver((existing) => {
       const next = { ...existing };
@@ -215,7 +325,8 @@ export function AddProviderInstanceDialog({
     if (navigation.kind === "blocked") {
       setHasAttemptedSubmit(true);
     }
-    if (isAcpRegistry && !isLocalAcp && navigation.kind === "navigate" && navigation.step === 2) {
+    // Entering the setup step is what creates the instance.
+    if (navigation.kind === "navigate" && navigation.step === setupStep) {
       void handleSave();
       return;
     }
@@ -225,15 +336,10 @@ export function AddProviderInstanceDialog({
   const navigateToStep = (requestedStep: number) => {
     applyWizardNavigation(
       isAcpRegistry
-        ? isLocalAcp
-          ? resolveWizardNavigation(wizardStep, requestedStep, LOCAL_ACP_WIZARD_STEPS.length, {
-              instanceIdError,
-              prerequisite: { step: 0, error: acpSelectionError },
-            })
-          : resolveAcpRegistryWizardNavigation(wizardStep, requestedStep, {
-              instanceIdError,
-              selectionError: acpSelectionError,
-            })
+        ? resolveAcpRegistryWizardNavigation(wizardStep, requestedStep, {
+            instanceIdError,
+            selectionError: acpSelectionError,
+          })
         : resolveWizardNavigation(wizardStep, requestedStep, ADD_PROVIDER_WIZARD_STEPS.length, {
             instanceIdError,
           }),
@@ -326,10 +432,6 @@ export function AddProviderInstanceDialog({
       ...(hasConfig ? { config } : {}),
       ...(isLocalAcp && localEnvironment.length > 0 ? { environment: localEnvironment } : {}),
     };
-    // `ProviderInstanceId.make` revalidates the slug; we've already checked
-    // it via `validateInstanceId`, but going through the brand constructor
-    // keeps the type boundary honest and guards against any future drift in
-    // the slug rules.
     const brandedId = ProviderInstanceId.make(instanceId);
     setIsSaving(true);
     const result = await persistProviderInstance({
@@ -348,56 +450,38 @@ export function AddProviderInstanceDialog({
       return;
     }
     onCreated?.(brandedId);
-    if (isAcpRegistry && !isLocalAcp) {
-      setCreatedInstanceId(brandedId);
-      setIsSaving(false);
-      setWizardStep(2);
-      return;
-    }
-    toastManager.add({
-      type: "success",
-      title: "Provider instance added",
-      description: `${driverOption.label} instance '${instanceId}' was added.`,
-    });
-    onOpenChange(false);
+    setCreatedInstanceId(brandedId);
+    setIsSaving(false);
+    setWizardStep(setupStep);
   };
 
   if (addingChatGptAccount) {
     return (
       <AddManagedCodexAccountDialog
         environmentId={environmentId}
-        onClose={() => onOpenChange(false)}
+        onClose={() => handleOpenChange(false)}
       />
     );
   }
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
+    <Dialog open={open} onOpenChange={(nextOpen) => handleOpenChange(nextOpen)}>
       <WizardPopup size="wide">
         <WizardHeader
           title="Add provider"
           description={<>Add an account or configure a provider on {environmentLabel}.</>}
         >
-          {isAcpRegistry ? (
-            <AddProviderInstanceWizardSteps
-              currentStep={wizardStep}
-              summaries={wizardStepSummaries}
-              instanceIdError={instanceIdError}
-              steps={isLocalAcp ? LOCAL_ACP_WIZARD_STEPS : ACP_REGISTRY_WIZARD_STEPS}
-              disabled={isSaving || isPreparingRegistryAgent || createdInstanceId !== null}
-              identityStep={1}
-              prerequisite={{ step: 0, error: acpSelectionError }}
-              onNavigation={applyWizardNavigation}
-            />
-          ) : (
-            <AddProviderInstanceWizardSteps
-              currentStep={wizardStep}
-              summaries={wizardStepSummaries}
-              instanceIdError={instanceIdError}
-              disabled={isSaving || isPreparingRegistryAgent}
-              onNavigation={applyWizardNavigation}
-            />
-          )}
+          <AddProviderInstanceWizardSteps
+            currentStep={wizardStep}
+            summaries={wizardStepSummaries}
+            instanceIdError={instanceIdError}
+            steps={wizardSteps}
+            disabled={isSaving || isPreparingRegistryAgent || createdInstanceId !== null}
+            {...(isAcpRegistry
+              ? { identityStep: 1, prerequisite: { step: 0, error: acpSelectionError } }
+              : {})}
+            onNavigation={applyWizardNavigation}
+          />
         </WizardHeader>
 
         {createdInstanceId ? (
@@ -405,7 +489,8 @@ export function AddProviderInstanceDialog({
             environmentId={environmentId}
             environmentLabel={environmentLabel}
             instanceId={createdInstanceId}
-            onFinish={() => onOpenChange(false)}
+            provider={createdProvider}
+            onFinish={({ signedIn }) => handleOpenChange(false, signedIn)}
           />
         ) : (
           <>
@@ -431,6 +516,7 @@ export function AddProviderInstanceDialog({
                   {providerClients.definitions
                     .filter((option) => option.driverKind !== ACP_REGISTRY_DRIVER_KIND)
                     .map((option) => {
+                      const setupBadge = summarizeDriverSetupState(providers, option.driverKind);
                       return (
                         <RadioPrimitive.Root
                           key={option.driverKind}
@@ -445,6 +531,11 @@ export function AddProviderInstanceDialog({
                           <span className="min-w-0 flex-1 truncate text-sm font-medium text-foreground">
                             {option.label}
                           </span>
+                          {setupBadge ? (
+                            <Badge variant={DRIVER_SETUP_BADGES[setupBadge].variant} size="sm">
+                              {DRIVER_SETUP_BADGES[setupBadge].label}
+                            </Badge>
+                          ) : null}
                           <RadioPrimitive.Indicator
                             className="grid size-5 shrink-0 place-items-center rounded-full bg-primary text-primary-foreground"
                             aria-hidden
@@ -666,7 +757,7 @@ export function AddProviderInstanceDialog({
                 disabled={isSaving || isPreparingRegistryAgent}
                 onClick={() => {
                   if (wizardStep === 0) {
-                    onOpenChange(false);
+                    handleOpenChange(false);
                     return;
                   }
                   setWizardStep((step) => Math.max(0, step - 1));
@@ -684,7 +775,7 @@ export function AddProviderInstanceDialog({
                     onClick={() => setAddingChatGptAccount(true)}
                   />
                 </>
-              ) : wizardStep < (isAcpRegistry ? 1 : 2) ? (
+              ) : wizardStep < setupStep - 1 ? (
                 <Button
                   size="sm"
                   disabled={isPreparingRegistryAgent}
@@ -698,11 +789,7 @@ export function AddProviderInstanceDialog({
                   disabled={isSaving || !canManageProviders}
                   onClick={() => void handleSave()}
                 >
-                  {isSaving
-                    ? "Adding..."
-                    : isAcpRegistry && !isLocalAcp
-                      ? "Continue to sign-in"
-                      : "Add instance"}
+                  {isSaving ? "Adding..." : "Add and set up"}
                 </Button>
               )}
             </WizardFooter>

@@ -1,11 +1,5 @@
-/**
- * The server's implementation of `ProviderHost.ProviderHost`, the only server surface
- * provider drivers and adapters may use.
- *
- * @module provider/ProviderHostLive
- */
-import * as ProviderHost from "@t3tools/provider-core/server/ProviderHost";
-import { ProviderCredentialError } from "@t3tools/provider-core/server/errors";
+import * as ProviderHost from "@goat/provider-core/server/ProviderHost";
+import { ProviderCredentialError } from "@goat/provider-core/server/errors";
 import * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -14,18 +8,22 @@ import { resolveAttachmentPath } from "../attachmentStore.ts";
 import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
 import * as BackgroundPolicy from "../background/BackgroundPolicy.ts";
 import * as ServerConfig from "../config.ts";
+import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as ProviderCredentialStore from "./ProviderCredentialStore.ts";
 
 export const layer = Layer.effect(
   ProviderHost.ProviderHost,
   Effect.gen(function* () {
+    const identity = yield* ServerEnvironment.ServerEnvironmentIdentity;
+    const environmentId = yield* identity.getEnvironmentId;
     const config = yield* ServerConfig.ServerConfig;
     const serverSettings = yield* ServerSettings.ServerSettingsService;
     const backgroundPolicy = yield* BackgroundPolicy.BackgroundPolicy;
     const secrets = yield* ServerSecretStore.ServerSecretStore;
     const crypto = yield* Crypto.Crypto;
     return ProviderHost.ProviderHost.of({
+      environmentId,
       paths: {
         cwd: config.cwd,
         baseDir: config.baseDir,

@@ -1,14 +1,11 @@
 import { describe, expect, it, vi } from "vite-plus/test";
 import { converter } from "culori/fn";
-import { BUILT_IN_THEMES } from "@t3tools/shared/themePalettes";
+import { BUILT_IN_THEMES } from "@goat/shared/themePalettes";
 
 import {
-  applyThemeColorPreview,
-  applyThemePalette,
   getThemeColorsForMode,
   getThemeDefinition,
   getThemeModes,
-  getThemePreviewSidebarArtwork,
   getThemePreferenceMode,
   isKnownThemePreference,
   getCustomThemes,
@@ -25,10 +22,8 @@ import {
   resolveDesktopTheme,
   resolveThemeAppearance,
   serializeThemeFile,
-  subscribeToThemePreview,
   subscribeToCustomThemes,
-  themeAllowsSidebarArtwork,
-  T3_CHAT_THEME,
+  GOAT_CHAT_THEME,
   EMBER_THEME,
   GROVE_THEME,
   IRIS_THEME,
@@ -114,7 +109,6 @@ describe("theme files", () => {
       expect(
         distance(colors.searchMatchBackground, colors.searchMatchActiveBackground),
       ).toBeGreaterThan(0.14);
-      // Check inline-code tints, code blocks, and user-message bubbles.
       for (const background of [colors.muted, colors.messageSurface, colors.codeBackground]) {
         expect(distance(colors.searchMatchBackground, background)).toBeGreaterThan(0.08);
         expect(distance(colors.searchMatchActiveBackground, background)).toBeGreaterThan(0.08);
@@ -165,16 +159,16 @@ describe("theme files", () => {
     },
   );
 
-  it("keeps stock dark controls in the neutral-black surface hierarchy", () => {
+  it("keeps stock dark controls one step above the near-black canvas", () => {
     expectThemeColors(getStandardThemeColors("dark"), {
-      canvas: "#0a0a0a",
-      surface: "#111111",
-      surfaceRaised: "#111111",
-      surfaceOverlay: "#111111",
-      toolbarControl: "#111111",
-      secondary: "#111111",
-      muted: "#111111",
-      accentSurface: "#141414",
+      canvas: "#171717",
+      surface: "#232323",
+      surfaceRaised: "#232323",
+      surfaceOverlay: "#232323",
+      toolbarControl: "#232323",
+      secondary: "#232323",
+      muted: "#232323",
+      accentSurface: "#252525",
     });
   });
 
@@ -186,10 +180,10 @@ describe("theme files", () => {
       messageSurface: "#f4f4f5",
     });
     expectThemeColors(getStandardThemeColors("dark"), {
-      canvas: "#0a0a0a",
-      sidebar: "#000000",
-      sidebarRowActive: "#1a1b1b",
-      messageSurface: "#141414",
+      canvas: "#171717",
+      sidebar: "#0f0f0f",
+      sidebarRowActive: "#272828",
+      messageSurface: "#252525",
     });
   });
 
@@ -199,7 +193,6 @@ describe("theme files", () => {
       ["dark", "#101a2c", "#4f8fe8"],
       ["dark", "#211a23", "#df5398"],
       ["light", "#fdf6ec", "#c2571b"],
-      // Inverted canvases: the palette follows the picked color, not the slot.
       ["light", "#111827", "#8ab4f8"],
       ["dark", "#f5ecf5", "#a84370"],
     ];
@@ -211,12 +204,10 @@ describe("theme files", () => {
       ];
     for (const [appearance, canvas, accent] of seeds) {
       const colors = createVividThemeColors(appearance, canvas, accent);
-      // Exact seeds are honored.
       expect(colors.canvas).toMatch(/^oklch\(/);
       expect(colors.accent).toMatch(/^oklch\(/);
       expect(asHex(colors.canvas)).toBe(canvas);
       expect(asHex(colors.accent)).toBe(accent);
-      // Readability is solved per surface.
       expect(contrastRatio(colors.text, colors.canvas)).toBeGreaterThanOrEqual(7);
       expect(contrastRatio(colors.textMuted, colors.canvas)).toBeGreaterThanOrEqual(4.5);
       expect(contrastRatio(colors.textMuted, colors.canvas)).toBeLessThan(5.5);
@@ -246,11 +237,8 @@ describe("theme files", () => {
         4.5,
       );
       expect(contrastRatio(colors.sidebarForeground, colors.sidebar)).toBeGreaterThanOrEqual(4.5);
-      // The companion action is a distinct voice, not the accent again.
       expect(colors.messageAction).not.toBe(colors.accent);
-      // Update family follows the theme, not the default palette.
       expect(asHex(colors.update)).toBe(accent);
-      // Semantic statuses stay red and amber instead of inheriting a brand tint.
       const [errorRed, errorGreen, errorBlue] = channels(colors.error);
       expect(errorRed).toBeGreaterThan(errorGreen * 2);
       expect(errorRed).toBeGreaterThan(errorBlue * 2);
@@ -265,8 +253,6 @@ describe("theme files", () => {
   });
 
   it("keys status colors off the canvas, not the appearance slot", () => {
-    // Inverted seeds: a dark canvas in the light slot must still get the dark
-    // status pair, or the alert foreground lands on a dark surface unreadable.
     const inverted = [
       createVividThemeColors("light", "#111827", "#8ab4f8"),
       createVividThemeColors("dark", "#f5ecf5", "#a84370"),
@@ -380,13 +366,13 @@ describe("theme files", () => {
 
   it("canonicalizes the explicitly exported theme", () => {
     const serialized = serializeThemeFile({
-      ...T3_CHAT_THEME,
-      colors: { ...T3_CHAT_THEME.colors, accent: "hsl(263 70% 58%)" },
+      ...GOAT_CHAT_THEME,
+      colors: { ...GOAT_CHAT_THEME.colors, accent: "hsl(263 70% 58%)" },
     });
     expect(JSON.parse(serialized)).toMatchObject({
       version: THEME_FILE_VERSION,
-      id: T3_CHAT_THEME.id,
-      name: T3_CHAT_THEME.label,
+      id: GOAT_CHAT_THEME.id,
+      name: GOAT_CHAT_THEME.label,
       appearance: "light",
       colors: { accent: canonical("hsl(263 70% 58%)") },
     });
@@ -427,29 +413,6 @@ describe("theme files", () => {
     expect(JSON.parse(serializeThemeFile(theme))).not.toHaveProperty("sidebarArtwork");
   });
 
-  it("suppresses sidebar artwork during a live custom-theme preview", () => {
-    const listener = vi.fn();
-    const unsubscribe = subscribeToThemePreview(listener);
-    vi.stubGlobal("document", {
-      documentElement: {
-        classList: { toggle: vi.fn() },
-        dataset: {},
-        style: { removeProperty: vi.fn(), setProperty: vi.fn() },
-      },
-    });
-
-    applyThemeColorPreview(T3_CHAT_THEME.colors, "light");
-    expect(getThemePreviewSidebarArtwork()).toBe(false);
-    expect(listener).toHaveBeenCalledTimes(1);
-
-    applyThemePalette("system");
-    expect(getThemePreviewSidebarArtwork()).toBeNull();
-    expect(listener).toHaveBeenCalledTimes(2);
-
-    unsubscribe();
-    vi.unstubAllGlobals();
-  });
-
   it("keeps optional light and dark palettes under one theme id", () => {
     const theme = parseThemeFile({
       version: THEME_FILE_VERSION,
@@ -467,11 +430,11 @@ describe("theme files", () => {
       canvas: canonical("#101827"),
       text: canonical("#eef5ff"),
     });
-    expect(getThemeModes(T3_CHAT_THEME)).toEqual(["light", "dark"]);
-    expect(resolveThemeAppearance(T3_CHAT_THEME.id, true, true)).toBe("dark");
-    expect(resolveDesktopTheme(T3_CHAT_THEME.id, true)).toBe("system");
-    expect(resolveThemeAppearance(T3_CHAT_THEME.id, false, false, "dark")).toBe("dark");
-    expect(resolveDesktopTheme(T3_CHAT_THEME.id, false, "dark")).toBe("dark");
+    expect(getThemeModes(GOAT_CHAT_THEME)).toEqual(["light", "dark"]);
+    expect(resolveThemeAppearance(GOAT_CHAT_THEME.id, true, true)).toBe("dark");
+    expect(resolveDesktopTheme(GOAT_CHAT_THEME.id, true)).toBe("system");
+    expect(resolveThemeAppearance(GOAT_CHAT_THEME.id, false, false, "dark")).toBe("dark");
+    expect(resolveDesktopTheme(GOAT_CHAT_THEME.id, false, "dark")).toBe("dark");
     expect(JSON.parse(serializeThemeFile(theme)).variants.dark).toMatchObject({
       canvas: canonical("#101827"),
       text: canonical("#eef5ff"),
@@ -479,7 +442,7 @@ describe("theme files", () => {
   });
 
   it("keeps the T3 Chat palette faithful and readable", () => {
-    expectThemeColors(T3_CHAT_THEME.colors, {
+    expectThemeColors(GOAT_CHAT_THEME.colors, {
       canvas: "#fdf7fd",
       chrome: "#fdf7fd",
       toolbarBorder: "#efbdeb",
@@ -494,7 +457,7 @@ describe("theme files", () => {
       accentSurface: "#f3e6f5",
       sidebar: "#f2e1f4",
     });
-    expectThemeColors(T3_CHAT_THEME.variants!.dark!, {
+    expectThemeColors(GOAT_CHAT_THEME.variants!.dark!, {
       canvas: "#1f1a24",
       chrome: "#1f1a24",
       surface: "#29232d",
@@ -508,7 +471,7 @@ describe("theme files", () => {
     });
 
     for (const mode of ["light", "dark"] as const) {
-      const colors = getThemeColorsForMode(T3_CHAT_THEME, mode)!;
+      const colors = getThemeColorsForMode(GOAT_CHAT_THEME, mode)!;
       expect(contrastRatio(colors.text, colors.canvas)).toBeGreaterThanOrEqual(7);
       expect(contrastRatio(colors.textMuted, colors.canvas)).toBeGreaterThanOrEqual(4.5);
       expect(contrastRatio(colors.messageForeground, colors.messageSurface)).toBeGreaterThanOrEqual(
@@ -523,11 +486,10 @@ describe("theme files", () => {
   });
 
   it("includes the dual-mode maintainer themes", () => {
-    for (const theme of [T3_CHAT_THEME, GROVE_THEME, OCEAN_THEME, EMBER_THEME, IRIS_THEME]) {
+    for (const theme of [GOAT_CHAT_THEME, GROVE_THEME, OCEAN_THEME, EMBER_THEME, IRIS_THEME]) {
       expect(getThemeDefinition(theme.id)).toBe(theme);
       expect(getThemeModes(theme)).toEqual(["light", "dark"]);
       expect(theme.sidebarArtwork).toBe(true);
-      expect(themeAllowsSidebarArtwork(theme.id)).toBe(true);
       expect(theme.colors.accent).toMatch(/^oklch\(/);
       expect(theme.variants?.dark?.accent).toMatch(/^oklch\(/);
 
@@ -536,7 +498,7 @@ describe("theme files", () => {
         expect(colors).not.toBeNull();
         expect(contrastRatio(colors!.text, colors!.canvas)).toBeGreaterThanOrEqual(4.5);
         expect(contrastRatio(colors!.textMuted, colors!.canvas)).toBeGreaterThanOrEqual(4.5);
-        if (theme !== T3_CHAT_THEME) {
+        if (theme !== GOAT_CHAT_THEME) {
           expect(contrastRatio(colors!.textMuted, colors!.canvas)).toBeLessThan(5.5);
           expect(contrastRatio(colors!.textMuted, colors!.canvas)).toBeCloseTo(
             mode === "dark" ? 5.082 : 4.705,
@@ -562,7 +524,6 @@ describe("theme files", () => {
         );
       }
     }
-    expect(themeAllowsSidebarArtwork("my-custom-theme")).toBe(false);
   });
 
   it("rejects a variant that repeats the base appearance", () => {
@@ -1058,7 +1019,6 @@ describe("theme files", () => {
 
 describe("stored theme preferences", () => {
   it("lets a configured half unlock an appearance the base theme lacks", () => {
-    // Light-only base: without halves, dark requests fall back to light.
     const lightOnly = parseThemeFile({
       version: THEME_FILE_VERSION,
       id: "paper",
@@ -1085,14 +1045,29 @@ describe("stored theme preferences", () => {
     }
   });
 
-  it("resolves the legacy t3-chat-dark preference to dark T3 Chat", () => {
-    expect(getThemeDefinition("t3-chat-dark")).toBe(T3_CHAT_THEME);
-    expect(getThemePreferenceMode("t3-chat-dark")).toBe("dark");
-    expect(resolveThemeAppearance("t3-chat-dark", true, false)).toBe("dark");
-    expect(resolveDesktopTheme("t3-chat-dark", false)).toBe("dark");
-    expect(isKnownThemePreference("t3-chat-dark")).toBe(true);
+  // goat-rename: legacy-begin
+  it("translates old chat selections and preserves their appearance", () => {
+    for (const [legacy, current, appearance] of [
+      ["t3-chat", "goat-chat", "light"],
+      ["t3-chat-light", "goat-chat-light", "light"],
+      ["t3-chat-dark", "goat-chat-dark", "dark"],
+    ]) {
+      expect(canonicalThemePreference(legacy!)).toBe(current);
+      expect(getThemeDefinition(legacy!)).toBe(GOAT_CHAT_THEME);
+      expect(getThemePreferenceMode(current!)).toBe(appearance);
+    }
+  });
+  // goat-rename: legacy-end
+
+  it("resolves the legacy goat-chat-dark preference to dark T3 Chat", () => {
+    expect(getThemeDefinition("goat-chat-dark")).toBe(GOAT_CHAT_THEME);
+    expect(getThemePreferenceMode("goat-chat-dark")).toBe("dark");
+    expect(resolveThemeAppearance("goat-chat-dark", true, false)).toBe("dark");
+    expect(resolveDesktopTheme("goat-chat-dark", false)).toBe("dark");
+    expect(isKnownThemePreference("goat-chat-dark")).toBe(true);
   });
 
+  // goat-rename: legacy-begin
   it("resolves legacy t3-prefixed ids onto the renamed themes", () => {
     for (const [legacy, theme] of [
       ["t3-grove", GROVE_THEME],
@@ -1105,16 +1080,17 @@ describe("stored theme preferences", () => {
       expect(canonicalThemePreference(legacy)).toBe(theme.id);
     }
     // The dark-variant alias keeps its raw form: it still carries a mode hint.
-    expect(canonicalThemePreference("t3-chat-dark")).toBe("t3-chat-dark");
+    expect(canonicalThemePreference("goat-chat-dark")).toBe("goat-chat-dark");
     // A stored mix that predates the rename resolves to the new ids.
     expect(parseThemeHalves(JSON.stringify({ light: "t3-ocean", dark: "t3-grove" }))).toEqual({
       light: OCEAN_THEME.id,
       dark: GROVE_THEME.id,
     });
   });
+  // goat-rename: legacy-end
 
   it("recognizes only preferences the runtime can render", () => {
-    for (const preference of ["light", "dark", "system", T3_CHAT_THEME.id, GROVE_THEME.id]) {
+    for (const preference of ["light", "dark", "system", GOAT_CHAT_THEME.id, GROVE_THEME.id]) {
       expect(isKnownThemePreference(preference)).toBe(true);
     }
     expect(isKnownThemePreference(`${GROVE_THEME.id}:dark`)).toBe(false);
@@ -1164,8 +1140,8 @@ describe("stored theme preferences", () => {
 
 describe("singleAppearanceOf", () => {
   it("reports the only half a theme can claim, and null for a pair", () => {
-    const { variants: _pair, ...base } = T3_CHAT_THEME;
+    const { variants: _pair, ...base } = GOAT_CHAT_THEME;
     expect(singleAppearanceOf({ ...base, id: "x", appearance: "dark" })).toBe("dark");
-    expect(singleAppearanceOf(T3_CHAT_THEME)).toBe(null);
+    expect(singleAppearanceOf(GOAT_CHAT_THEME)).toBe(null);
   });
 });

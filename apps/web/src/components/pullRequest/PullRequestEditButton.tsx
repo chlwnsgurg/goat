@@ -1,10 +1,9 @@
-import { PencilIcon } from "lucide-react";
+import { PencilIcon } from "~/components/solar";
 import type { ComponentProps } from "react";
 
 import { cn } from "../../lib/utils";
 import { Button } from "../ui/button";
 
-/** Edit affordances stay visible on touch devices and reveal on hover or focus. */
 export function PullRequestEditButton({
   className,
   ...props

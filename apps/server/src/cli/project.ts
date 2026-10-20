@@ -1,12 +1,12 @@
 import {
-  AuthAdministrativeScopes,
+  AuthStandardClientScopes,
   CommandId,
   EnvironmentHttpApi,
   EnvironmentHttpCommonError,
   type ProjectMutation,
   type ProjectSnapshot,
   ProjectId,
-} from "@t3tools/contracts";
+} from "@goat/contracts";
 import * as Console from "effect/Console";
 import * as Crypto from "effect/Crypto";
 import * as Duration from "effect/Duration";
@@ -22,16 +22,20 @@ import { FetchHttpClient, HttpClient, HttpClientError } from "effect/http";
 import * as HttpApiClient from "effect/http-api/HttpApiClient";
 
 import * as EnvironmentAuth from "../auth/EnvironmentAuth.ts";
+import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
 
 import * as ServerConfig from "../config.ts";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
+import * as ProcessRunner from "../processRunner.ts";
+import * as ServerOwnership from "../serverOwnership.ts";
 import * as RuntimeLayer from "../orchestration-v2/runtimeLayer.ts";
 import * as ProjectEnrichmentService from "../project/ProjectEnrichmentService.ts";
 import * as ProjectFaviconResolver from "../project/ProjectFaviconResolver.ts";
 import * as RepositoryIdentityResolver from "../project/RepositoryIdentityResolver.ts";
 import * as ProjectService from "../project/ProjectService.ts";
 import { projectMutationOperation } from "../project/ProjectMutation.ts";
-import * as T3ProjectFileLoader from "../project/T3ProjectFileLoader.ts";
+import * as GoatProjectFileLoader from "../project/GoatProjectFileLoader.ts";
+import * as ServerSettings from "../serverSettings.ts";
 import {
   clearPersistedServerRuntimeState,
   readPersistedServerRuntimeState,
@@ -186,7 +190,7 @@ export function projectCommandErrorFromLiveServerRequest(cause: unknown): Projec
 }
 
 const projectCommandUuid = Crypto.Crypto.pipe(
-  Effect.flatMap((crypto) => crypto.randomUUIDv4),
+  Effect.flatMap((crypto) => crypto.randomUUIDv4()),
   Effect.mapError(
     (cause) =>
       new ProjectCommandIdGenerationError({
@@ -202,10 +206,11 @@ const layerProjectCliRuntime = RuntimeLayer.layerProjectService.pipe(
   Layer.provideMerge(
     ProjectFaviconResolver.layer.pipe(
       Layer.provide(WorkspacePaths.layer),
-      Layer.provide(T3ProjectFileLoader.layer),
+      Layer.provide(GoatProjectFileLoader.layer),
     ),
   ),
   Layer.provideMerge(WorkspacePaths.layer),
+  Layer.provideMerge(ServerSettings.layer.pipe(Layer.provide(ServerSecretStore.layer))),
   Layer.provideMerge(SqlitePersistence.layerConfig),
 );
 
@@ -216,7 +221,7 @@ const withProjectCliSessionToken = <A, E, R>(
 ) =>
   Effect.acquireUseRelease(
     environmentAuth.issueSession({
-      scopes: AuthAdministrativeScopes,
+      scopes: AuthStandardClientScopes,
       label: "t3 project cli",
     }),
     (issued) => run(issued.token),
@@ -370,7 +375,6 @@ const tryResolveLiveProjectExecutionMode = Effect.fn("tryResolveLiveProjectExecu
       origin: runtimeState.value.origin,
       cause: attempted.failure,
     });
-    yield* clearPersistedServerRuntimeState(config.serverRuntimeStatePath);
     return Option.none<{ readonly origin: string }>();
   },
 );
@@ -421,6 +425,11 @@ const runProjectMutation = Effect.fn("runProjectMutation")(function* (
       Layer.provide(Layer.succeed(References.MinimumLogLevel, minimumLogLevel)),
     );
 
+    // An unreachable server may still be running; never write behind it.
+    yield* ServerOwnership.acquireServerOwnership(config.serverRuntimeStatePath).pipe(
+      Effect.provide(ProcessRunner.layer),
+    );
+    yield* clearPersistedServerRuntimeState(config.serverRuntimeStatePath);
     return yield* Effect.gen(function* () {
       const snapshot = yield* getOfflineSnapshot();
       const projects = yield* ProjectService.ProjectService;
@@ -432,6 +441,7 @@ const runProjectMutation = Effect.fn("runProjectMutation")(function* (
       yield* Console.log(output);
     }).pipe(Effect.provide(layerOfflineRuntime));
   }).pipe(
+    Effect.scoped,
     Effect.provide(
       Layer.mergeAll(EnvironmentAuth.layerRuntime, WorkspacePaths.layer).pipe(
         Layer.provideMerge(FetchHttpClient.layer),

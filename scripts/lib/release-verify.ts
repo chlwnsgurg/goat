@@ -6,8 +6,10 @@ import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import { ChildProcess, ChildProcessSpawner } from "effect/process";
-import * as HostProcess from "@t3tools/shared/HostProcess";
+import * as HostProcess from "@goat/shared/HostProcess";
 import type { PlatformError } from "effect/PlatformError";
+import { runtimeManifestAssetName } from "@goat/shared/runtimeManifest";
+import { checkReleaseRuntimeManifest } from "./runtime-manifest.ts";
 import { parseUpdateManifest, type UpdateManifest } from "./update-manifest.ts";
 
 export class ReleaseVerificationError extends Schema.TaggedError<ReleaseVerificationError>()(
@@ -156,9 +158,13 @@ export function isMachO(bytes: Uint8Array): boolean {
 // framework) legitimately ships its own TypeScript, source maps and its CI's paths, so
 // source checks and generic path patterns apply to GOAT code only. Paths of this build
 // machine (its home, workspace and checkout) fail anywhere they appear.
-const thirdParty = /(?:^|\/)node_modules\/|\/Contents\/Frameworks\//;
+// On Windows and Linux, Electron's runtime (the renamed electron executable, its
+// libraries, .pak files and locales) sits beside resources/ in the unpacked app;
+// GOAT's own code lives under resources/.
+const thirdParty =
+  /(?:^|\/)node_modules\/|\/Contents\/Frameworks\/|(?:^|\/)(?:(?:win|linux)(?:-[a-z0-9]+)?-unpacked|__appImage-[a-z0-9]+)\/(?!resources\/)/;
 // GOAT's own workspace packages stay GOAT code even when they land in node_modules.
-const goatPackage = /(?:^|\/)node_modules\/@t3tools\//;
+const goatPackage = /(?:^|\/)node_modules\/@goat\//;
 const buildPath =
   /\/Users\/[A-Za-z0-9._-]+\/|\/home\/runner\/|\/opt\/actions-runner\/|[DC]:\\+a\\+|\$GITHUB_WORKSPACE/g;
 
@@ -170,6 +176,11 @@ export function localBuildRoots(env: Readonly<Record<string, string | undefined>
   return [...new Set(roots)];
 }
 const defaultBuildRoots = localBuildRoots(process.env, process.cwd());
+// GitHub-hosted runners share one home directory per OS, so a dependency built on
+// any hosted runner (the Cursor SDK's sandbox binary, for one) carries the same
+// paths. Inside third-party files they do not identify this machine; workspace
+// and temp roots still do.
+const sharedHostedHomes = new Set(["/home/runner", "/Users/runner", "C:\\Users\\runneradmin"]);
 
 export function exposureProblems(
   name: string,
@@ -193,7 +204,8 @@ export function exposureProblems(
     problems.push(`${name}: private repository URL`);
   // V8/Node's diagnostic code embeds this documented Windows example literally.
   const pathContent = content.replace(/C:\\(?:\\)?a\\(?:\\)?b\\(?:\\)?c(?=["'`\s)]|$)/g, "");
-  const machinePath = roots.some(
+  const machineRoots = ours ? roots : roots.filter((root) => !sharedHostedHomes.has(root));
+  const machinePath = machineRoots.some(
     (root) =>
       pathContent.includes(`${root}/`) || pathContent.includes(`${root}\\`) || name.includes(root),
   );
@@ -426,12 +438,14 @@ export const writePayloadReport = Effect.fn("writePayloadReport")(function* (
 
 export function requiredReleaseAssets(version: string): string[] {
   const names = [
+    runtimeManifestAssetName(version),
     "nightly-mac.yml",
     "nightly.yml",
     "nightly-linux.yml",
     "nightly-linux-arm64.yml",
     "install.sh",
     "install.ps1",
+    "install-goat-server.sh",
     "THIRD_PARTY_NOTICES.md",
     "LICENSE-T3CODE.txt",
   ];
@@ -648,6 +662,16 @@ export const assembleRelease = Effect.fn("assembleRelease")(function* (
       continue;
     }
     assets.push(yield* readReleaseAsset(dir, name));
+  }
+  const runtimeName = runtimeManifestAssetName(version);
+  if (names.includes(runtimeName)) {
+    problems.push(
+      ...checkReleaseRuntimeManifest(
+        yield* fs.readFileString(path.join(dir, runtimeName)),
+        version,
+        new Map(assets.map(({ name, sha256 }) => [name, sha256])),
+      ),
+    );
   }
   for (const name of names.filter((name) => name.endsWith(".yml"))) {
     // Read before parsing so parser errors become a failed report instead of a defect.

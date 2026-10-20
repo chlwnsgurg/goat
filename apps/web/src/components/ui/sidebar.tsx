@@ -1,7 +1,7 @@
 import { mergeProps } from "@base-ui/react/merge-props";
 import { useRender } from "@base-ui/react/use-render";
 import { cva, type VariantProps } from "class-variance-authority";
-import { PanelLeft, PanelLeftClose } from "lucide";
+import { PanelLeft, PanelLeftClose } from "~/components/solar/nodes";
 import * as React from "react";
 import { cn } from "~/lib/utils";
 import { Button } from "~/components/ui/button";
@@ -28,12 +28,15 @@ const SIDEBAR_WIDTH = "16rem";
 const SIDEBAR_WIDTH_MOBILE = "calc(100vw - var(--spacing(3)))";
 const SIDEBAR_WIDTH_ICON = "3rem";
 const SIDEBAR_RESIZE_DEFAULT_MIN_WIDTH = 16 * 16;
+const SIDEBAR_TITLEBAR_CONTROL_SIZE = "max-sm:[--workspace-titlebar-control-size:--spacing(8)]";
 
 type SidebarContextProps = {
   state: ResponsiveSidebarState;
   open: boolean;
   setOpen: (open: boolean) => void;
   openMobile: boolean;
+  mobileSheetMounted: boolean;
+  setMobileSheetElement: (element: HTMLDivElement | null) => void;
   setOpenMobile: (open: boolean) => void;
   isMobile: boolean;
   toggleSidebar: () => void;
@@ -106,59 +109,53 @@ function SidebarProvider({
 }) {
   const isMobile = useIsMobile();
   const [openMobile, setOpenMobile] = React.useState(false);
+  const [mobileSheetMounted, setMobileSheetMounted] = React.useState(false);
+  const setMobileSheetElement = (element: HTMLDivElement | null) => {
+    setMobileSheetMounted(element !== null);
+  };
 
-  // This is the internal state of the sidebar.
-  // We use openProp and setOpenProp for control from outside the component.
   const [_open, _setOpen] = React.useState(defaultOpen);
   const open = openProp ?? _open;
-  const setOpen = React.useCallback(
-    async (value: boolean | ((value: boolean) => boolean)) => {
-      const openState = typeof value === "function" ? value(open) : value;
-      if (setOpenProp) {
-        setOpenProp(openState);
-      } else {
-        _setOpen(openState);
-      }
+  const setOpen = async (value: boolean | ((value: boolean) => boolean)) => {
+    const openState = typeof value === "function" ? value(open) : value;
+    if (setOpenProp) {
+      setOpenProp(openState);
+    } else {
+      _setOpen(openState);
+    }
 
-      // This sets the cookie to keep the sidebar state.
-      await cookieStore.set({
-        expires: Date.now() + SIDEBAR_COOKIE_MAX_AGE * 1000,
-        name: SIDEBAR_COOKIE_NAME,
-        path: "/",
-        value: String(openState),
-      });
-    },
-    [setOpenProp, open],
-  );
+    await cookieStore.set({
+      expires: Date.now() + SIDEBAR_COOKIE_MAX_AGE * 1000,
+      name: SIDEBAR_COOKIE_NAME,
+      path: "/",
+      value: String(openState),
+    });
+  };
 
-  // Helper to toggle the sidebar.
-  const toggleSidebar = React.useCallback(() => {
+  const toggleSidebar = () => {
     return isMobile ? setOpenMobile((open) => !open) : setOpen((open) => !open);
-  }, [isMobile, setOpen]);
+  };
 
-  // We add a state so that we can do data-state="expanded" or "collapsed".
-  // This makes it easier to style the sidebar with Tailwind classes.
   const state = resolveSidebarState({ isMobile, open, openMobile });
 
-  const contextValue = React.useMemo<SidebarContextProps>(
-    () => ({
-      isMobile,
-      open,
-      openMobile,
-      setOpen,
-      setOpenMobile,
-      state,
-      toggleSidebar,
-    }),
-    [state, open, setOpen, isMobile, openMobile, toggleSidebar],
-  );
+  const contextValue: SidebarContextProps = {
+    isMobile,
+    open,
+    openMobile,
+    mobileSheetMounted,
+    setMobileSheetElement,
+    setOpen,
+    setOpenMobile,
+    state,
+    toggleSidebar,
+  };
 
   return (
     <SidebarContext value={contextValue}>
       <div
-        // Inset layouts opt into bg-sidebar through className.
         className={cn(
-          "group/sidebar-wrapper flex min-h-svh w-full max-sm:[--workspace-titlebar-control-size:--spacing(8)]",
+          "group/sidebar-wrapper flex min-h-svh w-full",
+          SIDEBAR_TITLEBAR_CONTROL_SIZE,
           className,
         )}
         data-sidebar-state={state}
@@ -180,6 +177,29 @@ function SidebarProvider({
   );
 }
 
+function resolveSidebarResizable({
+  collapsible,
+  isMobile,
+  resizable,
+}: {
+  collapsible: "offcanvas" | "icon" | "none";
+  isMobile: boolean;
+  resizable: boolean | SidebarResizableOptions;
+}): SidebarResolvedResizableOptions | null {
+  if (isMobile || collapsible === "none" || !resizable) {
+    return null;
+  }
+
+  const options = typeof resizable === "boolean" ? {} : resizable;
+  return {
+    maxWidth: options.maxWidth ?? Number.POSITIVE_INFINITY,
+    minWidth: options.minWidth ?? SIDEBAR_RESIZE_DEFAULT_MIN_WIDTH,
+    storageKey: options.storageKey ?? null,
+    ...(options.onResize ? { onResize: options.onResize } : {}),
+    ...(options.shouldAcceptWidth ? { shouldAcceptWidth: options.shouldAcceptWidth } : {}),
+  };
+}
+
 function Sidebar({
   side = "left",
   variant = "sidebar",
@@ -190,29 +210,35 @@ function Sidebar({
   ...props
 }: React.ComponentProps<"div"> & {
   side?: "left" | "right";
-  variant?: "sidebar" | "floating" | "inset";
+  /** `framed` sits beside the destination rail: offset by --destination-rail-width, drawn as a
+   * panel below the titlebar strip so the strip reads as window frame. Its top and left edges
+   * belong to the shell's content frame (`workspace-content-frame`); the panel draws only its
+   * right edge, starting at the titlebar hairline. */
+  variant?: "sidebar" | "floating" | "inset" | "framed";
   collapsible?: "offcanvas" | "icon" | "none";
   resizable?: boolean | SidebarResizableOptions;
 }) {
-  const { isMobile, state, openMobile, setOpenMobile } = useSidebar();
-  const resolvedResizable = React.useMemo<SidebarResolvedResizableOptions | null>(() => {
-    if (isMobile || collapsible === "none" || !resizable) {
-      return null;
-    }
+  const { isMobile, state, openMobile, setOpenMobile, setMobileSheetElement } = useSidebar();
+  const desktopSidebarRef = React.useRef<HTMLDivElement>(null);
+  const offcanvasCollapsed = !isMobile && collapsible === "offcanvas" && state === "collapsed";
 
-    const options = typeof resizable === "boolean" ? {} : resizable;
-    return {
-      maxWidth: options.maxWidth ?? Number.POSITIVE_INFINITY,
-      minWidth: options.minWidth ?? SIDEBAR_RESIZE_DEFAULT_MIN_WIDTH,
-      storageKey: options.storageKey ?? null,
-      ...(options.onResize ? { onResize: options.onResize } : {}),
-      ...(options.shouldAcceptWidth ? { shouldAcceptWidth: options.shouldAcceptWidth } : {}),
-    };
-  }, [collapsible, isMobile, resizable]);
-  const instanceContextValue = React.useMemo<SidebarInstanceContextProps>(
-    () => ({ side, resizable: resolvedResizable }),
-    [resolvedResizable, side],
-  );
+  React.useLayoutEffect(() => {
+    const sidebar = desktopSidebarRef.current;
+    if (!sidebar) return;
+
+    // Transfer focus before inert causes the browser to clear the focused descendant.
+    if (offcanvasCollapsed && sidebar.contains(document.activeElement)) {
+      const wrapper = sidebar.closest('[data-slot="sidebar-wrapper"]');
+      const trigger = Array.from(
+        wrapper?.querySelectorAll<HTMLElement>('[data-sidebar="trigger"]') ?? [],
+      ).find((element) => !sidebar.contains(element));
+      trigger?.focus({ preventScroll: true });
+    }
+    sidebar.toggleAttribute("inert", offcanvasCollapsed);
+  }, [offcanvasCollapsed]);
+
+  const resolvedResizable = resolveSidebarResizable({ collapsible, isMobile, resizable });
+  const instanceContextValue: SidebarInstanceContextProps = { side, resizable: resolvedResizable };
 
   if (collapsible === "none") {
     return (
@@ -236,6 +262,7 @@ function Sidebar({
       <SidebarInstanceContext value={instanceContextValue}>
         <Sheet onOpenChange={setOpenMobile} open={openMobile}>
           <SheetPopup
+            ref={setMobileSheetElement}
             className={cn(
               "w-(--sidebar-width) max-w-none bg-sidebar surface-grain p-0 text-sidebar-foreground",
               className,
@@ -258,6 +285,7 @@ function Sidebar({
             <div
               className={cn(
                 "flex h-full w-full flex-col pb-safe pt-safe",
+                SIDEBAR_TITLEBAR_CONTROL_SIZE,
                 side === "left" ? "pl-safe" : "pr-safe",
               )}
               {...props}
@@ -273,6 +301,7 @@ function Sidebar({
   return (
     <SidebarInstanceContext value={instanceContextValue}>
       <div
+        ref={desktopSidebarRef}
         className="group peer hidden text-sidebar-foreground md:block"
         data-collapsible={state === "collapsed" ? collapsible : ""}
         data-side={side}
@@ -280,7 +309,6 @@ function Sidebar({
         data-state={state}
         data-variant={variant}
       >
-        {/* This is what handles the sidebar gap on desktop */}
         <div
           className={cn(
             "relative w-(--sidebar-width) bg-transparent",
@@ -298,19 +326,33 @@ function Sidebar({
             "fixed inset-y-0 z-10 hidden h-svh w-(--sidebar-width) md:flex",
             "[[data-panel-animations=true]_&]:transition-[left,right,width] [[data-panel-animations=true]_&]:[transition-duration:var(--panel-animation-duration)] [[data-panel-animations=true]_&]:ease-out",
             side === "left"
-              ? "left-0 group-data-[collapsible=offcanvas]:left-[calc(var(--sidebar-width)*-1)]"
+              ? variant === "framed"
+                ? // Slides exactly its own width, ending under the rail.
+                  "left-(--destination-rail-width) group-data-[collapsible=offcanvas]:left-[calc(var(--destination-rail-width)-var(--sidebar-width))]"
+                : "left-0 group-data-[collapsible=offcanvas]:left-[calc(var(--sidebar-width)*-1)]"
               : "right-0 group-data-[collapsible=offcanvas]:right-[calc(var(--sidebar-width)*-1)]",
-            // Adjust the padding for floating and inset variants.
             variant === "floating" || variant === "inset"
               ? "p-2 group-data-[collapsible=icon]:w-[calc(var(--sidebar-width-icon)+(--spacing(4))+2px)]"
-              : "group-data-[collapsible=icon]:w-(--sidebar-width-icon) group-data-[side=left]:border-r group-data-[side=right]:border-l",
+              : variant === "framed"
+                ? // The divider starts at the titlebar hairline so the titlebar strip stays one
+                  // surface. It inherits the container's themed border colour and stays above the
+                  // stage artwork, which can reach below the strip.
+                  "group-data-[collapsible=icon]:w-(--sidebar-width-icon) after:pointer-events-none after:absolute after:top-[calc(var(--workspace-topbar-height)-1px)] after:right-0 after:bottom-0 after:z-10 after:border-r after:border-inherit"
+                : "group-data-[collapsible=icon]:w-(--sidebar-width-icon) group-data-[side=left]:border-r group-data-[side=right]:border-l",
             className,
           )}
           data-slot="sidebar-container"
           {...props}
         >
           <div
-            className="flex h-full w-full flex-col bg-sidebar surface-grain group-data-[variant=floating]:rounded-lg group-data-[variant=floating]:border group-data-[variant=floating]:border-sidebar-border group-data-[variant=floating]:shadow-sm/5"
+            className={cn(
+              "flex h-full w-full flex-col",
+              variant === "framed"
+                ? // The panel surface starts under the titlebar strip; the strip shows the frame.
+                  // Its corner matches the content frame that outlines it.
+                  "relative isolate bg-transparent before:absolute before:inset-x-0 before:top-[calc(var(--workspace-topbar-height)-1px)] before:bottom-0 before:-z-10 before:rounded-tl-xl before:bg-sidebar"
+                : "bg-sidebar surface-grain group-data-[variant=floating]:rounded-lg group-data-[variant=floating]:border group-data-[variant=floating]:border-sidebar-border group-data-[variant=floating]:shadow-sm/5",
+            )}
             data-sidebar="sidebar"
             data-slot="sidebar-inner"
           >
@@ -446,32 +488,27 @@ function SidebarRail({
         });
       },
     };
-    // Toggling the sidebar cancels a drag so the inline width never pins a
-    // collapsed sidebar open.
   }, String(open));
+  const refreshResize = React.useEffectEvent(() => resize.refresh());
   React.useLayoutEffect(() => {
     latestResizable.current = resolvedResizable;
-    // Bounds follow the window; keep an active drag's inline width inside them.
-    resize.refresh();
+    refreshResize();
   }, [resolvedResizable]);
 
-  const handleClick = React.useCallback(
-    (event: React.MouseEvent<HTMLButtonElement>) => {
-      onClick?.(event);
-      if (event.defaultPrevented) return;
-      if (suppressClickRef.current) {
-        suppressClickRef.current = false;
-        event.preventDefault();
-        return;
-      }
-      if (resolvedResizable && open) {
-        event.preventDefault();
-        return;
-      }
-      toggleSidebar();
-    },
-    [onClick, open, resolvedResizable, toggleSidebar],
-  );
+  const handleClick = (event: React.MouseEvent<HTMLButtonElement>) => {
+    onClick?.(event);
+    if (event.defaultPrevented) return;
+    if (suppressClickRef.current) {
+      suppressClickRef.current = false;
+      event.preventDefault();
+      return;
+    }
+    if (resolvedResizable && open) {
+      event.preventDefault();
+      return;
+    }
+    toggleSidebar();
+  };
 
   React.useLayoutEffect(() => {
     if (!resolvedResizable?.storageKey || typeof window === "undefined") return;
@@ -489,8 +526,6 @@ function SidebarRail({
     }
     if (storedWidth === null) return;
     const clampedWidth = clampSidebarWidth(storedWidth, resolvedResizable);
-    // Hydrate the CSS variable before the browser paints so a restored sidebar
-    // never flashes at the default width first.
     wrapper.style.setProperty("--sidebar-width", `${clampedWidth}px`);
     resolvedResizable.onResize?.(clampedWidth);
   }, [resolvedResizable]);
@@ -504,6 +539,8 @@ function SidebarRail({
             className={cn(
               /* disable pointer events only when offcanvas sidebar is collapsed, that's when the rail sits over the native scrollbar on windows and linux. icon mode stays fully clickable. */
               "-translate-x-1/2 group-data-[side=left]:-right-4 absolute inset-y-0 z-20 hidden w-4 after:absolute after:inset-y-0 after:left-1/2 after:w-[2px] hover:after:bg-sidebar-border group-data-[side=right]:left-0 sm:flex [[data-collapsible=offcanvas][data-state=collapsed]_&]:pointer-events-none",
+              // A framed sidebar's edge starts at the titlebar hairline; so does its hover line.
+              "group-data-[variant=framed]:after:top-[calc(var(--workspace-topbar-height)-1px)]",
               "[[data-panel-animations=true]_&]:transition-all [[data-panel-animations=true]_&]:[transition-duration:var(--panel-animation-duration)] [[data-panel-animations=true]_&]:ease-out",
               "in-data-[side=left]:cursor-w-resize in-data-[side=right]:cursor-e-resize",
               "[[data-side=left][data-state=collapsed]_&]:cursor-e-resize [[data-side=right][data-state=collapsed]_&]:cursor-w-resize",
@@ -547,7 +584,6 @@ function SidebarRail({
   );
 }
 
-/** A bare search or rename field that sits in a row of sidebar chrome. */
 function SidebarInput({ className, ...props }: Omit<InputProps, "unstyled" | "variant">) {
   return (
     <Input
@@ -607,8 +643,6 @@ function SidebarContent({
   return (
     <>
       {fixedHeader ? <div className="w-full shrink-0">{fixedHeader}</div> : null}
-      {/* Rows take focus on click. Scroll padding would make the browser nudge
-          the list whenever a focused row sits under the fade. */}
       <ScrollArea
         hideScrollbars
         scrollFade
@@ -620,10 +654,7 @@ function SidebarContent({
         className="h-auto min-h-0 flex-1 [&>[data-slot=scroll-area-viewport]]:[--fade-size:0.75rem]"
       >
         <div
-          // Reordered rows must not pull the viewport to their new position.
           className={cn(
-            // Stacked groups share one inset between them instead of doubling
-            // it, including across the fixed header's boundary.
             "flex w-full min-w-0 flex-col [overflow-anchor:none] group-data-[collapsible=icon]:overflow-hidden [&>[data-sidebar=group]+[data-sidebar=group]]:pt-0",
             fixedHeader && "[&>[data-sidebar=group]:first-child]:pt-0",
             className,

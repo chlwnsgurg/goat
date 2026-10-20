@@ -1,7 +1,7 @@
-import { parseSemver } from "@t3tools/shared/semver";
+import { parseSemver } from "@goat/shared/semver";
 import { useNavigate } from "@tanstack/react-router";
 import * as Schema from "effect/Schema";
-import { SmartphoneIcon } from "lucide-react";
+import { SmartphoneIcon } from "~/components/solar";
 import { useEffect } from "react";
 
 import { APP_VERSION, HOSTED_APP_CHANNEL } from "../branding";
@@ -22,12 +22,29 @@ import { toastManager } from "./ui/toast";
 export const IS_NIGHTLY_BUILD =
   parseSemver(APP_VERSION)?.prerelease[0] === "nightly" || HOSTED_APP_CHANNEL === "nightly";
 
-const IOS_TESTFLIGHT_URL = "https://testflight.apple.com/join/XgaxaRtd";
-const ANDROID_BETA_GROUP_URL = "https://groups.google.com/g/t3-code-v2-beta";
-const ANDROID_PLAY_TESTING_URL = "https://play.google.com/apps/testing/com.t3tools.t3code";
+/**
+ * GOAT's iOS TestFlight invite. GOAT has no public beta yet, so this is null and
+ * the beta notice and Settings row stay hidden. Set it to show them again.
+ */
+export const GOAT_IOS_TESTFLIGHT_URL: string | null = null;
+
+/** Whether a build should advertise the beta mobile app. */
+export function shouldShowNightlyMobileBeta(input: {
+  isNightly: boolean;
+  testflightUrl: string | null | undefined;
+}): boolean {
+  return input.isNightly && Boolean(input.testflightUrl);
+}
+
+/** True when the beta mobile app has a GOAT TestFlight link to point at. */
+export const HAS_MOBILE_BETA_LINK = Boolean(GOAT_IOS_TESTFLIGHT_URL);
+
+// Google banned the Play testing group, so new testers can't join it. CI mirrors
+// the Play-signed beta APK to this release instead (mobile-android-apk.yml).
+const ANDROID_APK_RELEASE_URL = "https://github.com/pingdotgg/t3code/releases/tag/android-nightly";
 
 const ROW_ID = "nightly-mobile-beta";
-const NOTICE_DISMISSED_STORAGE_KEY = "t3code:nightly-mobile-beta-notice-dismissed:v1";
+const NOTICE_DISMISSED_STORAGE_KEY = "goat:nightly-mobile-beta-notice-dismissed:v1";
 
 // Guards against a second toast from a remount or a Strict Mode effect replay.
 let noticeShown = false;
@@ -56,7 +73,16 @@ export function NightlyMobileBetaNotice() {
   const navigate = useNavigate();
 
   useEffect(() => {
-    if (!IS_NIGHTLY_BUILD || noticeShown || isNoticeDismissed()) return;
+    if (
+      !shouldShowNightlyMobileBeta({
+        isNightly: IS_NIGHTLY_BUILD,
+        testflightUrl: GOAT_IOS_TESTFLIGHT_URL,
+      }) ||
+      noticeShown ||
+      isNoticeDismissed()
+    ) {
+      return;
+    }
     noticeShown = true;
     const toastId = toastManager.add({
       title: "Nightly needs the beta mobile app",
@@ -101,8 +127,13 @@ function BetaLinkQr({ url, label }: { url: string; label: string }) {
   );
 }
 
-/** Settings → General → About row with the beta app links. Render it only for Nightly. */
+/**
+ * Settings → General → About row with the beta app links. Render it only for
+ * Nightly; it renders nothing until GOAT has a TestFlight link.
+ */
 export function NightlyMobileBetaRow() {
+  const testflightUrl = GOAT_IOS_TESTFLIGHT_URL;
+  if (!testflightUrl) return null;
   return (
     <SettingsRow
       id={ROW_ID}
@@ -121,7 +152,7 @@ export function NightlyMobileBetaRow() {
                   <PopoverTitle>TestFlight beta</PopoverTitle>
                   <p className="text-xs text-muted-foreground">Scan with your iPhone camera.</p>
                 </div>
-                <BetaLinkQr url={IOS_TESTFLIGHT_URL} label="TestFlight beta link" />
+                <BetaLinkQr url={testflightUrl} label="TestFlight beta link" />
               </div>
             </PopoverPopup>
           </Popover>
@@ -133,22 +164,12 @@ export function NightlyMobileBetaRow() {
             <PopoverPopup align="end">
               <div className="flex flex-col gap-3">
                 <div className="space-y-1">
-                  <PopoverTitle>Google Play beta</PopoverTitle>
-                  <p className="max-w-72 text-xs text-muted-foreground">
-                    Use the same Google account for both steps. Step 2 can take up to an hour to
-                    work after you join the group.
+                  <PopoverTitle>Android beta APK</PopoverTitle>
+                  <p className="max-w-56 text-xs text-muted-foreground">
+                    Scan with your phone, then download and install the APK.
                   </p>
                 </div>
-                <div className="grid grid-cols-2 gap-4">
-                  <div className="space-y-2">
-                    <p className="text-center text-xs font-medium">1. Join the group</p>
-                    <BetaLinkQr url={ANDROID_BETA_GROUP_URL} label="Android beta group link" />
-                  </div>
-                  <div className="space-y-2">
-                    <p className="text-center text-xs font-medium">2. Become a tester</p>
-                    <BetaLinkQr url={ANDROID_PLAY_TESTING_URL} label="Google Play beta link" />
-                  </div>
-                </div>
+                <BetaLinkQr url={ANDROID_APK_RELEASE_URL} label="Android beta APK link" />
               </div>
             </PopoverPopup>
           </Popover>

@@ -9,14 +9,14 @@ import {
   EnvironmentHttpForbiddenError,
   EnvironmentHttpInternalServerError,
   EnvironmentHttpUnauthorizedError,
-} from "@t3tools/contracts";
+} from "@goat/contracts";
 import {
   type RelayEnvironmentLinkResponse as RelayEnvironmentLinkResponseType,
   type RelayManagedEndpointProviderKind,
-} from "@t3tools/contracts/relay";
-import { findErrorTraceId } from "@t3tools/client-runtime/errors";
-import { ManagedRelay, relayProtectedErrorMessage } from "@t3tools/client-runtime/relay";
-import { makeEnvironmentHttpApiClient } from "@t3tools/client-runtime/rpc";
+} from "@goat/contracts/relay";
+import { findErrorTraceId } from "@goat/client-runtime/errors";
+import { ManagedRelay, relayRequestFailureDetail } from "@goat/client-runtime/relay";
+import { makeEnvironmentHttpApiClient } from "@goat/client-runtime/rpc";
 
 import type { SavedRemoteConnection } from "../../lib/connection";
 import * as MobileStorage from "../../persistence/mobile-storage";
@@ -89,10 +89,9 @@ function withDevCause(message: string, cause: unknown): string {
 
 function decodedRelayClientError(message: string) {
   return (cause: ManagedRelay.ManagedRelayClientError) => {
-    const relayError =
-      cause._tag === "ManagedRelayRequestFailedError" ? cause.relayError : undefined;
-    const traceId = cause._tag === "ManagedRelayRequestFailedError" ? cause.traceId : undefined;
-    const detail = relayError ? relayProtectedErrorMessage(relayError) : null;
+    const failed = cause._tag === "ManagedRelayRequestFailedError" ? cause : undefined;
+    const traceId = failed?.traceId;
+    const detail = failed ? relayRequestFailureDetail(failed) : null;
     return new CloudEnvironmentLinkError({
       message: detail ? `${message}: ${detail}` : message,
       cause,

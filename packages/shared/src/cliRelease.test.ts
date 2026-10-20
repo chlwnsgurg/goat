@@ -7,11 +7,21 @@ import {
   cliReleaseDownloadBaseUrl,
   cliReleaseChannelOf,
   cliReleaseIndexPageUrl,
+  isPublishableCliReleaseVersion,
   newestCliReleaseVersion,
   parseChecksums,
 } from "./cliRelease.ts";
 
 describe("cliRelease", () => {
+  it("treats only stable, nightly and preview versions as publishable", () => {
+    expect(isPublishableCliReleaseVersion("0.1.0")).toBe(true);
+    expect(isPublishableCliReleaseVersion("0.1.0-nightly.20261019.194")).toBe(true);
+    expect(isPublishableCliReleaseVersion("1.2.3-preview.20260911.4")).toBe(true);
+    expect(isPublishableCliReleaseVersion("0.1.0-dev.1792420473.g7b523f265")).toBe(false);
+    expect(isPublishableCliReleaseVersion("0.1.0-pr.412.3")).toBe(false);
+    expect(isPublishableCliReleaseVersion("0.1.0-nightly.2026.1")).toBe(false);
+  });
+
   it("names archives by version and platform, zip only on Windows", () => {
     expect(cliArchiveFileName("1.2.3-preview.20260911.4", "linux-x64")).toBe(
       "goat-1.2.3-preview.20260911.4-linux-x64.tar.gz",
@@ -23,7 +33,6 @@ describe("cliRelease", () => {
     expect(cliArchivePlatformKey("darwin", "arm64")).toBe("darwin-arm64");
     expect(cliArchivePlatformKey("linux", "x64")).toBe("linux-x64");
     expect(cliArchivePlatformKey("win32", "x64")).toBe("win32-x64");
-    // Node single-executables are unsupported on x64 macOS.
     expect(cliArchivePlatformKey("darwin", "x64")).toBeUndefined();
     expect(cliArchivePlatformKey("linux", "arm64")).toBe("linux-arm64");
     expect(cliArchivePlatformKey("win32", "arm64")).toBe("win32-arm64");
@@ -66,7 +75,6 @@ describe("cliRelease", () => {
     expect(cliReleaseChannelOf("1.2.3")).toBe("stable");
     expect(cliReleaseChannelOf("1.2.3-nightly.20260911.4")).toBe("nightly");
     expect(cliReleaseChannelOf("1.2.3-preview.20260911.4")).toBe("preview");
-    // A prerelease that is not one of our trains is not silently a nightly.
     expect(cliReleaseChannelOf("1.2.3-rc.1")).toBe("stable");
   });
 

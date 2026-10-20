@@ -1,11 +1,12 @@
-import type { ChatFileAttachment } from "@t3tools/contracts";
+import { LEGACY_ATTACHMENT_DOWNLOAD_DIRECTORY } from "@goat/contracts/legacyT3Names";
+import type { ChatFileAttachment } from "@goat/contracts";
 import type { Directory } from "expo-file-system";
 import type { SharingOptions } from "expo-sharing";
 
 import { beginForegroundHandoff } from "./foreground-handoff";
 import { uuidv4 } from "./uuid";
 
-const ATTACHMENT_DOWNLOAD_DIRECTORY = "t3-attachment-downloads";
+const ATTACHMENT_DOWNLOAD_DIRECTORY = LEGACY_ATTACHMENT_DOWNLOAD_DIRECTORY;
 const DOWNLOAD_RETENTION_MS = 24 * 60 * 60_000;
 const DOWNLOAD_DIRECTORY_NAME = /^(\d+)-[\da-f]{8}-[\da-f]{4}-[\da-f]{4}-[\da-f]{4}-[\da-f]{12}$/i;
 const activeDirectories = new Set<string>();
@@ -160,7 +161,6 @@ async function createCachedAttachmentFile(attachment: AttachmentFileMetadata) {
   };
 }
 
-/** A readable reason for a viewer refusing a file; native rejections carry stack text. */
 export function nativeViewerErrorMessage(cause: unknown): string {
   const text = cause instanceof Error ? cause.message : String(cause);
   return /ActivityNotFound|cannot be previewed/i.test(text)
@@ -168,7 +168,6 @@ export function nativeViewerErrorMessage(cause: unknown): string {
     : "The file could not be opened. Check the connection and try again.";
 }
 
-/** Open an Android document in a viewer, retaining the cache while another app reads it. */
 export async function openAttachmentInViewer(input: {
   readonly uri: string;
   readonly attachment: AttachmentFileMetadata;
@@ -232,7 +231,6 @@ export async function downloadAttachmentForPreview(input: {
   }
 }
 
-/** Downloads original bytes for the native save/share sheet, including inline video responses. */
 export async function downloadAndShareAttachment(input: {
   readonly url: string;
   readonly attachment: AttachmentFileMetadata;
@@ -249,7 +247,6 @@ export async function downloadAndShareAttachment(input: {
   }
 }
 
-/** Shares a cache copy so another app never relies on the lifetime of a composer draft. */
 export async function shareLocalAttachment(input: {
   readonly uri: string;
   readonly attachment: AttachmentFileMetadata;
@@ -275,16 +272,11 @@ export async function shareLocalAttachment(input: {
   }
 }
 
-/**
- * Shares bytes made on this device (an MCP App's download) through the same
- * cache and share sheet. False when the share sheet could not be shown.
- */
 export async function shareGeneratedAttachment(input: {
   readonly bytes: Uint8Array;
   readonly attachment: AttachmentFileMetadata;
   readonly signal: AbortSignal;
 }): Promise<boolean> {
-  // An unavailable share sheet is a refusal for the caller, not a failure.
   const sharing = await availableSharing(input.signal).catch(() => null);
   if (sharing === null) return false;
   const cached = await createCachedAttachmentFile(input.attachment);

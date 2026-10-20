@@ -1,5 +1,5 @@
 import { assert } from "@effect/vitest";
-import type { ProviderReplayTranscript } from "@t3tools/contracts";
+import type { ProviderReplayTranscript } from "@goat/contracts";
 
 import type { OrchestratorV2ScenarioResult } from "../../OrchestratorScenario.ts";
 import { assertPlanQuestionsOutputBase } from "./codex_output.ts";
@@ -9,9 +9,6 @@ export function assertOpenCodePlanQuestionsOutput(
   result: OrchestratorV2ScenarioResult,
   transcript: ProviderReplayTranscript,
 ) {
-  // The shared assertions cover the runtime-request lifecycle. OpenCode owns
-  // its question identifiers, so assert its normalized native header instead
-  // of Codex's fixture-specific id.
   assertPlanQuestionsOutputBase(result, transcript);
   const projection = projectionFor(result, transcript.scenario);
   const requestItem = projection.turnItems.find((item) => item.type === "user_input_request");

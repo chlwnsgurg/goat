@@ -1,7 +1,7 @@
 import type {
   RelayClientDeviceRecord,
   RelayDeviceRegistrationRequest,
-} from "@t3tools/contracts/relay";
+} from "@goat/contracts/relay";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
@@ -179,8 +179,6 @@ export const make = Effect.gen(function* () {
       yield* Effect.annotateCurrentSpan({
         "relay.mobile.device_id": input.deviceId,
       });
-      // Same proxy-chain constraint as register above: db chains must be
-      // consumed via `yield*`, never passed to Effect.all.
       yield* db
         .delete(relayLiveActivities)
         .where(

@@ -1,8 +1,7 @@
-import type { ProviderDriverKind, ProviderReplayTranscript } from "@t3tools/contracts";
+import type { ProviderDriverKind, ProviderReplayTranscript } from "@goat/contracts";
 
-import { buildRuntimeInstructions } from "@t3tools/provider-core/server/runtimeInstructions";
+import { buildRuntimeInstructions } from "@goat/provider-core/server/runtimeInstructions";
 
-/** Adds current runtime context to legacy prompt expectations, keeping outbound matching exact. */
 export function materializeReplayTranscriptRuntimeInstructions(
   transcript: ProviderReplayTranscript,
   runtime: { readonly driver: ProviderDriverKind; readonly model: string },

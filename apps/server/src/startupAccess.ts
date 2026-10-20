@@ -1,6 +1,7 @@
 import * as NodeOS from "node:os";
 
-import { QrCode } from "@t3tools/shared/qrCode";
+import { buildMobilePairingLink } from "@goat/shared/mobilePairingLink";
+import { QrCode } from "@goat/shared/qrCode";
 import * as Effect from "effect/Effect";
 import { HttpServer } from "effect/http";
 
@@ -126,7 +127,8 @@ export const formatHeadlessServeOutput = (accessInfo: HeadlessServeAccessInfo): 
     `Token: ${accessInfo.token}`,
     `Pairing URL: ${accessInfo.pairingUrl}`,
     "",
-    renderTerminalQrCode(accessInfo.pairingUrl),
+    // The QR is for the phone app; browsers use the printed URL.
+    renderTerminalQrCode(buildMobilePairingLink(accessInfo.pairingUrl)),
     "",
   ].join("\n");
 

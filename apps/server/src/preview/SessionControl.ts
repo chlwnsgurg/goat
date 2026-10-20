@@ -1,4 +1,4 @@
-import type { PreviewAutomationControlReason } from "@t3tools/contracts";
+import type { PreviewAutomationControlReason } from "@goat/contracts";
 
 export class BrowserControlInterrupted extends Error {
   readonly reason: PreviewAutomationControlReason;
@@ -11,15 +11,23 @@ export class BrowserControlInterrupted extends Error {
   }
 }
 
+const settle = (work: Promise<unknown>) =>
+  work.then(
+    () => undefined,
+    () => undefined,
+  );
+
 /** Reserves control immediately, but drains running work before the new owner can act. */
 export class SessionControl {
   readonly agentId: string | null;
   private readonly onGenerationChange: () => void;
   private tail: Promise<unknown> = Promise.resolve();
   private pending: Promise<void> = Promise.resolve();
+  private readonly handoff = new Set<Promise<void>>();
   private owner: string | null = null;
   private epoch = 0;
   private closed = false;
+  private activeAgentAction: AbortController | undefined;
 
   constructor(agentId: string | null, onGenerationChange: () => void = () => {}) {
     this.agentId = agentId;
@@ -45,11 +53,15 @@ export class SessionControl {
 
   /** An action can respond before its navigation commits, while later actions still wait. */
   track(work: Promise<unknown>) {
-    const settled = work.then(
-      () => undefined,
-      () => undefined,
-    );
-    this.pending = Promise.all([this.pending, settled]).then(() => undefined);
+    this.pending = Promise.all([this.pending, settle(work)]).then(() => undefined);
+  }
+
+  /** Viewer input stays responsive, but control handoffs still drain its navigations. */
+  trackUntilHandoff(work: Promise<unknown>) {
+    const settled = settle(work).finally(() => {
+      this.handoff.delete(settled);
+    });
+    this.handoff.add(settled);
   }
 
   private assertOpen() {
@@ -60,6 +72,12 @@ export class SessionControl {
     this.owner = owner;
     this.epoch++;
     this.onGenerationChange();
+    this.activeAgentAction?.abort(
+      new BrowserControlInterrupted(
+        this.closed ? "This browser tab is closed." : "Browser control changed during the wait.",
+        this.closed ? "closed" : owner !== null ? "humanControl" : "interrupted",
+      ),
+    );
   }
 
   private async action<A>(allowed: () => boolean, run: () => Promise<A>) {
@@ -73,7 +91,6 @@ export class SessionControl {
     });
   }
 
-  /** Whether an agent may act here: its own tab, or a tab no agent opened. */
   agentMayAct(agentId: string) {
     return this.agentId === null || this.agentId === agentId;
   }
@@ -82,7 +99,7 @@ export class SessionControl {
    * An agent action. It may act on its own tab or on one a human opened, but
    * never while a human controls the tab; taking control interrupts it.
    */
-  agent<A>(agentId: string, run: () => Promise<A>) {
+  agent<A>(agentId: string, run: (signal: AbortSignal) => Promise<A>) {
     if (!this.agentMayAct(agentId))
       return Promise.reject(
         new BrowserControlInterrupted("This tab belongs to another agent.", "agentMismatch"),
@@ -91,10 +108,20 @@ export class SessionControl {
       return Promise.reject(
         new BrowserControlInterrupted("A human controls this tab.", "humanControl"),
       );
-    return this.action(() => this.agentMayAct(agentId) && this.owner === null, run);
+    return this.action(
+      () => this.agentMayAct(agentId) && this.owner === null,
+      async () => {
+        const action = new AbortController();
+        this.activeAgentAction = action;
+        try {
+          return await run(action.signal);
+        } finally {
+          this.activeAgentAction = undefined;
+        }
+      },
+    );
   }
 
-  /** Whether this agent's action would run now rather than be refused. */
   agentCanActNow(agentId: string) {
     return this.agentMayAct(agentId) && this.owner === null;
   }
@@ -108,10 +135,6 @@ export class SessionControl {
     return run();
   }
 
-  /**
-   * Work any client may ask for, such as a viewport or appearance change. It
-   * waits its turn behind running actions but needs no control.
-   */
   system<A>(run: () => Promise<A>) {
     this.assertOpen();
     return this.enqueue(async () => {
@@ -141,7 +164,10 @@ export class SessionControl {
       );
     }
     this.changeOwner(null);
-    await this.enqueue(afterDrain);
+    await this.enqueue(async () => {
+      await Promise.all(this.handoff);
+      await afterDrain();
+    });
   }
 
   async disconnect(viewerId: string, afterDrain?: () => Promise<void>) {

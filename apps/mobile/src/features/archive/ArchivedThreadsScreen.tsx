@@ -1,31 +1,23 @@
-import type {
-  EnvironmentProject,
-  EnvironmentThreadShell,
-} from "@t3tools/client-runtime/state/shell";
+import { Button } from "../../components/ui/Button";
+import type { EnvironmentProject, EnvironmentThreadShell } from "@goat/client-runtime/state/shell";
 import { LegendList } from "@legendapp/list/react-native";
 import {
   AuthOrchestrationOperateScope,
   type EnvironmentId,
   type EnvironmentMachineKind,
   resolveEnvironmentMachineKind,
-} from "@t3tools/contracts";
+} from "@goat/contracts";
 import { useNavigation } from "@react-navigation/native";
-import { ScreenHeader } from "../../components/ScreenHeader";
-import { SymbolView } from "../../components/AppSymbol";
+import { AppActivityIndicator } from "../../components/ui/AppActivityIndicator";
+import { AppBar } from "../../components/ui/AppBar";
+import { SymbolView } from "../../components/ui/AppSymbol";
 import { useCallback, useMemo, useRef, type ComponentProps } from "react";
-import {
-  ActivityIndicator,
-  Platform,
-  Pressable,
-  RefreshControl,
-  useWindowDimensions,
-  View,
-} from "react-native";
+import { Platform, RefreshControl, useWindowDimensions, View } from "react-native";
 import { GestureDetector, useNativeGesture } from "react-native-gesture-handler";
 import type { SwipeableMethods } from "react-native-gesture-handler/ReanimatedSwipeable";
 
-import { AppText as Text } from "../../components/AppText";
-import { EmptyState } from "../../components/EmptyState";
+import { AppText as Text } from "../../components/ui/AppText";
+import { EmptyState } from "../../components/ui/EmptyState";
 import { EnvironmentMachineSymbol } from "../../components/EnvironmentMachineSymbol";
 import { ProjectFavicon } from "../../components/ProjectFavicon";
 import { relativeTime } from "../../lib/time";
@@ -55,7 +47,7 @@ function ArchivedThreadsHeader(props: {
   const { width } = useWindowDimensions();
   const hasCustomFilter = props.selectedEnvironmentId !== null || props.sortOrder !== "newest";
   return (
-    <ScreenHeader
+    <AppBar
       title="Archived threads"
       sidebar={false}
       onBack={() => navigation.goBack()}
@@ -159,7 +151,7 @@ function ProjectGroupLabel(props: {
         workspaceRoot={props.project.workspaceRoot}
       />
       <Text
-        className="flex-1 text-xs font-t3-medium tracking-[0.5px] uppercase text-foreground-muted"
+        className="flex-1 text-xs font-goat-medium tracking-[0.5px] uppercase text-foreground-muted"
         numberOfLines={1}
       >
         {props.project.title}
@@ -217,7 +209,7 @@ function ArchivedThreadRow(props: {
       <View className="min-w-0 flex-1 gap-1">
         <View className="flex-row items-center gap-2">
           <Text
-            className="min-w-0 flex-1 text-base font-t3-bold leading-snug text-foreground"
+            className="min-w-0 flex-1 text-base font-goat-bold leading-snug text-foreground"
             numberOfLines={1}
           >
             {props.thread.title}
@@ -245,7 +237,6 @@ function ArchivedThreadRow(props: {
       </View>
     </View>
   );
-  // Keep the group's rounded corners on both interactive and read-only rows.
   const containerStyle = {
     borderTopLeftRadius: props.isFirst ? 20 : 0,
     borderTopRightRadius: props.isFirst ? 20 : 0,
@@ -282,13 +273,13 @@ function ArchivedThreadRow(props: {
 function ArchiveError(props: { readonly message: string; readonly onRetry: () => void }) {
   return (
     <View className="rounded-[20px] border border-danger-border bg-danger p-4">
-      <Text className="text-base font-t3-bold text-danger-foreground">
+      <Text className="text-base font-goat-bold text-danger-foreground">
         Could not load every archive
       </Text>
       <Text className="mt-1 text-sm text-foreground-muted">{props.message}</Text>
-      <Pressable className="mt-3 self-start active:opacity-60" onPress={props.onRetry}>
-        <Text className="text-sm font-t3-bold text-danger-foreground">Try again</Text>
-      </Pressable>
+      <View className="mt-3">
+        <Button label="Try again" tone="secondary" onPress={props.onRetry} />
+      </View>
     </View>
   );
 }
@@ -399,7 +390,7 @@ export function ArchivedThreadsScreen(props: {
     if (isInitialLoad) {
       return (
         <View className="items-center py-16">
-          <ActivityIndicator colorClassName="accent-icon" />
+          <AppActivityIndicator colorClassName="accent-icon" />
           <Text className="mt-3 text-sm text-foreground-muted">Loading archive...</Text>
         </View>
       );

@@ -3,8 +3,10 @@ import type {
   PullRequestCheck,
   PullRequestComment,
   PullRequestDetail,
+  PullRequestWatchPolicy,
+  PullRequestWatchWakeMode,
   ThreadPullRequestWatch,
-} from "@t3tools/contracts";
+} from "@goat/contracts";
 
 /**
  * Wakes in a row that bring only comments. Check, conflict, or push news resets the count, so
@@ -13,6 +15,9 @@ import type {
 export const PULL_REQUEST_WATCH_WAKE_LIMIT = 10;
 const LISTED_ITEMS = 10;
 const SNIPPET_LENGTH = 200;
+/** Lines of held context kept for the next wake; older ones are dropped first. */
+const HELD_CONTEXT_LINES = 40;
+const DAY_MS = 24 * 60 * 60_000;
 
 export type PullRequestWatchChange =
   | { readonly kind: "checks-failed"; readonly failed: ReadonlyArray<PullRequestCheck> }
@@ -21,32 +26,59 @@ export type PullRequestWatchChange =
   | { readonly kind: "conflicting" };
 
 export interface PullRequestWatchReport {
-  /** What the agent has not been told yet. Empty means no wake. */
+  /** What wakes the agent now. Empty means no wake. */
   readonly changes: ReadonlyArray<PullRequestWatchChange>;
-  /** The watch to record, whether or not anything is reported. */
+  /** What the policy keeps as context: recorded on the thread, told with the next wake. */
+  readonly held: ReadonlyArray<PullRequestWatchChange>;
   readonly next: ThreadPullRequestWatch;
-  /** This report spends the last wake before the limit, so watching stops after it. */
   readonly exhausted: boolean;
+}
+
+/** What the policy needs besides the pull request: when the thread was last active, and now. */
+export interface PullRequestWatchContext {
+  readonly policy: PullRequestWatchPolicy;
+  /** Epoch ms of the thread's last activity. Recorded watch progress does not move it. */
+  readonly threadActiveAt: number;
+  readonly now: number;
 }
 
 // "action-required" is a finished check that needs someone, so the agent hears about it.
 const isFailedCheck = (check: PullRequestCheck) =>
   check.status === "failure" || check.status === "cancelled" || check.status === "action-required";
 
+const botLogin = (login: string) => login.toLowerCase().replace(/\[bot\]$/, "");
+
 /**
- * Compares a watched pull request with what its agent was last told. Each check is reported as
- * soon as it fails, so a check that never finishes (an advisory review bot) cannot hold the
- * news back. "Passed" is reported once the checks the base branch requires all passed, or all
- * checks where the host marks none required. Remarks count when someone other than the agent's
- * own account wrote them, so its own replies never wake it. `remarks` is null when the
- * conversation could not be read; remarks then wait for a later pass.
+ * Bots follow `botRemarks` unless allowed, so a deploy preview or coverage comment does not
+ * spend a turn. Hosts mark bots with `isBot`; GitHub app logins also end in "[bot]".
+ */
+const remarkMode = (remark: PullRequestComment, policy: PullRequestWatchPolicy) => {
+  const login = remark.author?.login;
+  if (login === undefined) return policy.humanRemarks;
+  const bot = remark.author?.isBot === true || login.toLowerCase().endsWith("[bot]");
+  if (!bot) return policy.humanRemarks;
+  const allowed = policy.allowedBotLogins.some((entry) => botLogin(entry) === botLogin(login));
+  return allowed ? policy.humanRemarks : policy.botRemarks;
+};
+
+/**
+ * The policy sorts each change: `react` wakes, `keep_as_context` is held, `ignore` is
+ * dropped. Every change still moves the watch forward, so a held or ignored one is never
+ * reported again. A conflict on a thread idle past `conflictMaxIdleDays` is dropped.
  */
 export function evaluatePullRequestWatch(
   watch: ThreadPullRequestWatch,
   detail: Pick<PullRequestDetail, "headSha" | "checks" | "mergeability" | "viewer" | "author">,
   remarks: ReadonlyArray<PullRequestComment> | null,
+  context: PullRequestWatchContext,
 ): PullRequestWatchReport {
+  const { policy } = context;
   const changes: Array<PullRequestWatchChange> = [];
+  const held: Array<PullRequestWatchChange> = [];
+  const sort = (change: PullRequestWatchChange, mode: PullRequestWatchWakeMode) => {
+    if (mode === "react") changes.push(change);
+    else if (mode === "keep_as_context") held.push(change);
+  };
   const headSha = detail.headSha ?? null;
   const headMoved = headSha !== watch.headSha;
 
@@ -57,21 +89,24 @@ export function evaluatePullRequestWatch(
   if (detail.checks.length > 0) {
     const failed = detail.checks.filter(isFailedCheck);
     const newlyFailed = failed.filter((check) => !failedChecks.includes(check.name));
-    if (newlyFailed.length > 0) changes.push({ kind: "checks-failed", failed: newlyFailed });
-    // A check that runs again leaves the list, so a rerun that fails again is reported.
+    if (newlyFailed.length > 0) {
+      sort({ kind: "checks-failed", failed: newlyFailed }, policy.checksFailed);
+    }
     failedChecks = failed.map((check) => check.name);
 
     const required = detail.checks.filter((check) => check.required === true);
     const gate = required.length > 0 ? required : detail.checks;
     const passedNow = gate.every((check) => check.status !== "pending" && !isFailedCheck(check));
     const gateNames = gate.map((check) => check.name);
-    // A watch saved before passedChecks existed takes the current names, so it does not wake.
     const told = passed && passedChecks.length === 0 ? gateNames : passedChecks;
     // A required job created and finished between two passes is never seen pending. Without
     // required checks, any check counts, and advisory bots keep adding passed ones: no wake.
     const gateGrew = required.length > 0 && gateNames.some((name) => !told.includes(name));
     if (passedNow && (!passed || gateGrew)) {
-      changes.push({ kind: "checks-passed", count: gate.length, required: required.length > 0 });
+      sort(
+        { kind: "checks-passed", count: gate.length, required: required.length > 0 },
+        policy.checksPassed,
+      );
     }
     passed = passedNow;
     passedChecks = passedNow ? gateNames : [];
@@ -79,7 +114,6 @@ export function evaluatePullRequestWatch(
 
   const own = (detail.viewer ?? detail.author?.login)?.toLowerCase();
   const through = Date.parse(watch.remarksThrough);
-  // An edit counts as new activity, so bots that rewrite one summary comment still wake the agent.
   const activeAt = (remark: PullRequestComment) => remark.editedAt ?? remark.createdAt;
   // GitHub times are per second, so remarks at the boundary time are told apart by ID.
   const fresh = (remarks ?? []).filter((remark) => {
@@ -89,7 +123,12 @@ export function evaluatePullRequestWatch(
       remark.author?.login.toLowerCase() !== own
     );
   });
-  if (fresh.length > 0) changes.push({ kind: "remarks", remarks: fresh });
+  const byMode = (mode: PullRequestWatchWakeMode) =>
+    fresh.filter((remark) => remarkMode(remark, policy) === mode);
+  for (const mode of ["react", "keep_as_context"] as const) {
+    const told = byMode(mode);
+    if (told.length > 0) sort({ kind: "remarks", remarks: told }, mode);
+  }
   const latest = Math.max(through, ...fresh.map((remark) => Date.parse(activeAt(remark))));
   const atLatest = fresh.filter((remark) => Date.parse(activeAt(remark)) === latest);
   const remarksThrough = latest === through ? watch.remarksThrough : activeAt(atLatest[0]!);
@@ -99,17 +138,23 @@ export function evaluatePullRequestWatch(
   ];
 
   if (detail.mergeability === "conflicting" && !watch.conflicting) {
-    changes.push({ kind: "conflicting" });
+    // A base push can conflict every open pull request; a thread nobody touched for days stays
+    // asleep. The watch still records the conflict, so it is not reported later either.
+    const idle =
+      policy.conflictMaxIdleDays !== null &&
+      context.now - context.threadActiveAt > policy.conflictMaxIdleDays * DAY_MS;
+    sort({ kind: "conflicting" }, idle ? "ignore" : policy.conflicts);
   }
   // "unknown" is GitHub still computing after a push; only a clean answer clears a conflict.
   const conflicting =
     detail.mergeability === "unknown" ? watch.conflicting : detail.mergeability === "conflicting";
 
   const commentsOnly = changes.length > 0 && changes.every((change) => change.kind === "remarks");
-  const progress = headMoved || (changes.length > 0 && !commentsOnly);
+  const progress = headMoved || [...changes, ...held].some((change) => change.kind !== "remarks");
   const wakes = (progress ? 0 : watch.wakes) + (commentsOnly ? 1 : 0);
   return {
     changes,
+    held,
     next: {
       startedAt: watch.startedAt,
       headSha,
@@ -120,6 +165,8 @@ export function evaluatePullRequestWatch(
       remarkIds,
       conflicting,
       wakes,
+      ...(watch.automatic === true ? { automatic: true } : {}),
+      ...(watch.heldContext === undefined ? {} : { heldContext: watch.heldContext }),
     },
     exhausted: commentsOnly && wakes >= PULL_REQUEST_WATCH_WAKE_LIMIT,
   };
@@ -179,13 +226,26 @@ const SUMMARY: Record<PullRequestWatchChange["kind"], string> = {
   conflicting: "merge conflict",
 };
 
-/** The wake the agent reads and the timeline notification the user sees. */
+/** Adds the updates held as context to a message the agent reads, so a wake or an ending loses none. */
+export function withHeldContext(
+  text: string,
+  heldContext: ReadonlyArray<string> | undefined,
+): string {
+  return heldContext === undefined || heldContext.length === 0
+    ? text
+    : [text, "", "Earlier updates GOAT kept as context without waking you:", ...heldContext].join(
+        "\n",
+      );
+}
+
 export function pullRequestWatchMessage(input: {
   readonly number: number;
   readonly url: string;
   readonly baseBranch: string;
   readonly headSha: string | null;
   readonly report: PullRequestWatchReport;
+  /** Lines kept as context since the last wake, told with this one. */
+  readonly heldContext?: ReadonlyArray<string>;
 }): { readonly text: string; readonly notification: OrchestrationV2Notification } {
   const { changes, exhausted } = input.report;
   const context = {
@@ -193,8 +253,13 @@ export function pullRequestWatchMessage(input: {
     commit: input.headSha === null ? "" : ` on ${input.headSha.slice(0, 7)}`,
   };
   const text = [
-    `Update on pull request #${input.number} (${input.url}), which GOAT is watching for you:`,
-    ...changes.flatMap((change) => changeLines(change, context)),
+    withHeldContext(
+      [
+        `Update on pull request #${input.number} (${input.url}), which GOAT is watching for you:`,
+        ...changes.flatMap((change) => changeLines(change, context)),
+      ].join("\n"),
+      input.heldContext,
+    ),
     "",
     exhausted
       ? `GOAT stopped watching after ${PULL_REQUEST_WATCH_WAKE_LIMIT} comment-only updates in a row. Call watch_pull_request to watch it again.`
@@ -215,6 +280,55 @@ export function pullRequestWatchMessage(input: {
           ? "completed"
           : "updated",
       summary: `#${input.number}: ${summary.join(", ")}`,
+    },
+  };
+}
+
+/**
+ * Turns a report into what the reactor records: the watch to save, and either a wake, or a
+ * timeline note for updates kept as context. Held lines ride along with the next wake, then
+ * clear. A watch that spent its comment limit ends with its wake.
+ */
+export function pullRequestWatchOutcome(input: {
+  readonly number: number;
+  readonly url: string;
+  readonly baseBranch: string;
+  readonly report: PullRequestWatchReport;
+}): {
+  readonly next: ThreadPullRequestWatch | null;
+  /** An ending watch keeps what this pass saw, so watching again starts from it. */
+  readonly endedWatch?: ThreadPullRequestWatch;
+  readonly wake?: { readonly text: string; readonly notification: OrchestrationV2Notification };
+  readonly note?: OrchestrationV2Notification;
+} {
+  const { report } = input;
+  const { heldContext: earlier = [], ...next } = report.next;
+  const context = {
+    baseBranch: input.baseBranch,
+    commit: next.headSha === null ? "" : ` on ${next.headSha.slice(0, 7)}`,
+  };
+  const heldLines = report.held.flatMap((change) => changeLines(change, context));
+  if (report.changes.length > 0) {
+    return {
+      ...(report.exhausted ? { next: null, endedWatch: next } : { next }),
+      wake: pullRequestWatchMessage({
+        number: input.number,
+        url: input.url,
+        baseBranch: input.baseBranch,
+        headSha: next.headSha,
+        report,
+        heldContext: [...earlier, ...heldLines].slice(-HELD_CONTEXT_LINES),
+      }),
+    };
+  }
+  if (heldLines.length === 0) return { next: report.next };
+  return {
+    next: { ...next, heldContext: [...earlier, ...heldLines].slice(-HELD_CONTEXT_LINES) },
+    note: {
+      source: { kind: "monitor" },
+      outcome: "updated",
+      summary: `#${input.number}: ${report.held.map((change) => SUMMARY[change.kind]).join(", ")}, kept as context`,
+      detail: heldLines.join("\n"),
     },
   };
 }

@@ -13,7 +13,7 @@ import {
   RunAttemptId,
   RunId,
   ThreadId,
-} from "@t3tools/contracts";
+} from "@goat/contracts";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
@@ -24,7 +24,7 @@ import * as Stream from "effect/Stream";
 
 import { CodexProviderCapabilitiesV2 } from "./Adapters/CodexAdapterV2.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
-import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
+import type * as ProviderAdapter from "@goat/provider-core/server/ProviderAdapter";
 import * as ProviderSessionManager from "./ProviderSessionManager.ts";
 import * as ProviderTurnControlService from "./ProviderTurnControlService.ts";
 
@@ -142,8 +142,6 @@ it.effect(
         id: providerThreadId,
         driver,
         providerInstanceId,
-        // The restart command has already projected this replacement binding
-        // before the process-bound restart effect executes.
         providerSessionId: replacementSessionId,
         appThreadId: threadId,
         ownerNodeId: null,
@@ -165,6 +163,7 @@ it.effect(
         makeProjection({ now, threadId, providerThread, providerTurnId, attemptId }),
       );
       const interruptedThread = yield* Ref.make<OrchestrationV2ProviderThread | null>(null);
+      const interruptCount = yield* Ref.make(0);
       const providerSession = {
         id: oldSessionId,
         driver,
@@ -190,6 +189,7 @@ it.effect(
         interruptTurn: ({ providerThread: target }) =>
           Effect.all(
             [
+              Ref.update(interruptCount, (count) => count + 1),
               Ref.set(interruptedThread, target),
               Ref.update(projection, (current) => ({
                 ...current,
@@ -222,6 +222,7 @@ it.effect(
           getThread: () => Ref.get(projection).pipe(Effect.map((state) => state.thread)),
           getSettlementCandidates: () => Effect.die("unused getSettlementCandidates"),
           getThreadsWithPullRequests: () => Effect.die("unused getThreadsWithPullRequests"),
+          getThreadWorktreePaths: () => Effect.die("unused getThreadWorktreePaths"),
           getThreadProjection: () => Effect.die("control effects must not load transcript"),
           getTurnStartContext: () => Effect.die("unused"),
           getTurnStartHistory: () => Effect.die("unused"),
@@ -236,6 +237,7 @@ it.effect(
           getMessageCount: () => Effect.die("unused message count"),
           getNextTurnItemOrdinal: () => Effect.die("unused ordinal read"),
           getTurnItem: () => Effect.die("unused turn item read"),
+          getReviewLedgerEntries: () => Effect.die("unused review ledger query"),
           getThreadRecords: () => Effect.die("unused record read"),
           getRuntimeRequest: () => Effect.die("unused getRuntimeRequest"),
           getRunningTurnContext: () => Effect.die("unused getRunningTurnContext"),
@@ -259,6 +261,7 @@ it.effect(
           getCheckpointContext: () => Effect.die("not used"),
           getCheckpointCaptureContext: () => Effect.die("not used"),
           getRunMessage: () => Effect.die("not used"),
+          isNodeStored: () => Effect.die("not used"),
           canStartQueuedRun: () => Effect.die("not used"),
           getRecoveryThreadIds: () => Effect.die("unused getRecoveryThreadIds"),
           getUnreadableThreadIds: () => Effect.die("unused getUnreadableThreadIds"),
@@ -275,6 +278,7 @@ it.effect(
             Effect.succeed(
               providerSessionId === oldSessionId ? Option.some(runtime) : Option.none(),
             ),
+          isLive: (providerSessionId) => Effect.succeed(providerSessionId === oldSessionId),
           close: () => Effect.void,
           closeInstance: () => Effect.void,
           release: () => Effect.void,
@@ -322,8 +326,18 @@ it.effect(
           providerTurnId,
           interruptedAttemptId: attemptId,
         });
+        // A contended restart reclaims the same effect after the old turn ended.
+        yield* control.interruptAndAwaitTerminal({
+          threadId,
+          providerSessionId: oldSessionId,
+          replacementProviderSessionId: replacementSessionId,
+          providerThreadId,
+          providerTurnId,
+          interruptedAttemptId: attemptId,
+        });
       }).pipe(Effect.provide(layerControl));
 
+      assert.equal(yield* Ref.get(interruptCount), 1);
       const interrupted = yield* Ref.get(interruptedThread);
       assert.isNotNull(interrupted);
       assert.equal(interrupted?.providerSessionId, oldSessionId);

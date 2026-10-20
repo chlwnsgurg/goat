@@ -54,14 +54,55 @@ export function normalizeProjectPathForComparison(value: string): string {
   return normalized;
 }
 
+/** `uname -s` of a Windows host whose shell is Git Bash, MSYS2, or Cygwin. */
+export function isWindowsShellOs(os: string | null | undefined): boolean {
+  return os != null && /^(?:MINGW|MSYS|CYGWIN)/iu.test(os);
+}
+
+const MSYS_DRIVE_PATH = /^\/(?:cygdrive\/)?([A-Za-z])(?=\/|$)(.*)$/su;
+
+/**
+ * Git Bash and MSYS2 mount drive C: at `/c`, Cygwin at `/cygdrive/c`. Returns the native
+ * `C:\…` form, or null when the value is not a drive mount. Only a Windows host should
+ * call this: on POSIX `/c/x` is an ordinary folder.
+ */
+export function msysDrivePathToWindows(value: string): string | null {
+  const match = MSYS_DRIVE_PATH.exec(value.trim());
+  if (match === null) return null;
+  const rest = (match[2] ?? "").replace(/[\\/]+/gu, "\\").replace(/\\+$/u, "");
+  return `${match[1]!.toUpperCase()}:${rest || "\\"}`;
+}
+
+/**
+ * The path a native Windows GOAT server stores for a path reported by the host's POSIX shell:
+ * drive mounts become `C:\…`, `c:/…` becomes `C:\…`. UNC paths and other shell-only paths
+ * (`/tmp`, which only the host's mount table can resolve) are returned trimmed but unchanged.
+ */
+export function toWindowsHostPath(value: string): string {
+  const trimmed = value.trim();
+  const mounted = msysDrivePathToWindows(trimmed);
+  if (mounted !== null) return mounted;
+  if (isWindowsDrivePath(trimmed))
+    return normalizeProjectPathForDispatch(
+      trimmed[0]!.toUpperCase() + trimmed.slice(1).replaceAll("/", "\\"),
+    );
+  return trimmed;
+}
+
+/** Compares paths on a Windows host: either shell form, any slash, any case (NTFS default). */
+export function windowsHostPathKey(value: string): string {
+  return normalizeProjectPathForDispatch(toWindowsHostPath(value))
+    .replaceAll("/", "\\")
+    .toLowerCase();
+}
+
 // Windows refuses these as file names, with or without an extension.
 const WINDOWS_RESERVED_NAME = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])$/;
 
-/**
- * Folder name for a project started from just a name ("Pinball Stats" becomes
- * "pinball-stats"). The server uses it for `projects.createNew`, and clients
- * use it to show the path before the server makes it.
- */
+export function isWindowsReservedFileName(name: string): boolean {
+  return WINDOWS_RESERVED_NAME.test(name.split(".")[0]!.trimEnd().toLowerCase());
+}
+
 export function newProjectFolderName(name: string): string {
   const slug = name
     .normalize("NFKD")
@@ -72,7 +113,7 @@ export function newProjectFolderName(name: string): string {
     .slice(0, 64)
     .replace(/-+$/, "");
   if (slug.length === 0) return "project";
-  return WINDOWS_RESERVED_NAME.test(slug) ? `${slug}-project` : slug;
+  return isWindowsReservedFileName(slug) ? `${slug}-project` : slug;
 }
 
 const SLASH_PREFIXED_WINDOWS_DRIVE_PATTERN = /^\/[A-Za-z]:[\\/]/;
@@ -83,8 +124,6 @@ export function stripSlashPrefixedWindowsDrive(path: string): string {
 }
 
 export function fileBasename(path: string): string {
-  // A trailing separator is a valid way to write a directory. Trim it before
-  // taking the final segment so the label is never empty.
   const trimmed = path.replace(/[/\\]+$/, "");
   if (trimmed.length === 0) return path;
   const separatorIndex = Math.max(trimmed.lastIndexOf("/"), trimmed.lastIndexOf("\\"));
@@ -110,4 +149,12 @@ export function workspaceRelativeFilePath(
 
 export function isAbsolutePath(value: string): boolean {
   return value.startsWith("/") || isWindowsAbsolutePath(value);
+}
+
+export function resolveWorkspaceFilePath(path: string, workspaceRoot: string): string {
+  if (isAbsolutePath(path) || path.startsWith("~/") || path.startsWith("~\\")) return path;
+  const base = workspaceRoot.replace(/[/\\]+$/, "");
+  return isWindowsAbsolutePath(workspaceRoot)
+    ? `${base}\\${path.replaceAll("/", "\\")}`
+    : `${base}/${path}`;
 }

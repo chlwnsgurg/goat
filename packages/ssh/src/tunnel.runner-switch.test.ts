@@ -1,7 +1,7 @@
 import { assert, describe, it } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import * as NetService from "@t3tools/shared/Net";
-import * as HostProcess from "@t3tools/shared/HostProcess";
+import * as NetService from "@goat/shared/Net";
+import * as HostProcess from "@goat/shared/HostProcess";
 import * as Crypto from "effect/Crypto";
 import * as Hex from "effect/encoding/Hex";
 import * as Effect from "effect/Effect";
@@ -23,6 +23,7 @@ import {
   arch,
   makeProtocolTestSpawner,
   nativeScripts,
+  isRemoteLaunch,
 } from "./tunnel.fixture.ts";
 import {
   stateKey,
@@ -31,6 +32,9 @@ import {
   shell,
   fixture,
 } from "./tunnel.runnerSwitch.fixture.ts";
+
+const versionEntries = (...versions: string[]) =>
+  platform === "linux" ? [".maintenance.lock", ...versions] : versions;
 
 describe.skipIf(HostProcess.Platform.defaultValue() === "win32")(
   "install before runner switch",
@@ -61,7 +65,7 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")(
                 return makeRunningProcess(() => {
                   forwardKills++;
                 });
-              if (args.includes("--")) {
+              if (isRemoteLaunch(args)) {
                 return makeSuccessfulProcess(
                   '{"status":"ready","selectedVersion":"1.2.3-preview.20260911.4","remotePort":3773,"serverKind":"managed"}',
                 );
@@ -234,12 +238,12 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")(
           assert.include(result.stderr, `expected goat v${requestedVersion}`);
           assert.include(result.stderr, `reported "goat v${reportedVersion}"`);
           assert.deepEqual(yield* snapshot, before);
-          assert.deepEqual(yield* fs.readDirectory(versions), [requestedVersion]);
+          assert.deepEqual(yield* fs.readDirectory(versions), versionEntries(requestedVersion));
           assert.deepEqual(yield* fs.readDirectory(state), ["run-t3.sh"]);
         }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
     );
 
-    it.live("verifies, stops, publishes, then starts on a successful upgrade", () =>
+    it.live("verifies, drains, publishes, then supervises startup on a successful upgrade", () =>
       Effect.gen(function* () {
         const f = yield* fixture("none");
         const before = yield* f.snapshot;
@@ -263,21 +267,27 @@ fi
           (event) => event.type === "version" && event.version === nextVersion,
         );
         const stopped = events.findIndex(
-          (event) => event.type === "stop" && event.version === oldVersion,
+          (event) => event.type === "self-stop" && event.version === oldVersion,
         );
         const started = events.findIndex(
           (event) => event.type === "start" && event.version === nextVersion,
         );
         const published = events.findIndex((event) => event.type === "publication");
         assert.isAtLeast(verified, 0);
-        assert.include(events[verified]!.runner!, `T3_ARCHIVE_VERSION='${oldVersion}'`);
+        assert.isAtLeast(stopped, 0);
+        assert.isAtLeast(published, 0);
+        assert.isAtLeast(started, 0);
+        assert.isFalse(events.some((event) => event.type === "stop"));
+        assert.isTrue(events.some((event) => event.type === "drain"));
+        assert.isTrue(events.some((event) => event.type === "supervise"));
+        assert.include(events[verified]!.runner!, `GOAT_ARCHIVE_VERSION='${oldVersion}'`);
         assert.isTrue(events[verified]!.oldAlive);
         assert.isFalse(events[published]!.oldAlive);
         assert.isBelow(verified, published);
         assert.isBelow(stopped, published);
         assert.isBelow(verified, stopped);
         assert.isBelow(stopped, started);
-        assert.include(events[started]!.installed!, `T3_ARCHIVE_VERSION='${nextVersion}'`);
+        assert.include(events[started]!.installed!, `GOAT_ARCHIVE_VERSION='${nextVersion}'`);
         assert.equal(events[started]!.complete, nextVersion);
         assert.equal(Number(yield* f.oldProcess!.exitCode), 0);
         const resultJson = JSON.parse(result.stdout.trim()) as { serverKind: string };
@@ -382,7 +392,7 @@ fi
           assert.isBelow(verified, issued);
           assert.include(
             yield* f.fs.readFileString(`${f.state}/run-t3.sh`),
-            `T3_ARCHIVE_VERSION='${nextVersion}'`,
+            `GOAT_ARCHIVE_VERSION='${nextVersion}'`,
           );
           assert.equal(
             (yield* f.fs.readFileString(

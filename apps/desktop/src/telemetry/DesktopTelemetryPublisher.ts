@@ -7,7 +7,7 @@ import {
   type DesktopTelemetryRequestDesktopUpdate,
   type DesktopUpdateStatusReport,
   type HostPowerSnapshot,
-} from "@t3tools/contracts";
+} from "@goat/contracts";
 import * as Cause from "effect/Cause";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
@@ -69,16 +69,12 @@ export class DesktopTelemetryPublisher extends Context.Service<
       message: DesktopTelemetryControlMessage,
     ) => Effect.Effect<void>;
     readonly removeControlSource: (sourceId: string) => Effect.Effect<void>;
-    /** Sends the report to the attached backend and replays the latest one
-        to backends that attach later (including the one spawned after a
-        relaunch). */
     readonly publishUpdateReport: (report: DesktopUpdateStatusReport) => Effect.Effect<void>;
-    /** Update requests received over the control channel. Single consumer. */
     readonly updateRequests: Stream.Stream<DesktopTelemetryRequestDesktopUpdate>;
     readonly updateCommits: Stream.Stream<DesktopTelemetryCommitDesktopUpdate>;
     readonly updateCancellations: Stream.Stream<DesktopTelemetryCancelDesktopUpdate>;
   }
->()("@t3tools/desktop/telemetry/DesktopTelemetryPublisher") {}
+>()("@goat/desktop/telemetry/DesktopTelemetryPublisher") {}
 
 function booleanState(value: boolean): HostPowerSnapshot["onBattery"] {
   return value ? "true" : "false";
@@ -219,7 +215,6 @@ export const make = Effect.fn("desktop.telemetryPublisher.make")(function* () {
         { concurrency: "unbounded" },
       );
       // One Electron sampler preserves the shared CPU measurement interval.
-      // History follows the existing power-aware cadence, even without demand.
       yield* rendererHistory.recordMetrics(metrics);
       const polledLocked =
         systemIdleState === "unknown"

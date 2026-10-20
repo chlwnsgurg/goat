@@ -6,7 +6,7 @@ import {
   ProviderThreadId,
   RunId,
   ThreadId,
-} from "@t3tools/contracts";
+} from "@goat/contracts";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
@@ -20,8 +20,8 @@ import {
   historicalMessage,
   renderHistory,
   selectHistory,
-} from "@t3tools/provider-core/server/handoffBudget";
-import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
+} from "@goat/provider-core/server/handoffBudget";
+import * as IdAllocator from "@goat/provider-core/server/IdAllocator";
 
 export class ContextHandoffPrepareError extends Schema.TaggedError<ContextHandoffPrepareError>()(
   "ContextHandoffPrepareError",
@@ -91,7 +91,7 @@ export interface ContextHandoffServiceV2Shape {
 export class ContextHandoffServiceV2 extends Context.Service<
   ContextHandoffServiceV2,
   ContextHandoffServiceV2Shape
->()("t3/orchestration-v2/ContextHandoffService/ContextHandoffServiceV2") {}
+>()("goat/orchestration-v2/ContextHandoffService/ContextHandoffServiceV2") {}
 
 function compactText(text: string, maxLength = 240): string {
   const compacted = text.replace(/\s+/g, " ").trim();
@@ -141,7 +141,10 @@ function makeForkDeltaSummary(input: {
   ].join("\n");
 }
 
-function makeLegacyImportSummary(items: ReadonlyArray<OrchestrationV2TurnItem>): string {
+export function summarizeConversationForHandoff(
+  items: ReadonlyArray<OrchestrationV2TurnItem>,
+  header: string,
+): string {
   const sections = items.flatMap((item) => {
     switch (item.type) {
       case "user_message":
@@ -152,8 +155,6 @@ function makeLegacyImportSummary(items: ReadonlyArray<OrchestrationV2TurnItem>):
         return [];
     }
   });
-  const header =
-    "Imported conversation history from the previous GOAT orchestrator. Use it as context; do not repeat it unless the user asks.";
   const maxChars = 32_000;
   const selected: Array<string> = [];
   let remaining = maxChars - header.length - 2;
@@ -280,7 +281,10 @@ const makeContextHandoffService = Effect.fn("orchestrationV2.ContextHandoffServi
           strategy: "manual_context",
           status: "ready",
           summaryMessageId: null,
-          summaryText: makeLegacyImportSummary(input.items),
+          summaryText: summarizeConversationForHandoff(
+            input.items,
+            "Imported conversation history from the previous GOAT orchestrator. Use it as context; do not repeat it unless the user asks.",
+          ),
           history: {
             messages: selected.messages,
             coverage,

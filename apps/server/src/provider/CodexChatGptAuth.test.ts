@@ -3,7 +3,7 @@ import * as NodeHttp from "node:http";
 import * as NodeCrypto from "node:crypto";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
-import { EnvironmentId, ProviderInstanceId } from "@t3tools/contracts";
+import { EnvironmentId, ProviderInstanceId } from "@goat/contracts";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
@@ -1994,7 +1994,6 @@ it.effect("an unreadable unrelated profile omits counts without failing sign-in"
       const unrelated = yield* ProviderCredentialStore.make("codex-chatgpt", "codex").pipe(
         Effect.provideService(ServerSecretStore.ServerSecretStore, h.secrets),
       );
-      // The harness owns its store; seed the corresponding binding in that store.
       h.bytes.set(unrelated.binding.key, new TextEncoder().encode("invalid"));
       yield* h.signIn;
       yield* h.phase("succeeded");

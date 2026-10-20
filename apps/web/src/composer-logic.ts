@@ -1,9 +1,11 @@
-import type { ClientSettings } from "@t3tools/contracts/settings";
-import type { AssistantCitation, ResolvedKeybindingsConfig } from "@t3tools/contracts";
+import type { ClientSettings } from "@goat/contracts/settings";
+import type { AssistantCitation, EnvironmentId, ResolvedKeybindingsConfig } from "@goat/contracts";
+import type { ComposerPathSearchTarget } from "@goat/client-runtime/state/threads";
 import {
   serializeAssistantCitation,
   withAssistantCitationComment,
-} from "@t3tools/shared/assistantCitations";
+} from "@goat/shared/assistantCitations";
+import { isPathWord } from "@goat/shared/composerTrigger";
 import {
   splitPromptIntoComposerSegments,
   type ComposerPromptSegment,
@@ -12,7 +14,7 @@ import {
 import { resolveShortcutCommand, type ShortcutEventLike } from "./keybindings";
 
 export type ComposerTriggerKind = "path" | "pull-request" | "slash-command" | "skill";
-export type ComposerSlashCommand = "model" | "plan" | "default";
+export type ComposerSlashCommand = "model" | "plan" | "default" | "side";
 export type ComposerSubmissionIntent = "foreground" | "background" | "alternate";
 
 export interface ComposerTrigger {
@@ -22,11 +24,25 @@ export interface ComposerTrigger {
   rangeEnd: number;
 }
 
+export function isPathSuggestionCurrent(
+  searchTarget: ComposerPathSearchTarget,
+  trigger: ComposerTrigger | null,
+  environmentId: EnvironmentId | null,
+  cwd: string | null,
+) {
+  return (
+    trigger?.kind === "path" &&
+    searchTarget.environmentId === environmentId &&
+    searchTarget.cwd === cwd &&
+    searchTarget.query === trigger.query.trim()
+  );
+}
+
 export function formatAssistantCitationForComposer(citation: AssistantCitation, comment = "") {
   return `${serializeAssistantCitation(withAssistantCitationComment(citation, comment))} `;
 }
 
-function composerRequiresModifier(
+export function composerRequiresModifier(
   sendShortcut: ClientSettings["sendShortcut"] | undefined,
   prompt: string,
 ) {
@@ -40,14 +56,15 @@ export function composerSubmissionIntentForKey(input: {
   event: ShortcutEventLike & { isComposing?: boolean; keyCode?: number; repeat?: boolean };
   keybindings: ResolvedKeybindingsConfig;
   platform?: string;
-  isMobileViewport: boolean;
+  isSoftwareKeyboardOpen: boolean;
   isDraftThread: boolean;
   isRunning?: boolean;
   sendShortcut?: ClientSettings["sendShortcut"];
   prompt?: string;
 }): ComposerSubmissionIntent | null {
   const { event } = input;
-  if (input.isMobileViewport || event.isComposing || event.keyCode === 229 || event.repeat)
+  if (event.isComposing || event.keyCode === 229 || event.repeat) return null;
+  if (input.isSoftwareKeyboardOpen && event.key === "Enter" && !event.metaKey && !event.ctrlKey)
     return null;
   const command = resolveShortcutCommand(event, input.keybindings, {
     ...(input.platform === undefined ? {} : { platform: input.platform }),
@@ -55,6 +72,7 @@ export function composerSubmissionIntentForKey(input: {
       composerFocus: true,
       draftThreadRoute: input.isDraftThread,
       turnRunning: input.isRunning === true,
+      composerRequiresModifier: composerRequiresModifier(input.sendShortcut, input.prompt ?? ""),
     },
   });
   if (command === "composer.sendAlternate" && input.isRunning) return "alternate";
@@ -258,24 +276,17 @@ export function isCollapsedCursorAdjacentToInlineToken(
 
 export function detectComposerTrigger(text: string, cursorInput: number): ComposerTrigger | null {
   const cursor = clampCursor(text, cursorInput);
-  const lineStart = text.lastIndexOf("\n", Math.max(0, cursor - 1)) + 1;
-  const linePrefix = text.slice(lineStart, cursor);
-
-  if (linePrefix.startsWith("/")) {
-    const commandMatch = /^\/(\S*)$/.exec(linePrefix);
-    if (commandMatch) {
-      const commandQuery = commandMatch[1] ?? "";
-      return {
-        kind: "slash-command",
-        query: commandQuery,
-        rangeStart: lineStart,
-        rangeEnd: cursor,
-      };
-    }
-  }
-
   const tokenStart = tokenStartForCursor(text, cursor);
   const token = text.slice(tokenStart, cursor);
+  if (token.startsWith("/")) {
+    if (isPathWord(text, tokenStart, cursor, isWhitespace)) return null;
+    return {
+      kind: "slash-command",
+      query: token.slice(1),
+      rangeStart: tokenStart,
+      rangeEnd: cursor,
+    };
+  }
   const pullRequestMatch = /^#([\p{L}\p{N}][\p{L}\p{N}_-]*)?$/u.exec(token);
   if (pullRequestMatch) {
     return {
@@ -306,7 +317,16 @@ export function detectComposerTrigger(text: string, cursorInput: number): Compos
   };
 }
 
-/** Caret and trigger after replacing composer text and continuing at the end. */
+export function pastedPathQueryLength(
+  lineBefore: string,
+  pasted: string,
+  pathQueryActive = true,
+): number {
+  if (!pathQueryActive) return 0;
+  if (detectComposerTrigger(lineBefore, lineBefore.length)?.kind !== "path") return 0;
+  return /^\S*/.exec(pasted)![0].length;
+}
+
 export function composerStateAtPromptEnd(
   text: string,
   literalText = false,
@@ -323,9 +343,7 @@ export function composerStateAtPromptEnd(
   };
 }
 
-export function parseStandaloneComposerSlashCommand(
-  text: string,
-): Exclude<ComposerSlashCommand, "model"> | null {
+export function parseStandaloneComposerSlashCommand(text: string): "plan" | "default" | null {
   const match = /^\/(plan|default)\s*$/i.exec(text.trim());
   if (!match) {
     return null;

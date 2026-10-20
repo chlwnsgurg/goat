@@ -2,7 +2,7 @@ import type {
   RelayAgentActivityAggregateRow,
   RelayAgentActivityAggregateState,
   RelayAgentAwarenessPreferences,
-} from "@t3tools/contracts/relay";
+} from "@goat/contracts/relay";
 import * as DateTime from "effect/DateTime";
 import * as Option from "effect/Option";
 
@@ -67,8 +67,6 @@ export function attentionTransitionRows(input: TransitionInput) {
   );
 }
 
-// Reconciliation uses only observed transitions. Event-driven delivery can
-// include fresh completions whose running update never reached the device.
 export function newlyTerminalRows(
   previousAggregate: RelayAgentActivityAggregateState | null,
   nextAggregate: RelayAgentActivityAggregateState,

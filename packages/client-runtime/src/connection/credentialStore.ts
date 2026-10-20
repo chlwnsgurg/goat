@@ -14,10 +14,11 @@ export class ConnectionCredentialStore extends Context.Service<
     readonly put: (
       connectionId: string,
       credential: ConnectionCredential,
+      expectedToken?: string | null,
     ) => Effect.Effect<void, ConnectionAttemptError>;
     readonly remove: (connectionId: string) => Effect.Effect<void, ConnectionAttemptError>;
   }
->()("@t3tools/client-runtime/connection/credentialStore/ConnectionCredentialStore") {}
+>()("@goat/client-runtime/connection/credentialStore/ConnectionCredentialStore") {}
 
 export const make = (service: ConnectionCredentialStore["Service"]) =>
   ConnectionCredentialStore.of(service);

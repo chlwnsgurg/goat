@@ -1,15 +1,17 @@
-import { ScreenScrollView as ScrollView } from "../../components/ScreenScrollView";
-import { NativeHeaderToolbar } from "../../native/StackHeader";
+import { Toolbar } from "../../components/ui/Toolbar";
+import { ScreenScrollView as ScrollView } from "../../components/ui/ScreenScrollView";
+
 import { useNavigation } from "@react-navigation/native";
-import type { EnvironmentId } from "@t3tools/contracts";
+import type { EnvironmentId } from "@goat/contracts";
 import { useCallback, useState } from "react";
 import { Platform, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
-import { AndroidScreenHeader } from "../../components/AndroidScreenHeader";
+import { AndroidScreenHeader } from "../../components/ui/AndroidScreenHeader";
 import { useRemoteConnections } from "../../state/use-remote-environment-registry";
 import { LocalEnvironmentList } from "./LocalEnvironmentList";
 import { GitHubRoutingSettings } from "./GitHubRoutingSettings";
+import { useConnectHubEntryLabel } from "./useConnectHubEntryLabel";
 
 export function ConnectionsRouteScreen() {
   const {
@@ -20,6 +22,7 @@ export function ConnectionsRouteScreen() {
     onUpdateEnvironment,
   } = useRemoteConnections();
   const navigation = useNavigation();
+  const connectHubLabel = useConnectHubEntryLabel();
   const insets = useSafeAreaInsets();
   const [expandedId, setExpandedId] = useState<EnvironmentId | null>(null);
   const handleToggle = useCallback((environmentId: EnvironmentId) => {
@@ -34,20 +37,20 @@ export function ConnectionsRouteScreen() {
           onBack={() => navigation.goBack()}
           actions={[
             {
-              accessibilityLabel: "Add environment",
+              accessibilityLabel: connectHubLabel,
               icon: "plus",
               onPress: () => navigation.navigate("ConnectionsNew"),
             },
           ]}
         />
       ) : (
-        <NativeHeaderToolbar placement="right">
-          <NativeHeaderToolbar.Button
+        <Toolbar placement="right">
+          <Toolbar.Button
             icon="plus"
             onPress={() => navigation.navigate("ConnectionsNew")}
             separateBackground
           />
-        </NativeHeaderToolbar>
+        </Toolbar>
       )}
       <ScrollView
         contentInsetAdjustmentBehavior="automatic"

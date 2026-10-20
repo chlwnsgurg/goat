@@ -6,7 +6,7 @@ import {
   ProviderInstanceId,
   ScheduledTaskId,
   type ScheduledTask,
-} from "@t3tools/contracts";
+} from "@goat/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
 import type {
@@ -73,8 +73,6 @@ function group(
   };
 }
 
-// Project IDs are environment-local. This unrelated server checkout deliberately
-// shares an ID with a laptop checkout in the selected group.
 const sameIdElsewhere = member("first", serverId);
 const groups = [group("t3code", [first, second, third]), group("other", [other, sameIdElsewhere])];
 const tasks = [first, second, third, other, sameIdElsewhere].map((project, index) => ({

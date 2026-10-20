@@ -32,6 +32,67 @@ const palette: MaterialYouPalette = {
 
 describe("Material You system colors", () => {
   it.each(["light", "dark"] as const)(
+    "recomputes %s semantic colors from system roles while retaining base stop red",
+    (appearance) => {
+      const base = getMobileThemeRuntimeVariables("goat-code", appearance, "android");
+      const system =
+        appearance === "dark"
+          ? {
+              ...palette,
+              primary: "#D0BCFFFF",
+              onSurface: "#E6E0E9FF",
+              surface: "#141218FF",
+              onSurfaceVariant: "#CAC4D0FF",
+              onErrorContainer: "#F9DEDCFF",
+            }
+          : palette;
+      const variables = materialYouPaletteToMobileThemeVariables(system, appearance, base);
+      const send = variables["--color-composer-send"];
+      expect(send).not.toBe(base["--color-composer-send"]);
+      for (const offset of [1, 3, 5]) {
+        expect(Number.parseInt(send.slice(offset, offset + 2), 16)).toBeLessThan(
+          Number.parseInt(system.primary.slice(offset, offset + 2), 16),
+        );
+      }
+      expect(variables["--color-composer-stop"]).toBe(base["--color-composer-stop"]);
+      expect(variables["--color-composer-stop-foreground"]).toBe("#ffffff");
+      for (const token of [
+        "pr-open",
+        "pr-closed",
+        "pr-merged",
+        "goat-avatar",
+        "goat-avatar-border",
+        "goat-avatar-foreground",
+      ] as const) {
+        expect(variables[`--color-${token}`]).not.toBe(base[`--color-${token}`]);
+      }
+      for (const state of ["open", "closed", "merged"] as const) {
+        expect(variables[`--color-pr-${state}-surface`]).toMatch(
+          appearance === "dark" ? /, 0\.16\)$/ : /, 0\.12\)$/,
+        );
+        expect(variables[`--color-pr-${state}-surface`]).not.toBe(
+          base[`--color-pr-${state}-surface`],
+        );
+      }
+      const neutral = materialYouPaletteToMobileThemeVariables(
+        {
+          ...system,
+          onSurface: "#FFFFFFFF",
+          surface: "#000000FF",
+          onSurfaceVariant: "#000000FF",
+          onErrorContainer: "#FFFFFFFF",
+        },
+        appearance,
+        base,
+      );
+      expect(neutral["--color-pr-closed"]).toBe("#717171");
+      expect(neutral["--color-goat-avatar"]).toBe("#010101");
+      expect(neutral["--color-goat-avatar-border"]).toBe("#060606");
+      expect(neutral["--color-goat-avatar-foreground"]).toBe("#c4c4c4");
+    },
+  );
+
+  it.each(["light", "dark"] as const)(
     "uses the system surface for the Android frame in %s",
     (appearance) => {
       const variables = materialYouPaletteToMobileThemeVariables(
@@ -44,7 +105,7 @@ describe("Material You system colors", () => {
   );
 
   it("overrides the selected theme without mutating its base variables", () => {
-    const base = getMobileThemeRuntimeVariables("t3-code", "dark", "android");
+    const base = getMobileThemeRuntimeVariables("goat-code", "dark", "android");
     const snapshot = { ...base };
 
     const variables = materialYouPaletteToMobileThemeVariables(palette, "dark", base);
@@ -60,7 +121,7 @@ describe("Material You system colors", () => {
   });
 
   it("uses the Messages-style RCS tones for sent messages", () => {
-    const base = getMobileThemeRuntimeVariables("t3-code", "dark", "android");
+    const base = getMobileThemeRuntimeVariables("goat-code", "dark", "android");
     const dark = materialYouPaletteToMobileThemeVariables(
       { ...palette, inversePrimary: "#A31D8DFF" },
       "dark",
@@ -69,7 +130,7 @@ describe("Material You system colors", () => {
     const light = materialYouPaletteToMobileThemeVariables(
       { ...palette, inversePrimary: "#A31D8DFF" },
       "light",
-      getMobileThemeRuntimeVariables("t3-code", "light", "android"),
+      getMobileThemeRuntimeVariables("goat-code", "light", "android"),
     );
 
     expect(dark["--color-user-bubble"]).toBe("#850073FF");

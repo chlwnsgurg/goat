@@ -1,4 +1,4 @@
-import type { DesktopSystemWakeEvent } from "@t3tools/contracts";
+import type { DesktopSystemWakeEvent } from "@goat/contracts";
 import * as Clock from "effect/Clock";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -10,7 +10,10 @@ import * as ElectronWindow from "../electron/ElectronWindow.ts";
 import { SYSTEM_WAKE_CHANNEL } from "../ipc/channels.ts";
 import * as DesktopSshEnvironment from "../ssh/DesktopSshEnvironment.ts";
 
-type PowerTransition = "suspend" | DesktopSystemWakeEvent["reason"];
+type PowerTransition = DesktopSystemWakeEvent["reason"];
+
+/** Repeated macOS powerMonitor resume events within this window belong to the same wake. */
+export const RESUME_DEDUP_WINDOW_MS = 3_000;
 
 /**
  * Tells the renderer when the machine wakes or the screen unlocks, so its
@@ -38,11 +41,19 @@ export const layer = Layer.effectDiscard(
       );
       // Wall-clock time: the monotonic clock does not advance during sleep on macOS.
       let suspendedAtMs: number | null = null;
+      let lastResumeAtMs: number | null = null;
       for (;;) {
         const transition = yield* Queue.take(transitions);
         const nowMs = yield* Clock.currentTimeMillis;
         if (transition === "suspend") {
           suspendedAtMs = nowMs;
+        }
+        if (
+          transition === "resume" &&
+          suspendedAtMs === null &&
+          lastResumeAtMs !== null &&
+          nowMs - lastResumeAtMs < RESUME_DEDUP_WINDOW_MS
+        ) {
           continue;
         }
         const event: DesktopSystemWakeEvent = {
@@ -56,6 +67,7 @@ export const layer = Layer.effectDiscard(
         yield* electronWindow.sendAll(SYSTEM_WAKE_CHANNEL, event);
         if (transition === "resume") {
           suspendedAtMs = null;
+          lastResumeAtMs = nowMs;
           yield* sshEnvironment.revalidateTunnels.pipe(Effect.forkScoped);
         }
       }

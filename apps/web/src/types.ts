@@ -1,4 +1,4 @@
-import { imageMimeType } from "@t3tools/shared/image";
+import { imageMimeType } from "@goat/shared/image";
 import type {
   ChatFileAttachment as ContractChatFileAttachment,
   ChatImageAttachment as ContractChatImageAttachment,
@@ -15,17 +15,17 @@ import type {
   RuntimeMode,
   ScheduledTaskId,
   ThreadId,
-} from "@t3tools/contracts";
+} from "@goat/contracts";
 import type {
   EnvironmentProject,
   EnvironmentThreadShell,
   ThreadRunSummary,
   ThreadRuntimeSummary,
-} from "@t3tools/client-runtime/state/shell";
-import type { ThreadCheckpointSummary } from "@t3tools/client-runtime/state/thread-checkpoints";
-import { videoMimeType } from "@t3tools/shared/video";
+} from "@goat/client-runtime/state/shell";
+import type { ThreadCheckpointSummary } from "@goat/client-runtime/state/thread-checkpoints";
+import { videoMimeType } from "@goat/shared/video";
 
-export { videoMimeType } from "@t3tools/shared/video";
+export { videoMimeType } from "@goat/shared/video";
 
 export type SessionPhase = "disconnected" | "connecting" | "ready" | "running";
 export const DEFAULT_RUNTIME_MODE: RuntimeMode = "full-access";
@@ -49,7 +49,6 @@ export interface ChatImageAttachment extends ContractChatImageAttachment {
 export interface ChatFileAttachment extends ContractChatFileAttachment {
   readonly previewUrl?: string;
   readonly downloadable?: boolean;
-  /** A page an agent published with `html_render`; its viewer hands it the app theme. */
   readonly htmlRender?: boolean;
 }
 
@@ -81,17 +80,8 @@ export function isVideoAttachment(attachment: ChatFileAttachment): boolean {
   return videoMimeType(attachment) !== null;
 }
 
-export function isBrowserPreviewAttachment(attachment: ChatFileAttachment): boolean {
-  const mimeType = attachment.mimeType.split(";", 1)[0]?.trim().toLowerCase();
-  return (
-    /\.(?:html?|pdf)$/i.test(attachment.name) ||
-    mimeType === "application/pdf" ||
-    mimeType === "text/html"
-  );
-}
-
 export interface ChatMessage {
-  readonly context?: import("@t3tools/contracts").OrchestrationMessageContext | undefined;
+  readonly context?: import("@goat/contracts").OrchestrationMessageContext | undefined;
   readonly id: MessageId;
   readonly role: "user" | "assistant" | "system";
   readonly text: string;

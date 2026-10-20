@@ -27,13 +27,12 @@ describe("CDP relay", () => {
     relay.receive(JSON.stringify({ id: 2, method: "Target.createTarget", params: {} }));
     await settle();
     const attach = written.findIndex((message) => message["id"] === 1);
-    // The page is announced right after the auto-attach reply, never before it.
     expect(written.slice(attach, attach + 2)).toEqual([
       { id: 1, result: {} },
       {
         method: "Target.attachedToTarget",
         params: expect.objectContaining({
-          sessionId: "t3-preview-page",
+          sessionId: "goat-preview-page",
           targetInfo: expect.objectContaining({ targetId: "GUEST-TARGET", type: "page" }),
         }),
       },
@@ -55,10 +54,9 @@ describe("CDP relay", () => {
       written.push(JSON.parse(raw)),
     );
     relay.receive(
-      JSON.stringify({ id: 5, method: "Page.captureScreenshot", sessionId: "t3-preview-page" }),
+      JSON.stringify({ id: 5, method: "Page.captureScreenshot", sessionId: "goat-preview-page" }),
     );
     relay.receive(JSON.stringify({ id: 6, method: "DOM.enable", sessionId: "iframe-session" }));
-    // A slow screenshot must not hold up the reply behind it.
     pending[1]!();
     await settle();
     expect(written).toEqual([
@@ -71,19 +69,18 @@ describe("CDP relay", () => {
     expect(written.at(-1)).toEqual({
       id: 5,
       result: { method: "Page.captureScreenshot" },
-      sessionId: "t3-preview-page",
+      sessionId: "goat-preview-page",
     });
   });
 
   it("resumes paused child frames, so cross-site iframes run", async () => {
     const send = vi.fn(async () => ({}));
     const relay = createCdpRelayConnection(makeTarget(send), () => {});
-    // The page's own session is already running; only its children wait.
     relay.receive(
       JSON.stringify({
         id: 1,
         method: "Runtime.runIfWaitingForDebugger",
-        sessionId: "t3-preview-page",
+        sessionId: "goat-preview-page",
       }),
     );
     relay.receive(
@@ -110,7 +107,7 @@ describe("CDP relay", () => {
     relay.event("Page.loadEventFired", { timestamp: 1 }, "");
     relay.event("Runtime.consoleAPICalled", {}, "iframe-session");
     expect(written.slice(-2)).toEqual([
-      { method: "Page.loadEventFired", params: { timestamp: 1 }, sessionId: "t3-preview-page" },
+      { method: "Page.loadEventFired", params: { timestamp: 1 }, sessionId: "goat-preview-page" },
       { method: "Runtime.consoleAPICalled", params: {}, sessionId: "iframe-session" },
     ]);
   });
@@ -153,7 +150,7 @@ describe("CDP relay extra sessions", () => {
     expect(send).toHaveBeenLastCalledWith("Page.startScreencast", {}, undefined);
     written.length = 0;
     relay.event("Page.screencastFrame", { data: "x" }, undefined);
-    expect(written.map((m) => m["sessionId"])).toEqual(["t3-preview-page", extra]);
+    expect(written.map((m) => m["sessionId"])).toEqual(["goat-preview-page", extra]);
   });
 });
 
@@ -173,7 +170,7 @@ describe("CDP relay downloads", () => {
         method: "Browser.setDownloadBehavior",
         params: {
           behavior: "allowAndName",
-          browserContextId: "t3-preview",
+          browserContextId: "goat-preview",
           downloadPath: "/srv/artifacts",
           eventsEnabled: true,
         },
@@ -181,7 +178,6 @@ describe("CDP relay downloads", () => {
     );
     await settle();
     expect(directories).toEqual(["/srv/artifacts"]);
-    // The tab's own debugger has no such context, so the id stays here.
     expect(send).toHaveBeenCalledWith(
       "Browser.setDownloadBehavior",
       { behavior: "allowAndName", downloadPath: "/srv/artifacts", eventsEnabled: true },

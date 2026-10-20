@@ -1,4 +1,5 @@
-import { EnvironmentId } from "@t3tools/contracts";
+import { secureStore } from "../persistence/namespaced-secure-store";
+import { EnvironmentId } from "@goat/contracts";
 import { beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 const mocks = vi.hoisted(() => {
@@ -70,10 +71,18 @@ const mocks = vi.hoisted(() => {
   };
 });
 
+vi.mock("expo", () => ({
+  requireOptionalNativeModule: () => null,
+}));
+
 vi.mock("expo-secure-store", () => ({
   deleteItemAsync: mocks.deleteItemAsync,
   getItemAsync: mocks.getItemAsync,
   setItemAsync: mocks.setItemAsync,
+}));
+
+vi.mock("../persistence/mobile-database-migration", () => ({
+  openMigratedMobileDatabase: vi.fn(() => Promise.resolve(mocks.database)),
 }));
 
 vi.mock("expo-sqlite", () => ({
@@ -89,6 +98,7 @@ vi.mock("expo-constants", () => ({
 }));
 
 vi.mock("react-native", () => ({
+  AppState: { currentState: "active" },
   Platform: {
     OS: "ios",
   },
@@ -115,10 +125,38 @@ const managedConnection = {
   relayManaged: true,
 } as const;
 
+describe("legacy mobile theme preferences", () => {
+  // goat-rename: legacy-begin
+  it("loads old palette ids from persisted preferences", async () => {
+    mocks.clear();
+    mocks.setPreferencesJson(
+      JSON.stringify({
+        themeId: "t3-code",
+        lightThemeId: "t3-chat-light",
+        darkThemeId: "t3-chat-dark",
+      }),
+      1,
+    );
+    await expect(loadPreferences()).resolves.toEqual({
+      themeId: "goat-code",
+      lightThemeId: "goat-chat",
+      darkThemeId: "goat-chat",
+    });
+  });
+  // goat-rename: legacy-end
+});
+
 describe("mobile connection storage", () => {
   beforeEach(() => {
     mocks.clear();
     vi.clearAllMocks();
+  });
+
+  it("ignores the unshipped preference hub id without migrating it", async () => {
+    mocks.setPreferencesJson(JSON.stringify({ hubEnvironmentId: "hub-c", themeMode: "dark" }), 1);
+    await expect(loadPreferences()).resolves.toEqual({ themeMode: "dark" });
+    await savePreferencesPatch({ codeWordBreak: true });
+    await expect(loadPreferences()).resolves.toEqual({ themeMode: "dark", codeWordBreak: true });
   });
 
   it("persists relay-managed connections without their ephemeral access token", async () => {
@@ -146,14 +184,14 @@ describe("mobile connection storage", () => {
     await expect(loadSavedConnections()).rejects.toMatchObject({
       _tag: "MobileSecureStorageError",
       operation: "read",
-      key: "t3code.connections",
+      key: "goat.connections",
       cause,
-      message: "Mobile secure storage operation read failed for key t3code.connections.",
+      message: "Mobile secure storage operation read failed for key goat.connections.",
     });
   });
 
   it("logs structured decode failures before using the empty fallback", async () => {
-    await mocks.setItemAsync("t3code.connections", "{");
+    await mocks.setItemAsync("goat.connections", "{");
     const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
 
     await expect(loadSavedConnections()).resolves.toEqual([]);
@@ -161,9 +199,9 @@ describe("mobile connection storage", () => {
       "[mobile-storage] ignored invalid JSON",
       expect.objectContaining({
         _tag: "MobileStorageDecodeError",
-        key: "t3code.connections",
+        key: "goat.connections",
         cause: expect.any(SyntaxError),
-        message: "Failed to decode mobile storage value for key t3code.connections.",
+        message: "Failed to decode mobile storage value for key goat.connections.",
       }),
     );
 
@@ -172,7 +210,7 @@ describe("mobile connection storage", () => {
 
   it("loads legacy preferences when SQLite is unavailable", async () => {
     mocks.setDatabaseFailures(true, true);
-    await mocks.setItemAsync("t3code.preferences", JSON.stringify({ baseFontSize: 17 }));
+    await mocks.setItemAsync("goat.preferences", JSON.stringify({ baseFontSize: 17 }));
 
     await expect(loadPreferences()).resolves.toEqual({ baseFontSize: 17 });
   });
@@ -200,19 +238,19 @@ describe("mobile connection storage", () => {
     const themes = { lightThemeId: "material-you", darkThemeId: "ocean" } as const;
     await savePreferencesPatch(themes);
     await expect(loadPreferences()).resolves.toEqual(themes);
-    await savePreferencesPatch({ lightThemeId: "t3-chat" });
-    await expect(loadPreferences()).resolves.toEqual({ ...themes, lightThemeId: "t3-chat" });
+    await savePreferencesPatch({ lightThemeId: "goat-chat" });
+    await expect(loadPreferences()).resolves.toEqual({ ...themes, lightThemeId: "goat-chat" });
   });
 
   it.each([true, false])("drops the removed Android layout preference (%s)", async (enabled) => {
     mocks.setPreferencesJson(
       JSON.stringify({
         materialYouStyleLayoutEnabled: enabled,
-        lightThemeId: "t3-chat",
+        lightThemeId: "goat-chat",
       }),
       10,
     );
-    await expect(loadPreferences()).resolves.toEqual({ lightThemeId: "t3-chat" });
+    await expect(loadPreferences()).resolves.toEqual({ lightThemeId: "goat-chat" });
   });
 
   it("drops the removed theme transition preference", async () => {
@@ -224,7 +262,7 @@ describe("mobile connection storage", () => {
   it("falls back to secure storage when SQLite cannot save preferences", async () => {
     mocks.setDatabaseFailures(true, true);
     await expect(savePreferencesPatch({ baseFontSize: 19 })).resolves.toEqual({ baseFontSize: 19 });
-    const fallback = JSON.parse(mocks.getStoredValue("t3code.preferences.fallback") ?? "") as {
+    const fallback = JSON.parse(mocks.getStoredValue("goat.preferences.fallback") ?? "") as {
       readonly payload: string;
       readonly updatedAt: number;
     };
@@ -276,10 +314,47 @@ describe("mobile connection storage", () => {
     await expect(loadPreferences()).resolves.toEqual({ baseFontSize: 17 });
   });
 
+  it("keeps valid list filters and drops malformed ones", async () => {
+    const threadListFilters = { environmentId: "environment-1", projectKey: null };
+    const pullRequestListFilters = {
+      environmentId: null,
+      controls: {
+        "": {
+          state: "all",
+          involvement: "reviewing",
+          filters: { labels: [["size:S"]] },
+          sort: "oldest",
+        },
+      },
+    };
+    mocks.setPreferencesJson(JSON.stringify({ threadListFilters, pullRequestListFilters }), 10);
+    await expect(loadPreferences()).resolves.toEqual({ threadListFilters, pullRequestListFilters });
+
+    mocks.setPreferencesJson(
+      JSON.stringify({
+        threadListFilters: { environmentId: 1, projectKey: null },
+        pullRequestListFilters: { environmentId: null, controls: { "": { sort: "newest" } } },
+      }),
+      11,
+    );
+    await expect(loadPreferences()).resolves.toEqual({});
+  });
+
+  it("migrates legacy secure preferences and retains them after saving to SQLite", async () => {
+    const legacyKey = "t3code.preferences"; // goat-rename: legacy
+    const payload = JSON.stringify({ baseFontSize: 19 });
+    await mocks.setItemAsync(legacyKey, payload);
+    await expect(loadPreferences()).resolves.toEqual({ baseFontSize: 19 });
+    expect(mocks.getStoredValue(legacyKey)).toBe(payload);
+    await savePreferencesPatch({ baseFontSize: 21 });
+    expect(mocks.getStoredValue(legacyKey)).toBe(payload);
+    await expect(loadPreferences()).resolves.toEqual({ baseFontSize: 21 });
+  });
+
   it("reconciles fallback preferences after SQLite recovers", async () => {
     mocks.setPreferencesJson(JSON.stringify({ baseFontSize: 15 }), 10);
     await mocks.setItemAsync(
-      "t3code.preferences.fallback",
+      "goat.preferences.fallback",
       JSON.stringify({
         payload: JSON.stringify({ baseFontSize: 19 }),
         updatedAt: 20,
@@ -288,13 +363,13 @@ describe("mobile connection storage", () => {
 
     await expect(loadPreferences()).resolves.toEqual({ baseFontSize: 19 });
     expect(JSON.parse(mocks.getPreferencesJson() ?? "")).toEqual({ baseFontSize: 19 });
-    expect(mocks.getStoredValue("t3code.preferences.fallback")).toBeNull();
+    expect(await secureStore.getItem("goat.preferences.fallback")).toBeNull();
   });
 
   it("ignores a stale fallback when its previous deletion failed", async () => {
     mocks.setPreferencesJson(JSON.stringify({ baseFontSize: 21 }), 30);
     await mocks.setItemAsync(
-      "t3code.preferences.fallback",
+      "goat.preferences.fallback",
       JSON.stringify({
         payload: JSON.stringify({ baseFontSize: 19 }),
         updatedAt: 20,
@@ -303,27 +378,27 @@ describe("mobile connection storage", () => {
 
     await expect(loadPreferences()).resolves.toEqual({ baseFontSize: 21 });
     expect(JSON.parse(mocks.getPreferencesJson() ?? "")).toEqual({ baseFontSize: 21 });
-    expect(mocks.getStoredValue("t3code.preferences.fallback")).toBeNull();
+    expect(await secureStore.getItem("goat.preferences.fallback")).toBeNull();
   });
 
   it("ignores an invalid fallback even when it has a newer timestamp", async () => {
     mocks.setPreferencesJson(JSON.stringify({ baseFontSize: 21 }), 30);
     await mocks.setItemAsync(
-      "t3code.preferences.fallback",
+      "goat.preferences.fallback",
       JSON.stringify({ payload: "{", updatedAt: 40 }),
     );
     const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
 
     await expect(loadPreferences()).resolves.toEqual({ baseFontSize: 21 });
     expect(JSON.parse(mocks.getPreferencesJson() ?? "")).toEqual({ baseFontSize: 21 });
-    expect(mocks.getStoredValue("t3code.preferences.fallback")).toBeNull();
+    expect(await secureStore.getItem("goat.preferences.fallback")).toBeNull();
 
     warn.mockRestore();
   });
 
   it("keeps SQLite authoritative when stale legacy preferences remain", async () => {
     mocks.setPreferencesJson(JSON.stringify({ baseFontSize: 21 }), 30);
-    await mocks.setItemAsync("t3code.preferences", JSON.stringify({ baseFontSize: 19 }));
+    await mocks.setItemAsync("goat.preferences", JSON.stringify({ baseFontSize: 19 }));
 
     await expect(loadPreferences()).resolves.toEqual({ baseFontSize: 21 });
     expect(JSON.parse(mocks.getPreferencesJson() ?? "")).toEqual({ baseFontSize: 21 });

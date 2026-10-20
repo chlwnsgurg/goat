@@ -1,7 +1,7 @@
 import { assert, describe, it } from "@effect/vitest";
 
 import { cursorFetchRange, mergeCursorFetch } from "./accountCache.ts";
-import type { UsageRecord } from "@t3tools/provider-core/server/usage";
+import type { UsageRecord } from "@goat/provider-core/server/usage";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -47,7 +47,6 @@ describe("cursorAccountCache", () => {
       merged.records.map((entry) => entry.timestampMs),
       [50 * DAY_MS],
     );
-    // Then only the newest edge.
     assert.deepStrictEqual(cursorFetchRange(merged, 11 * DAY_MS, nowMs + DAY_MS), {
       sinceMs: nowMs - 60 * 60 * 1000,
       untilMs: nowMs + DAY_MS,

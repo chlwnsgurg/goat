@@ -1,10 +1,9 @@
-import type { ProviderAuthResponse } from "@t3tools/contracts";
+import type { ProviderAuthResponse } from "@goat/contracts";
 import { useEffect, useRef, useState } from "react";
 import { GhosttyTerminalSurface } from "../../terminal/ghostty/surface";
 import { ensureLocalApi } from "../../localApi";
 import { terminalThemeFromApp } from "../ThreadTerminalDrawer";
 
-/** Loaded only for an interactive login. PTY input is serialized by the parent. */
 export default function ProviderAuthTerminal({
   output,
   outputOffset,

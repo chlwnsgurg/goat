@@ -3,8 +3,9 @@ import {
   type ServerConfigStreamEvent,
   WsSubscribeServerConfigRpc,
   WS_METHODS,
-} from "@t3tools/contracts";
+} from "@goat/contracts";
 import * as Cause from "effect/Cause";
+import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
@@ -14,7 +15,6 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as PubSub from "effect/PubSub";
 import * as Ref from "effect/Ref";
-import * as Schedule from "effect/Schedule";
 import * as Schema from "effect/Schema";
 import type * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
@@ -24,7 +24,11 @@ import * as RpcClientError from "effect/rpc/RpcClientError";
 import * as RpcSerialization from "effect/rpc/RpcSerialization";
 import * as Socket from "effect/socket/Socket";
 
-import { makeWsRpcProtocolClient, PING_TIMEOUT, type WsRpcProtocolClient } from "./protocol.ts";
+import {
+  makeWsRpcProtocolClient,
+  makeWsRpcSocketProtocol,
+  type WsRpcProtocolClient,
+} from "./protocol.ts";
 import { NETWORK_BLOCKING_HINT } from "../errors/network.ts";
 import type {
   ConnectionAttemptError,
@@ -41,6 +45,7 @@ import {
   withoutEnvironmentThemes,
 } from "../state/serverConfigProjection.ts";
 import { environmentMismatchError } from "../connection/errors.ts";
+import { logSshConnectionTiming } from "../connection/sshTiming.ts";
 
 const SOCKET_OPEN_TIMEOUT = "15 seconds";
 
@@ -58,7 +63,6 @@ export interface RpcSession {
 export interface RpcSessionOptions {
   readonly environmentThemes?: boolean;
   readonly usageLimitSources?: boolean;
-  /** This client answers /usage-limits itself, so the server may advertise it. */
   readonly usageLimitsCommand?: boolean;
 }
 
@@ -69,7 +73,7 @@ export class RpcSessionFactory extends Context.Service<
       connection: PreparedConnection,
     ) => Effect.Effect<RpcSession, ConnectionAttemptError, Scope.Scope>;
   }
->()("@t3tools/client-runtime/rpc/session/RpcSessionFactory") {}
+>()("@goat/client-runtime/rpc/session/RpcSessionFactory") {}
 
 type InitialConfigError = Effect.Error<
   ReturnType<WsRpcProtocolClient[typeof WS_METHODS.serverGetConfig]>
@@ -169,13 +173,17 @@ export const make = Effect.fn("RpcSessionFactory.make")(function* (
     });
 
     const connected = yield* Deferred.make<void>();
+    const ssh = connection.target._tag === "SshConnectionTarget";
+    const openingStartedAt = yield* Clock.monotonicTimeNanos;
+    const openedAt = yield* Ref.make(openingStartedAt);
     const disconnected = yield* Deferred.make<never, ConnectionTransientError>();
-    // Set when the socket closes because the server stopped answering, so the failure says so
-    // instead of looking like the server closed the connection.
     const pingTimedOut = yield* Ref.make(false);
     const hooks = RpcClient.ConnectionHooks.of({
-      onConnect: Deferred.succeed(connected, undefined).pipe(Effect.asVoid),
-      onPingTimeout: Ref.set(pingTimedOut, true),
+      onConnect: Effect.gen(function* () {
+        yield* Ref.set(openedAt, yield* Clock.monotonicTimeNanos);
+        if (ssh) yield* logSshConnectionTiming("websocket-open", openingStartedAt);
+        yield* Deferred.succeed(connected, undefined);
+      }),
       onDisconnect: Effect.all([Deferred.isDone(connected), Ref.get(pingTimedOut)]).pipe(
         Effect.flatMap(([wasConnected, timedOut]) =>
           Deferred.fail(
@@ -200,11 +208,7 @@ export const make = Effect.fn("RpcSessionFactory.make")(function* (
     }).pipe(Layer.provide(Layer.succeed(Socket.WebSocketConstructor, webSocketConstructor)));
     const layerProtocol = Layer.effect(
       RpcClient.Protocol,
-      RpcClient.makeProtocolSocket({
-        pingTimeout: PING_TIMEOUT,
-        retryTransientErrors: false,
-        retryPolicy: Schedule.recurs(0),
-      }),
+      makeWsRpcSocketProtocol(Ref.set(pingTimedOut, true)),
     ).pipe(
       Layer.provide(
         Layer.mergeAll(
@@ -270,7 +274,9 @@ export const make = Effect.fn("RpcSessionFactory.make")(function* (
             yield* PubSub.publish(serverConfigUpdates, buffered.value);
           }
           if (event.type === "snapshot") {
-            yield* Deferred.succeed(initialConfigDeferred, event.config);
+            const first = yield* Deferred.succeed(initialConfigDeferred, event.config);
+            if (ssh && first)
+              yield* logSshConnectionTiming("initial-snapshot", yield* Ref.get(openedAt));
           }
         }),
       ),

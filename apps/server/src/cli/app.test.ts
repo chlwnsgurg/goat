@@ -1,15 +1,17 @@
 // @effect-diagnostics nodeBuiltinImport:off -- The integration fixture binds the same platform socket or named pipe as the CLI.
+import * as NodeChildProcess from "node:child_process";
+import * as NodeEvents from "node:events";
 import * as NodeFSP from "node:fs/promises";
 import * as NodeNet from "node:net";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import { it } from "@effect/vitest";
-import type { DesktopAppActivationRequest } from "@t3tools/contracts";
-import { resolveDesktopAppControlAddress } from "@t3tools/shared/desktopAppControl";
-import * as HostProcess from "@t3tools/shared/HostProcess";
-import * as NetService from "@t3tools/shared/Net";
+import { assert, it } from "@effect/vitest";
+import type { DesktopAppActivationRequest } from "@goat/contracts";
+import { resolveDesktopAppControlAddresses } from "@goat/shared/desktopAppControl";
+import * as HostProcess from "@goat/shared/HostProcess";
+import * as NetService from "@goat/shared/Net";
 import * as ConfigProvider from "effect/ConfigProvider";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -19,6 +21,22 @@ import { describe, expect } from "vite-plus/test";
 
 import { makeCli } from "../binCli.ts";
 import { PersistedServerRuntimeState } from "../serverRuntimeState.ts";
+
+const liveProcess = Effect.acquireRelease(
+  Effect.promise(async () => {
+    const child = NodeChildProcess.spawn(process.execPath, ["-e", "process.stdin.resume()"], {
+      stdio: ["pipe", "ignore", "ignore"],
+    });
+    await NodeEvents.EventEmitter.once(child, "spawn");
+    return child;
+  }),
+  (child) =>
+    Effect.promise(async () => {
+      const exited = NodeEvents.EventEmitter.once(child, "exit");
+      child.kill();
+      await exited;
+    }),
+);
 
 const encodeRuntimeState = Schema.encodeEffect(Schema.fromJsonString(PersistedServerRuntimeState));
 
@@ -46,15 +64,16 @@ async function startFakeDesktop(input: {
   readonly stateSubdirectory?: "userdata" | "dev";
   readonly platform: NodeJS.Platform;
   readonly userId: number | undefined;
+  readonly legacy?: boolean;
   readonly reply?: (request: DesktopAppActivationRequest) => unknown;
 }) {
-  const target = resolveDesktopAppControlAddress({
+  const target = resolveDesktopAppControlAddresses({
     stateDir: NodePath.join(input.baseDir, input.stateSubdirectory ?? "userdata"),
     platform: input.platform,
     tempDir: NodeOS.tmpdir(),
     userId: input.userId,
     joinPath: NodePath.join,
-  });
+  })[input.legacy ? 1 : 0];
   if (target.directory !== null) {
     await NodeFSP.mkdir(target.directory, { recursive: true, mode: 0o700 });
     await NodeFSP.unlink(target.address).catch((error: NodeJS.ErrnoException) => {
@@ -97,6 +116,8 @@ async function startFakeDesktop(input: {
         await NodeFSP.unlink(target.address).catch((error: NodeJS.ErrnoException) => {
           if (error.code !== "ENOENT") throw error;
         });
+        // The fixture made the per-user socket directory; rmdir leaves it if anything else uses it.
+        await NodeFSP.rmdir(target.directory).catch(() => undefined);
       }
     },
   };
@@ -152,7 +173,7 @@ describe("goat server command safety", () => {
     withTempDirectory("goat-cli-help-", (root) =>
       Effect.gen(function* () {
         const baseDir = NodePath.join(root, "home");
-        const help = yield* runCli(["help"], { T3CODE_HOME: baseDir }).pipe(Effect.flip);
+        const help = yield* runCli(["help"], { GOAT_HOME: baseDir }).pipe(Effect.flip);
         expect(help).toMatchObject({ _tag: "ShowHelp", commandPath: ["goat"], errors: [] });
         expect(yield* pathExists(baseDir)).toBe(false);
       }),
@@ -165,9 +186,11 @@ describe("goat server command safety", () => {
         const baseDir = NodePath.join(root, "home");
         const stateDir = NodePath.join(baseDir, "userdata");
         const statePath = NodePath.join(stateDir, "server-runtime.json");
+        const child = yield* liveProcess;
+        assert(child.pid !== undefined);
         const record = yield* encodeRuntimeState({
           version: 1,
-          pid: process.pid,
+          pid: child.pid,
           port: 3773,
           origin: "http://127.0.0.1:3773",
           startedAt: "2026-10-01T00:00:00.000Z",
@@ -186,7 +209,7 @@ describe("goat server command safety", () => {
           [newDirectory],
           ["start", newDirectory],
         ]) {
-          const error = yield* runCli(args, { T3CODE_HOME: baseDir }).pipe(
+          const error = yield* runCli(args, { GOAT_HOME: baseDir }).pipe(
             Effect.provideService(
               HostProcess.Platform,
               args[0] === "C:new-project" ? "win32" : platform,
@@ -206,23 +229,45 @@ describe("goat server command safety", () => {
 });
 
 describe("goat app", () => {
+  it.effect("prefers the GOAT address when both desktop addresses answer", () =>
+    withTempDirectory("goat-app-dual-", (baseDir) =>
+      Effect.gen(function* () {
+        const primary = yield* fakeDesktop({ baseDir });
+        const legacy = yield* fakeDesktop({ baseDir, legacy: true });
+        yield* runCli(["app", "--base-dir", baseDir]);
+        expect(primary.received).toHaveLength(1);
+        expect(legacy.received).toHaveLength(0);
+      }).pipe(Effect.scoped),
+    ),
+  );
+
+  it.effect("reaches an older desktop through its legacy address", () =>
+    withTempDirectory("goat-app-legacy-address-", (baseDir) =>
+      Effect.gen(function* () {
+        const legacy = yield* fakeDesktop({ baseDir, legacy: true });
+        yield* runCli(["app", "--base-dir", baseDir]);
+        expect(legacy.received).toHaveLength(1);
+        expect(yield* pathExists(NodePath.join(baseDir, "userdata"))).toBe(false);
+      }).pipe(Effect.scoped),
+    ),
+  );
   it.effect(
     "finds the packaged GOAT desktop first and keeps explicit home overrides authoritative",
     () =>
       withTempDirectory("goat-app-packaged-home-", (root) =>
         Effect.gen(function* () {
           const packaged = yield* fakeDesktop({ baseDir: NodePath.join(root, ".goat", "desktop") });
-          const legacyHome = NodePath.join(root, ".t3");
+          const legacyHome = NodePath.join(root, ".t3"); // goat-rename: legacy
           const legacy = yield* fakeDesktop({ baseDir: legacyHome });
           const development = yield* fakeDesktop({ baseDir: legacyHome, stateSubdirectory: "dev" });
           yield* runCli(["app"]);
-          yield* runCli(["app"], { T3CODE_HOME: "  " });
+          yield* runCli(["app"], { GOAT_HOME: "  " });
           expect(packaged.received).toHaveLength(2);
           expect(legacy.received).toHaveLength(0);
           expect(development.received).toHaveLength(0);
-          yield* runCli(["app"], { T3CODE_HOME: legacyHome });
+          yield* runCli(["app"], { GOAT_HOME: legacyHome });
           yield* runCli(["app", "--base-dir", legacyHome], {
-            T3CODE_HOME: NodePath.join(root, ".goat", "desktop"),
+            GOAT_HOME: NodePath.join(root, ".goat", "desktop"),
           });
           expect(legacy.received).toHaveLength(2);
           const error = yield* runCli(["app", "--base-dir", NodePath.join(root, "missing")]).pipe(
@@ -230,7 +275,7 @@ describe("goat app", () => {
           );
           expect(error).toMatchObject({
             _tag: "DesktopAppUnreachableError",
-            candidateAddresses: [expect.any(String)],
+            candidateAddresses: [expect.any(String), expect.any(String)],
           });
           expect(packaged.received).toHaveLength(2);
         }).pipe(Effect.provideService(HostProcess.HomeDirectory, root), Effect.scoped),
@@ -281,7 +326,7 @@ describe("goat app", () => {
 
         expect(error).toMatchObject({
           _tag: "DesktopAppUnreachableError",
-          candidateAddresses: [expect.any(String)],
+          candidateAddresses: [expect.any(String), expect.any(String)],
           workspaceRoot: yield* HostProcess.WorkingDirectory,
           message: expect.stringContaining("Could not reach the GOAT desktop app."),
           cause: { code: "ENOENT" },
@@ -291,7 +336,7 @@ describe("goat app", () => {
     ),
   );
 
-  it.effect("uses T3CODE_HOME or --base-dir and sends the default or explicit path", () =>
+  it.effect("uses GOAT_HOME or --base-dir and sends the default or explicit path", () =>
     withTempDirectory("goat-app-command-test-", (root) =>
       Effect.gen(function* () {
         const baseDir = NodePath.join(root, "goat-home");
@@ -300,7 +345,7 @@ describe("goat app", () => {
         const workingDirectory = yield* HostProcess.WorkingDirectory;
         const desktop = yield* fakeDesktop({ baseDir });
 
-        yield* runCli(["app"], { T3CODE_HOME: baseDir });
+        yield* runCli(["app"], { GOAT_HOME: baseDir });
         yield* runCli(["app", explicitPath, "--base-dir", baseDir]);
 
         expect(desktop.received.map((request) => request.workspaceRoot)).toEqual([
@@ -315,7 +360,7 @@ describe("goat app", () => {
   it.effect("prefers the installed desktop app when a dev desktop is also running", () =>
     withTempDirectory("goat-app-preferred-test-", (root) =>
       Effect.gen(function* () {
-        const baseDir = NodePath.join(root, ".t3");
+        const baseDir = NodePath.join(root, ".t3"); // goat-rename: legacy
         const desktop = yield* fakeDesktop({ baseDir });
         const development = yield* fakeDesktop({ baseDir, stateSubdirectory: "dev" });
 
@@ -330,11 +375,11 @@ describe("goat app", () => {
   it.effect("finds the dev desktop when the default desktop socket is absent", () =>
     withTempDirectory("goat-app-dev-test-", (root) =>
       Effect.gen(function* () {
-        const baseDir = NodePath.join(root, ".t3");
+        const baseDir = NodePath.join(root, ".t3"); // goat-rename: legacy
         const development = yield* fakeDesktop({ baseDir, stateSubdirectory: "dev" });
 
         yield* runCli(["app"]);
-        yield* runCli(["app"], { T3CODE_HOME: "   " });
+        yield* runCli(["app"], { GOAT_HOME: "   " });
 
         expect(development.received).toHaveLength(2);
         expect(yield* pathExists(baseDir)).toBe(false);
@@ -345,11 +390,11 @@ describe("goat app", () => {
   it.effect("never searches a dev state directory for an explicit T3 home", () =>
     withTempDirectory("goat-app-explicit-test-", (root) =>
       Effect.gen(function* () {
-        const baseDir = NodePath.join(root, ".t3");
+        const baseDir = NodePath.join(root, ".t3"); // goat-rename: legacy
         const development = yield* fakeDesktop({ baseDir, stateSubdirectory: "dev" });
 
         const flagError = yield* runCli(["app", "--base-dir", baseDir]).pipe(Effect.flip);
-        const envError = yield* runCli(["app"], { T3CODE_HOME: baseDir }).pipe(Effect.flip);
+        const envError = yield* runCli(["app"], { GOAT_HOME: baseDir }).pipe(Effect.flip);
 
         expect(flagError).toMatchObject({ _tag: "DesktopAppUnreachableError" });
         expect(envError).toMatchObject({ _tag: "DesktopAppUnreachableError" });
@@ -363,7 +408,7 @@ describe("goat app", () => {
     (responseKind) =>
       withTempDirectory("goat-app-response-test-", (root) =>
         Effect.gen(function* () {
-          const baseDir = NodePath.join(root, ".t3");
+          const baseDir = NodePath.join(root, ".t3"); // goat-rename: legacy
           const desktop = yield* fakeDesktop({
             baseDir,
             reply: (request) =>
@@ -379,10 +424,13 @@ describe("goat app", () => {
           });
           const development = yield* fakeDesktop({ baseDir, stateSubdirectory: "dev" });
 
+          const legacy = yield* fakeDesktop({ baseDir, legacy: true });
+
           const error = yield* runCli(["app"]).pipe(Effect.flip);
 
           expect(desktop.received).toHaveLength(1);
           expect(development.received).toHaveLength(0);
+          expect(legacy.received).toHaveLength(0);
           if (responseKind === "failure") {
             expect(error).toMatchObject({
               _tag: "DesktopAppRequestFailedError",

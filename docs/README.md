@@ -1,8 +1,8 @@
-# T3 Code docs
+# GOAT docs
 
-## Using T3 Code
+## Using GOAT
 
-- [Install T3 Code](./user/install.md)
+- [Install GOAT](./user/install.md)
 - [Messages and context](./user/composer.md)
 - [Working with threads](./user/thread-sidebar.md)
 - [Permission modes](./user/permission-modes.md)
@@ -14,20 +14,21 @@
 - [SnapShots](./user/snap-shot.md)
 - [Visual replies](./user/html-renders.md)
 - [Import browser sessions](./user/browser-import.md)
-- [Use T3 Code as your default browser](./user/default-browser.md)
+- [Use GOAT as your default browser](./user/default-browser.md)
 - [Devices](./user/devices.md)
 - [Usage and limits](./user/usage.md)
 - [Product usage data](./user/telemetry.md)
 - [Remote access](./user/remote-access.md)
 - [Outside agents (MCP)](./user/outside-agents.md)
+- [Fleet goals](./user/fleet-goals.md)
 - [Slack](./user/slack.md)
 - [Running in the background](./user/background-service.md)
-- [Updating T3 Code](./user/updating.md)
+- [Updating GOAT](./user/updating.md)
 - Provider guides: [Codex](./user/providers-codex.md) · [Claude](./user/providers-claude.md) · [OpenCode](./user/providers-opencode.md) · [Antigravity](./user/providers-antigravity.md) · [Pi](./user/providers-pi.md) · [Muse Code](./user/providers-muse.md)
 
 ---
 
-## Working on T3 Code
+## Working on GOAT
 
 Start with the [development runbook](./operations/development.md) and
 [contribution policy](../CONTRIBUTING.md).
@@ -39,6 +40,8 @@ source alone does not explain. Most code changes do not need an internal documen
 - [Architecture overview](./internals/overview.md)
 - [Glossary](./internals/glossary.md)
 - [Connection runtime](./internals/connection-runtime.md)
+- [SSH reconnect](./internals/ssh-reconnect.md)
+- [SSH hardening references](./internals/ssh-hardening-references.md)
 - [Providers](./internals/providers.md)
 - [Adding a provider](./internals/adding-a-provider.md)
 - [Pull request file revisions](./internals/pull-request-file-revisions.md)
@@ -46,6 +49,8 @@ source alone does not explain. Most code changes do not need an internal documen
 - [Remote environments](./internals/remote.md)
 - [Channels and the GOAT bot](./internals/channels.md)
 - [Server updates](./internals/server-updates.md)
+- [Remote updates](./internals/remote-updates.md)
+- [Release channels](./internals/release-channels.md)
 - [Resource telemetry](./internals/resource-telemetry.md)
 - [Product analytics](./internals/product-analytics.md)
 - [Environment auth](./internals/environment-auth.md)
@@ -55,6 +60,7 @@ source alone does not explain. Most code changes do not need an internal documen
 - [Mobile development lifecycle](./internals/mobile-development.md)
 - [Terminal runtime](./internals/terminal-runtime.md)
 - [Devices](./internals/devices.md)
+- [Agent surface (proposal)](./internals/agent-surface.md)
 - [Voice input](./internals/voice-input.md)
 
 ### Runbooks

@@ -1,4 +1,5 @@
-import * as HostProcess from "@t3tools/shared/HostProcess";
+import * as HostProcess from "@goat/shared/HostProcess";
+import { isGoatConnectEnabled } from "@goat/shared/goatConnect";
 import * as Console from "effect/Console";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -18,11 +19,7 @@ export const layer = (config: ServerConfig.ServerConfig["Service"]) =>
     baseDir: config.baseDir,
     logsDir: config.logsDir,
     cliVersion: packageJson.version,
-  }).pipe(
-    Layer.provide(ProcessRunner.layer),
-    // Archive-distributed versions download the release archive here.
-    Layer.provide(FetchHttpClient.layer),
-  );
+  }).pipe(Layer.provide(ProcessRunner.layer), Layer.provide(FetchHttpClient.layer));
 
 export type ServiceReconcileResult =
   | {
@@ -35,7 +32,6 @@ export type ServiceReconcileResult =
       readonly plan: BootService.BootServicePlan;
     };
 
-/** Install, update, or repair the service using the CLI version running this command. */
 export const reconcileService = Effect.fn("cli.service.reconcile")(function* (options?: {
   readonly allowDowngrade?: boolean;
   readonly start?: boolean;
@@ -137,8 +133,6 @@ const serviceInstallCommand = Command.make("install", serviceReconcileFlags).pip
   ),
 );
 
-// Kept one release for muscle memory and old docs. It did what `goat service
-// install` does; the way to move to a newer release is `goat update`.
 const serviceUpdateCommand = Command.make("update", serviceReconcileFlags).pipe(
   Command.withDescription("Deprecated. Run `goat update` to move to a newer release."),
   Command.unlisted,
@@ -234,21 +228,19 @@ export const offerServiceDuringOnboarding = Effect.gen(function* () {
     yield* Console.log(
       `A newer goat@${status.installedVersion} background service is installed. Leaving it unchanged.`,
     );
-    // This CLI cannot verify the newer service. Keep the manual fallback available.
     return false;
   }
-  // A LaunchAgent starts at login and dies at logout; there is no
-  // enable-linger equivalent on macOS. Do not promise more than that.
   const platform = yield* HostProcess.Platform;
+  const reachability = isGoatConnectEnabled() ? "T3 Connect" : "your network and Tailscale";
   const wanted = yield* Prompt.run(
     Prompt.Confirm({
       message: installed
         ? "The installed GOAT service needs an update or repair. Update it now?"
         : platform === "darwin"
           ? "Run GOAT in the background whenever you log in to this Mac? " +
-            "It stays reachable through T3 Connect while you are logged in."
+            `It stays reachable through ${reachability} while you are logged in.`
           : "Run GOAT in the background whenever this machine boots? " +
-            "It stays reachable through T3 Connect even after you log out.",
+            `It stays reachable through ${reachability} even after you log out.`,
       initial: true,
     }),
   );

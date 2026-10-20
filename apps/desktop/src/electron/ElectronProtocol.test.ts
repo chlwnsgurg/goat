@@ -30,44 +30,55 @@ describe("ElectronProtocol", () => {
     unhandleMock.mockReset();
   });
 
-  it.effect("serves the bundled client from disk without a backend", () =>
-    Effect.gen(function* () {
-      const fileSystem = yield* FileSystem.FileSystem;
-      const directory = yield* fileSystem.makeTempDirectoryScoped();
-      yield* fileSystem.writeFileString(`${directory}/index.html`, "<html>app</html>");
-      yield* fileSystem.writeFileString(`${directory}/app.js`, "export default 1;");
-      let handler: ((request: Request) => Promise<Response>) | undefined;
-      handleMock.mockImplementation((_scheme, nextHandler) => {
-        handler = nextHandler;
-      });
-      const protocol = yield* ElectronProtocol.ElectronProtocol;
-      yield* protocol.registerDesktopProtocol({
-        scheme: "t3code",
-        assetDirectory: directory,
-        clerkFrontendApiHostname: undefined,
-      });
-      const request = (pathname: string, init?: RequestInit) =>
-        Effect.promise(() => handler!(new Request(`t3code://app${pathname}`, init)));
+  it.effect.each(["goat", "t3code"])(
+    "serves the bundled client from %s without a backend",
+    (scheme) =>
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const directory = yield* fileSystem.makeTempDirectoryScoped();
+        yield* fileSystem.writeFileString(`${directory}/index.html`, "<html>app</html>");
+        yield* fileSystem.writeFileString(`${directory}/app.js`, "export default 1;");
+        let handler: ((request: Request) => Promise<Response>) | undefined;
+        handleMock.mockImplementation((_scheme, nextHandler) => {
+          handler = nextHandler;
+        });
+        const protocol = yield* ElectronProtocol.ElectronProtocol;
+        yield* protocol.registerDesktopProtocol({
+          scheme,
+          assetDirectory: directory,
+          clerkFrontendApiHostname: undefined,
+        });
+        const request = (pathname: string, init?: RequestInit) =>
+          Effect.promise(() => handler!(new Request(`${scheme}://app${pathname}`, init)));
 
-      // SPA routes fall back to index.html, including ones containing dots.
-      const page = yield* request("/settings/connections");
-      assert.equal(yield* Effect.promise(() => page.text()), "<html>app</html>");
-      assert.include(page.headers.get("content-security-policy") ?? "", "default-src 'self'");
-      const dottedRoute = yield* request("/environment/thread.with.dots", {
-        headers: { accept: "text/html" },
-      });
-      assert.equal(yield* Effect.promise(() => dottedRoute.text()), "<html>app</html>");
+        const page = yield* request("/settings/connections");
+        assert.equal(yield* Effect.promise(() => page.text()), "<html>app</html>");
+        assert.include(page.headers.get("content-security-policy") ?? "", "default-src 'self'");
+        const dottedRoute = yield* request("/environment/thread.with.dots", {
+          headers: { accept: "text/html" },
+        });
+        assert.equal(yield* Effect.promise(() => dottedRoute.text()), "<html>app</html>");
 
-      const script = yield* request("/app.js?v=1");
-      assert.equal(yield* Effect.promise(() => script.text()), "export default 1;");
-      assert.include(script.headers.get("content-type") ?? "", "javascript");
+        const script = yield* request("/app.js?v=1");
+        assert.equal(yield* Effect.promise(() => script.text()), "export default 1;");
+        assert.include(script.headers.get("content-type") ?? "", "javascript");
 
-      assert.equal((yield* request("/missing.js")).status, 404);
-      assert.equal((yield* request("/%2e%2e%2fsecret.txt")).status, 404);
-      assert.equal((yield* request("/%invalid")).status, 400);
-      assert.equal((yield* request("/", { method: "POST" })).status, 405);
-      assert.equal(netFetchMock.mock.calls.length, 0);
-    }).pipe(Effect.provide(Layer.merge(layerProtocol, NodeServices.layer)), Effect.scoped),
+        assert.equal((yield* request("/missing.js")).status, 404);
+        assert.equal((yield* request("/%2e%2e%2fsecret.txt")).status, 404);
+        assert.equal((yield* request("/%invalid")).status, 400);
+        assert.equal((yield* request("/", { method: "POST" })).status, 405);
+        assert.equal(netFetchMock.mock.calls.length, 0);
+      }).pipe(Effect.provide(Layer.merge(layerProtocol, NodeServices.layer)), Effect.scoped),
+  );
+
+  it.each([
+    { development: false, schemes: ["goat", "t3code"] as const },
+    { development: true, schemes: ["goat-dev", "t3code-dev"] as const },
+  ])(
+    "keeps current and legacy OS link schemes for development=$development",
+    ({ development, schemes }) => {
+      assert.deepEqual(ElectronProtocol.getDesktopLinkSchemes(development), schemes);
+    },
   );
 
   it.effect("proxies the stable renderer origin to the current app server", () =>
@@ -323,6 +334,7 @@ describe("ElectronProtocol", () => {
     ]);
     assert.deepEqual(directives["media-src"], ["'self'", "t3code:", "blob:", "http:", "https:"]);
     assert.deepEqual(directives["frame-src"], ["'self'", "blob:", "http:", "https:"]);
+    assert.deepEqual(directives["object-src"], ["'self'", "blob:", "http:", "https:"]);
     assert.deepEqual(directives["font-src"], ["'self'", "t3code:", "data:"]);
   });
 });

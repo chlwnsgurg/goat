@@ -1,12 +1,10 @@
+import { isGoatConnectEnabled } from "@goat/shared/goatConnect";
 import type {
   RelayClientEnvironmentRecord,
   RelayEnvironmentStatusResponse,
-} from "@t3tools/contracts/relay";
-import { decodeRelayJwt } from "@t3tools/shared/relayJwt";
-import {
-  RelayEnvironmentConnectScope,
-  RelayEnvironmentStatusScope,
-} from "@t3tools/contracts/relay";
+} from "@goat/contracts/relay";
+import { decodeRelayJwt } from "@goat/shared/relayJwt";
+import { RelayEnvironmentConnectScope, RelayEnvironmentStatusScope } from "@goat/contracts/relay";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -45,7 +43,7 @@ export class RelayEnvironmentDiscovery extends Context.Service<
     readonly state: SubscriptionRef.SubscriptionRef<RelayEnvironmentDiscoveryState>;
     readonly refresh: Effect.Effect<void>;
   }
->()("@t3tools/client-runtime/relay/discovery/RelayEnvironmentDiscovery") {}
+>()("@goat/client-runtime/relay/discovery/RelayEnvironmentDiscovery") {}
 
 export const EMPTY_RELAY_ENVIRONMENT_DISCOVERY_STATE: RelayEnvironmentDiscoveryState = {
   environments: new Map(),
@@ -104,11 +102,14 @@ function relayAccountId(clerkToken: string): Option.Option<string> {
 
 /** @public Service construction is part of the canonical Effect module API. */
 export const make = Effect.fn("RelayEnvironmentDiscovery.make")(function* () {
+  const state = yield* SubscriptionRef.make(EMPTY_RELAY_ENVIRONMENT_DISCOVERY_STATE);
+  if (!isGoatConnectEnabled()) {
+    return RelayEnvironmentDiscovery.of({ state, refresh: Effect.void });
+  }
   const relay = yield* ManagedRelay.ManagedRelayClient;
   const session = yield* ClientCapabilities.CloudSession;
   const connectivity = yield* Connectivity.Connectivity;
   const wakeups = yield* ConnectionWakeups.ConnectionWakeups;
-  const state = yield* SubscriptionRef.make(EMPTY_RELAY_ENVIRONMENT_DISCOVERY_STATE);
   const refreshLock = yield* Semaphore.make(1);
   const hasRefreshed = yield* Ref.make(false);
   const accountGeneration = yield* Ref.make(0);
@@ -333,10 +334,6 @@ export const make = Effect.fn("RelayEnvironmentDiscovery.make")(function* () {
             yield* Ref.set(activeAccountId, Option.none());
             yield* Ref.set(offlineReportFingerprints, new Map());
             yield* SubscriptionRef.set(state, EMPTY_RELAY_ENVIRONMENT_DISCOVERY_STATE);
-            // Refresh proactively — this wakeup fires when a session activates
-            // (sign-in or cold start), and the list should be populated before
-            // any screen asks for it. A signed-out refresh settles back to the
-            // clean empty state.
             yield* refresh.pipe(Effect.forkScoped);
           })
         : Effect.void,

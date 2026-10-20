@@ -1,6 +1,6 @@
 import type { ComponentProps } from "react";
-import { ExternalLinkIcon } from "lucide-react";
-import { CHATGPT_USAGE_URL } from "@t3tools/shared/usageLimits";
+import { ExternalLinkIcon } from "~/components/solar";
+import { CHATGPT_USAGE_URL } from "@goat/shared/usageLimits";
 import { ensureLocalApi } from "../../localApi";
 import { Button } from "../ui/button";
 

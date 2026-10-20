@@ -1,15 +1,15 @@
 import { useAtomValue } from "@effect/atom-react";
-import { parseScopedThreadKey, scopedThreadKey } from "@t3tools/client-runtime/environment";
-import { PREVIEW_STREAM_BASE_PATH } from "@t3tools/client-runtime/preview/server-browser-stream";
-import { createPreviewEnvironmentAtoms } from "@t3tools/client-runtime/state/preview";
-import { resolveDeviceHubAccess } from "@t3tools/client-runtime/state/deviceHubAccess";
+import { parseScopedThreadKey, scopedThreadKey } from "@goat/client-runtime/environment";
+import { PREVIEW_STREAM_BASE_PATH } from "@goat/client-runtime/preview/server-browser-stream";
+import { createPreviewEnvironmentAtoms } from "@goat/client-runtime/state/preview";
+import { resolveDeviceHubAccess } from "@goat/client-runtime/state/deviceHubAccess";
 import type {
   EnvironmentId,
   PreviewEvent,
   PreviewListResult,
   PreviewSessionSnapshot,
   ThreadId,
-} from "@t3tools/contracts";
+} from "@goat/contracts";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 import { AsyncResult, Atom } from "effect/reactivity";
@@ -25,7 +25,6 @@ interface ThreadPreviewTabs {
   readonly serverEpoch: string | null;
   readonly revision: number;
   readonly sessions: ReadonlyArray<PreviewSessionSnapshot>;
-  /** A list result has arrived, so `sessions` covers tabs opened before this view. */
   readonly listed: boolean;
 }
 
@@ -61,7 +60,6 @@ function applyEvent(current: ThreadPreviewTabs, event: PreviewEvent): ThreadPrev
       };
     }
   } else {
-    // Keep a tab's place so the picker order is stable.
     sessions[index === -1 ? sessions.length : index] = event.snapshot;
   }
   return { ...current, serverEpoch: event.serverEpoch, revision: event.revision, sessions };
@@ -118,7 +116,6 @@ const threadPreviewTabsAtom = Atom.family((threadKey: string) => {
     get.mount(eventsAtom);
     const cached = get.once(listAtom);
     if (AsyncResult.isSuccess(cached)) state = applyList(cached.value) ?? state;
-    // The cached list can predate an agent-opened tab.
     queueMicrotask(() => {
       if (!disposed) get.refresh(listAtom);
     });

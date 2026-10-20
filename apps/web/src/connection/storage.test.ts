@@ -1,9 +1,10 @@
 import {
   ConnectionTransientError,
   PrimaryConnectionTarget,
-} from "@t3tools/client-runtime/connection";
-import { EnvironmentId, ThreadId } from "@t3tools/contracts";
-import { ConnectionCatalogDocument, Persistence } from "@t3tools/client-runtime/platform";
+  RelayConnectionTarget,
+} from "@goat/client-runtime/connection";
+import { EnvironmentId, ThreadId } from "@goat/contracts";
+import { ConnectionCatalogDocument, Persistence } from "@goat/client-runtime/platform";
 import { describe, expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as Deferred from "effect/Deferred";
@@ -11,6 +12,15 @@ import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import { afterEach, vi } from "vite-plus/test";
+
+vi.mock("../lib/indexedDbMigration", () => ({
+  createMigratingDatabaseOpener: (name: string) => () =>
+    new Promise<IDBDatabase>((resolve, reject) => {
+      const request = indexedDB.open(name);
+      request.addEventListener("success", () => resolve(request.result));
+      request.addEventListener("error", () => reject(request.error));
+    }),
+}));
 
 import * as ConnectionStorage from "./storage";
 
@@ -45,6 +55,116 @@ describe("ConnectionStorage.makeCatalogStore", () => {
       expect(quarantined).toEqual(["{not-json"]);
       expect(writes).toHaveLength(1);
       expect(decodeCatalog(writes[0]!)).toEqual(emptyCatalog);
+    }),
+  );
+
+  it.effect(
+    "preserves sequential additions and deletions from desktop channels with stale caches",
+    () =>
+      Effect.gen(function* () {
+        let disk: string | null = encodeCatalog(emptyCatalog);
+        const setConnectionCatalog = vi.fn(async (raw: string, expected: string | null) => {
+          if (disk !== expected) return "conflict" as const;
+          disk = raw;
+          return true;
+        });
+        vi.stubGlobal("window", {
+          desktopBridge: {
+            getConnectionCatalog: async () => disk,
+            setConnectionCatalog,
+          },
+        });
+        const backend = () => ConnectionStorage.makeCatalogBackend(fixedHandle({} as IDBDatabase));
+        const first = yield* ConnectionStorage.makeCatalogStore(backend());
+        const second = yield* ConnectionStorage.makeCatalogStore(backend());
+        yield* first.read;
+        yield* second.read;
+        const a = new RelayConnectionTarget({ environmentId: EnvironmentId.make("A"), label: "A" });
+        const b = new RelayConnectionTarget({ environmentId: EnvironmentId.make("B"), label: "B" });
+        yield* first.update((catalog) => ({ ...catalog, targets: [...catalog.targets, a] }));
+        yield* second.update((catalog) => ({ ...catalog, targets: [...catalog.targets, b] }));
+        expect(decodeCatalog(disk!).targets).toEqual([a, b]);
+        yield* first.update((catalog) => ({
+          ...catalog,
+          targets: catalog.targets.filter((t) => t.environmentId !== a.environmentId),
+        }));
+        yield* second.update((catalog) => ({
+          ...catalog,
+          disabledEnvironmentIds: [b.environmentId],
+        }));
+        expect(decodeCatalog(disk!).targets).toEqual([b]);
+        expect(decodeCatalog(disk!).disabledEnvironmentIds).toEqual([b.environmentId]);
+      }),
+  );
+
+  it.effect(
+    "reloads and reapplies after a desktop CAS conflict and bounds repeated conflicts",
+    () =>
+      Effect.gen(function* () {
+        const a = new RelayConnectionTarget({ environmentId: EnvironmentId.make("A"), label: "A" });
+        const b = new RelayConnectionTarget({ environmentId: EnvironmentId.make("B"), label: "B" });
+        let disk = encodeCatalog(emptyCatalog);
+        let conflict = true;
+        let alwaysConflict = false;
+        const setConnectionCatalog = vi.fn(async (raw: string, expected: string | null) => {
+          if (conflict || alwaysConflict) {
+            conflict = false;
+            disk = encodeCatalog({ ...emptyCatalog, targets: [a] });
+            return "conflict" as const;
+          }
+          if (disk !== expected) return "conflict" as const;
+          disk = raw;
+          return true;
+        });
+        vi.stubGlobal("window", {
+          desktopBridge: {
+            getConnectionCatalog: async () => disk,
+            setConnectionCatalog,
+          },
+        });
+        const store = yield* ConnectionStorage.makeCatalogStore(
+          ConnectionStorage.makeCatalogBackend(fixedHandle({} as IDBDatabase)),
+        );
+        const addB = (catalog: typeof ConnectionCatalogDocument.Type) => ({
+          ...catalog,
+          targets: [...catalog.targets, b],
+        });
+        yield* store.update(addB);
+        expect(decodeCatalog(disk).targets).toEqual([a, b]);
+        expect(setConnectionCatalog).toHaveBeenCalledTimes(2);
+        alwaysConflict = true;
+        const error = yield* store.update(addB).pipe(Effect.flip);
+        expect(error.message).toContain("kept changing");
+        expect(setConnectionCatalog).toHaveBeenCalledTimes(7);
+        alwaysConflict = false;
+        yield* store.update(addB);
+        expect(decodeCatalog(disk).targets).toEqual([a, b]);
+      }),
+  );
+
+  it.effect("replaces a corrupt desktop catalog on read and on a save without a read", () =>
+    Effect.gen(function* () {
+      let disk: string | null = "{not-json";
+      vi.stubGlobal("window", {
+        desktopBridge: {
+          getConnectionCatalog: async () => disk,
+          setConnectionCatalog: async (raw: string, expected: string | null) => {
+            if (disk !== expected) return "conflict" as const;
+            disk = raw;
+            return true;
+          },
+        },
+      });
+      const backend = () => ConnectionStorage.makeCatalogBackend(fixedHandle({} as IDBDatabase));
+      const reader = yield* ConnectionStorage.makeCatalogStore(backend());
+      expect(yield* reader.read).toEqual(emptyCatalog);
+      expect(decodeCatalog(disk!)).toEqual(emptyCatalog);
+
+      disk = "{not-json";
+      const a = new RelayConnectionTarget({ environmentId: EnvironmentId.make("A"), label: "A" });
+      const writer = yield* ConnectionStorage.makeCatalogStore(backend());
+      yield* writer.update((catalog) => ({ ...catalog, targets: [...catalog.targets, a] }));
+      expect(decodeCatalog(disk!).targets).toEqual([a]);
     }),
   );
 
@@ -104,7 +224,7 @@ describe("ConnectionStorage.makeCatalogBackend", () => {
 
       expect(error).toBeInstanceOf(ConnectionTransientError);
       expect(error.message).toContain("Desktop secure storage is unavailable");
-      expect(setConnectionCatalog).toHaveBeenCalledWith("{}");
+      expect(setConnectionCatalog).toHaveBeenCalledWith("{}", null);
     }),
   );
 
@@ -346,7 +466,13 @@ describe("browser GitHub routing permissions", () => {
       expect(yield* first.get(entry)).toBe("off");
       yield* first.set(entry, "read-write");
       expect(yield* second.get(entry)).toBe("read-write");
+      const legacyKey = "t3code:github-routing:first"; // goat-rename: legacy
+      const legacyPermission = localStorage.getItem("goat:github-routing:first")!;
+      localStorage.setItem(legacyKey, legacyPermission);
+      localStorage.removeItem("goat:github-routing:first");
       const oldPermissions = Option.getOrThrow(yield* Stream.runHead(first.changes));
+      expect(oldPermissions).toHaveLength(1);
+      expect(localStorage.getItem("goat:github-routing:first")).toBe(legacyPermission);
       const staleCatalog = yield* ConnectionStorage.makeCatalogStore({
         read: Effect.succeed(
           encodeCatalog({ ...emptyCatalog, githubRoutingPermissions: oldPermissions }),
@@ -366,6 +492,7 @@ describe("browser GitHub routing permissions", () => {
 
       yield* first.set(entry, "off");
       expect(yield* second.get(entry)).toBe("off");
+      expect(localStorage.getItem(legacyKey)).toBe(legacyPermission);
       secondBrowser.dispatchEvent(Object.assign(new Event("storage"), { key: null }));
       yield* Deferred.await(revoked);
       yield* second.set(other, "read");

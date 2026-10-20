@@ -1,5 +1,5 @@
 import { assert } from "@effect/vitest";
-import type { ProviderReplayTranscript } from "@t3tools/contracts";
+import type { ProviderReplayTranscript } from "@goat/contracts";
 
 import type { OrchestratorV2ScenarioResult } from "../../OrchestratorScenario.ts";
 import {
@@ -122,8 +122,6 @@ export function assertTurnInterruptMidToolCodexOutput(
   assert.isDefined(commandItem);
   assert.isDefined(interruptRequest);
   assert.isDefined(interruptResult);
-  // Interrupted Codex turns must terminalize mid-flight commandExecution items so
-  // the projected card is never left running forever after turn.terminal.
   assert.equal(commandItem.status, "interrupted");
   assert.isNotNull(commandItem.completedAt);
   assert.include(commandItem.input, "node -e");

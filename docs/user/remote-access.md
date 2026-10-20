@@ -3,32 +3,58 @@
 Connect a phone, browser, or another desktop app to GOAT running on a different
 machine. That machine must stay running and reachable while you work.
 
-## T3 Connect
+## GOAT Connect (coming soon)
 
-T3 Connect makes an environment available to your other devices without setting
-up router forwarding. In the desktop app on the host, open **Settings →
-Connections**, sign in, and enable **T3 Connect** for that environment.
+GOAT Connect is coming soon. T3 Connect sign-in and managed tunnels are
+unavailable. Connect your devices with direct pairing, [Tailscale HTTPS](#tailscale-https),
+or [SSH](#desktop-managed-ssh).
 
-For a command-line host, run:
+`goat connect` and its subcommands print
+"GOAT Connect is coming soon. Use `goat pair --tailscale` to connect a device over Tailscale."
+and exit successfully without changing your connection settings.
 
-```bash
-goat connect
-```
+Previously linked servers start normally and keep their stored link dormant.
+Saved environments with only a T3 Connect route show as unavailable; add a
+direct or Tailscale route, or forget the environment in connection settings.
 
-Follow the sign-in instructions. Setup offers a
-[background service](./background-service.md); if you decline it, start the
-server with `goat serve`. Saving your sign-in alone does not make the machine
-reachable.
+## Connect your phone to a hub
 
-On your other device, sign in to the same T3 Connect account and choose the
-environment. Over SSH, the CLI prints a browser link and a short code. Open the
-link on any device, confirm the code matches, and approve. The CLI continues on
-its own, so you do not need to forward an OAuth callback port.
+A hub is the one GOAT server your phone pairs with, ideally a machine that stays
+on. The phone and the hub must be on the same tailnet, so install Tailscale on
+both and sign in to the same account.
 
-T3 Connect renews access credentials when needed without disconnecting a healthy
-connection. Pull request diffs and provider settings keep working after the
-previous credential expires. A failed renewal affects that request; it does not
-disconnect an otherwise healthy conversation.
+On the hub's desktop app, open **Settings → Connections**. The **Use this device
+as a hub** card at the top has the **Tailscale HTTPS** switch and **Show phone
+QR**. Turn on Tailscale HTTPS first: without it, the QR dialog explains how to
+turn it on, and only offers a tailnet or local network address after you choose
+one. On a hub without the desktop app, run `goat serve --tailscale-serve`, then
+`goat pair --tailscale` to print a QR code.
+
+On the phone, open GOAT and tap **Scan QR code**, allow camera access the first
+time, and point the camera at the hub's QR code. The app connects as soon as it
+reads the code and opens the hub's sessions. To type an address and pairing code
+instead, open **Advanced → Enter address manually**.
+
+These QR codes are GOAT app links. Scan them from inside GOAT; scanning one with
+the phone's camera app opens GOAT's scanner, and you scan once more there. QR
+codes printed by older T3 Code versions still scan. Browsers use the
+`Pairing URL` printed next to the QR code.
+
+If pairing fails, the app shows three checks and stops at the first one that
+failed:
+
+1. **Tailscale** (or **Network** for a non-tailnet address): the phone could not
+   reach the hub. Turn on Tailscale on the phone and sign in to the hub's
+   tailnet, or check that the hub is awake.
+2. **Hub responds**: something answered, but not as a GOAT hub this app can use.
+   Check the address and update GOAT on the hub.
+3. **Pairing code**: the hub rejected the code. Codes work once and expire; show
+   a new QR code on the hub.
+
+To switch to another hub, open **Settings → Environments → Change hub** on the
+phone and scan the new hub's QR code. The old hub is removed from the phone
+after the new one connects. To keep several servers on the phone, use
+**Settings → Environments → Advanced → Add another server**.
 
 ## Pair over a LAN or private network
 
@@ -51,8 +77,8 @@ If a server is already running, generate a fresh link without restarting it:
 goat pair
 ```
 
-Scan the QR code on your phone or paste the pairing URL into **Add environment**
-in the receiving app. Connection settings are under **Settings → Connections**
+Scan the QR code from the GOAT app on your phone, or paste the pairing URL into
+**Add device → Tailscale (GOAT server)** on web and desktop. Connection settings are under **Settings → Connections**
 on web and desktop and **Settings → Environments** on mobile. A loopback address
 such as `127.0.0.1` reaches only the device opening the link.
 
@@ -65,17 +91,16 @@ another link to share.
 ### Reach one machine several ways
 
 A machine can have more than one route: LAN, Tailscale, another VPN, a public
-URL, SSH, or T3 Connect. Tailscale shares its `100.64.0.0/10` address range with
+URL, or SSH. Tailscale shares its `100.64.0.0/10` address range with
 other VPNs such as Cloudflare WARP, so an address in that range shows as VPN
 unless the machine confirms it is on Tailscale. To add a route, choose **Add
-route** in the machine's route list, or next to it in the T3 Connect list.
+route** in the machine's route list.
 Pairing the same machine again over another address also adds a route instead
 of a second machine. A new route is placed by speed, in that order, and you can
 reorder routes at any time.
 
-While connected through T3 Connect or a paired address, GOAT also learns the
-machine's current LAN and Tailscale addresses and adds them as routes, so
-pairing once through T3 Connect is enough to use the LAN at home. When the
+While connected through a paired address, GOAT also learns the
+machine's current LAN and Tailscale addresses and adds them as routes. When the
 machine's LAN address changes, for example after it joins another Wi-Fi network,
 the learned route follows it. The machine must allow network access for its LAN
 address to be learned. You can reorder a learned route, but not remove it; it
@@ -91,15 +116,13 @@ return to the app, and every minute, and moves back as soon as one works.
 On web and desktop, select the route count under the machine's name in
 **Settings → Connections** to see its routes. Drag a route to change the order,
 or remove it. On mobile, open the machine under **Settings → Environments** and
-choose **Edit**. Signing out of T3 Connect removes only that route; a machine
-you can still reach another way stays saved.
+choose **Edit**.
 
 Open **Permissions** next to **Routes** in web or desktop, or **Your permissions**
 in the mobile route details, to see what your current connection can do on that
 environment. For a remote environment, this is in its route details. Permissions
 shown there apply only to the route marked **In use**; other routes are not
-checked. Direct pairing and T3 Connect have separate sessions and may grant
-different permissions.
+checked.
 
 ### Balance new threads across machines
 
@@ -147,59 +170,158 @@ tailscale serve --https=443 off
 If that port is already in use, choose another with
 `--tailscale-serve-port`. See `goat pair --help` for other pairing options.
 
-### Hosted web app
+### Connect a browser
 
-[app.t3.codes](https://app.t3.codes) needs an HTTPS endpoint. It connects directly
-to your server; a hosted pairing link does not make an unreachable backend
-reachable or convert HTTP to HTTPS.
-
-For a plain HTTP LAN endpoint, use the direct pairing URL in a browser that can
-open it, or pair from the desktop app. On mobile, an IP address entered without a
-scheme uses HTTP, so include `https://` when your server uses HTTPS.
+Open the direct pairing URL in a browser that can reach the server. For a
+secure address on your tailnet, use [Tailscale HTTPS](#tailscale-https).
+On mobile, an IP address entered without a scheme uses HTTP, so include
+`https://` when your server uses HTTPS.
 
 ## Desktop-managed SSH
 
-In the desktop app, open **Settings → Connections → Add environment**, choose
+In the desktop app, open **Settings → Connections → Add device**, choose
 **SSH**, and enter a host or SSH alias such as `user@example.com`. GOAT starts
 or reuses a server there and opens the port forward for you. Projects, provider
 credentials, and agent work stay on the remote machine.
 
-The remote host must be Linux or an Apple Silicon Mac with `tar`, `sha256sum`
-or `shasum`, and [provider setup](./install.md#providers). GOAT keeps its
-server, launch state, and data on the host under `~/.goat`, apart from any T3
-Code install in `~/.t3`.
+The remote host must be Linux, an Apple Silicon Mac, or a Windows machine set up
+as described below, with `tar`, `sha256sum` or `shasum`, and
+`git` for project work. Set up provider CLIs and sign-in with
+[provider sync](#providers-on-your-machines) or follow [provider setup](./install.md#providers)
+on that host. GOAT keeps its server, launch state,
+and data under `~/.goat`, apart from any T3 Code install in `~/.t3`. A fresh host
+does not need the desktop app or Node.
 
-The first launch uploads GOAT's server from this computer, so it takes longer
-than later ones. When this computer does not already have the server for your
-GOAT version, it downloads it from the public GOAT releases and checks it
-against the published checksums. If that release is not published yet or the
-download fails on the network, GOAT tries the GitHub CLI when it is signed in
-(`gh auth login`). A download that does not match the published checksums is
-refused. If neither source works, the connection fails with an error that names
-the release it looked for.
-Provider CLIs must be on the `PATH` of a non-interactive login shell there;
-check with:
+A Windows host works when its OpenSSH server uses Git Bash as the default shell
+(the OpenSSH `DefaultShell` setting pointing at Git for Windows' `bash.exe`).
+GOAT starts its server outside your SSH session so it keeps running after you
+disconnect, which means the server gets your Windows user environment rather
+than the SSH session's: provider CLIs must be on your Windows `PATH`. After an
+app update, a Windows host moves to the new version only from a GOAT release;
+a server started from a source checkout must be stopped before reconnecting.
+
+The first launch can take longer while GOAT installs its runtime. It uses a
+bundled or cached archive when available. Otherwise it uses your configured
+release mirror, or downloads the matching published GOAT release and checks its
+checksums. If a public download fails, GOAT can try the GitHub CLI when signed in
+(`gh auth login`). It refuses a checksum mismatch and names the expected release
+when it cannot obtain an archive.
+
+When the host is asleep or off the network, its connection shows **Unreachable**
+and GOAT keeps retrying, sooner when this computer wakes or joins a network.
+Agent work on the host keeps running while you are away. A rejected SSH key, a
+changed host key, or a runtime that refuses this app stops retrying until you
+choose **Reconnect**; the connection's status says what to fix.
+
+On Linux and macOS hosts, provider CLIs must be on the `PATH` of a
+non-interactive login shell there; check with:
 
 ```bash
 ssh user@example.com 'sh -lc "command -v claude codex"'
 ```
 
-After an app update, GOAT moves the host's server to the app's version when no
-agent work is running there. This applies to servers it launched and to servers
-left by older GOAT builds. If the old server still works with the app, GOAT
-keeps using it and replaces it once it is idle. If it does not, the connection
-waits and says the server will be replaced when its current work finishes. GOAT
-retries in the background in both cases. GOAT never replaces a server that is
-newer than the app; update the app instead. If GOAT cannot confirm that it
-launched a server, it leaves it running and the error names the process to stop
-before you reconnect. When two computers update the same host at once, the
+The machine that owns your SSH connection keeps the host's GOAT runtime at its
+own version. The host does not need the desktop app. In **Settings → Connections**,
+check the SSH connection's runtime status and choose **Update runtime** to retry an
+update. A busy compatible runtime stays available while the update waits.
+
+Choose **Update now** and confirm to update immediately. Running agent work gets up
+to a minute to finish, then continues on the new version. **Cancel** leaves the
+runtime running as before. Agents can request an update that runs when the
+runtime is idle. If the new version fails to start, GOAT restores the previous one.
+
+Runtime archives come from published GOAT releases or a configured release mirror.
+If this app's own version has no archive (a development build, for example) and
+the host has never run GOAT, GOAT installs the newest published runtime that works
+with this app instead. The connection then shows **Running <version> · Upgrade to
+<version> deferred** and GOAT retries the upgrade every 10 minutes. A host that
+already has GOAT data never gets a different version this way. When nothing
+usable exists, the status says so and names the one thing to do. GOAT does not
+replace a newer runtime; update the machine that owns the SSH connection instead.
+
+A server that GOAT cannot confirm it launched, or that cannot restart itself,
+is left running. GOAT keeps using it if it is compatible; otherwise, stop it on
+the host and reconnect. When two computers update the same host at once, the
 second retries after the first finishes. If an interrupted update left the host
 locked, the error names the file to remove after you check that no other GOAT
-app is updating it. Removing the connection stops a server that GOAT launched; a
-server that was already running is left alone.
+app is updating it. Removing the connection leaves GOAT's server running on the
+host. Ask an agent to forget the host and stop its runtime when idle, or use
+**Forget host**. GOAT stops only an idle server it owns; remote projects and files stay.
+
+Each desktop app keeps one session on the host for its SSH connection and reuses
+it when it reconnects. Revoke sessions you no longer use in **Settings →
+Connections** on the host, or on a headless host with `goat auth session list` and
+`goat auth session revoke <id>`. A desktop that can still sign in over SSH pairs
+again on its next connect.
 
 For Antigravity's Google callback on a remote host, see
 [remote sign-in](./providers-antigravity.md#sign-in-from-a-remote-device).
+
+### Providers on your machines
+
+Open **Settings → Connections → Providers on your machines** to compare installed
+provider versions and sign-in status on this machine and connected SSH hosts.
+Choose **Sync to other hosts…** for a provider and select your destination
+machines. GOAT uses the vendor's official npm package or installer for each
+operating system, matching this machine's version by default, or installing the
+latest if it is absent here. Cursor's installer always installs the latest.
+Choose **Update runtime** for a host whose GOAT is too old, or **Prepare host**
+if its runtime is stopped, then retry.
+
+Each host installs and starts its own sign-in. Complete the offered device code
+or vendor sign-in page, or finish in GOAT on that host. If a terminal step is
+needed, run it on the destination: `claude auth login`, `agent login` (Cursor),
+`grok login`, `opencode auth login`, or `pi` followed by `/login`. Codex uses
+`codex login --device-auth`. An agent can request a sync; approve the request in
+its thread before installation starts. Cancelling stops unfinished work; a
+completed installation stays installed.
+
+GOAT never copies credentials between machines. For headless Codex login,
+[OpenAI documents copying `~/.codex/auth.json` as a fallback](https://developers.openai.com/codex/auth).
+A person may do this between their own machines, treating the file like a
+password; GOAT does not automate it.
+
+Sync only to your own machines and sign in with your own account on each.
+Never sign in to someone else's account or share yours.
+[Claude's consumer terms](https://www.anthropic.com/legal/consumer-terms) forbid
+sharing login credentials or letting others use your account; see also the
+[Pro plan guidance](https://support.anthropic.com/en/articles/8325606-what-is-the-pro-plan).
+[OpenAI accounts are for the individual](https://help.openai.com/en/articles/10471989),
+and [use across your own devices is supported](https://help.openai.com/en/articles/8980438).
+Cursor and xAI subscription policies: **needs confirmation**; no source has been
+verified yet.
+
+### A fresh VPS
+
+Open **Settings → Connections → Add device → SSH**, or tell an agent to
+“connect a new SSH host” and give it the address and SSH user. Check the displayed
+host-key fingerprint against your server provider's record before approving.
+The first approval also lets GOAT add its Include line to your SSH config.
+
+GOAT uses SSH keys or your ssh-agent. If it creates a key, register the displayed
+public key with your server provider or add it to the host. If the host only
+accepts a password, run the offered `ssh-copy-id` command in a terminal on the
+machine that owns this GOAT environment, then retry. Your password stays in that
+terminal; GOAT does not collect it or run `sudo` for you.
+
+GOAT prepares the runtime before checking providers. Provider diagnosis needs a
+ready runtime; if preparation is still running or failed, check the host's status
+and finish or retry setup first. After agent setup, GOAT checks provider CLIs and
+sign-in on the remote host. Use [provider sync](#providers-on-your-machines) or
+run the offered installation and sign-in commands there; signing in on your own
+computer does not sign in the VPS. The desktop
+connection row reports runtime setup.
+
+Save the prepared host in the desktop app to see its environment in the sidebar.
+With web or mobile alone, approve setup in the requesting thread. The host is then
+available to that environment's SSH tools; adding it does not create a separate
+sidebar environment on those clients.
+
+If the host key changes, GOAT stops connecting. Check why it changed before
+trusting it again. If you rebuilt the server, forget the host and add it again.
+Forgetting removes GOAT's managed SSH entry and pinned key. It keeps your shared
+SSH keys and the host's projects and files, and stops a runtime only when GOAT owns
+it and no work is running.
 
 ### Start a worktree on a saved SSH host
 
@@ -225,6 +347,14 @@ this device** in **Git actions**, or search for it in the command palette. The r
 shows a local ref you can inspect in the original repository. See
 [Fetch a branch from an SSH worktree](./source-control.md#fetch-a-branch-from-an-ssh-worktree).
 
+To move a thread you already started, choose **Continue on SSH host…** in the thread's
+menu or the command palette, pick the saved host, and optionally say what to do next.
+GOAT copies the thread's worktree the same way, including uncommitted changes, starts a
+new thread on that host with a summary of the conversation, and leaves a note in the
+original thread pointing to it. Wait for the current turn to finish first; a running
+thread cannot be moved. Your local worktree is left as it was, so you can keep working
+here or fetch the remote branch back later.
+
 SSH worktree creation and fetch-back are available in the desktop app. The remote
 thread can also be followed through an existing web or mobile connection.
 
@@ -236,11 +366,15 @@ machine's `~/.ssh/config` and `known_hosts`, browses folders and Git worktrees o
 the one you name, and starts a thread there in that folder or in a new worktree.
 The folder becomes a project on that machine, and the thread runs in that
 machine's own GOAT, which is started the same way as above if needed.
+An agent can also move a thread there, uncommitted changes included, when you ask
+it to "continue this on mini"; it does so as the last step of its turn.
 
 Only SSH keys or a running ssh-agent are used; a host that asks for a password
 is refused. Starting a thread needs a full-access thread or a full-access
 outside agent. To watch the new thread, add the same host under
-**Settings → Connections**, or ask the agent to add it for you. Each start
+**Settings → Connections**, or ask the agent to add it for you. On that machine
+itself, the GOAT desktop app lists these threads under **Headless server** while
+that server is running. Each start
 issues a 12-hour sign-in on that machine, listed with its other clients. A
 machine running an older GOAT
 only accepts approval-required threads in folders that are already projects
@@ -257,12 +391,78 @@ change right away, and the agent's connection list shows which agent added each
 connection.
 
 The agent that started the thread can follow it from here: it waits for the
-thread to finish, reads its messages, sends it follow-ups, or stops it, and it
+thread to finish, reads its messages and the result its agent recorded (outcome,
+pull requests, tests, and commits), sends it follow-ups, or stops it, and it
 can list threads across this machine and the ones it is connected to. The
 remote thread cannot report back on its own, so ask the starting agent to wait
 on it. Sending to or stopping a thread on another machine needs an agent in the
 default interaction mode, and that machine still refuses threads that run with
 broader permissions than the agent has.
+
+**Settings → Connections → Remote launches** lists the threads each connected
+environment started or watches on other machines, grouped by SSH host, even
+when this app runs on a different computer from the one that started them. A
+thread opens from there once this app is also connected to its machine. In the
+desktop app, **Connect** adds the host over SSH using the same host name. A
+thread started from another machine shows **Launched by** with that machine's
+name in its header, also when the launching thread is not open here.
+
+### Link a GOAT server for agents without SSH
+
+When the other machine already runs GOAT on its own, such as a headless server
+kept up with `goat service install`, and this machine reaches it over
+Tailscale or your LAN, agents can use it without SSH. On that
+machine, create a pairing link that can only grant agent access:
+
+```sh
+goat pair --tailscale --scope orchestration:read --scope orchestration:operate
+```
+
+Leave out `--tailscale` when the server already listens on an address this
+machine reaches. Give an agent here the printed pairing URL, for example "link
+https://mini.tailnet.ts.net/pair#token=… as mini". The code works once and
+expires after five minutes. From then on agents use `mini` as the host for
+projects, threads, worktrees and host status, start threads there, and include
+it when they list threads across machines.
+
+A link can do at most what you allow when linking. It is Supervised by default;
+read-only links cannot start or change threads. Agents start threads only in
+folders that are already projects on that machine, so add the project there
+first, for example from the GOAT app connected to it. An agent whose own permission
+mode is lower than the link's cannot change anything through it. A link cannot
+answer approval requests, and folder browsing and runtime updates still need SSH.
+
+A link lasts 30 days; link again with a new code to renew it. Removing a link
+forgets it here. To end it on the other machine at once, revoke **GOAT on …** in
+that machine's **Settings → Connections**. To watch its threads yourself, add
+the machine under **Settings → Connections** with a pairing URL from `goat pair`.
+
+### Cloud machines
+
+GOAT can create [Boat](https://boat.dev) cloud machines and use them like any other
+SSH host. In **Settings → Connections → Cloud machines**, paste a Boat API key and agree
+to one `Include ~/.ssh/goat-cloud/*.conf` line at the top of this computer's
+`~/.ssh/config`. Create the key with Boat's `ci` preset (`boat api-key create goat
+--preset ci`), which can create, resume and delete the machines it made and connect
+over SSH. A `full-sandbox` key cannot create or resume machines. The key stays on the
+GOAT server that owns the machines.
+
+Create a machine with a name, a size and an auto-stop time. It appears as
+`boat-<id>`, which you can open from **Connect**, pick as an SSH host for a thread, or
+give an agent. Boat bills the machine while it runs:
+
+- **Stop** saves its disk as a snapshot that Boat keeps for about 14 days.
+- **Resume** starts it again, and billing with it. Browsing, launching a thread or
+  continuing a thread on a stopped machine also resumes it. Listing hosts, checking host
+  status and following a running thread never do.
+- **Delete** removes the machine and its data from Boat permanently.
+
+Each use you start pushes the auto-stop time out again, but work that keeps running on
+its own does not, so choose an auto-stop time that covers it. Boat gives a resumed
+machine a new address and host key; GOAT refreshes and pins both before it connects.
+Removing the key keeps the machines listed, so you can still find ones that may be
+billing. Machines belong to the GOAT server that created them; open them from that
+server.
 
 ## Browser on a remote environment
 
@@ -307,11 +507,12 @@ The server shows the exact line for how you started it, such as
 `sudo npx t3 browser setup`, and keeps your `PATH` when Node is installed only
 for your user. Where `goat` is not on your `PATH`, such as with only the
 desktop app installed, it names the full path of the app's own `goat` instead. It allows Chrome's sandbox with an AppArmor profile and installs
-any missing libraries with apt. It is safe to run again. Without `sudo`, it
-only reports what it would change.
+any missing libraries and system fonts with apt; pages that load without text
+can mean the host has no fonts. It is safe to run again. Without `sudo`, it only
+reports what it would change.
 
 The browser always runs in Chrome's sandbox. Where you cannot change the host,
-set `T3CODE_SERVER_BROWSER_SANDBOX=0` for the environment to run without it.
+set `GOAT_SERVER_BROWSER_SANDBOX=0` for the environment to run without it.
 
 ## Connect an outside agent
 
@@ -337,9 +538,11 @@ npx t3 pair --scope orchestration:read --scope relay:read
 
 The selected scopes replace the default permissions. The same option works with
 `npx t3 auth pairing create` and `npx t3 auth session issue`; each command's
-`--help` lists the available scopes. Without `--scope`, pairing tokens retain
-standard client permissions and issued bearer sessions retain administrative
-permissions.
+`--help` lists the available scopes. Without `--scope`, pairing tokens and issued
+bearer sessions get every permission, including managing access.
+A terminal or a full-access agent on the host can reach those as well, so a
+client that should not manage access also needs to go without `terminal:operate`
+and `orchestration:operate`.
 
 To change an existing client's permissions, create a fresh pairing link with the
 scopes it needs. In a browser opened directly on the environment, open that link
@@ -358,63 +561,23 @@ worktrees. It does not restrict what a task does. Starting a task in a new
 worktree still creates that branch and worktree with `orchestration:operate`,
 and the agent it runs can use Git however the environment allows.
 
-Settings changes, provider management, and environment maintenance can be granted
-separately from access administration. New standard pairings include these
-permissions. Existing clients can stay connected after an update, but newly separated
-features may require pairing again with the permissions they need. Older clients
-may show controls that the server denies. Create a fresh pairing link to change
-a client's permissions.
+Settings changes, provider management, environment maintenance, and access
+management can each be granted separately. New pairings without `--scope` include all of them. Existing clients keep the
+permissions they paired with and can stay connected after an update, but newly
+separated features may require pairing again with the permissions they need.
+Older clients may show controls that the server denies. Create a fresh pairing
+link to change a client's permissions.
 
 `filesystem:read` allows browsing host files, opening workspace files, and viewing
 local changes. Add `filesystem:write` to allow editing files or saving plans to
 the workspace. These scopes control direct file access from the client.
 
-To remove an environment from T3 Connect, open your account menu's **T3 Connect**
-page, or **Settings → T3 Connect** on mobile, and choose **Deregister**. This
-revokes its cloud access and frees its host space even when the environment is
-offline or has been wiped. Removing an environment from a device's connection
-settings only forgets it on that device; it stays registered to your account.
-
-When idle tunnel cleanup is enabled, T3 Connect removes a linked environment's
-tunnel after it stays offline for several minutes. The environment stays linked
-and keeps the same address. When the host starts again or wakes, T3 Connect
-creates a replacement tunnel on its own. You do not need to pair again. Cleanup
-usually runs five to ten minutes after the tunnel goes down.
-
-T3 Connect also removes the tunnel of an environment running an older version of
-GOAT once it has been offline for seven days. That environment shows a message
-asking you to update. Start GOAT on that computer and update it to the latest
-version; it reconnects at the same address without pairing again.
-
-On a command-line host, `goat connect unlink` disables exposure while retaining
-your login; `goat connect logout` also clears that login. Background-service
-[removal](./background-service.md#manage-the-service) is separate.
+Removing an environment from a device's connection settings only forgets it on
+that device. It does not stop the server or delete its stored link.
+Background-service [removal](./background-service.md#manage-the-service) is separate.
 
 Treat pairing URLs and authorization codes as passwords. Do not include them in
 screenshots, logs, or bug reports.
-
-## T3 Connect troubleshooting
-
-Run `goat connect status` on the host to inspect saved authorization and link
-configuration. It is not a live reachability check. If the environment appears
-offline, run `goat service status` and read the displayed log. If it disappears
-when SSH closes, see [background-service troubleshooting](./background-service.md#troubleshooting).
-
-| Error                                                     | Recovery                                                                                                                                          |
-| --------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `environment_link_limit_exceeded` or managed tunnel limit | Deregister an unused environment, then restart GOAT on the host.                                                                                  |
-| `auth_invalid` or `invalid_bearer`                        | Run `goat connect login`. If credentials were revoked, run `goat connect logout`, then `goat connect` again. Restart the server after signing in. |
-| Expired or invalid link proof                             | Check the host's date and time, update GOAT, then restart it.                                                                                     |
-| HTTP 403 without a recognized error                       | Check relay access, proxies, and firewall rules. Keep any Cloudflare Ray ID for a bug report.                                                     |
-| HTTP 408, 429, or 5xx                                     | Check network and relay availability. Startup retries temporary failures for up to ten minutes.                                                   |
-
-After fixing a permanent rejection, restart the host's server. On Linux, use
-`systemctl --user restart t3code.service` for the background service. For a
-foreground server, stop it and run `goat serve` again with your usual options.
-Include the diagnostic message and trace ID when reporting a persistent failure.
-
-For a connection that still fails after linking, check the date and time on both
-devices. For server version warnings, follow [Updating GOAT](./updating.md).
 
 ## Using the Desktop App as a Remote Only
 
@@ -422,7 +585,7 @@ If a computer should only drive work running elsewhere, turn off its local envir
 desktop app, open **Settings → Connections** and switch off **Local
 environment**. GOAT restarts without a local server: no local agents or terminals run, WSL
 backends stay off, and other devices can no longer connect to this computer. Your projects,
-history, and saved connections are kept, and you keep working through pairing, T3 Connect, or SSH.
+history, and saved connections are kept, and you keep working through direct pairing, Tailscale, or SSH.
 
 Switch **Local environment** back on in the same place to restart with your previous local
 settings.

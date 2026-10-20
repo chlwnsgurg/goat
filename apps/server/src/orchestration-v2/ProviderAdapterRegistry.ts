@@ -5,7 +5,7 @@ import {
   type ProviderDriverKind,
   type ProviderInstanceConfig,
   type ProviderInstanceConfigMap,
-} from "@t3tools/contracts";
+} from "@goat/contracts";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
@@ -17,8 +17,8 @@ import * as ProviderInstanceRegistry from "../provider/ProviderInstanceRegistry.
 import {
   ProviderAdapterDriverCreateError,
   type AnyProviderAdapterDriver,
-} from "@t3tools/provider-core/server/adapterDriver";
-import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
+} from "@goat/provider-core/server/adapterDriver";
+import * as ProviderAdapter from "@goat/provider-core/server/ProviderAdapter";
 
 const isProviderSetupError = Schema.is(ProviderSetupError);
 
@@ -64,13 +64,8 @@ export interface ProviderAdapterRegistryV2Shape {
 export class ProviderAdapterRegistryV2 extends Context.Service<
   ProviderAdapterRegistryV2,
   ProviderAdapterRegistryV2Shape
->()("t3/orchestration-v2/ProviderAdapterRegistry/ProviderAdapterRegistryV2") {}
+>()("goat/orchestration-v2/ProviderAdapterRegistry/ProviderAdapterRegistryV2") {}
 
-/**
- * Production facade over the canonical provider-instance registry. Adapter
- * lookup stays dynamic so instance hot reloads and removals are visible
- * without maintaining a second settings watcher or instance map.
- */
 export const layerFromProviderInstanceRegistry: Layer.Layer<
   ProviderAdapterRegistryV2,
   never,
@@ -195,7 +190,7 @@ export function layerFromAdapters(
 
 export function layerFromAdaptersEffect<R, E>(
   adapters: Effect.Effect<ReadonlyArray<ProviderAdapter.ProviderAdapterV2["Service"]>, E, R>,
-): Layer.Layer<ProviderAdapterRegistryV2, E, R> {
+): Layer.Layer<ProviderAdapterRegistryV2, E, Exclude<R, Scope.Scope>> {
   return Layer.effect(
     ProviderAdapterRegistryV2,
     adapters.pipe(Effect.map((entries) => ProviderAdapterRegistryV2.of(makeRegistry(entries)))),

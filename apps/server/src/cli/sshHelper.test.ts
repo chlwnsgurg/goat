@@ -1,3 +1,13 @@
+import * as NodeNet from "node:net";
+
+import * as NodeServices from "@effect/platform-node/NodeServices";
+import { assert, describe as describeEffect, it as itEffect } from "@effect/vitest";
+import * as HostProcess from "@goat/shared/HostProcess";
+import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
+import * as Stream from "effect/Stream";
+import { ChildProcess, ChildProcessSpawner } from "effect/process";
+
 // @effect-diagnostics nodeBuiltinImport:off
 import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";
@@ -5,16 +15,25 @@ import * as NodePath from "node:path";
 import * as NodeHttp from "node:http";
 import * as NodeChildProcess from "node:child_process";
 import { describe, expect, it, vi } from "vite-plus/test";
-import { ORCHESTRATION_PROTOCOL_VERSION } from "@t3tools/contracts";
-import { SSH_RUNTIME_PROTOCOL_VERSION } from "@t3tools/shared/sshRuntimeProtocol";
+import { ORCHESTRATION_PROTOCOL_VERSION } from "@goat/contracts";
+import { SSH_RUNTIME_PROTOCOL_VERSION } from "@goat/shared/sshRuntimeProtocol";
+import { ownRuntimeManifest } from "@goat/shared/runtimeManifest";
 import packageJson from "../../package.json" with { type: "json" };
 import { readLiveSshRuntimeProtocol, readSshServerActivity } from "./sshHelper.ts";
 
-const startDescriptor = async (value: unknown) => {
+const startDescriptor = async (value: unknown, legacyOnly = false) => {
+  const paths: string[] = [];
   const server = NodeHttp.createServer((request, response) => {
+    paths.push(request.url ?? "");
     response.setHeader("content-type", "application/json");
-    if (request.url === "/.well-known/t3/environment") response.end(JSON.stringify(value));
-    else response.end("ok");
+    if (
+      request.url === (legacyOnly ? "/.well-known/t3/environment" : "/.well-known/goat/environment")
+    )
+      response.end(JSON.stringify(value));
+    else {
+      response.writeHead(404);
+      response.end();
+    }
   });
   await new Promise<void>((resolve, reject) => {
     server.once("error", reject);
@@ -24,6 +43,7 @@ const startDescriptor = async (value: unknown) => {
   if (address === null || typeof address === "string") throw new Error("No loopback port");
   return {
     port: address.port,
+    paths,
     close: () =>
       new Promise<void>((resolve, reject) => {
         server.close((error) => (error ? reject(error) : resolve()));
@@ -76,9 +96,50 @@ await Effect.runPromise(Command.runWith(sshHelperCommand,{version:'test'})(['pro
     });
   });
 
-  it.each((["matching", "legacy", "disagreeing", "malformed"] as const).map((mode) => ({ mode })))(
-    "checks a live loopback descriptor: $mode",
-    async ({ mode }) => {
+  it.each([
+    { commit: undefined, commitTime: undefined },
+    { commit: "abc123", commitTime: 123456 },
+  ])("prints one runtime manifest JSON line with build metadata: %j", async (build) => {
+    const moduleUrl = new URL("./sshHelper.ts", import.meta.url).href;
+    const effectUrl = import.meta.resolve("effect/Effect");
+    const cliUrl = import.meta.resolve("effect/cli");
+    const script = `import * as Effect from ${JSON.stringify(effectUrl)};
+import {Command} from ${JSON.stringify(cliUrl)};
+globalThis.__GOAT_BUILD_COMMIT__ = ${JSON.stringify(build.commit) ?? "undefined"};
+globalThis.__GOAT_BUILD_COMMIT_TIME__ = ${JSON.stringify(build.commitTime?.toString()) ?? "undefined"};
+const {sshHelperCommand} = await import(${JSON.stringify(moduleUrl)});
+await Effect.runPromise(Command.runWith(sshHelperCommand,{version:'test'})(['runtime-manifest']));`;
+    const stdout = await new Promise<string>((resolve, reject) => {
+      NodeChildProcess.execFile(
+        process.execPath,
+        ["--input-type=module", "-e", script],
+        { timeout: 10000 },
+        (error, stdout, stderr) => {
+          if (error) {
+            reject(error);
+            return;
+          }
+          if (stderr.trim()) {
+            reject(new Error(stderr));
+            return;
+          }
+          resolve(stdout);
+        },
+      );
+    });
+    expect(stdout.split("\n")).toHaveLength(2);
+    expect(JSON.parse(stdout)).toEqual(
+      ownRuntimeManifest({ version: packageJson.version, ...build }),
+    );
+  });
+
+  it.each(
+    (["matching", "legacy", "disagreeing", "malformed"] as const).flatMap((mode) =>
+      [false, true].map((legacyOnly) => ({ mode, legacyOnly })),
+    ),
+  )(
+    "checks a live loopback descriptor: $mode, legacy path=$legacyOnly",
+    async ({ mode, legacyOnly }) => {
       const home = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "goat-helper-"));
       const liveDescriptor =
         mode === "legacy"
@@ -90,7 +151,7 @@ await Effect.runPromise(Command.runWith(sshHelperCommand,{version:'test'})(['pro
           : mode === "malformed"
             ? { ...descriptor, sshRuntimeProtocolVersion: "1" }
             : descriptor;
-      const server = await startDescriptor(liveDescriptor);
+      const server = await startDescriptor(liveDescriptor, legacyOnly);
       try {
         const file = NodePath.join(home, "server-runtime.json");
         NodeFS.writeFileSync(
@@ -112,6 +173,11 @@ await Effect.runPromise(Command.runWith(sshHelperCommand,{version:'test'})(['pro
           }),
         );
         const result = await readLiveSshRuntimeProtocol(file);
+        expect(server.paths).toEqual(
+          legacyOnly
+            ? ["/.well-known/goat/environment", "/.well-known/t3/environment"]
+            : ["/.well-known/goat/environment"],
+        );
         expect(result.status).toBe(mode === "matching" || mode === "legacy" ? "live" : "unknown");
         if (result.status === "live") {
           expect(result.serverVersion).toBe(packageJson.version);
@@ -139,6 +205,7 @@ describe("SSH live identity and bounded responses", () => {
         "stale version",
         "stale protocol",
         "remembered mismatch",
+        "remembered stale",
         "origin",
         "origin port",
         "string",
@@ -207,18 +274,34 @@ describe("SSH live identity and bounded responses", () => {
       if (!["missing", "remembered alive"].includes(mode))
         NodeFS.writeFileSync(file, mode === "broken" ? "{" : JSON.stringify(state));
       NodeFS.writeFileSync(ports, String(port));
-      if (mode === "remembered alive" || mode === "remembered mismatch")
+      if (
+        mode === "remembered alive" ||
+        mode === "remembered mismatch" ||
+        mode === "remembered stale"
+      )
         NodeFS.writeFileSync(
           pids,
-          String(mode === "remembered mismatch" ? process.pid + 1 : process.pid),
+          // A living second claim is ambiguous; an exited one is left over from an earlier server.
+          String(
+            mode === "remembered mismatch"
+              ? process.ppid
+              : mode === "remembered stale"
+                ? 2147483647
+                : process.pid,
+          ),
         );
       const started = performance.now();
       const result = await readLiveSshRuntimeProtocol(file, ports, pids);
-      const live = ["missing", "remembered alive", "dead PID", "service", "split UTF8"].includes(
-        mode,
-      );
+      const live = [
+        "missing",
+        "remembered alive",
+        "remembered stale",
+        "dead PID",
+        "service",
+        "split UTF8",
+      ].includes(mode);
       expect(result.status).toBe(live ? "live" : "unknown");
-      if (live && mode !== "split UTF8") expect(result.pid).toBe(0);
+      if (live && mode !== "split UTF8" && mode !== "remembered stale") expect(result.pid).toBe(0);
       if (mode === "held" || mode === "oversized")
         expect(performance.now() - started).toBeLessThan(3500);
     } finally {
@@ -295,7 +378,7 @@ describe("SSH server activity", () => {
     { activity: "idle", expected: "unknown", status: 404 },
   ])("handles $activity with HTTP $status", async ({ activity, expected, status }) => {
     const server = NodeHttp.createServer((request, response) => {
-      expect(request.url).toBe("/.well-known/t3/activity");
+      expect(["/.well-known/goat/activity", "/.well-known/t3/activity"]).toContain(request.url);
       response.writeHead(status);
       response.end(
         JSON.stringify({ activity, serverVersion: packageJson.version, pid: process.pid }),
@@ -362,4 +445,107 @@ it("returns unknown when an activity response exceeds the deadline", async () =>
     server.closeAllConnections();
     await new Promise<void>((resolve) => server.close(() => resolve()));
   }
+});
+
+it.each([404, 403, 500])("activity falls back only on HTTP %s", async (status) => {
+  const paths: string[] = [];
+  const server = NodeHttp.createServer((request, response) => {
+    paths.push(request.url ?? "");
+    response.writeHead(request.url === "/.well-known/goat/activity" ? status : 200);
+    response.end(
+      JSON.stringify({ activity: "idle", serverVersion: packageJson.version, pid: process.pid }),
+    );
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  if (!address || typeof address === "string") throw new Error("Missing port");
+  try {
+    expect(await readSshServerActivity(address.port, process.pid)).toBe(
+      status === 404 ? "idle" : "unknown",
+    );
+    expect(paths).toEqual(
+      status === 404
+        ? ["/.well-known/goat/activity", "/.well-known/t3/activity"]
+        : ["/.well-known/goat/activity"],
+    );
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+});
+
+// On macOS, Node can bind 127.0.0.1:<port> while another process (such as the
+// desktop app with network access on) listens on *:<port>. Linux refuses that
+// bind unless both sockets set SO_REUSEPORT, so on Linux the preload adds it to
+// the picker's probe and the holder sets it too. macOS needs neither.
+const MACOS_BIND_PRELOAD = `const net = require("node:net");
+const listen = net.Server.prototype.listen;
+net.Server.prototype.listen = function (port, host, callback) {
+  if (typeof port !== "number" || typeof host !== "string") return listen.apply(this, arguments);
+  return listen.call(this, { port, host, reusePort: true }, callback);
+};
+`;
+
+describeEffect("__ssh-helper pick-port", () => {
+  const hostPlatform = HostProcess.Platform.defaultValue();
+  const linuxHost = hostPlatform === "linux";
+  const windowsHost = hostPlatform === "win32";
+
+  const holdWildcardPort = Effect.acquireRelease(
+    Effect.callback<NodeNet.Server>((resume) => {
+      const server = NodeNet.createServer((socket) => socket.destroy());
+      server.once("error", (error) => resume(Effect.die(error)));
+      server.listen({ port: 0, host: "0.0.0.0", reusePort: linuxHost }, () =>
+        resume(Effect.succeed(server)),
+      );
+    }),
+    (server) =>
+      Effect.callback<void>((resume) => {
+        server.close(() => resume(Effect.void));
+      }),
+  );
+
+  itEffect.effect.skipIf(windowsHost)(
+    "skips a port another server answers on loopback",
+    () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+        const root = yield* fs.makeTempDirectoryScoped({ prefix: "goat-pick-port-" });
+        yield* fs.writeFileString(`${root}/preload.cjs`, MACOS_BIND_PRELOAD);
+        const holder = yield* holdWildcardPort;
+        const heldPort = (holder.address() as NodeNet.AddressInfo).port;
+
+        const child = yield* spawner.spawn(
+          ChildProcess.make(process.execPath, [
+            ...(linuxHost ? ["--require", `${root}/preload.cjs`] : []),
+            "--experimental-strip-types",
+            new URL("../bin.ts", import.meta.url).pathname,
+            "__ssh-helper",
+            "pick-port",
+            "",
+            String(heldPort),
+            "20",
+          ]),
+        );
+        const [stdout, exitCode] = yield* Effect.all(
+          [
+            child.stdout.pipe(
+              Stream.decodeText(),
+              Stream.runFold(
+                () => "",
+                (acc, chunk) => acc + chunk,
+              ),
+            ),
+            child.exitCode.pipe(Effect.map(Number)),
+          ],
+          { concurrency: "unbounded" },
+        );
+
+        assert.equal(exitCode, 0);
+        const picked = Number(stdout);
+        assert.isAbove(picked, heldPort);
+        assert.isBelow(picked, heldPort + 20);
+      }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+    30_000,
+  );
 });

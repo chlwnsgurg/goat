@@ -1,9 +1,11 @@
+import { agentSurfaceRegistry } from "@goat/contracts/agentSurface";
+import { agentSurfaceAnnotations } from "../../agentSurface.ts";
 import {
   EnvironmentId,
   OrchestratorMcpFailure,
   SavedConnection,
   TrimmedNonEmptyString,
-} from "@t3tools/contracts";
+} from "@goat/contracts";
 import * as Schema from "effect/Schema";
 import { Tool, Toolkit } from "effect/ai";
 
@@ -21,21 +23,16 @@ const shared = {
   ],
 };
 
-const ListTool = Tool.make("goat_connection_list", {
+const ListTool = Tool.make(agentSurfaceRegistry["connection.list"].name, {
   ...shared,
-  description:
-    "List the connections saved in the GOAT desktop app on this machine: the environments its sidebar shows, with their routes and who added them. No credentials are returned.",
+  description: agentSurfaceRegistry["connection.list"].description,
   parameters: Tool.EmptyParams,
   success: Schema.Struct({ connections: Schema.Array(SavedConnection) }),
-})
-  .annotate(Tool.Title, "List saved connections")
-  .annotate(Tool.Readonly, true)
-  .annotate(Tool.Destructive, false);
+}).annotateMerge(agentSurfaceAnnotations(agentSurfaceRegistry["connection.list"]));
 
-const AddSshTool = Tool.make("goat_connection_add_ssh", {
+const AddSshTool = Tool.make(agentSurfaceRegistry["connection.add_ssh"].name, {
   ...shared,
-  description:
-    "Save an SSH host in Settings → Connections of the GOAT desktop app on this machine so its threads appear in the sidebar. Key-based SSH only (keys or ssh-agent); a password host fails. An already saved machine (by alias or endpoint) is returned with created:false. A machine saved through another route gains this SSH route with created:false. The first connection may take minutes. Needs a full-access caller. Requires the GOAT desktop app to be running on this machine.",
+  description: agentSurfaceRegistry["connection.add_ssh"].description,
   parameters: Schema.Struct({
     host: TrimmedNonEmptyString.annotate({
       description: "SSH alias or host from goat_ssh_host_list.",
@@ -43,19 +40,13 @@ const AddSshTool = Tool.make("goat_connection_add_ssh", {
     label: Schema.optional(TrimmedNonEmptyString),
   }),
   success: Schema.Struct({ created: Schema.Boolean, connection: SavedConnection }),
-})
-  .annotate(Tool.Title, "Save an SSH connection")
-  .annotate(Tool.Destructive, false)
-  .annotate(Tool.OpenWorld, true);
+}).annotateMerge(agentSurfaceAnnotations(agentSurfaceRegistry["connection.add_ssh"]));
 
-const RemoveTool = Tool.make("goat_connection_remove", {
+const RemoveTool = Tool.make(agentSurfaceRegistry["connection.remove"].name, {
   ...shared,
-  description:
-    "Remove a saved connection like Settings → Remove: forget pairing, credentials and cached threads on this device, and stop a server T3 launched over SSH. The local environment and T3 Connect environments are refused.",
+  description: agentSurfaceRegistry["connection.remove"].description,
   parameters: Schema.Struct({ environmentId: EnvironmentId }),
   success: Schema.Struct({ removed: SavedConnection }),
-})
-  .annotate(Tool.Title, "Remove a saved connection")
-  .annotate(Tool.Destructive, true);
+}).annotateMerge(agentSurfaceAnnotations(agentSurfaceRegistry["connection.remove"]));
 
 export const ConnectionToolkit = Toolkit.make(ListTool, AddSshTool, RemoveTool);

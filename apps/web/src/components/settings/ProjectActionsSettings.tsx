@@ -1,10 +1,10 @@
 import { useScopedSettingsWriteAllowed } from "./useScopedSettings";
-import { AuthSettingsWriteScope } from "@t3tools/contracts";
-import { EnvironmentId } from "@t3tools/contracts";
-import { DEFAULT_RESOLVED_KEYBINDINGS } from "@t3tools/shared/keybindings";
-import { PlusIcon } from "lucide-react";
+import { AuthSettingsWriteScope } from "@goat/contracts";
+import { EnvironmentId } from "@goat/contracts";
+import { DEFAULT_RESOLVED_KEYBINDINGS } from "@goat/shared/keybindings";
+import { PlusIcon } from "~/components/solar";
 import { useState } from "react";
-import { useT3ProjectFileState } from "../../hooks/useT3ProjectFileScripts";
+import { useGoatProjectFileState } from "../../hooks/useGoatProjectFileScripts";
 import { useEnvironments } from "../../state/environments";
 import {
   EMPTY_PROJECT_SCRIPT_INPUT,
@@ -18,13 +18,6 @@ import { useProjectScriptSettings } from "./useProjectScriptSettings";
 import { SettingsRow, SettingsSection } from "./settingsLayout";
 import { useSettingsScope } from "./SettingsScopeContext";
 
-/**
- * A project's actions on each selected environment. Actions belong to a
- * project, so this only renders at a project scope; the environment's
- * `defaultProjectScripts` is the layer a project without its own list
- * inherits. Shortcuts are environment-wide, so the same action id shares its
- * binding on an environment.
- */
 export function ProjectActionsSettings() {
   const { scope, targets, target } = useSettingsScope();
   const { environments } = useEnvironments();
@@ -63,8 +56,6 @@ export function ProjectActionsSettings() {
       return [
         {
           environmentId: candidate.environmentId,
-          // Writes read the raw environment settings so an override entry is
-          // extended, not derived from already-resolved values.
           settings: environment.serverConfig.settings,
           keybindings: environment.serverConfig.keybindings,
           ...(member ? { project: member } : {}),
@@ -76,7 +67,7 @@ export function ProjectActionsSettings() {
   // Read the project's t3.json from the representative checkout so a broken
   // file is flagged below.
   const representativeMember = target?.projectId ? memberById.get(target.projectId) : undefined;
-  const t3File = useT3ProjectFileState(
+  const goatFile = useGoatProjectFileState(
     representativeMember?.environmentId ?? EnvironmentId.make("none"),
     representativeMember?.workspaceRoot ?? null,
   );
@@ -115,10 +106,10 @@ export function ProjectActionsSettings() {
           onEdit={(script) => setRequest(editorRequestForScript(script, keybindings))}
         />
       )}
-      {t3File.status === "invalid" ? (
+      {goatFile.status === "invalid" ? (
         <SettingsRow
-          title="t3.json is invalid"
-          description="A t3.json exists in this checkout but fails to parse, so every action and icon it declares is ignored. Check the JSON syntax and icon values."
+          title={`${goatFile.relativePath} is invalid`}
+          description={`A ${goatFile.relativePath} exists in this checkout but fails to parse, so every action and icon it declares is ignored. Check the JSON syntax and icon values.`}
           className="text-warning"
         />
       ) : null}

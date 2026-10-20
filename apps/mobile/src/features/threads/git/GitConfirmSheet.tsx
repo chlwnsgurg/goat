@@ -1,5 +1,5 @@
-import { resolveDefaultBranchActionDialogCopy } from "@t3tools/client-runtime/state/vcs";
-import { resolveAutoFeatureBranchName } from "@t3tools/shared/git";
+import { resolveDefaultBranchActionDialogCopy } from "@goat/client-runtime/state/vcs";
+import { resolveAutoFeatureBranchName } from "@goat/shared/git";
 import * as Arr from "effect/Array";
 import * as Result from "effect/Result";
 import { StackActions, useNavigation, type StaticScreenProps } from "@react-navigation/native";
@@ -8,10 +8,10 @@ import { Platform, ScrollView, useWindowDimensions, View } from "react-native";
 
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
-import { AndroidSheetHeader } from "../../../components/AndroidScreenHeader";
-import { MaterialScreenContent } from "../../../components/MaterialScreenContent";
+import { AndroidSheetHeader } from "../../../components/ui/AndroidScreenHeader";
+import { ScreenContent } from "../../../components/ui/ScreenContent";
 import { NativeStackScreenOptions } from "../../../native/StackHeader";
-import { AppText as Text } from "../../../components/AppText";
+import { AppText as Text } from "../../../components/ui/AppText";
 import { useSelectedThreadGitActions } from "../../../state/use-selected-thread-git-actions";
 import { useSelectedThreadGitState } from "../../../state/use-selected-thread-git-state";
 import { SheetActionButton } from "./gitSheetComponents";
@@ -139,8 +139,9 @@ export function GitConfirmSheet(props: GitConfirmSheetProps) {
         <View className="min-h-4 pt-2" />
       )}
 
-      <MaterialScreenContent fitToContents>
+      <ScreenContent fitToContents>
         <ScrollView
+          nestedScrollEnabled
           className="android:shrink android:grow-0 ios:flex-1"
           showsVerticalScrollIndicator={false}
           contentContainerClassName="android:gap-2 android:p-2"
@@ -152,11 +153,11 @@ export function GitConfirmSheet(props: GitConfirmSheetProps) {
         >
           <View className="android:gap-2 android:rounded-[20px] android:bg-card android:p-3 ios:items-center ios:gap-1 ios:px-5 ios:pb-3 ios:pt-4">
             {Platform.OS !== "android" ? (
-              <Text className="text-xs font-t3-bold tracking-[1px] uppercase text-foreground-muted">
+              <Text className="text-xs font-goat-bold tracking-[1px] uppercase text-foreground-muted">
                 Confirm
               </Text>
             ) : null}
-            <Text className="android:text-xl android:font-t3-medium ios:text-center ios:text-3xl ios:font-t3-bold">
+            <Text className="android:text-xl android:font-goat-medium ios:text-center ios:text-3xl ios:font-goat-bold">
               {copy?.title ?? "Run action on default branch?"}
             </Text>
             <Text className="text-foreground-secondary leading-normal android:text-base ios:text-center ios:text-sm ios:font-medium">
@@ -187,7 +188,7 @@ export function GitConfirmSheet(props: GitConfirmSheetProps) {
             />
           </View>
         </ScrollView>
-      </MaterialScreenContent>
+      </ScreenContent>
     </View>
   );
 }

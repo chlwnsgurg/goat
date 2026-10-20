@@ -5,31 +5,29 @@ import { writeTextToClipboard } from "../hooks/useCopyToClipboard";
 import { readLocalApi } from "../localApi";
 import { stackedThreadToast, toastManager } from "./ui/toast";
 import { ComposerContextLabel } from "./ComposerContextLabel";
-import { scopeProjectRef, scopeThreadRef } from "@t3tools/client-runtime/environment";
-import type { EnvironmentId, ThreadId } from "@t3tools/contracts";
+import { scopeProjectRef, scopeThreadRef } from "@goat/client-runtime/environment";
+import type { EnvironmentId, ThreadId } from "@goat/contracts";
 import {
   ChevronDownIcon,
-  FolderGit2Icon,
+  FolderGitIcon as FolderGit2Icon,
   FolderGitIcon,
   FolderIcon,
   ScaleIcon,
-} from "lucide-react";
+} from "~/components/solar";
 import {
   type Ref,
   type MouseEvent as ReactMouseEvent,
   memo,
   useImperativeHandle,
-  useCallback,
   useEffect,
   useLayoutEffect,
-  useMemo,
   useRef,
   useState,
 } from "react";
 
 import { useComposerDraftStore, type DraftId } from "../composerDraftStore";
 import { EnvironmentMachineIcon } from "./EnvironmentMachineIcon";
-import { useProject, useThreadShell } from "../state/entities";
+import { useProject, useQuietThreadShell } from "../state/entities";
 import {
   type EnvMode,
   type EnvironmentOption,
@@ -55,6 +53,7 @@ import {
   Menu,
   MenuGroup,
   MenuGroupLabel,
+  MenuItem,
   MenuPopup,
   MenuRadioGroup,
   MenuRadioItem,
@@ -69,12 +68,14 @@ import { measureRestingComposerControls } from "./chat/restingComposerControlsMe
 import { resolveRestingComposerControlsNaturalWidth } from "./composerFooterLayout";
 import { cn } from "~/lib/utils";
 import { observeResize } from "~/lib/observeResize";
+import { useStableCallback } from "~/hooks/useStableCallback";
 
 export interface BranchToolbarHandle {
   openBranchPicker: () => void;
 }
 
 const EMPTY_SSH_OPTIONS: ReadonlyArray<SavedSshWorktreeOption> = [];
+const EMPTY_ENVIRONMENTS: readonly EnvironmentOption[] = [];
 
 interface BranchToolbarProps {
   sshDestination?: DraftSshDestination | null | undefined;
@@ -91,7 +92,6 @@ interface BranchToolbarProps {
   showGitControls: boolean;
   draftId?: DraftId;
   onEnvModeChange: (mode: EnvMode) => void;
-  /** The thread's env mode as ChatView resolves it. */
   envMode: EnvMode;
   activeThreadBranchOverride?: string | null;
   onActiveThreadBranchOverrideChange?: (branch: string | null) => void;
@@ -103,6 +103,8 @@ interface BranchToolbarProps {
   onCheckoutPullRequestRequest?: (reference: string) => void;
   onComposerFocusRequest?: () => void;
   availableEnvironments?: readonly EnvironmentOption[];
+  /** Connected machines without this project, listed disabled under Run on. */
+  environmentsWithoutProject?: readonly EnvironmentOption[];
   onEnvironmentChange?: (environmentId: EnvironmentId) => void;
   composerControlsHostRef?: (element: HTMLDivElement | null) => void;
   contextStripVisible?: boolean;
@@ -158,6 +160,7 @@ interface RunContextSelectorProps {
   envModeLocked: boolean;
   environmentId: EnvironmentId;
   availableEnvironments: readonly EnvironmentOption[] | undefined;
+  environmentsWithoutProject: readonly EnvironmentOption[];
   showEnvironmentPicker: boolean;
   showEnvironmentIndicator: boolean;
   onEnvironmentChange: ((environmentId: EnvironmentId) => void) | undefined;
@@ -176,6 +179,7 @@ const RunContextSelector = memo(function RunContextSelector({
   envModeLocked,
   environmentId,
   availableEnvironments,
+  environmentsWithoutProject,
   showEnvironmentPicker,
   showEnvironmentIndicator,
   onEnvironmentChange,
@@ -188,10 +192,8 @@ const RunContextSelector = memo(function RunContextSelector({
   onSshDestinationChange,
 }: RunContextSelectorProps) {
   const composerFloatingLayerProps = useComposerMenuProps();
-  const activeEnvironment = useMemo(
-    () => availableEnvironments?.find((env) => env.environmentId === environmentId) ?? null,
-    [availableEnvironments, environmentId],
-  );
+  const activeEnvironment =
+    availableEnvironments?.find((env) => env.environmentId === environmentId) ?? null;
   const WorkspaceIcon =
     effectiveEnvMode === "worktree"
       ? FolderGit2Icon
@@ -362,6 +364,17 @@ const RunContextSelector = memo(function RunContextSelector({
                   </MenuRadioItem>
                 ))}
               </MenuRadioGroup>
+              {environmentsWithoutProject.map((env) => (
+                <MenuItem key={env.environmentId} disabled>
+                  <span className="flex min-w-0 items-center gap-1.5">
+                    <EnvironmentMachineIcon kind={env.machine} className="size-3" />
+                    <span className="flex min-w-0 flex-col">
+                      <span className="truncate">{env.label}</span>
+                      <span className="text-muted-foreground text-xs">Project not added here</span>
+                    </span>
+                  </span>
+                </MenuItem>
+              ))}
             </MenuGroup>
             <MenuSeparator />
           </>
@@ -387,16 +400,8 @@ const COMPOSER_CONTEXT_MOTION_EASING = "cubic-bezier(0.32, 0.72, 0, 1)";
 const COMPOSER_CONTEXT_LABEL_SELECTOR = "[data-composer-label]";
 
 /**
- * The width a label takes when shown, clipped parts included.
- *
- * Text keeps its full width when its box clips it, so each text run measures
- * whole. A label can hold more than one run (MiddleTruncate splits a branch
- * into a head and a tail), so the runs are added. Reading one element's
- * scrollWidth drops the tail when the label is hidden or squeezed, and the
- * strip then flips between labels and icons on every measure.
- *
- * A shown label never grows past its motion span's max width, so longer text
- * reserves only that much.
+ * Reading one element's scrollWidth drops the tail when the label is hidden or
+ * squeezed, and the strip then flips between labels and icons on every measure.
  */
 function labelTextWidth(label: HTMLElement, range: Range): number {
   const walker = document.createTreeWalker(label, NodeFilter.SHOW_TEXT);
@@ -410,32 +415,22 @@ function labelTextWidth(label: HTMLElement, range: Range): number {
   return Number.isFinite(maxWidth) ? Math.min(width, maxWidth) : width;
 }
 
-/**
- * Collapse the strip's labels to icons only when the text no longer fits.
- *
- * Hidden labels stay measurable because their inner text keeps its natural
- * width while the outer layout box collapses. This lets every pass recompute
- * the expanded width without remembered values that could go stale or latch
- * the strip compact. A small hysteresis keeps the boundary from flapping.
- */
 function useLabelsOverflow(element: HTMLDivElement | null): boolean {
   const [overflows, setOverflows] = useState(false);
   const pendingLabelRectsRef = useRef<Map<HTMLElement, DOMRect> | null>(null);
   const labelAnimationsRef = useRef(new Map<HTMLElement, Animation>());
-  // A render-synced mirror instead of useEffectEvent: the compiler memoizes
-  // the event callback, which left observers reading the first render's null
-  // element forever.
-  const stateRef = useRef({ element, overflows });
-  stateRef.current = { element, overflows };
-
-  const measure = useCallback(() => {
-    const { element: current, overflows: compact } = stateRef.current;
+  // useEffectEvent stays stale in memo components; see useStableCallback.
+  const measure = useStableCallback(() => {
+    const current = element;
+    const compact = overflows;
     if (!current) return;
-    const available = current.clientWidth;
-    if (available === 0) return;
-    // flex-1 stretches the groups to fill the strip, so their own boxes always
-    // measure "full". Sum the laid-out content instead, skipping hidden form
-    // artifacts and other out-of-flow nodes.
+    const stripWidth = current.clientWidth;
+    if (stripWidth === 0) return;
+    const stripStyle = getComputedStyle(current);
+    const available =
+      stripWidth -
+      (Number.parseFloat(stripStyle.paddingInlineStart) || 0) -
+      (Number.parseFloat(stripStyle.paddingInlineEnd) || 0);
     const contentWidth = (parent: Element): number => {
       const gap = Number.parseFloat(getComputedStyle(parent).columnGap) || 0;
       let width = 0;
@@ -454,16 +449,16 @@ function useLabelsOverflow(element: HTMLDivElement | null): boolean {
       }
       return width + gap * Math.max(0, counted - 1);
     };
-    const stripGap = Number.parseFloat(getComputedStyle(current).columnGap) || 0;
+    const stripGap = Number.parseFloat(stripStyle.columnGap) || 0;
     let needed = 0;
     let groups = 0;
     for (const child of current.children) {
       if (!(child instanceof HTMLElement)) continue;
-      // The host itself flexes into all remaining room. Reserve the natural
-      // width of the controls inside it, blocks in overflow included, so Git
-      // labels compact before squeezing out the model picker. Reserving only
-      // the visible controls would let the labels expand into room the
-      // composer just freed, shrink the host, and hide the controls again.
+      // Reserve the natural width of the controls inside it, blocks in overflow
+      // included, so Git labels compact before squeezing out the model picker.
+      // Reserving only the visible controls would let the labels expand into
+      // room the composer just freed, shrink the host, and hide the controls
+      // again.
       const hostedControls = child.matches('[data-chat-resting-composer-controls-host="true"]')
         ? child.querySelector<HTMLElement>('[data-chat-composer-resting-controls="true"]')
         : null;
@@ -480,8 +475,6 @@ function useLabelsOverflow(element: HTMLDivElement | null): boolean {
     needed += stripGap * Math.max(0, groups - 1);
     const range = document.createRange();
     for (const label of current.querySelectorAll<HTMLElement>("[data-composer-label]")) {
-      // Subtract the visible width even during an animation. The content
-      // sum already includes it; only the hidden text needs reserving.
       needed += Math.max(0, labelTextWidth(label, range) - label.getBoundingClientRect().width);
     }
     const nextOverflows = resolveContextStripLabelsCompact({
@@ -497,7 +490,7 @@ function useLabelsOverflow(element: HTMLDivElement | null): boolean {
       );
     }
     setOverflows(nextOverflows);
-  }, []);
+  });
 
   useLayoutEffect(() => {
     const previousRects = pendingLabelRectsRef.current;
@@ -516,9 +509,6 @@ function useLabelsOverflow(element: HTMLDivElement | null): boolean {
       const nextWidth = label.getBoundingClientRect().width;
       if (Math.abs(previousRect.width - nextWidth) < 0.5) continue;
 
-      // Animate the space occupied by each label so flex layout keeps the
-      // trailing controls anchored. Translating the whole group after its
-      // width snaps sends expanded text beyond the strip's right edge.
       const animation = label.animate(
         [
           { width: `${previousRect.width}px`, maxWidth: `${previousRect.width}px` },
@@ -541,7 +531,7 @@ function useLabelsOverflow(element: HTMLDivElement | null): boolean {
         { once: true },
       );
     }
-  }, [overflows]);
+  });
 
   useEffect(
     () => () => {
@@ -552,9 +542,6 @@ function useLabelsOverflow(element: HTMLDivElement | null): boolean {
     [],
   );
 
-  // Label widths can change without the strip box moving (font family or
-  // size preferences), so re-measure on every render as well as on resize
-  // and font loads.
   useLayoutEffect(() => {
     measure();
   });
@@ -597,19 +584,17 @@ export const BranchToolbar = memo(function BranchToolbar({
   onCheckoutPullRequestRequest,
   onComposerFocusRequest,
   availableEnvironments,
+  environmentsWithoutProject = EMPTY_ENVIRONMENTS,
   onEnvironmentChange,
   composerControlsHostRef,
   contextStripVisible = true,
 }: BranchToolbarProps) {
   const branchSelectorRef = useRef<BranchToolbarBranchSelectorHandle>(null);
-  const threadRef = useMemo(
-    () => scopeThreadRef(environmentId, threadId),
-    [environmentId, threadId],
-  );
+  const threadRef = scopeThreadRef(environmentId, threadId);
   const draftThread = useComposerDraftStore((store) =>
     draftId ? store.getDraftSession(draftId) : store.getDraftThreadByRef(threadRef),
   );
-  const serverThread = useThreadShell(threadRef);
+  const serverThread = useQuietThreadShell(threadRef);
   const activeProjectRef = serverThread
     ? scopeProjectRef(serverThread.environmentId, serverThread.projectId)
     : draftThread
@@ -629,14 +614,20 @@ export const BranchToolbar = memo(function BranchToolbar({
     [],
   );
 
+  const hasMultipleEnvironments =
+    (availableEnvironments?.length ?? 0) > 1 || environmentsWithoutProject.length > 0;
   const showEnvironmentPicker = Boolean(
-    availableEnvironments && availableEnvironments.length > 1 && onEnvironmentChange,
+    availableEnvironments &&
+    (availableEnvironments.length > 1 || environmentsWithoutProject.length > 0) &&
+    onEnvironmentChange,
   );
   const activeEnvironmentOption =
     availableEnvironments?.find((env) => env.environmentId === environmentId) ?? null;
+  // Started threads get no handler but still show which machine they run on,
+  // matching the strip visibility ChatView computes from the same inputs.
   const showEnvironmentIndicator = shouldShowEnvironmentIndicator({
     activeEnvironment: activeEnvironmentOption,
-    canPickEnvironment: showEnvironmentPicker,
+    canPickEnvironment: hasMultipleEnvironments,
   });
   const [stripElement, setStripElement] = useState<HTMLDivElement | null>(null);
   const labelsOverflow = useLabelsOverflow(stripElement);
@@ -657,6 +648,7 @@ export const BranchToolbar = memo(function BranchToolbar({
             envModeLocked={envModeLocked}
             environmentId={environmentId}
             availableEnvironments={availableEnvironments}
+            environmentsWithoutProject={environmentsWithoutProject}
             showEnvironmentPicker={showEnvironmentPicker}
             showEnvironmentIndicator={activeEnvironmentOption !== null}
             onEnvironmentChange={onEnvironmentChange}
@@ -712,6 +704,7 @@ export const BranchToolbar = memo(function BranchToolbar({
             envModeLocked={envModeLocked}
             environmentId={environmentId}
             availableEnvironments={availableEnvironments}
+            environmentsWithoutProject={environmentsWithoutProject}
             showEnvironmentPicker={showEnvironmentPicker}
             showEnvironmentIndicator={showEnvironmentIndicator}
             onEnvironmentChange={onEnvironmentChange}
@@ -741,6 +734,7 @@ export const BranchToolbar = memo(function BranchToolbar({
                 envLocked={envLocked}
                 environmentId={environmentId}
                 availableEnvironments={availableEnvironments}
+                environmentsWithoutProject={environmentsWithoutProject}
                 {...(showEnvironmentPicker && onEnvironmentChange ? { onEnvironmentChange } : {})}
               />
               {showGitControls ? (
@@ -770,9 +764,6 @@ export const BranchToolbar = memo(function BranchToolbar({
       ) : null}
 
       {composerControlsHostRef ? (
-        // The host takes whatever the workspace and branch controls leave
-        // over, in both strip layouts, so a collapsed composer can show its
-        // model and mode controls wherever they fit.
         <div
           ref={composerControlsHostRef}
           data-composer-context-control

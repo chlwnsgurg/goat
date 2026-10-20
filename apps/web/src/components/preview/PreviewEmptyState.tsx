@@ -1,5 +1,9 @@
-import type { EnvironmentId, ScopedThreadRef } from "@t3tools/contracts";
-import { Globe, History, RadioTower } from "lucide-react";
+import type { EnvironmentId, ScopedThreadRef } from "@goat/contracts";
+import {
+  GlobeIcon as Globe,
+  HistoryIcon as History,
+  RadioTowerIcon as RadioTower,
+} from "~/components/solar";
 
 import type { BrowserHistoryEntry } from "~/browserHistoryStore";
 import { Empty, EmptyDescription, EmptyMedia, EmptyTitle } from "~/components/ui/empty";

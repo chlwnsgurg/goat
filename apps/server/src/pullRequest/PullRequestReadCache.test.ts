@@ -1,6 +1,6 @@
 import { assert, it } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import { PullRequestOperationError } from "@t3tools/contracts";
+import { PullRequestOperationError } from "@goat/contracts";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Duration from "effect/Duration";
@@ -18,7 +18,6 @@ import * as PullRequestReadCache from "./PullRequestReadCache.ts";
 const cacheLayer = (directory: string) =>
   PullRequestReadCache.make.pipe(Effect.provide(KeyValueStore.layerFileSystem(directory)));
 
-/** Sets every file's mtime to `age` before the current test clock time. */
 const ageFiles = (directory: string, names: ReadonlyArray<string>, age: Duration.Duration) =>
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
@@ -31,7 +30,7 @@ it.layer(NodeServices.layer)("PR filesystem cache", (it) => {
   it.effect("prunes entry files written before the max age and keeps fresh ones", () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
-      const directory = yield* fs.makeTempDirectoryScoped({ prefix: "t3-pr-cache-" });
+      const directory = yield* fs.makeTempDirectoryScoped({ prefix: "goat-pr-cache-" });
       yield* TestClock.setTime(DateTime.toEpochMillis(DateTime.makeUnsafe("2026-10-01T00:00:00Z")));
       const cache = yield* cacheLayer(directory);
       yield* cache.get("old", Effect.succeed("old"), ["pr"]);
@@ -44,7 +43,6 @@ it.layer(NodeServices.layer)("PR filesystem cache", (it) => {
       );
       const unrelated = "unrelated.json";
       yield* fs.writeFileString(`${directory}/${unrelated}`, "{}");
-      // Starts with the store id but is not an entry file.
       const prefixed = "pr-v2-backup.json";
       yield* fs.writeFileString(`${directory}/${prefixed}`, "{}");
       const justExpired = Duration.sum(
@@ -71,15 +69,11 @@ it.layer(NodeServices.layer)("PR filesystem cache", (it) => {
       yield* TestClock.setTime(DateTime.toEpochMillis(DateTime.makeUnsafe("2026-10-01T00:00:00Z")));
       yield* (yield* cacheLayer(directory)).get("summary", Effect.succeed("cached"));
       const [entry] = yield* fs.readDirectory(directory);
-      // Within the max age at the first two sweeps, past it at the third.
       yield* ageFiles(
         directory,
         [entry!],
         Duration.subtract(PullRequestReadCache.ENTRY_FILE_MAX_AGE, Duration.minutes(90)),
       );
-      // A sweep's last file operation is the entry's stat when it keeps the
-      // entry, and its removal otherwise. Waiting for it means the sweep has
-      // finished before the clock moves.
       const operations = yield* Queue.unbounded<string>();
       const observedFs = FileSystem.FileSystem.of({
         ...fs,
@@ -101,14 +95,14 @@ it.layer(NodeServices.layer)("PR filesystem cache", (it) => {
       assert.deepStrictEqual(yield* fs.readDirectory(directory), []);
     }).pipe(
       Effect.scoped,
-      Effect.provide(ServerConfig.layerTest(process.cwd(), { prefix: "t3-pr-cache-layer-" })),
+      Effect.provide(ServerConfig.layerTest(process.cwd(), { prefix: "goat-pr-cache-layer-" })),
     ),
   );
 
   it.effect("reuses files after restart and respects the original expiry", () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
-      const directory = yield* fs.makeTempDirectoryScoped({ prefix: "t3-pr-cache-" });
+      const directory = yield* fs.makeTempDirectoryScoped({ prefix: "goat-pr-cache-" });
       let reads = 0;
       const lookup = Effect.sync(() => String(++reads));
       const first = yield* cacheLayer(directory);
@@ -127,7 +121,7 @@ it.layer(NodeServices.layer)("PR filesystem cache", (it) => {
   it.effect("clears in-flight reads before a new service can reuse them", () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
-      const directory = yield* fs.makeTempDirectoryScoped({ prefix: "t3-pr-cache-" });
+      const directory = yield* fs.makeTempDirectoryScoped({ prefix: "goat-pr-cache-" });
       const started = yield* Deferred.make<void>();
       const release = yield* Deferred.make<void>();
       const cache = yield* cacheLayer(directory);
@@ -156,7 +150,7 @@ it.layer(NodeServices.layer)("PR filesystem cache", (it) => {
   it.effect("invalidates only the changed scope across restarts and coalesces its next reads", () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
-      const directory = yield* fs.makeTempDirectoryScoped({ prefix: "t3-pr-cache-" });
+      const directory = yield* fs.makeTempDirectoryScoped({ prefix: "goat-pr-cache-" });
       let reads = 0;
       const lookup = Effect.sync(() => String(++reads));
       const cache = yield* cacheLayer(directory);
@@ -221,7 +215,7 @@ it.layer(NodeServices.layer)("PR filesystem cache", (it) => {
   it.effect("compacts expired scope records without discarding fresh PR data", () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
-      const directory = yield* fs.makeTempDirectoryScoped({ prefix: "t3-pr-cache-" });
+      const directory = yield* fs.makeTempDirectoryScoped({ prefix: "goat-pr-cache-" });
       const cache = yield* cacheLayer(directory);
       yield* cache.get("summary", Effect.succeed("old"), ["pr"]);
       yield* cache.invalidate("pr");
@@ -244,7 +238,7 @@ it.layer(NodeServices.layer)("PR filesystem cache", (it) => {
   it.effect("does not persist failed GitHub reads", () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
-      const directory = yield* fs.makeTempDirectoryScoped({ prefix: "t3-pr-cache-" });
+      const directory = yield* fs.makeTempDirectoryScoped({ prefix: "goat-pr-cache-" });
       const cache = yield* cacheLayer(directory);
       const error = new PullRequestOperationError({ operation: "summary", detail: "unavailable" });
       yield* cache.get("summary", Effect.fail(error)).pipe(Effect.flip);

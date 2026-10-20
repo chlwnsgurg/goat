@@ -2,6 +2,7 @@ import * as RemoteDispatchCoordinator from "../remoteReports/RemoteDispatchCoord
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import { describe, expect, it } from "@effect/vitest";
 import {
+  OrchestratorMcpPendingRequestRespondInput,
   EnvironmentId,
   NodeId,
   ProviderInstanceId,
@@ -13,17 +14,21 @@ import {
   type OrchestrationV2RuntimeRequest,
   type OrchestrationV2TurnItem,
   type OrchestrationV2ServerCommand,
+  type OrchestrationV2UserInputQuestion,
   type UserInputRespondedBy,
-} from "@t3tools/contracts";
+} from "@goat/contracts";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
+import * as TestClock from "effect/testing/TestClock";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Ref from "effect/Ref";
+import * as Schema from "effect/Schema";
 
 import * as ThreadManagement from "../orchestration-v2/ThreadManagementService.ts";
 import * as SshRemoteDispatch from "../sshRemote/SshRemoteDispatch.ts";
+import * as ThreadResults from "../threadResults/ThreadResultService.ts";
 import * as HostThreads from "./HostThreadsMcpService.ts";
 import * as LaunchWatchService from "./LaunchWatchService.ts";
 import * as OrchestratorMcpService from "./OrchestratorMcpService.ts";
@@ -32,6 +37,7 @@ import type { McpInvocationScope } from "./McpInvocationContext.ts";
 import { idleThreadProjection, liveThreadShell } from "./McpToolAccess.testkit.ts";
 import { OrchestratorQuestionAlreadyAnsweredError } from "../orchestration-v2/Orchestrator.ts";
 
+const decodeRespondInput = Schema.decodeUnknownSync(OrchestratorMcpPendingRequestRespondInput);
 const callerId = ThreadId.make("caller");
 const targetId = ThreadId.make("asking");
 const requestId = RuntimeRequestId.make("question");
@@ -53,6 +59,10 @@ const outside: McpInvocationScope = {
   thread: undefined,
   client: { sessionId: "client", label: "SSH", access: "full-access" },
 };
+const approver: McpInvocationScope = {
+  ...outside,
+  client: { sessionId: "approver", label: "Grok Bot", access: "full-access", approvals: true },
+};
 const reason = "The existing API meets the requirement.";
 const foreign: UserInputRespondedBy = {
   type: "agent",
@@ -63,7 +73,13 @@ const foreign: UserInputRespondedBy = {
 };
 const answers = { q: "  exact label\n" };
 const respondInput = { threadId: targetId, requestId, reason, answers };
-const questionProjection = (id = targetId, rid = requestId): OrchestrationV2ThreadProjection => {
+const questionProjection = (
+  id = targetId,
+  rid = requestId,
+  questions: ReadonlyArray<OrchestrationV2UserInputQuestion> = [
+    { id: "q", header: "Choice", question: "Use the existing API?", options: [] },
+  ],
+): OrchestrationV2ThreadProjection => {
   const projection = idleThreadProjection(liveThreadShell(id));
   const request: OrchestrationV2RuntimeRequest = {
     id: rid,
@@ -93,10 +109,29 @@ const questionProjection = (id = targetId, rid = requestId): OrchestrationV2Thre
     completedAt: null,
     updatedAt: now,
     requestId: rid,
-    questions: [{ id: "q", header: "Choice", question: "Use the existing API?", options: [] }],
+    questions,
   };
   return { ...projection, runtimeRequests: [request], turnItems: [item] };
 };
+const approvalProjection = (): OrchestrationV2ThreadProjection => {
+  const projection = questionProjection();
+  const request = projection.runtimeRequests[0]!;
+  const item = projection.turnItems[0]!;
+  return {
+    ...projection,
+    runtimeRequests: [{ ...request, kind: "command" }],
+    turnItems: [
+      {
+        ...item,
+        type: "approval_request",
+        requestId,
+        requestKind: "command",
+        prompt: "hostname",
+      } as OrchestrationV2TurnItem,
+    ],
+  };
+};
+const decideInput = { threadId: targetId, requestId, reason, decision: "accept" as const };
 const remoteQuestion = (env = "remote", rid = "question") => ({
   host: null,
   environmentId: env,
@@ -205,6 +240,7 @@ const runService = <A, E>(
       }),
   });
   const hostLayer = HostThreads.layer.pipe(
+    Layer.provide(Layer.mock(ThreadResults.ThreadResultService)({})),
     Layer.provide(Layer.mock(RemoteDispatchCoordinator.RemoteDispatchCoordinator)({})),
     Layer.provide(Layer.mock(LaunchWatchService.LaunchWatchService)({})),
     Layer.provide(Layer.mock(OrchestratorMcpService.OrchestratorMcpService)({})),
@@ -225,6 +261,65 @@ const runService = <A, E>(
 };
 
 describe("PendingQuestionsMcpService", () => {
+  it.effect("returns fast hosts at the fan-out deadline without interrupting a slow launch", () =>
+    Effect.gen(function* () {
+      const started = yield* Deferred.make<void>();
+      const release = yield* Deferred.make<void>();
+      const finished = yield* Deferred.make<void>();
+      const interrupted = yield* Deferred.make<void>();
+      const returned = yield* Deferred.make<void>();
+      const slow = Deferred.succeed(started, undefined).pipe(
+        Effect.andThen(Deferred.await(release)),
+        Effect.andThen(Deferred.succeed(finished, undefined)),
+        Effect.as({ questions: [], truncated: false, unavailableHosts: [] }),
+        Effect.onInterrupt(() => Deferred.succeed(interrupted, undefined)),
+      );
+      const fiber = yield* runService(
+        {
+          candidates: [{ threadId: targetId, requestId }],
+          hosts: ["fast", "slow"],
+          hostCall: (call) =>
+            call.host === "slow"
+              ? slow
+              : Effect.succeed({
+                  questions: [remoteQuestion()],
+                  truncated: false,
+                  unavailableHosts: [],
+                }),
+        },
+        (service) => service.list(scope, { scope: "launched" }),
+      ).pipe(
+        Effect.tap(() => Deferred.succeed(returned, undefined)),
+        Effect.forkChild,
+      );
+      yield* Deferred.await(started);
+      yield* TestClock.adjust(14_999);
+      expect(yield* Deferred.isDone(returned)).toBe(false);
+      yield* TestClock.adjust(1);
+      const returnedOnTime = yield* Deferred.isDone(returned);
+      const wasInterrupted = yield* Deferred.isDone(interrupted);
+      // Release even on the old implementation so a failing regression cannot hang.
+      yield* Deferred.succeed(release, undefined);
+      const { result } = yield* Fiber.join(fiber);
+      if (!wasInterrupted) yield* Deferred.await(finished);
+      expect(returnedOnTime).toBe(true);
+      expect(wasInterrupted).toBe(false);
+      expect(result._tag).toBe("Success");
+      if (result._tag !== "Success") return;
+      expect("questions" in result.success).toBe(true);
+      if (!("questions" in result.success)) return;
+      expect(result.success.questions.map((question) => question.host)).toEqual([null, "fast"]);
+      expect(result.success.unavailableHosts).toEqual([
+        {
+          host: "slow",
+          code: "host_unavailable",
+          message: expect.stringContaining("host:slow"),
+        },
+      ]);
+      expect(result.success.unavailableHosts?.[0]?.message).toContain("waits longer");
+    }),
+  );
+
   it.effect("keeps default local list restricted to pending user_input", () =>
     Effect.gen(function* () {
       const projection = questionProjection(callerId);
@@ -344,6 +439,171 @@ describe("PendingQuestionsMcpService", () => {
       });
     }),
   );
+  it.effect.each([undefined, false, true])(
+    "stores and reads agent relay provenance (%s)",
+    (relayedFromUser) =>
+      Effect.gen(function* () {
+        const input = {
+          ...respondInput,
+          ...(relayedFromUser === undefined ? {} : { relayedFromUser }),
+        };
+        const { result, commands, records } = yield* runService({}, (service) =>
+          Effect.gen(function* () {
+            yield* service.respond(scope, input);
+            return yield* service.read(scope, { threadId: targetId, requestId });
+          }),
+        );
+        const expected = {
+          type: "agent",
+          threadId: callerId,
+          environmentId: null,
+          title: callerId,
+          reason,
+          ...(relayedFromUser === undefined ? {} : { relayedFromUser }),
+        };
+        expect(commands[0]).toMatchObject({ respondedBy: expected });
+        expect(records.get(targetId)?.runtimeRequests[0]?.respondedBy).toEqual(expected);
+        expect(result).toMatchObject({ success: { status: "resolved", respondedBy: expected } });
+        if (result._tag === "Success") expect(result.success.respondedBy).toEqual(expected);
+      }),
+  );
+  it.effect("preserves the relay claim across host transport and remote reads", () =>
+    Effect.gen(function* () {
+      const sent = yield* runService({}, (service) =>
+        service.respond(scope, { ...respondInput, host: "box", relayedFromUser: true }),
+      );
+      expect(sent.result._tag).toBe("Success");
+      expect(sent.calls).toHaveLength(1);
+      const transported = decodeRespondInput(sent.calls[0]!.arguments);
+      const destination = { ...outside, environmentId: EnvironmentId.make("destination") };
+      const received = yield* runService({}, (service) =>
+        Effect.gen(function* () {
+          yield* service.respond(destination, transported);
+          return yield* service.read(destination, { threadId: targetId, requestId });
+        }),
+      );
+      const expected = {
+        type: "agent",
+        threadId: callerId,
+        environmentId: scope.environmentId,
+        title: callerId,
+        reason,
+        relayedFromUser: true,
+      };
+      expect(received.commands[0]).toMatchObject({ respondedBy: expected });
+      expect(received.records.get(targetId)?.runtimeRequests[0]?.respondedBy).toEqual(expected);
+      expect(received.result).toMatchObject({ success: { respondedBy: expected } });
+      if (received.result._tag !== "Success") return;
+      const remoteRead = received.result.success;
+      const readBack = yield* runService(
+        { hostCall: () => Effect.succeed(remoteRead) },
+        (service) => service.read(scope, { host: "box", threadId: targetId, requestId }),
+      );
+      expect(readBack.result).toMatchObject({
+        success: { host: "box", status: "resolved", respondedBy: expected },
+      });
+    }),
+  );
+  it.effect.each([
+    { name: "missing answers", answers: undefined },
+    { name: "empty answers", answers: {} },
+    { name: "a header instead of an id", answers: { Choice: "Yes" } },
+    { name: "an extra question id", answers: { q: "Yes", extra: "No" } },
+  ])("explains the expected question ids for $name without dispatching", ({ answers }) =>
+    Effect.gen(function* () {
+      const run = yield* runService({}, (service) =>
+        service.respond(scope, {
+          threadId: targetId,
+          requestId,
+          reason,
+          ...(answers === undefined ? {} : { answers }),
+        }),
+      );
+      expect(run.result).toMatchObject({
+        failure: {
+          code: "invalid_request",
+          message: expect.stringContaining("Expected question ids: q."),
+        },
+      });
+      expect(run.commands).toEqual([]);
+    }),
+  );
+  it.effect.each([
+    { name: "an unknown option", answer: "Maybe", multiSelect: false },
+    { name: "multiple choices for single select", answer: ["Yes", "No"], multiSelect: false },
+    { name: "an empty selection", answer: [], multiSelect: true },
+    { name: "an unknown multi select option", answer: ["Yes", "Maybe"], multiSelect: true },
+  ])(
+    "lists allowed choices for $name when custom answers are forbidden",
+    ({ answer, multiSelect }) =>
+      Effect.gen(function* () {
+        const records = [
+          questionProjection(targetId, requestId, [
+            {
+              id: "q",
+              header: "Choice",
+              question: "Proceed?",
+              multiSelect,
+              allowCustomAnswer: false,
+              options: [
+                { label: "Yes", description: "Proceed", value: "yes-id" },
+                { label: "No", description: "Stop" },
+              ],
+            },
+          ]),
+        ];
+        const run = yield* runService({ records }, (service) =>
+          service.respond(scope, { ...respondInput, answers: { q: answer } }),
+        );
+        expect(run.result).toMatchObject({
+          failure: {
+            code: "invalid_request",
+            message: expect.stringContaining('Allowed options: "yes-id", "No".'),
+          },
+        });
+        expect(run.commands).toEqual([]);
+      }),
+  );
+  it.effect.each([
+    { answer: "Yes", multiSelect: false, allowCustomAnswer: false },
+    { answer: "yes-id", multiSelect: false, allowCustomAnswer: false },
+    { answer: ["yes-id", "No"], multiSelect: true, allowCustomAnswer: false },
+    { answer: "  custom text\n", multiSelect: false, allowCustomAnswer: true },
+    { answer: ["Yes", "custom"], multiSelect: true, allowCustomAnswer: undefined },
+  ])(
+    "preserves valid answers ($answer, custom=$allowCustomAnswer)",
+    ({ answer, multiSelect, allowCustomAnswer }) =>
+      Effect.gen(function* () {
+        const records = [
+          questionProjection(targetId, requestId, [
+            {
+              id: "q",
+              header: "Choice",
+              question: "Proceed?",
+              multiSelect,
+              ...(allowCustomAnswer === undefined ? {} : { allowCustomAnswer }),
+              options: [
+                { label: "Yes", description: "Proceed", value: "yes-id" },
+                { label: "No", description: "Stop" },
+              ],
+            },
+            {
+              id: "optional",
+              header: "Notes",
+              question: "Anything else?",
+              required: false,
+              options: [],
+            },
+          ]),
+        ];
+        const run = yield* runService({ records }, (service) =>
+          service.respond(scope, { ...respondInput, answers: { q: answer } }),
+        );
+        expect(run.result).toMatchObject({ success: { sequence: 7 } });
+        expect(run.commands).toHaveLength(1);
+        expect(run.commands[0]).toMatchObject({ answers: { q: answer } });
+      }),
+  );
   it.effect("rejects forged provenance from a thread caller", () =>
     Effect.gen(function* () {
       for (const host of [undefined, "box"]) {
@@ -351,7 +611,8 @@ describe("PendingQuestionsMcpService", () => {
           service.respond(scope, {
             ...respondInput,
             ...(host === undefined ? {} : { host }),
-            respondedBy: foreign,
+            respondedBy: { ...foreign, relayedFromUser: true },
+            relayedFromUser: true,
           }),
         );
         expect(result).toMatchObject({ failure: { code: "invalid_request" } });
@@ -550,6 +811,109 @@ describe("PendingQuestionsMcpService", () => {
       );
       expect(approval.result).toMatchObject({ failure: { code: "invalid_request" } });
       expect(approval.commands).toEqual([]);
+    }),
+  );
+  it.effect("lets only an approve-scoped client see and decide approvals", () =>
+    Effect.gen(function* () {
+      const records = [approvalProjection()];
+      const listed = yield* runService({ records }, (service) =>
+        service.list(approver, { threadId: targetId }),
+      );
+      expect(listed.result).toMatchObject({
+        success: { requestIds: [], approvalRequestIds: [requestId] },
+      });
+      const hidden = yield* runService({ records }, (service) =>
+        service.list(outside, { threadId: targetId }),
+      );
+      expect(hidden.result._tag).toBe("Success");
+      if (hidden.result._tag === "Success")
+        expect(hidden.result.success).not.toHaveProperty("approvalRequestIds");
+
+      const read = yield* runService({ records }, (service) =>
+        service.read(approver, { threadId: targetId, requestId }),
+      );
+      expect(read.result).toMatchObject({
+        success: { questions: [], approval: { kind: "command", prompt: "hostname" } },
+      });
+      const unread = yield* runService({ records }, (service) =>
+        service.read(outside, { threadId: targetId, requestId }),
+      );
+      expect(unread.result).toMatchObject({ failure: { code: "invalid_request" } });
+
+      const decided = yield* runService({ records }, (service) =>
+        service.respond(approver, decideInput),
+      );
+      expect(decided.result).toMatchObject({ success: { sequence: 7 } });
+      expect(decided.commands).toHaveLength(1);
+      expect(decided.commands[0]).toMatchObject({
+        type: "runtime-request.respond",
+        decision: "accept",
+        respondedBy: { type: "client", label: "Grok Bot", reason },
+      });
+      expect(decided.commands[0]).not.toHaveProperty("answers");
+
+      for (const caller of [outside, scope]) {
+        const refused = yield* runService({ records }, (service) =>
+          service.respond(caller, decideInput),
+        );
+        expect(refused.result).toMatchObject({
+          failure: {
+            code: "capability_denied",
+            message: expect.stringContaining("orchestration:approve"),
+          },
+        });
+        expect(refused.commands).toEqual([]);
+      }
+      const both = yield* runService({ records }, (service) =>
+        service.respond(approver, { ...decideInput, answers }),
+      );
+      expect(both.result).toMatchObject({
+        failure: {
+          code: "invalid_request",
+          message: expect.stringContaining("omit the other field"),
+        },
+      });
+      const answeredApproval = yield* runService({ records }, (service) =>
+        service.respond(approver, respondInput),
+      );
+      expect(answeredApproval.result).toMatchObject({ failure: { code: "invalid_request" } });
+      const decidedQuestion = yield* runService({}, (service) =>
+        service.respond(approver, decideInput),
+      );
+      expect(decidedQuestion.result).toMatchObject({ failure: { code: "invalid_request" } });
+      expect([both, answeredApproval, decidedQuestion].flatMap((run) => run.commands)).toEqual([]);
+    }),
+  );
+  it.effect("asks hosts for an approval session and relays the deciding client", () =>
+    Effect.gen(function* () {
+      const remote = yield* runService({}, (service) =>
+        service.respond(approver, { ...decideInput, host: "box" }),
+      );
+      expect(remote.result).toMatchObject({ success: { host: "box", sequence: 7 } });
+      expect(remote.calls[0]).toMatchObject({
+        approvals: true,
+        writes: true,
+        arguments: {
+          ...decideInput,
+          respondedBy: { type: "client", label: "Grok Bot", reason },
+        },
+      });
+      const listed = yield* runService(
+        { hostCall: () => Effect.succeed({ requestIds: [] }) },
+        (service) => service.list(approver, { host: "box", threadId: targetId }),
+      );
+      expect(listed.calls[0]?.approvals).toBe(true);
+      const plain = yield* runService(
+        { hostCall: () => Effect.succeed({ requestIds: [] }) },
+        (service) => service.list(outside, { host: "box", threadId: targetId }),
+      );
+      expect(plain.calls[0]).not.toHaveProperty("approvals");
+
+      const relayed = { type: "client" as const, label: "Grok Bot", reason };
+      const received = yield* runService({ records: [approvalProjection()] }, (service) =>
+        service.respond(approver, { ...decideInput, respondedBy: relayed }),
+      );
+      expect(received.commands[0]).toMatchObject({ respondedBy: relayed });
     }),
   );
   it.effect("preserves host failures and rejects malformed results", () =>

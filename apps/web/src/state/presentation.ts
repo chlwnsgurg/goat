@@ -2,16 +2,27 @@ import { useAtomValue } from "@effect/atom-react";
 import type {
   EnvironmentConnectionPhase,
   EnvironmentPresentation,
-} from "@t3tools/client-runtime/connection";
+} from "@goat/client-runtime/connection";
 import {
   createEnvironmentPresentationAtoms,
   createEnvironmentSummaryAtoms,
-} from "@t3tools/client-runtime/state/presentation";
-import type { EnvironmentId } from "@t3tools/contracts";
+  createEnvironmentShellSyncAtom,
+} from "@goat/client-runtime/state/presentation";
+import type { EnvironmentId } from "@goat/contracts";
 import { Atom } from "effect/reactivity";
 
 import { environmentCatalog } from "../connection/catalog";
 import { serverEnvironment } from "./server";
+import { environmentShell } from "./shell";
+
+const environmentShellSyncAtom = createEnvironmentShellSyncAtom(environmentShell.stateValueAtom);
+const emptyShellSyncAtom = Atom.make(null);
+
+export function useEnvironmentShellSync(environmentId: EnvironmentId | null) {
+  return useAtomValue(
+    environmentId === null ? emptyShellSyncAtom : environmentShellSyncAtom(environmentId),
+  );
+}
 
 export const environmentPresentations = createEnvironmentPresentationAtoms({
   catalogValueAtom: environmentCatalog.catalogValueAtom,
@@ -41,6 +52,19 @@ export function useEnvironmentConnectionPhase(
   environmentId: EnvironmentId,
 ): EnvironmentConnectionPhase | null {
   return useAtomValue(environmentConnectionPhaseAtom(environmentId));
+}
+
+const environmentConnectionUnreachableAtom = Atom.family((environmentId: EnvironmentId) =>
+  Atom.make(
+    (get): boolean =>
+      get(environmentPresentations.presentationAtom(environmentId))?.connection.unreachable ===
+      true,
+  ).pipe(Atom.withLabel(`web-environment-connection-unreachable:${environmentId}`)),
+);
+
+/** Whether the environment is retrying a host that could not be reached at all. */
+export function useEnvironmentConnectionUnreachable(environmentId: EnvironmentId): boolean {
+  return useAtomValue(environmentConnectionUnreachableAtom(environmentId));
 }
 
 export function useEnvironmentPresentation(environmentId: EnvironmentId | null) {

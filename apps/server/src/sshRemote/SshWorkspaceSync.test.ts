@@ -1,24 +1,41 @@
 // @effect-diagnostics nodeBuiltinImport:off -- isolated fake SSH uses local shell and independent Node hashing.
 import * as NodeCrypto from "node:crypto";
 import * as NodeChildProcess from "node:child_process";
+import * as NodeFS from "node:fs";
+import * as NodeNet from "node:net";
+import * as NodeOS from "node:os";
+import * as NodePath from "node:path";
 import * as NodeUtil from "node:util";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
+import * as HostProcess from "@goat/shared/HostProcess";
 import {
+  EventId,
+  ThreadId,
+  RunId,
+  MessageId,
+  OrchestrationV2TurnItem,
+  type OrchestrationV2Run,
   Project,
   ProjectId,
   EnvironmentId,
   SshWorkspaceLaunchInput,
   VcsProcessExitError,
-  type SshWorkspaceError,
+  GitCommandError,
+  SshWorkspaceError,
   type RuntimeMode,
-} from "@t3tools/contracts";
+} from "@goat/contracts";
+import * as DateTime from "effect/DateTime";
+import { emptyProjection } from "../orchestration-v2/ProjectionStore.ts";
+import * as Threads from "../orchestration-v2/ThreadManagementService.ts";
+import * as Orchestrator from "../orchestration-v2/Orchestrator.ts";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
+import * as Queue from "effect/Queue";
 import * as Schema from "effect/Schema";
 import * as Deferred from "effect/Deferred";
 import * as Fiber from "effect/Fiber";
@@ -28,10 +45,49 @@ import * as VcsProcess from "../vcs/VcsProcess.ts";
 import * as ServerConfig from "../config.ts";
 import * as Dispatch from "./SshRemoteDispatch.ts";
 import * as Sync from "./SshWorkspaceSync.ts";
+import {
+  closeServer,
+  listenLoopback,
+  makeStallRelay,
+} from "../../../../packages/ssh/src/stallRelay.fixture.ts";
 
 const exec = NodeUtil.promisify(NodeChildProcess.execFile);
+const findExecutable = (name: string, extraDirs: ReadonlyArray<string> = []) => {
+  if (HostProcess.Platform.defaultValue() === "win32") return undefined;
+  for (const dir of [...(process.env.PATH ?? "").split(NodePath.delimiter), ...extraDirs]) {
+    if (!dir) continue;
+    const candidate = NodePath.join(dir, name);
+    try {
+      NodeFS.accessSync(candidate, NodeFS.constants.X_OK);
+      return candidate;
+    } catch {}
+  }
+  return undefined;
+};
+const realSsh = findExecutable("ssh");
+const realSshd = findExecutable("sshd", [
+  "/usr/sbin",
+  "/sbin",
+  "/opt/homebrew/sbin",
+  "/usr/local/sbin",
+]);
+const realSshKeygen = findExecutable("ssh-keygen");
+const realGitExecutable = findExecutable("git");
+const sshdTestBinaries =
+  realSsh !== undefined &&
+  realSshd !== undefined &&
+  realSshKeygen !== undefined &&
+  realGitExecutable !== undefined
+    ? {
+        ssh: realSsh,
+        sshd: realSshd,
+        sshKeygen: realSshKeygen,
+        gitDir: NodePath.dirname(realGitExecutable),
+      }
+    : undefined;
 const decodeProject = Schema.decodeUnknownSync(Project);
 const decodeInput = Schema.decodeUnknownSync(SshWorkspaceLaunchInput);
+const decodeTurnItem = Schema.decodeUnknownSync(OrchestrationV2TurnItem);
 const target = { alias: "buildbox", hostname: "host.test", username: "runner", port: 2222 };
 const baseLayer = Git.layer.pipe(
   Layer.provideMerge(VcsProcess.layer),
@@ -118,7 +174,92 @@ const fixture = Effect.gen(function* () {
     interactionMode: "default",
     initialMessage: { text: "Implement" },
   });
+  const now = DateTime.makeUnsafe("2026-10-17T00:00:00.000Z");
+  const threadId = ThreadId.make("source-thread");
+  const projection = emptyProjection({
+    type: "thread.created",
+    id: EventId.make("created"),
+    threadId,
+    occurredAt: now,
+    payload: {
+      createdBy: "user",
+      creationSource: "web",
+      id: threadId,
+      projectId: project.id,
+      title: "Existing work",
+      providerInstanceId: input.modelSelection.instanceId,
+      modelSelection: input.modelSelection,
+      runtimeMode: "full-access",
+      interactionMode: "plan",
+      branch: null,
+      worktreePath: null,
+      activeProviderThreadId: null,
+      lineage: { parentThreadId: null, relationshipToParent: null, rootThreadId: threadId },
+      sideChatOf: null,
+      forkedFrom: null,
+      createdAt: now,
+      updatedAt: now,
+      archivedAt: null,
+      settledOverride: null,
+      settledAt: null,
+      lastVisitedAt: null,
+      deletedAt: null,
+    },
+  });
+  const conversationItem = (
+    type: "user_message" | "assistant_message",
+    text: string,
+    ordinal: number,
+    streaming = false,
+  ) =>
+    decodeTurnItem({
+      type,
+      text,
+      streaming,
+      id: `item-${ordinal}`,
+      threadId,
+      runId: null,
+      nodeId: null,
+      providerThreadId: null,
+      providerTurnId: null,
+      nativeItemRef: null,
+      parentItemId: null,
+      ordinal,
+      status: "completed",
+      title: null,
+      startedAt: now,
+      completedAt: now,
+      updatedAt: now,
+      messageId: `message-${ordinal}`,
+      inputIntent: "turn_start",
+      attachments: [],
+      createdBy: "user",
+      creationSource: "web",
+    });
+  const run = (status: OrchestrationV2Run["status"]): OrchestrationV2Run => ({
+    id: RunId.make("source-run"),
+    threadId,
+    ordinal: 1,
+    providerInstanceId: input.modelSelection.instanceId,
+    modelSelection: input.modelSelection,
+    providerThreadId: null,
+    userMessageId: MessageId.make("input"),
+    rootNodeId: null,
+    activeAttemptId: null,
+    status,
+    requestedAt: now,
+    startedAt: now,
+    completedAt: null,
+    checkpointId: null,
+    contextHandoffId: null,
+  });
   const state = {
+    projection,
+    projections: [] as (typeof projection)[],
+    projectionReads: 0,
+    threadMissing: false,
+    noticeFails: false,
+    notices: [] as Parameters<Threads.ThreadManagementService["Service"]["dispatch"]>[0][],
     projects: [project],
     missing: false,
     projectReadFails: false,
@@ -142,7 +283,7 @@ const fixture = Effect.gen(function* () {
       | ((
           call: Git.ExecuteGitInput,
         ) =>
-          | Effect.Effect<Git.ExecuteGitResult, import("@t3tools/contracts").GitCommandError>
+          | Effect.Effect<Git.ExecuteGitResult, import("@goat/contracts").GitCommandError>
           | undefined)
       | undefined,
     processHook: undefined as
@@ -206,6 +347,35 @@ const fixture = Effect.gen(function* () {
   });
   const layer = Sync.layer.pipe(
     Layer.provide(dispatch),
+    Layer.provide(
+      Layer.mock(Threads.ThreadManagementService)({
+        getThreadProjection: (threadId) =>
+          Effect.suspend(() => {
+            const projection = state.projections[state.projectionReads++] ?? state.projection;
+            return state.threadMissing
+              ? Effect.fail(
+                  new Orchestrator.OrchestratorProjectionError({
+                    threadId,
+                    cause: new Error("missing"),
+                  }),
+                )
+              : Effect.succeed(projection);
+          }),
+        dispatch: (command) =>
+          Effect.suspend(() => {
+            state.notices.push(command);
+            assert.lengthOf(state.launches, 1);
+            return state.noticeFails
+              ? Effect.fail(
+                  new Orchestrator.OrchestratorProjectionError({
+                    threadId,
+                    cause: new Error("notice failed"),
+                  }),
+                )
+              : Effect.succeed({ sequence: 1, storedEvents: [] });
+          }),
+      }),
+    ),
     Layer.provide(
       Layer.mock(Projects.ProjectService)({
         getById: () =>
@@ -292,6 +462,9 @@ const fixture = Effect.gen(function* () {
     unchanged,
     realGit,
     processService,
+    conversationItem,
+    run,
+    handoffInput: { sourceThreadId: threadId, target, expectedEnvironmentId: null },
   };
 });
 const test = <E>(
@@ -359,6 +532,8 @@ test("pushes snapshot then launches remote owned worktree", (f) =>
     });
     const log = yield* f.fs.readFileString(f.sshLog);
     assert.include(log, "BatchMode=yes");
+    assert.include(log, "ServerAliveInterval=15");
+    assert.include(log, "ServerAliveCountMax=3");
     assert.include(log, "runner@buildbox");
     assert.include(log, "2222");
   }));
@@ -580,6 +755,28 @@ test("initializes receiver once without a root checkout", (f) =>
       (yield* f.git(["rev-parse", "--verify", "HEAD"], f.remote).pipe(Effect.result))._tag,
       "Failure",
     );
+  }));
+test("accepts its own receiver on a Git Bash host, where git prints C:/ paths", (f) =>
+  Effect.gen(function* () {
+    // Stand-ins for Git for Windows: `uname -s` says MINGW, `--show-toplevel` answers in drive
+    // form (W: + the real path), and cygpath turns it back into the shell form `$HOME` uses.
+    const fake = (name: string, body: string) =>
+      f.fs
+        .writeFileString(f.path.join(f.bin, name), `#!/bin/sh\n${body}\n`)
+        .pipe(Effect.andThen(f.fs.chmod(f.path.join(f.bin, name), 0o755)));
+    yield* fake("uname", '[ "$1" = -s ] && echo MINGW64_NT-10.0-26100 || exec /usr/bin/uname "$@"');
+    yield* fake("cygpath", '[ "$1" = -u ] || exit 2\nprintf "%s\\n" "${2#W:}"');
+    yield* fake(
+      "git",
+      [
+        'real="$(PATH="${PATH#*:}" command -v git)"',
+        'case "$*" in *.goat/repos/*--show-toplevel*) out="$("$real" "$@")" || exit $?; printf "W:%s\\n" "$out" ;;',
+        '*) exec "$real" "$@" ;; esac',
+      ].join("\n"),
+    );
+    yield* f.sync.launch(f.input);
+    yield* f.sync.launch(f.input);
+    assert.lengthOf(f.state.launches, 2);
   }));
 testEach(
   (["file", "directory", "repo", "symlink"] as const).map(
@@ -824,6 +1021,288 @@ test("fetch rejects malformed commit OID", (f) =>
         : undefined;
     yield* rejected(f.sync.fetchBack(f.fetchInput()), "fetch", "invalid_remote_response");
   }));
+it.effect.skipIf(sshdTestBinaries === undefined)(
+  "fetch aborts via SSH keepalive when the TCP link stalls mid-transfer",
+  () =>
+    Effect.gen(function* () {
+      if (sshdTestBinaries === undefined) return;
+      const f = yield* fixture;
+      const hostKey = f.path.join(f.parent, "sshd_host_ed25519");
+      const userKey = f.path.join(f.parent, "ssh_user_ed25519");
+      const authorizedKeys = f.path.join(f.parent, "authorized_keys");
+      yield* Effect.tryPromise(() =>
+        exec(sshdTestBinaries.sshKeygen, ["-q", "-t", "ed25519", "-N", "", "-f", hostKey]),
+      );
+      yield* Effect.tryPromise(() =>
+        exec(sshdTestBinaries.sshKeygen, ["-q", "-t", "ed25519", "-N", "", "-f", userKey]),
+      );
+      yield* f.fs.copyFile(`${userKey}.pub`, authorizedKeys);
+      yield* f.fs.chmod(authorizedKeys, 0o600);
+
+      // upload-pack spawns packObjectsHook only after advertising refs downstream and reading the
+      // client's want/done negotiation upstream, giving a deterministic mid-fetch stall point.
+      const packHookSockets = yield* Queue.unbounded<NodeNet.Socket>();
+      const gateSockets = new Set<NodeNet.Socket>();
+      const gateServer = NodeNet.createServer((socket) => {
+        gateSockets.add(socket);
+        socket.on("close", () => gateSockets.delete(socket));
+        socket.on("error", () => socket.destroy());
+        Queue.offerUnsafe(packHookSockets, socket);
+      });
+      const gatePort = yield* Effect.acquireRelease(listenLoopback(gateServer), () =>
+        Effect.suspend(() => {
+          for (const socket of gateSockets) socket.destroy();
+          return gateServer.listening ? closeServer(gateServer) : Effect.void;
+        }),
+      );
+
+      const packHookJs = f.path.join(f.parent, "pack-hook.cjs");
+      const packHookSh = f.path.join(f.parent, "pack-hook.sh");
+      const gitConfigGlobal = f.path.join(f.parent, "sshd.gitconfig");
+      yield* f.fs.writeFileString(
+        packHookJs,
+        [
+          'const net = require("node:net");',
+          "process.stdin.resume();",
+          `const socket = net.connect(${gatePort}, "127.0.0.1");`,
+          'socket.once("data", () => {',
+          '  process.stdout.write("PACK" + "\\0".repeat(8192));',
+          "});",
+          'socket.on("error", () => process.exit(0));',
+          'socket.on("close", () => process.exit(0));',
+        ].join("\n"),
+      );
+      yield* f.fs.writeFileString(
+        packHookSh,
+        `#!/bin/sh\nexec '${process.execPath}' '${packHookJs}'\n`,
+      );
+      yield* f.fs.chmod(packHookSh, 0o755);
+      yield* f.fs.writeFileString(
+        gitConfigGlobal,
+        `[uploadpack]\n\tkeepAlive = 0\n\tpackObjectsHook = ${packHookSh}\n`,
+      );
+
+      const sshdShell = f.path.join(f.parent, "sshd-shell.sh");
+      yield* f.fs.writeFileString(
+        sshdShell,
+        [
+          "#!/bin/sh",
+          `export PATH='${sshdTestBinaries.gitDir}':"$PATH"`,
+          `export GIT_CONFIG_GLOBAL='${gitConfigGlobal}'`,
+          'exec /bin/sh -c "$SSH_ORIGINAL_COMMAND"',
+          "",
+        ].join("\n"),
+      );
+      yield* f.fs.chmod(sshdShell, 0o755);
+
+      const sshUser = NodeOS.userInfo().username;
+      const sshdConfig = f.path.join(f.parent, "sshd_config");
+
+      const { port: sshdPort } = yield* Effect.acquireRelease(
+        Effect.gen(function* () {
+          for (let attempt = 1; ; attempt++) {
+            const probeServer = NodeNet.createServer();
+            const port = yield* listenLoopback(probeServer);
+            yield* closeServer(probeServer);
+            yield* f.fs.writeFileString(
+              sshdConfig,
+              [
+                `ListenAddress 127.0.0.1:${port}`,
+                `HostKey ${hostKey}`,
+                `AuthorizedKeysFile ${authorizedKeys}`,
+                "UsePAM no",
+                "StrictModes no",
+                "PasswordAuthentication no",
+                "KbdInteractiveAuthentication no",
+                "PubkeyAuthentication yes",
+                `PidFile ${f.path.join(f.parent, "sshd.pid")}`,
+                `AllowUsers ${sshUser}`,
+                `ForceCommand ${sshdShell}`,
+                "LogLevel INFO",
+                "",
+              ].join("\n"),
+            );
+            const started = yield* Effect.callback<Option.Option<NodeChildProcess.ChildProcess>>(
+              (resume) => {
+                const proc = NodeChildProcess.spawn(
+                  sshdTestBinaries.sshd,
+                  ["-D", "-e", "-f", sshdConfig],
+                  { stdio: ["ignore", "ignore", "pipe"] },
+                );
+                let stderr = "";
+                const cleanup = () => {
+                  proc.stderr.removeListener("data", onData);
+                  proc.removeListener("error", onError);
+                  proc.removeListener("close", onClose);
+                };
+                const onData = (chunk: Buffer) => {
+                  stderr += chunk.toString("utf8");
+                  if (stderr.includes("Server listening on")) {
+                    cleanup();
+                    resume(Effect.succeedSome(proc));
+                  }
+                };
+                const onError = (error: Error) => {
+                  cleanup();
+                  resume(Effect.die(error));
+                };
+                const onClose = (code: number | null, signal: NodeJS.Signals | null) => {
+                  cleanup();
+                  if (
+                    attempt < 5 &&
+                    /Bind to port .* failed|Address already in use|Cannot bind any address/iu.test(
+                      stderr,
+                    )
+                  ) {
+                    resume(Effect.succeedNone);
+                    return;
+                  }
+                  resume(
+                    Effect.die(
+                      new Error(
+                        `sshd exited before listening (code=${String(code)}, signal=${String(signal)}): ${stderr}`,
+                      ),
+                    ),
+                  );
+                };
+                proc.stderr.on("data", onData);
+                proc.once("error", onError);
+                proc.once("close", onClose);
+                return Effect.sync(() => {
+                  cleanup();
+                  if (proc.exitCode === null && proc.signalCode === null) proc.kill("SIGTERM");
+                });
+              },
+            );
+            if (Option.isSome(started)) return { child: started.value, port };
+          }
+        }),
+        ({ child }) =>
+          Effect.callback<void>((resume) => {
+            if (child.exitCode !== null || child.signalCode !== null) {
+              resume(Effect.void);
+              return;
+            }
+            child.once("exit", () => resume(Effect.void));
+            child.kill("SIGTERM");
+          }),
+      );
+
+      const relay = yield* makeStallRelay(sshdPort);
+      // Scale the 15 s x 3 keepalive window down only when GIT_SSH_COMMAND actually supplies those
+      // product flags, so removing SSH_KEEPALIVE_ARGS from SshWorkspaceSync leaves keepalive off.
+      yield* f.fs.writeFileString(
+        f.path.join(f.bin, "ssh"),
+        [
+          "#!/bin/sh",
+          `printf '%s\\n' "$@" >> '${f.sshLog}'`,
+          "for arg do",
+          "  shift",
+          '  case "$arg" in',
+          '    ServerAliveInterval=15) set -- "$@" ServerAliveInterval=1 ;;',
+          '    ServerAliveCountMax=3) set -- "$@" ServerAliveCountMax=2 ;;',
+          '    *) set -- "$@" "$arg" ;;',
+          "  esac",
+          "done",
+          `exec '${sshdTestBinaries.ssh}' -F /dev/null -i '${userKey}' -o User='${sshUser}' -o HostName=127.0.0.1 -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$@"`,
+          "",
+        ].join("\n"),
+      );
+      yield* f.fs.chmod(f.path.join(f.bin, "ssh"), 0o755);
+
+      yield* f.initRemote;
+      yield* f.fs.writeFileString(f.path.join(f.remote, "remote-only.txt"), "remote change\n");
+      yield* f.git(["config", "user.name", "Remote"], f.remote);
+      yield* f.git(["config", "user.email", "remote@test.invalid"], f.remote);
+      yield* f.git(["add", "remote-only.txt"], f.remote);
+      yield* f.git(["commit", "-m", "remote commit"], f.remote);
+      yield* f.git(["branch", "-M", "feature/result"], f.remote);
+
+      const fetchStderr: string[] = [];
+      const fetchErrors: GitCommandError[] = [];
+      f.state.gitHook = (call) =>
+        call.args[0] === "fetch"
+          ? f.realGit
+              .execute({
+                ...call,
+                progress: {
+                  onStderrLine: (line) =>
+                    Effect.sync(() => {
+                      fetchStderr.push(line);
+                    }),
+                },
+              })
+              .pipe(
+                Effect.tapError((error) =>
+                  Effect.sync(() => {
+                    fetchErrors.push(error);
+                  }),
+                ),
+              )
+          : undefined;
+
+      const before = yield* f.unchanged;
+      const startedAtNs = process.hrtime.bigint();
+      const fetchFiber = yield* f.sync
+        .fetchBack({
+          ...f.fetchInput(),
+          target: { ...target, port: relay.port },
+        })
+        .pipe(Effect.flip, Effect.forkChild);
+
+      const hookSocket = yield* Queue.take(packHookSockets);
+      const preStallTraffic = Array.from(yield* Queue.takeAll(relay.traffic));
+      assert.isTrue(
+        preStallTraffic.some(
+          (item) => item.direction === "downstream" && item.forwarded && item.bytes > 0,
+        ),
+      );
+      assert.isTrue(
+        preStallTraffic.some(
+          (item) => item.direction === "upstream" && item.forwarded && item.bytes > 0,
+        ),
+      );
+
+      relay.setMode("stall");
+      assert.strictEqual(relay.openSockets, 2);
+      hookSocket.write("stall\n");
+
+      // Whether upload-pack forwards the hook's bytes before the client gives up depends on the
+      // Git build (Ubuntu 24.04's 2.43 holds them), so only the client's dropped keepalive is
+      // awaited; waiting for a downstream drop there outlives the fetch it should observe.
+      let sawDroppedUpstream = false;
+      while (!sawDroppedUpstream) {
+        const packet = yield* Queue.take(relay.traffic);
+        assert.isFalse(packet.forwarded);
+        if (packet.direction === "upstream") sawDroppedUpstream = true;
+      }
+      assert.strictEqual(relay.openSockets, 2);
+
+      const error = yield* Fiber.join(fetchFiber);
+      const elapsedMs = Number(process.hrtime.bigint() - startedAtNs) / 1_000_000;
+      assert.deepInclude(error, {
+        stage: "fetch",
+        code: "fetch_failed",
+        host: target.alias,
+      });
+      assert.isBelow(elapsedMs, 30_000);
+      assert.lengthOf(fetchErrors, 1);
+      assert.notStrictEqual(fetchErrors[0]?.exitCode, 0);
+      const stderrText = fetchStderr.join("\n");
+      assert.match(stderrText, /Timeout, server .* not responding\./i);
+      const postStallTraffic = Array.from(yield* Queue.takeAll(relay.traffic));
+      const droppedKeepalives =
+        1 +
+        postStallTraffic.filter((item) => item.direction === "upstream" && !item.forwarded).length;
+      assert.isAtLeast(droppedKeepalives, 2);
+      const sshLog = yield* f.fs.readFileString(f.sshLog);
+      assert.include(sshLog, "BatchMode=yes");
+      assert.include(sshLog, "ServerAliveInterval=15");
+      assert.include(sshLog, "ServerAliveCountMax=3");
+      assert.include(sshLog, String(relay.port));
+      assert.deepEqual(yield* f.unchanged, before);
+    }).pipe(Effect.scoped, Effect.provide(baseLayer)),
+);
 
 test("rejects HEAD changed snapshot before remote initialization", (f) =>
   Effect.gen(function* () {
@@ -864,4 +1343,440 @@ test("unborn receiver creates a worktree from the pushed ref without a root chec
       (yield* f.git(["rev-parse", "--verify", "HEAD"], f.remote).pipe(Effect.result))._tag,
       "Failure",
     );
+  }));
+
+test("handoff snapshots the thread worktree and carries history before the continuation", (f) =>
+  Effect.gen(function* () {
+    const worktree = f.path.join(f.parent, "source worktree");
+    yield* f.git(["worktree", "add", "-b", "source-feature", worktree]);
+    f.state.projection = {
+      ...f.state.projection,
+      thread: { ...f.state.projection.thread, worktreePath: worktree },
+      turnItems: [
+        f.conversationItem("user_message", "Keep the existing behavior.", 1),
+        f.conversationItem(
+          "assistant_message",
+          "The implementation is ready for the next step.",
+          2,
+        ),
+        f.conversationItem("assistant_message", "unfinished streaming text", 3, true),
+      ],
+    };
+    f.state.projection = {
+      ...f.state.projection,
+      visibleTurnItems: f.state.projection.turnItems.map((item, position) => ({
+        position,
+        visibility: "local" as const,
+        sourceThreadId: item.threadId,
+        sourceItemId: item.id,
+        item,
+      })),
+    };
+    yield* f.fs.writeFileString(f.path.join(worktree, "file.txt"), "staged worktree content");
+    yield* f.git(["add", "file.txt"], worktree);
+    yield* f.fs.writeFileString(f.path.join(worktree, "file.txt"), "unstaged worktree content");
+    yield* f.fs.writeFileString(
+      f.path.join(worktree, "untracked.txt"),
+      "untracked worktree content",
+    );
+    const indexPath = (yield* f.git(
+      ["rev-parse", "--path-format=absolute", "--git-path", "index"],
+      worktree,
+    )).stdout.trim();
+    const beforeIndex = yield* f.fs.readFile(indexPath);
+    const beforeRoot = yield* f.unchanged;
+    const beforeHead = (yield* f.git(["rev-parse", "HEAD"], worktree)).stdout;
+    const result = yield* f.sync.handoffThread({
+      ...f.handoffInput,
+      message: "Implement the next step.",
+    });
+    assert.strictEqual(result.remoteRepoPath, f.remote);
+    assert.strictEqual(
+      (yield* f.git(["show", `${result.snapshotRef}:file.txt`])).stdout,
+      "unstaged worktree content",
+    );
+    assert.strictEqual(
+      (yield* f.git(["show", `${result.snapshotRef}:untracked.txt`])).stdout,
+      "untracked worktree content",
+    );
+    assert.deepEqual(yield* f.fs.readFile(indexPath), beforeIndex);
+    assert.deepEqual(yield* f.unchanged, beforeRoot);
+    assert.strictEqual((yield* f.git(["rev-parse", "HEAD"], worktree)).stdout, beforeHead);
+    assert.strictEqual(
+      yield* f.fs.readFileString(f.path.join(worktree, "file.txt")),
+      "unstaged worktree content",
+    );
+    assert.strictEqual(
+      yield* f.fs.readFileString(f.path.join(worktree, "untracked.txt")),
+      "untracked worktree content",
+    );
+    const launch = f.state.launches[0]!;
+    assert.include(launch.message, `GOAT thread ${f.handoffInput.sourceThreadId}`);
+    assert.include(launch.message, "Uncommitted changes were copied");
+    assert.include(launch.message, "User:\nKeep the existing behavior.");
+    assert.include(launch.message, "Assistant:\nThe implementation is ready for the next step.");
+    assert.notInclude(launch.message, "unfinished streaming text");
+    assert.isTrue(launch.message!.endsWith("\n\nImplement the next step."));
+    assert.strictEqual(launch.title, f.state.projection.thread.title);
+    assert.deepEqual(launch.modelSelection, f.state.projection.thread.modelSelection);
+    assert.strictEqual(launch.runtimeMode, "full-access");
+    assert.strictEqual(launch.interactionMode, "plan");
+    assert.lengthOf(f.state.notices, 1);
+    assert.deepInclude(f.state.notices[0], {
+      type: "thread.notice.record",
+      threadId: f.handoffInput.sourceThreadId,
+      recordKey: `ssh-handoff:${result.operationId}`,
+      message: `Continued on buildbox in remote thread rt (branch ${result.branch}).`,
+    });
+  }));
+
+test("handoff carries visible conversation and excludes a rolled-back user message", (f) =>
+  Effect.gen(function* () {
+    const rolledBackRun = f.run("rolled_back");
+    const hidden = {
+      ...f.conversationItem("user_message", "Discarded instruction from rolled-back run", 1),
+      runId: rolledBackRun.id,
+    };
+    const visible = f.conversationItem("user_message", "Keep this visible instruction", 2);
+    f.state.projection = {
+      ...f.state.projection,
+      runs: [rolledBackRun],
+      turnItems: [hidden, visible],
+      visibleTurnItems: [
+        {
+          position: 0,
+          visibility: "local",
+          sourceThreadId: visible.threadId,
+          sourceItemId: visible.id,
+          item: visible,
+        },
+      ],
+    };
+    yield* f.sync.handoffThread(f.handoffInput);
+    assert.lengthOf(f.state.launches, 1);
+    const message = f.state.launches[0]!.message;
+    assert.include(message, "User:\nKeep this visible instruction");
+    assert.notInclude(message, "Discarded instruction from rolled-back run");
+  }));
+
+test("RPC handoff uses the supplied modes title and continuation", (f) =>
+  Effect.gen(function* () {
+    yield* f.sync.launch({ ...f.input, sourceThreadId: f.handoffInput.sourceThreadId });
+    const launch = f.state.launches[0]!;
+    assert.strictEqual(launch.title, f.input.title);
+    assert.strictEqual(launch.runtimeMode, f.input.runtimeMode);
+    assert.strictEqual(launch.interactionMode, f.input.interactionMode);
+    assert.isTrue(launch.message!.endsWith(`\n\n${f.input.initialMessage.text}`));
+    assert.lengthOf(f.state.notices, 1);
+  }));
+
+test("handoff default continuation and oversized instructions respect the message limit", (f) =>
+  Effect.gen(function* () {
+    yield* f.sync.handoffThread({ ...f.handoffInput, message: "  " });
+    assert.isTrue(
+      f.state.launches[0]!.message!.endsWith("\n\nContinue where the previous host left off."),
+    );
+    f.state.launches.length = 0;
+    f.state.notices.length = 0;
+    yield* f.sync.handoffThread({ ...f.handoffInput, message: "x".repeat(130_000) });
+    assert.strictEqual(f.state.launches[0]!.message!.length, 120_000);
+  }));
+
+test("handoff push failure preserves source and never launches or records a notice", (f) =>
+  Effect.gen(function* () {
+    yield* f.write("file.txt", "staged");
+    yield* f.git(["add", "file.txt"]);
+    yield* f.write("file.txt", "unstaged");
+    yield* f.write("untracked.txt", "untracked");
+    const before = yield* f.unchanged;
+    f.state.gitHook = (call) =>
+      call.args[0] === "push"
+        ? Effect.fail(
+            new GitCommandError({
+              operation: call.operation,
+              command: "git",
+              cwd: call.cwd,
+              detail: "fixture",
+            }),
+          )
+        : undefined;
+    yield* rejected(f.sync.handoffThread(f.handoffInput), "push", "push_failed");
+    assert.deepEqual(yield* f.unchanged, before);
+    assert.strictEqual(
+      yield* f.fs.readFileString(f.path.join(f.cwd, "untracked.txt")),
+      "untracked",
+    );
+    assert.lengthOf(f.state.launches, 0);
+    assert.lengthOf(f.state.notices, 0);
+  }));
+
+testEach(
+  (["preparing", "queued", "starting", "running", "waiting"] as const).map(
+    (status) => [`handoff rejects ${status} work`, status] as const,
+  ),
+  (status, f) =>
+    Effect.gen(function* () {
+      f.state.projection = { ...f.state.projection, runs: [f.run(status)] };
+      yield* rejected(f.sync.handoffThread(f.handoffInput), "validate", "thread_busy");
+      assert.lengthOf(f.state.preflights, 0);
+      assert.lengthOf(f.state.scripts, 0);
+      assert.lengthOf(f.state.launches, 0);
+      assert.lengthOf(f.state.notices, 0);
+    }),
+);
+
+test("handoff allows the caller's sole active run and still snapshots uncommitted files", (f) =>
+  Effect.gen(function* () {
+    const run = f.run("running");
+    f.state.projection = { ...f.state.projection, runs: [run] };
+    yield* f.write("file.txt", "current turn changes");
+    const result = yield* f.sync.handoffThread({ ...f.handoffInput, allowRunId: run.id });
+    assert.strictEqual(
+      (yield* f.git(["show", `${result.snapshotRef}:file.txt`])).stdout,
+      "current turn changes",
+    );
+    assert.lengthOf(f.state.launches, 1);
+    assert.lengthOf(f.state.notices, 1);
+  }));
+
+testEach(
+  (["queued", "running"] as const).map(
+    (status) =>
+      [`handoff rejects another ${status} run even with the caller's run allowed`, status] as const,
+  ),
+  (status, f) =>
+    Effect.gen(function* () {
+      const ownRun = f.run("running");
+      f.state.projection = {
+        ...f.state.projection,
+        runs: [ownRun, { ...f.run(status), id: RunId.make("another-run"), ordinal: 2 }],
+      };
+      yield* rejected(
+        f.sync.handoffThread({ ...f.handoffInput, allowRunId: ownRun.id }),
+        "validate",
+        "thread_busy",
+      );
+      assert.lengthOf(f.state.preflights, 0);
+      assert.lengthOf(f.state.scripts, 0);
+      assert.lengthOf(f.state.launches, 0);
+    }),
+);
+
+test("handoff does not exempt a mismatched or queued run", (f) =>
+  Effect.gen(function* () {
+    for (const status of ["running", "queued"] as const) {
+      const run = f.run(status);
+      f.state.projection = { ...f.state.projection, runs: [run] };
+      yield* rejected(
+        f.sync.handoffThread({
+          ...f.handoffInput,
+          allowRunId: status === "queued" ? run.id : RunId.make("different-run"),
+        }),
+        "validate",
+        "thread_busy",
+      );
+    }
+    assert.lengthOf(f.state.preflights, 0);
+    assert.lengthOf(f.state.launches, 0);
+  }));
+
+test("RPC handoff rejects a source project mismatch", (f) =>
+  Effect.gen(function* () {
+    yield* rejected(
+      f.sync.launch({
+        ...f.input,
+        sourceThreadId: f.handoffInput.sourceThreadId,
+        sourceProjectId: ProjectId.make("other"),
+      }),
+      "validate",
+      "thread_project_mismatch",
+    );
+    assert.lengthOf(f.state.preflights, 0);
+    assert.lengthOf(f.state.scripts, 0);
+    assert.lengthOf(f.state.notices, 0);
+  }));
+
+test("handoff rejects a missing thread", (f) =>
+  Effect.gen(function* () {
+    f.state.threadMissing = true;
+    yield* rejected(f.sync.handoffThread(f.handoffInput), "validate", "thread_not_found");
+    assert.lengthOf(f.state.scripts, 0);
+    assert.lengthOf(f.state.notices, 0);
+  }));
+
+testEach(
+  ([1, 2, 3, 4] as const).map(
+    (check) => [`handoff rejects a deleted thread at check ${check}`, check] as const,
+  ),
+  (check, f) =>
+    Effect.gen(function* () {
+      const deleted = {
+        ...f.state.projection,
+        thread: {
+          ...f.state.projection.thread,
+          deletedAt: DateTime.makeUnsafe("2026-10-17T01:00:00.000Z"),
+        },
+      };
+      f.state.projections = [
+        ...Array.from({ length: check - 1 }, () => f.state.projection),
+        deleted,
+      ];
+      yield* rejected(f.sync.handoffThread(f.handoffInput), "validate", "thread_not_found");
+      assert.strictEqual(f.state.projectionReads, check);
+      assert.lengthOf(f.state.launches, 0);
+      assert.lengthOf(f.state.notices, 0);
+      if (check < 3) assert.lengthOf(f.state.scripts, 0);
+    }),
+);
+
+testEach(
+  (["queued", "running"] as const).flatMap((status) =>
+    ([2, 3, 4] as const).map(
+      (check) =>
+        [`handoff rejects new ${status} work at check ${check}`, { status, check }] as const,
+    ),
+  ),
+  ({ status, check }, f) =>
+    Effect.gen(function* () {
+      const ownRun = f.run("running");
+      const initial = { ...f.state.projection, runs: [ownRun] };
+      f.state.projections = [
+        ...Array.from({ length: check - 1 }, () => initial),
+        { ...initial, runs: [ownRun, { ...f.run(status), id: RunId.make("new-run"), ordinal: 2 }] },
+      ];
+      yield* rejected(
+        f.sync.handoffThread({ ...f.handoffInput, allowRunId: ownRun.id }),
+        "validate",
+        "thread_busy",
+      );
+      assert.strictEqual(f.state.projectionReads, check);
+      assert.lengthOf(f.state.launches, 0);
+      assert.lengthOf(f.state.notices, 0);
+      if (check === 2) assert.lengthOf(f.state.scripts, 0);
+      else assert.isTrue(f.state.gitCalls.some((call) => call.args[0] === "push"));
+    }),
+);
+
+test("handoff summarizes the projection re-read after transfer", (f) =>
+  Effect.gen(function* () {
+    const item = f.conversationItem("assistant_message", "Completed during transfer", 1);
+    f.state.projections = [
+      f.state.projection,
+      f.state.projection,
+      {
+        ...f.state.projection,
+        visibleTurnItems: [
+          {
+            item,
+            position: 0,
+            sourceThreadId: item.threadId,
+            sourceItemId: item.id,
+            visibility: "local",
+          },
+        ],
+      },
+    ];
+    yield* f.sync.handoffThread(f.handoffInput);
+    // Entry, before the snapshot, while summarizing, and right before the remote launch.
+    assert.strictEqual(f.state.projectionReads, 4);
+    assert.include(f.state.launches[0]?.message ?? "", "Completed during transfer");
+  }));
+
+testEach(
+  ([1, 2, 3] as const).map(
+    (check) => [`handoff re-checks caller authority before remote change ${check}`, check] as const,
+  ),
+  (check, f) =>
+    Effect.gen(function* () {
+      let checks = 0;
+      yield* rejected(
+        f.sync.handoffThread({
+          ...f.handoffInput,
+          beforeRemoteChange: Effect.suspend(() =>
+            ++checks === check
+              ? Effect.fail(
+                  new SshWorkspaceError({ stage: "validate", code: "caller_not_authorized" }),
+                )
+              : Effect.void,
+          ),
+        }),
+        "validate",
+        "caller_not_authorized",
+      );
+      assert.strictEqual(checks, check);
+      assert.lengthOf(f.state.launches, 0);
+      assert.lengthOf(f.state.notices, 0);
+      if (check === 1) assert.lengthOf(f.state.scripts, 0);
+      if (check < 3) assert.isFalse(f.state.gitCalls.some((call) => call.args[0] === "push"));
+      else assert.isTrue(f.state.gitCalls.some((call) => call.args[0] === "push"));
+    }),
+);
+
+testEach(
+  (["missing", "subdirectory", "foreign"] as const).map(
+    (kind) => [`handoff refuses ${kind} worktree`, kind] as const,
+  ),
+  (kind, f) =>
+    Effect.gen(function* () {
+      const worktree = f.path.join(f.parent, "invalid worktree");
+      if (kind === "subdirectory") yield* f.fs.makeDirectory(f.path.join(f.cwd, "subdirectory"));
+      if (kind === "foreign") {
+        yield* f.fs.makeDirectory(worktree);
+        yield* f.git(["init"], worktree);
+      }
+      f.state.projection = {
+        ...f.state.projection,
+        thread: {
+          ...f.state.projection.thread,
+          worktreePath: kind === "subdirectory" ? f.path.join(f.cwd, "subdirectory") : worktree,
+        },
+      };
+      yield* rejected(f.sync.handoffThread(f.handoffInput), "validate", "thread_worktree_invalid");
+      assert.lengthOf(f.state.preflights, 0);
+      assert.lengthOf(f.state.scripts, 0);
+      assert.lengthOf(f.state.notices, 0);
+    }),
+);
+
+test("handoff enforces a supplied environment identity before transfer", (f) =>
+  Effect.gen(function* () {
+    yield* rejected(
+      f.sync.handoffThread({
+        ...f.handoffInput,
+        expectedEnvironmentId: EnvironmentId.make("different"),
+      }),
+      "preflight",
+      "environment_mismatch",
+    );
+    assert.lengthOf(f.state.scripts, 0);
+    assert.lengthOf(f.state.launches, 0);
+    assert.lengthOf(f.state.notices, 0);
+  }));
+
+test("source notice failure does not turn a successful handoff into failure", (f) =>
+  Effect.gen(function* () {
+    f.state.noticeFails = true;
+    const result = yield* f.sync.handoffThread(f.handoffInput);
+    assert.strictEqual(result.remoteThreadId, "rt");
+    assert.lengthOf(f.state.launches, 1);
+    assert.lengthOf(f.state.notices, 1);
+  }));
+
+test("workspace transfer publishes a project-named snapshot without starting a thread", (f) =>
+  Effect.gen(function* () {
+    const result = yield* f.sync.transferWorkspace({
+      target,
+      snapshotCwd: f.cwd,
+      projectRoot: f.project.workspaceRoot,
+      operationId: "12345678",
+    });
+    assert.strictEqual(result.remoteRepoPath, f.remote);
+    assert.strictEqual(result.snapshotRef, "refs/goat/snapshots/12345678");
+    assert.strictEqual(result.pushedRef, "refs/heads/goat/ssh-base/12345678");
+    assert.strictEqual(
+      (yield* f.git(["rev-parse", result.pushedRef], f.remote)).stdout.trim(),
+      result.snapshotOid,
+    );
+    assert.lengthOf(f.state.launches, 0);
+    assert.lengthOf(f.state.notices, 0);
   }));

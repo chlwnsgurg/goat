@@ -3,7 +3,7 @@ import {
   ChatFileAttachment,
   ChatImageAttachment,
   PROVIDER_SEND_TURN_MAX_INPUT_CHARS,
-} from "@t3tools/contracts";
+} from "@goat/contracts";
 import { assert, describe, it } from "@effect/vitest";
 
 import {
@@ -26,7 +26,6 @@ const image = ChatImageAttachment.make({
   sizeBytes: 456,
 });
 
-// Stands in for the host's resolver, which maps stored attachments to their files.
 const resolveAttachmentPath = (attachment: { readonly id: string; readonly name: string }) =>
   `/attachments/${attachment.id}${attachment.name.slice(attachment.name.lastIndexOf("."))}`;
 

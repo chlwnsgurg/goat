@@ -1,10 +1,18 @@
-import type { EnvironmentConnectionPhase } from "@t3tools/client-runtime/connection";
+import type { EnvironmentConnectionPhase } from "@goat/client-runtime/connection";
 
 import { cn } from "~/lib/utils";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "~/components/ui/tooltip";
 
-/** Canonical connection-phase → dot color mapping shared by every status dot. */
-export function connectionPhaseDotClassName(phase: EnvironmentConnectionPhase): string {
+/**
+ * Canonical connection-phase → dot color mapping shared by every status dot.
+ * An unreachable host is expected to be away (asleep, off the network), so it
+ * reads as idle instead of in progress.
+ */
+export function connectionPhaseDotClassName(
+  phase: EnvironmentConnectionPhase,
+  unreachable = false,
+): string {
+  if (unreachable) return "bg-muted-foreground/40";
   switch (phase) {
     case "connected":
       return "bg-success";
@@ -18,8 +26,15 @@ export function connectionPhaseDotClassName(phase: EnvironmentConnectionPhase): 
   }
 }
 
-/** Ping halo for transitional phases; null renders no ping. */
-export function connectionPhasePingClassName(phase: EnvironmentConnectionPhase): string | null {
+/**
+ * Ping halo for transitional phases; null renders no ping. An unreachable host
+ * can stay away for hours, so it gets no animation.
+ */
+export function connectionPhasePingClassName(
+  phase: EnvironmentConnectionPhase,
+  unreachable = false,
+): string | null {
+  if (unreachable) return null;
   return phase === "connecting" || phase === "reconnecting" ? "bg-warning/60 duration-2000" : null;
 }
 

@@ -29,7 +29,7 @@ export class DesktopAppIdentity extends Context.Service<
     >;
     readonly configure: Effect.Effect<void>;
   }
->()("@t3tools/desktop/app/DesktopAppIdentity") {}
+>()("@goat/desktop/app/DesktopAppIdentity") {}
 
 const normalizeCommitHash = (value: string): Option.Option<string> => {
   const trimmed = value.trim();
@@ -95,7 +95,7 @@ export const make = Effect.gen(function* () {
     // product token, but leaves parentheses intact. Keep the runtime name valid
     // without rewriting preview sessions (which breaks Turnstile, #7110).
     yield* electronApp.setName(
-      `${DesktopEnvironment.DESKTOP_RUNTIME_APP_BASE_NAME} ${environment.branding.stageLabel}`,
+      DesktopEnvironment.desktopRuntimeAppName(environment.branding.stageLabel),
     );
     yield* electronApp.setAboutPanelOptions({
       applicationName: environment.displayName,

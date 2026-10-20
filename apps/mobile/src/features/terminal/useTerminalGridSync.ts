@@ -1,16 +1,15 @@
-import type { TerminalSessionState } from "@t3tools/client-runtime/state/terminal";
+import type { TerminalSessionState } from "@goat/client-runtime/state/terminal";
 import {
   AuthTerminalOperateScope,
   type EnvironmentId,
   type TerminalResizeInput,
   type ThreadId,
-} from "@t3tools/contracts";
+} from "@goat/contracts";
 import { useEffect } from "react";
 
 import type { TerminalGridSize } from "./terminalUiState";
 import { readEnvironmentScope } from "../../state/session";
 
-/** Replay the measured grid when a writable attachment becomes ready or reconnects. */
 export function useTerminalGridSync({
   environmentId,
   threadId,

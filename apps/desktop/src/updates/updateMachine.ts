@@ -3,7 +3,7 @@ import type {
   DesktopUpdateChannel,
   DesktopUpdateReleaseNote,
   DesktopUpdateState,
-} from "@t3tools/contracts";
+} from "@goat/contracts";
 
 function nextStatusAfterDownloadFailure(
   currentState: DesktopUpdateState,
@@ -217,4 +217,18 @@ export function reduceDesktopUpdateStateOnInstallFailure(
     errorContext: "install",
     canRetry: true,
   };
+}
+
+export interface DesktopUpdateInstallRecord {
+  readonly fromVersion: string;
+  readonly targetVersion: string;
+}
+
+export function resolveNotAppliedInstallVersion(
+  record: DesktopUpdateInstallRecord,
+  appVersion: string,
+): string | null {
+  return record.fromVersion === appVersion && record.targetVersion !== appVersion
+    ? record.targetVersion
+    : null;
 }

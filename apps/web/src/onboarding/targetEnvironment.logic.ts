@@ -1,5 +1,16 @@
-import { type ConnectionCatalogEntry, hasRelayRoute } from "@t3tools/client-runtime/connection";
-import type { EnvironmentId } from "@t3tools/contracts";
+import { isGoatConnectEnabled } from "@goat/shared/goatConnect";
+import {
+  type ConnectionCatalogEntry,
+  hasRelayRoute,
+  usableRoutes,
+} from "@goat/client-runtime/connection";
+import type { EnvironmentId } from "@goat/contracts";
+
+export function isOnboardingEnvironmentAvailable(environment: {
+  readonly entry: ConnectionCatalogEntry;
+}): boolean {
+  return isGoatConnectEnabled() || usableRoutes(environment.entry).length > 0;
+}
 
 interface OnboardingEnvironment {
   readonly environmentId: EnvironmentId;
@@ -13,7 +24,6 @@ export function isOnboardingRelayEnvironment(
   return hasRelayRoute(environment.entry);
 }
 
-/** Keep a directly paired machine pinned while its initial connection completes. */
 export function resolveOnboardingTargetEnvironment<TEnvironment extends OnboardingEnvironment>({
   mode,
   environments,
@@ -49,10 +59,9 @@ export function resolveOnboardingTargetEnvironment<TEnvironment extends Onboardi
 }
 
 /**
- * The computers the wizard sets up from the user's selection. Continue waits
- * only on a first connection attempt, which settles on its own. Selected
- * computers that are switched off, offline, failing, or unsupported are skipped
- * so they can never lock the user out of onboarding.
+ * Continue waits only on a first connection attempt, which settles on its own.
+ * Selected computers that are switched off, offline, failing, or unsupported
+ * are skipped so they can never lock the user out of onboarding.
  */
 export function resolveOnboardingSetup(
   environments: ReadonlyArray<Pick<OnboardingEnvironment, "environmentId" | "connection">>,

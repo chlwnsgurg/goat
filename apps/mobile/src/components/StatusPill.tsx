@@ -1,6 +1,6 @@
 import { View } from "react-native";
 
-import { AppText as Text } from "./AppText";
+import { AppText as Text } from "./ui/AppText";
 import { cn } from "../lib/cn";
 
 export interface StatusTone {
@@ -25,7 +25,7 @@ export function StatusPill(
     >
       <Text
         className={cn(
-          "font-t3-bold",
+          "font-goat-bold",
           size === "compact" ? "text-2xs" : "text-xs",
           props.textClassName,
         )}

@@ -26,7 +26,7 @@ import {
   type VcsStatusLocalResult,
   type VcsStatusRemoteResult,
   type VcsStatusResult,
-} from "@t3tools/contracts";
+} from "@goat/contracts";
 
 import * as GitManager from "./GitManager.ts";
 import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
@@ -40,11 +40,6 @@ export class GitWorkflowService extends Context.Service<
       readonly cwd: string;
       readonly refName: string;
     }) => Effect.Effect<boolean, GitCommandError>;
-    /**
-     * Whether a ref in any namespace ends in this name: a local branch, a
-     * remote-tracking branch of any remote, a tag. Git falls back to these
-     * when a branch name is not a revision by itself.
-     */
     readonly hasRefNamed: (input: {
       readonly cwd: string;
       readonly refName: string;
@@ -106,6 +101,11 @@ export class GitWorkflowService extends Context.Service<
     readonly removeWorktree: (
       input: VcsRemoveWorktreeInput,
     ) => Effect.Effect<void, GitCommandError>;
+    /** The worktree that has `branch` checked out, or null when none has it. */
+    readonly branchWorktreePath: (input: {
+      readonly cwd: string;
+      readonly branch: string;
+    }) => Effect.Effect<string | null, GitCommandError>;
     readonly pruneWorktrees: (input: {
       readonly cwd: string;
     }) => Effect.Effect<void, GitCommandError>;
@@ -125,7 +125,7 @@ export class GitWorkflowService extends Context.Service<
       readonly newBranch: string;
     }) => Effect.Effect<{ readonly branch: string }, GitManagerServiceError>;
   }
->()("t3/git/GitWorkflowService") {}
+>()("goat/git/GitWorkflowService") {}
 
 function nonRepositoryLocalStatus(): VcsStatusLocalResult {
   return {
@@ -163,7 +163,7 @@ function nonRepositoryListRefs(): VcsListRefsResult {
   };
 }
 
-/** @public Service construction is part of the canonical Effect module API. */
+/** @public */
 export const make = Effect.gen(function* () {
   const registry = yield* VcsDriverRegistry.VcsDriverRegistry;
   const git = yield* GitVcsDriver.GitVcsDriver;
@@ -400,6 +400,10 @@ export const make = Effect.gen(function* () {
     removeWorktree: (input) =>
       ensureGitCommand("GitWorkflowService.removeWorktree", input.cwd).pipe(
         Effect.andThen(git.removeWorktree(input)),
+      ),
+    branchWorktreePath: (input) =>
+      ensureGitCommand("GitWorkflowService.branchWorktreePath", input.cwd).pipe(
+        Effect.andThen(git.branchWorktreePath(input)),
       ),
     pruneWorktrees: (input) =>
       ensureGitCommand("GitWorkflowService.pruneWorktrees", input.cwd).pipe(

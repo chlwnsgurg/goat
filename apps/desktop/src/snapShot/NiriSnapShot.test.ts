@@ -41,7 +41,7 @@ let version: string;
 const send = (socket: NodeNet.Socket, value: unknown) => socket.write(`${JSON.stringify(value)}\n`);
 
 beforeEach(async () => {
-  directory = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-niri-test-"));
+  directory = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "goat-niri-test-"));
   socketPath = NodePath.join(directory, "ipc");
   sockets = new Set();
   events = [];
@@ -61,7 +61,6 @@ beforeEach(async () => {
     else if (typeof request !== "string" && request.Action.ScreenshotWindow) {
       const screenshot = request.Action.ScreenshotWindow;
       capturePath = screenshot.path;
-      // Focus may change between discovery and capture. The request must keep the original ID.
       focused = { ...window, id: 99, title: "Another app" };
       await NodeFSP.writeFile(screenshot.path, png);
       for (const event of events) {

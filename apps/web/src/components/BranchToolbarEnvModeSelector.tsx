@@ -3,7 +3,7 @@ import { findSavedSshWorktreeOption, type SavedSshWorktreeOption } from "../lib/
 import { WorkspaceMenuItems } from "./WorkspaceMenuItems";
 import { ComposerControl } from "./chat/ComposerControl";
 import { ComposerContextLabel } from "./ComposerContextLabel";
-import { FolderGit2Icon, FolderGitIcon, FolderIcon } from "lucide-react";
+import { FolderGitIcon as FolderGit2Icon, FolderGitIcon, FolderIcon } from "~/components/solar";
 import { memo, type MouseEvent as ReactMouseEvent } from "react";
 
 import {
@@ -16,6 +16,9 @@ import {
 import { useComposerMenuProps } from "./chat/composerEventScope";
 import { Menu, MenuTrigger, MenuPopup } from "./ui/menu";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "./ui/tooltip";
+import { useAtomValue } from "@effect/atom-react";
+import { shortcutLabelForCommand } from "../keybindings";
+import { primaryServerKeybindingsAtom } from "../state/server";
 
 const EMPTY_SSH_OPTIONS: ReadonlyArray<SavedSshWorktreeOption> = [];
 
@@ -46,6 +49,10 @@ export const BranchToolbarEnvModeSelector = memo(function BranchToolbarEnvModeSe
   onSshDestinationChange,
 }: BranchToolbarEnvModeSelectorProps) {
   const composerFloatingLayerProps = useComposerMenuProps();
+  const shortcutLabel = shortcutLabelForCommand(
+    useAtomValue(primaryServerKeybindingsAtom),
+    "composer.workspace",
+  );
   const workspaceLabel = resolveSshWorkspaceLabel({
     sshSelected: sshDestination !== null,
     savedLabel: findSavedSshWorktreeOption(sshOptions, sshDestination)?.label ?? null,
@@ -113,7 +120,10 @@ export const BranchToolbarEnvModeSelector = memo(function BranchToolbarEnvModeSe
           )}
           <ComposerContextLabel collapseWhenCompact={false}>{workspaceLabel}</ComposerContextLabel>
         </TooltipTrigger>
-        <TooltipPopup>{workspaceLabel}</TooltipPopup>
+        <TooltipPopup>
+          {workspaceLabel}
+          {shortcutLabel ? ` · ${shortcutLabel}` : null}
+        </TooltipPopup>
       </Tooltip>
       <MenuPopup align="start" side="top" {...composerFloatingLayerProps}>
         <WorkspaceMenuItems

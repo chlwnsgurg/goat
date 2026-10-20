@@ -1,8 +1,9 @@
-import { formatProviderSkillDisplayName } from "@t3tools/shared/inlineSkills";
+import { formatProviderSkillDisplayName } from "@goat/shared/inlineSkills";
+import type { ComposerPathSearchTarget } from "@goat/client-runtime/state/threads";
 import {
   resolveProviderSkillSourceKind,
   type ProviderSkillSourceKind,
-} from "@t3tools/client-runtime/providerSkills";
+} from "@goat/client-runtime/providerSkills";
 import {
   type ProjectEntry,
   type ProviderDriverKind,
@@ -10,7 +11,7 @@ import {
   type ScopedThreadRef,
   type ServerProviderSkill,
   type ServerProviderSlashCommand,
-} from "@t3tools/contracts";
+} from "@goat/contracts";
 import {
   BlocksIcon,
   FolderIcon,
@@ -18,8 +19,8 @@ import {
   PackageIcon,
   SettingsIcon,
   UserRoundIcon,
-  type LucideIcon,
-} from "lucide-react";
+  type IconComponent,
+} from "~/components/solar";
 import { memo, useLayoutEffect, useRef } from "react";
 
 import { type ComposerSlashCommand, type ComposerTriggerKind } from "../../composer-logic";
@@ -36,6 +37,7 @@ export type ComposerCommandItem =
       type: "path";
       path: string;
       pathKind: ProjectEntry["kind"];
+      searchTarget: ComposerPathSearchTarget;
       label: string;
       description: string;
     }
@@ -244,7 +246,7 @@ const LISTBOX_LABEL_BY_TRIGGER: Record<ComposerTriggerKind, string> = {
   skill: "Skills",
 };
 
-const SKILL_SOURCE_ICON_BY_KIND: Record<ProviderSkillSourceKind, LucideIcon> = {
+const SKILL_SOURCE_ICON_BY_KIND: Record<ProviderSkillSourceKind, IconComponent> = {
   app: BlocksIcon,
   repo: FolderIcon,
   project: FolderIcon,

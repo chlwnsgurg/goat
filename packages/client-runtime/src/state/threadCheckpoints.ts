@@ -5,7 +5,7 @@ import type {
   MessageId,
   OrchestrationV2ThreadProjection,
   RunId,
-} from "@t3tools/contracts";
+} from "@goat/contracts";
 import * as DateTime from "effect/DateTime";
 
 export interface ThreadCheckpointSummary {
@@ -25,9 +25,8 @@ export interface ThreadCheckpointSummary {
   readonly completedAt: string;
 }
 
-/** Derives the checkpoint/diff rows needed by review UIs from native V2 entities. */
 export function deriveThreadCheckpointSummaries(
-  projection: OrchestrationV2ThreadProjection,
+  projection: Pick<OrchestrationV2ThreadProjection, "checkpoints" | "messages">,
 ): ReadonlyArray<ThreadCheckpointSummary> {
   return projection.checkpoints.flatMap((checkpoint) => {
     if (checkpoint.appRunOrdinal === null || checkpoint.runId === null) return [];

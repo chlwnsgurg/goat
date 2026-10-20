@@ -7,7 +7,6 @@ export interface CommandPaletteItem {
   readonly run: () => void;
 }
 
-/** `>` narrows to actions, matching the desktop palette. Stable ties retain recent-thread order. */
 export function filterCommandPaletteItems(
   items: ReadonlyArray<CommandPaletteItem>,
   query: string,
@@ -43,4 +42,25 @@ export function filterCommandPaletteItems(
 
 export function nextPaletteIndex(index: number, direction: -1 | 1, count: number) {
   return count === 0 ? 0 : (index + direction + count) % count;
+}
+
+/** Navigation aliases only; destructive work always stays in the Memory screen. */
+export function memoryPaletteItem(run: () => void): CommandPaletteItem {
+  return {
+    key: "memory",
+    kind: "action",
+    title: "Open memory",
+    searchTerms: [
+      "memory",
+      "remember",
+      "forget",
+      "conflict",
+      "revert",
+      "sync",
+      "import",
+      "owner",
+      "original",
+    ],
+    run,
+  };
 }

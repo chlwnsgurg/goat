@@ -11,27 +11,28 @@ launch GOAT and configure providers afterwards.
 ## Command line
 
 ```bash
-curl -fsSL https://t3.codes/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/goat-si/goat-releases/main/install.sh | sh
 ```
 
 On Windows, in PowerShell:
 
 ```powershell
-irm https://t3.codes/install.ps1 | iex
+irm https://raw.githubusercontent.com/goat-si/goat-releases/main/install.ps1 | iex
 ```
 
 This installs the `goat` binary to `~/.local/bin`. If your shell reports `command not found`
 afterwards, that directory is not on your `PATH` yet; the installer prints the
-line to add. Set `T3CODE_CHANNEL=nightly` to install the nightly train, or
-`T3CODE_VERSION` to pin an exact version.
+line to add. Set `GOAT_CHANNEL=nightly` to install the nightly train, or
+`GOAT_VERSION` to pin an exact version.
 
-| Task                                             | Command                                                     |
-| ------------------------------------------------ | ----------------------------------------------------------- |
-| Start the server and open the web app            | `goat`                                                      |
-| Start the server without a browser               | `goat serve`                                                |
-| Keep it running in the background (macOS, Linux) | `goat service install` ([details](./background-service.md)) |
-| Move to the newest release                       | `goat update`                                               |
-| Remove it again                                  | `goat uninstall`                                            |
+| Task                                             | Command                                                                   |
+| ------------------------------------------------ | ------------------------------------------------------------------------- |
+| Start the server and open the web app            | `goat`                                                                    |
+| Start the server without a browser               | `goat serve`                                                              |
+| Keep it running in the background (macOS, Linux) | `goat service install` ([details](./background-service.md))               |
+| Move to the newest release                       | `goat update`                                                             |
+| Reclaim database space                           | `goat doctor` ([details](./background-service.md#reclaim-database-space)) |
+| Remove it again                                  | `goat uninstall`                                                          |
 
 Run `goat help` or `goat --help` for the full reference. To start in a new working
 directory, use an explicit path such as `goat ./my-project`. A bare directory name
@@ -41,36 +42,51 @@ If `goat` or `goat start` reports an already running server, connect to that ser
 instead. Stop it before starting a replacement, or use a different `--base-dir`
 for an independent server.
 
-To try T3 Code once without installing it, run `npx t3@latest` instead (needs
-Node.js for `npx`).
-
 ### Intel Macs
 
 There is no `goat` executable for Intel Macs (the desktop app is available). To
 run a server there, build it from source with Node.js 24 and `vp`
-([Install vp](https://github.com/pingdotgg/t3code#install-vp)):
+([Install vp](https://github.com/goat-si/goat#development)):
 
 ```bash
-git clone https://github.com/pingdotgg/t3code
-cd t3code && vp i && vp run build:desktop
+git clone https://github.com/goat-si/goat
+cd goat && vp i && vp run build:desktop
 node apps/server/dist/bin.mjs
 ```
 
 `goat update` and the background service do not apply to a server run this way;
 update it with `git pull` and a rebuild.
 
+### A server-only machine
+
+For a machine you only reach from other devices, such as a VPS or a spare Mac,
+install just the server. It needs no desktop app, browser or Node.js:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/goat-si/goat-releases/main/install-goat-server.sh | sh -s -- --tailscale
+```
+
+This installs the `goat` command, keeps the server running as a
+[background service](./background-service.md), and prints two pairing links.
+Paste the first into **Settings → Connections** on your other device, or scan
+its QR code, to see the machine's threads there. Give the second to an agent in
+your main GOAT so it can
+[link the machine](./remote-access.md#link-a-goat-server-for-agents-without-ssh)
+and start, read and message threads on it. The second link only grants agent
+access. Each link works once and expires after five minutes; run `goat pair`
+on the machine for new ones.
+
+`--tailscale` publishes the server on your tailnet so other devices can reach
+it. Leave it out when you reach the machine another way, such as
+[direct pairing over your LAN](./remote-access.md#pair-over-a-lan-or-private-network). Pass `--no-service` to skip the
+background service and run `goat serve` yourself. To install a CLI archive you
+already downloaded, for example on a machine without internet access, pass
+`--archive goat-<version>-<platform>-<arch>.tar.gz`.
+
 ## Desktop app
 
-Download a release from [GitHub Releases](https://github.com/pingdotgg/t3code/releases),
-or use a package manager:
-
-| Platform           | Install                            |
-| ------------------ | ---------------------------------- |
-| Windows            | `winget install T3Tools.T3Code`    |
-| macOS              | `brew install --cask t3-code`      |
-| Debian, Ubuntu     | `sudo apt install ./T3-Code-*.deb` |
-| Arch Linux         | `yay -S t3code-bin`                |
-| Arch Linux nightly | `yay -S t3code-nightly-bin`        |
+Download a release from [GitHub Releases](https://github.com/goat-si/goat-releases/releases).
+On Debian and Ubuntu, install the `.deb` with `sudo apt install ./<file>.deb`.
 
 The `.deb` updates itself like the other desktop builds. It asks for your
 password to install each update. If your desktop has no password prompt, the
@@ -107,19 +123,18 @@ command cannot reach the app, start or update the desktop app and try again.
 
 ## Mobile app
 
-Install T3 Code from the
+Install GOAT from the
 [App Store](https://apps.apple.com/us/app/t3-code-remote-claude-more/id6787819824) or
 [Google Play](https://play.google.com/store/apps/details?id=com.t3tools.t3code).
 The phone connects to a server on another machine. Follow
-[remote access](./remote-access.md) to link it through T3 Connect or a pairing URL.
+[remote access](./remote-access.md) to pair it directly or over Tailscale.
 
-Nightly builds need the beta app. The store apps cannot connect to them. A Nightly build also
-shows these links as QR codes in **Settings → General → Mobile app**.
+Store links and QR codes are also available in **Settings → General → Mobile app**
+on web and desktop. The store apps work with both stable and Nightly servers. Test builds are optional:
 
-- **iPhone and iPad:** join the [TestFlight beta](https://testflight.apple.com/join/XgaxaRtd).
-- **Android:** join the [beta group](https://groups.google.com/g/t3-code-v2-beta). With the same
-  Google account, open the [Google Play testing page](https://play.google.com/apps/testing/com.t3tools.t3code)
-  and become a tester.
+- **iPhone and iPad:** TestFlight is invite-only.
+- **Android:** download an APK from the
+  [Android beta releases](https://github.com/pingdotgg/t3code/releases?q=android-beta-).
 
 If the app crashes during launch, open Settings → Diagnostics on the next launch
 that succeeds. It lists startup crashes from the last 7 days with the error and
@@ -134,15 +149,29 @@ and enable the provider you want. Installation, login, and configuration belong
 to that environment's machine, even when you connect from a phone or another
 computer.
 
+To add one while you work, open the composer's model picker and select **+** at
+the bottom of the provider list. The window lists every provider with whether it
+is installed, then installs it when GOAT can and signs you in with the provider's
+own flow: a browser page, a device code, an API key, or the provider's login
+command in a terminal inside the window. When a provider can only sign in from
+its own terminal, the window shows the command to run on that machine and
+**Check again** confirms it. The picker adds providers to the environment the
+composer targets, including an SSH-connected machine. The **+** is disabled when
+your device cannot manage that environment's providers.
+
+An agent can ask you to add or sign in to a provider. Its request appears as a
+card in the thread; **Review request** opens the same window, and the agent never
+sees what you enter.
+
 | Provider    | Install and authenticate                                                                                                                                  |
 | ----------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Codex       | [Connect with ChatGPT](./providers-codex.md#connect-with-chatgpt), or install [Codex CLI](https://developers.openai.com/codex/cli) and run `codex login`. |
-| Claude      | Install [Claude Code](https://claude.com/product/claude-code), then run `claude auth login`.                                                              |
+| Claude      | Install [Claude Code](https://claude.com/product/claude-code), then sign in from GOAT, which runs `claude auth login` in the app.                         |
 | Cursor      | Install [Cursor CLI](https://cursor.com/cli), then run `agent login`.                                                                                     |
 | Grok Build  | Install [Grok Build CLI](https://x.ai/cli), then run `grok login`.                                                                                        |
 | OpenCode    | Install [OpenCode](https://opencode.ai), then run `opencode auth login`.                                                                                  |
 | Antigravity | Install and sign in with Google from GOAT's provider settings.                                                                                            |
-| Pi          | Install [Pi](https://pi.dev), then run `pi` once to finish its login or API-key setup.                                                                    |
+| Pi          | Install [Pi](./providers-pi.md#set-up-pi) with Node.js 22.19 or newer, then run `pi` and `/login`.                                                        |
 | Muse Code   | Install [Muse Code](https://dev.meta.ai/docs/muse-code) on the server, run `muse login`, then enable it in Settings → Providers.                          |
 
 Provider CLIs must be on the server's `PATH`. If GOAT cannot find one, set its

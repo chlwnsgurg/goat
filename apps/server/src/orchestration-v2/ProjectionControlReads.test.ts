@@ -14,7 +14,7 @@ import {
   RuntimeRequestId,
   ThreadId,
   type OrchestrationV2DomainEvent,
-} from "@t3tools/contracts";
+} from "@goat/contracts";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -339,8 +339,6 @@ it.effect.each(storageCases)(
           occurredAt: now,
           payload: { ...turn, status: "completed", completedAt: now },
         });
-        // A settled turn's Stop still reaches the adapter, which alone knows
-        // whether it runs background work for the thread.
         yield* control.interrupt({ threadId, providerThreadId, providerTurnId, providerSessionId });
         assert.deepEqual(calls, ["interrupt", "Use the smaller fix.", "reply", "interrupt"]);
       }).pipe(

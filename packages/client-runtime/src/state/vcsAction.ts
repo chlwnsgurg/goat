@@ -9,7 +9,7 @@ import {
   type ThreadId,
   type ProjectId,
   WS_METHODS,
-} from "@t3tools/contracts";
+} from "@goat/contracts";
 import * as Cause from "effect/Cause";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
@@ -79,7 +79,6 @@ export interface RunVcsStackedActionInput {
   readonly commitMessage?: string;
   readonly featureBranch?: boolean;
   readonly filePaths?: ReadonlyArray<string>;
-  /** The thread the action runs beside; the server links a pull request it creates to it. */
   readonly threadId?: ThreadId;
   readonly projectId?: ProjectId;
   readonly onProgress?: (event: GitActionProgressEvent) => void;
@@ -501,9 +500,7 @@ export function createVcsActionManager<R, E>(
                 if (input.onProgress !== undefined) {
                   try {
                     input.onProgress(event);
-                  } catch {
-                    // Presentation callbacks must not fail the source-control operation.
-                  }
+                  } catch {}
                 }
               }),
           },

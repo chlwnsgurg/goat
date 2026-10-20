@@ -1,0 +1,80 @@
+import { assert, it } from "@effect/vitest";
+import * as Deferred from "effect/Deferred";
+import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
+import * as Option from "effect/Option";
+
+import { tryWithWorkspaceLease, withWorkspaceLease } from "./workspaceLease.ts";
+
+it.effect("rejects contention without entering the checkout and admits a later attempt", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const cwd = "/lease-test/contention";
+      const held = yield* Deferred.make<void>();
+      const release = yield* Deferred.make<void>();
+      const holder = yield* withWorkspaceLease(
+        cwd,
+        Deferred.succeed(held, undefined).pipe(Effect.andThen(Deferred.await(release))),
+      ).pipe(Effect.forkChild);
+      yield* Deferred.await(held);
+      const skipped = yield* tryWithWorkspaceLease(
+        cwd,
+        Effect.die("must not enter a busy checkout"),
+      );
+      assert.isTrue(Option.isNone(skipped));
+      // Different workspaces remain independent while the holder is still busy.
+      assert.deepEqual(
+        yield* tryWithWorkspaceLease("/lease-test/other", Effect.succeed(1)),
+        Option.some(1),
+      );
+      yield* Deferred.succeed(release, undefined);
+      yield* Fiber.join(holder);
+      assert.deepEqual(yield* tryWithWorkspaceLease(cwd, Effect.succeed(2)), Option.some(2));
+    }),
+  ),
+);
+
+it.effect("releases a nonblocking lease after failure and holder interruption", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const cwd = "/lease-test/interrupt-holder";
+      assert.equal(
+        yield* tryWithWorkspaceLease(cwd, Effect.fail("failed")).pipe(Effect.flip),
+        "failed",
+      );
+      const held = yield* Deferred.make<void>();
+      const holder = yield* tryWithWorkspaceLease(
+        cwd,
+        Deferred.succeed(held, undefined).pipe(Effect.andThen(Effect.never)),
+      ).pipe(Effect.forkChild);
+      yield* Deferred.await(held);
+      assert.isTrue(Option.isNone(yield* tryWithWorkspaceLease(cwd, Effect.void)));
+      yield* Fiber.interrupt(holder);
+      assert.deepEqual(yield* withWorkspaceLease(cwd, Effect.succeed("released")), "released");
+    }),
+  ),
+);
+
+it.effect("interrupting a blocking waiter does not release the holder's lease", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const cwd = "/lease-test/interrupt-waiter";
+      const held = yield* Deferred.make<void>();
+      const holder = yield* withWorkspaceLease(
+        cwd,
+        Deferred.succeed(held, undefined).pipe(Effect.andThen(Effect.never)),
+      ).pipe(Effect.forkChild);
+      yield* Deferred.await(held);
+      const waiterEntered = yield* Deferred.make<void>();
+      const waiter = yield* Deferred.succeed(waiterEntered, undefined).pipe(
+        Effect.andThen(withWorkspaceLease(cwd, Effect.die("waiter must not enter"))),
+        Effect.forkChild,
+      );
+      yield* Deferred.await(waiterEntered);
+      yield* Fiber.interrupt(waiter);
+      assert.isTrue(Option.isNone(yield* tryWithWorkspaceLease(cwd, Effect.void)));
+      yield* Fiber.interrupt(holder);
+      assert.deepEqual(yield* tryWithWorkspaceLease(cwd, Effect.succeed(3)), Option.some(3));
+    }),
+  ),
+);

@@ -2,20 +2,20 @@
 
 ## Purpose
 
-T3 exposes V2 orchestration through its app-owned MCP endpoint. A provider
+GOAT exposes V2 orchestration through its app-owned MCP endpoint. A provider
 agent can use this endpoint to:
 
 - create an app-owned sub-agent on any supported provider instance;
 - wait for or poll the sub-agent's durable result;
 - cancel an active delegated task; and
-- create one or more ordinary top-level T3 threads;
+- create one or more ordinary top-level GOAT threads;
 - list a project's threads and incrementally read any thread;
 - rename threads, regenerate titles, and link or unlink pull requests;
 - send or steer follow-up messages; and
 - wait for or interrupt ordinary thread runs.
 
-These are T3 orchestration operations, not provider-native sub-agent APIs.
-Delegated tasks always create a T3 child thread and run. The child receives
+These are GOAT orchestration operations, not provider-native sub-agent APIs.
+Delegated tasks always create a GOAT child thread and run. The child receives
 only the supplied task prompt, plus an optional role instruction supplied in
 the same tool call. Parent conversation history is not copied into the child.
 
@@ -40,15 +40,40 @@ preview toolkit and the orchestration toolkit.
 Before `ProviderSessionManager` opens a new V2 provider session, it asks
 `McpSessionRegistry` for a credential scoped to:
 
-- the T3 environment;
-- the parent T3 thread;
+- the GOAT environment;
+- the parent GOAT thread;
 - the concrete provider instance; and
 - the provider session.
 
-The credential grants `preview` and `orchestration` capabilities. Credentials
-expire after a maximum lifetime, expire when idle, and are revoked when the
-provider session is released. The raw token is not persisted in orchestration
-state.
+The credential grants `preview` and `orchestration` capabilities. The raw
+token is not persisted in orchestration state.
+
+A thread keeps one bearer token for as long as GOAT holds its attachment to a
+provider instance. Provider processes keep the header they were given, for the
+rest of a turn (Codex, ACP, OpenCode, Cursor) or for their whole life (Pi,
+Muse), so a change in authority (memory policy, browser or device access,
+read-only, task ceilings) replaces the record behind the same token and bumps
+its `credentialGeneration`. Permits and memory admission taken under an older
+generation are refused. When the committed memory policy moves before the
+thread is re-prepared, the token keeps its other authority and loses only
+memory. A new token is minted only for a different provider instance or after
+revocation.
+
+An idle credential expires after the liveness window unless the session it was
+issued to is still attached, in which case the next call renews it. Releasing
+the provider session revokes it, and a revoked credential is never renewed.
+Local provider processes are scoped children of the server, so a restart or
+update ends them and the next turn opens a new session with a new credential.
+Tokens carry a per-run tag, which lets the server recognize one minted before
+it restarted without persisting anything secret.
+
+Every refusal is logged and traced as `McpHttpServer.refuseCredential` with its
+reason (`expired`, `revoked`, `earlier_server`, `unknown`, `missing`) and,
+when known, the thread and credential id. MCP clients replace a 401 with their
+own text, so a refused `tools/call` carrying a registry-shaped token is answered
+with an `isError` tool result that says what happened and that GOAT
+re-authenticates the thread at its next turn. Other requests, and session
+tokens that may sign in through OAuth, still get 401.
 
 The MCP HTTP server resolves the bearer token and supplies the resulting
 `McpInvocationScope` to tool handlers. Orchestration handlers additionally
@@ -63,10 +88,10 @@ overrides:
 
 ```text
 -c mcp_servers.goat.url=http://127.0.0.1:<port>/mcp
--c mcp_servers.goat.bearer_token_env_var="T3_MCP_BEARER_TOKEN"
+-c mcp_servers.goat.bearer_token_env_var="GOAT_MCP_BEARER_TOKEN"
 ```
 
-The provider-session token is placed in `T3_MCP_BEARER_TOKEN`. Both the
+The provider-session token is placed in `GOAT_MCP_BEARER_TOKEN`. Both the
 production Codex launcher and the injectable test launcher use the same
 projection helper.
 
@@ -145,18 +170,18 @@ provider-specific extensions; those remain in flavors such as Grok.
 
 ### Pi V2
 
-T3 keeps a provider-session HTTP bridge even when Pi supports native MCP.
+GOAT keeps a provider-session HTTP bridge even when Pi supports native MCP.
 `mcp.json` entries override native registrations, and native MCP's default
-60-second request timeout can interrupt long-running T3 tools. The bridge owns
+60-second request timeout can interrupt long-running GOAT tools. The bridge owns
 the injected endpoint and credential and forwards Pi's cancellation signal.
 
-When a provider session credential exists, the adapter writes a T3-owned
+When a provider session credential exists, the adapter writes a GOAT-owned
 extension into the server cache and spawns
-`pi --mode rpc --extension <cache>/pi-t3-mcp-extension.ts` with:
+`pi --mode rpc --extension <cache>/pi-goat-mcp-extension.ts` with:
 
 ```text
-T3_MCP_URL=http://127.0.0.1:<port>/mcp
-T3_MCP_BEARER_TOKEN=<provider-session-token>
+GOAT_MCP_URL=http://127.0.0.1:<port>/mcp
+GOAT_MCP_BEARER_TOKEN=<provider-session-token>
 ```
 
 The extension registers each tool once under `mcp__goat__`. The public and
@@ -169,12 +194,12 @@ available; optional tools are discovered through Pi's builtin `tool_search`.
 On older Pi or without builtin search, all tools remain directly available.
 The bridge calls the original MCP tool name over HTTP. Follow-up requests send
 `mcp-protocol-version: 2025-06-18`; Effect's MCP transport returns 400
-without it. The first turn of a session also receives the shared T3
+without it. The first turn of a session also receives the shared GOAT
 orchestration instructions.
 
-Pi keeps ownership of native extension discovery. T3 does not replace Pi's
+Pi keeps ownership of native extension discovery. GOAT does not replace Pi's
 `subagent` tool or reproduce Pi's package and project-trust loader. Durable
-delegation goes through the namespaced T3 MCP `delegate_task` tool and the
+delegation goes through the namespaced GOAT MCP `delegate_task` tool and the
 shared orchestration child-thread lifecycle. When Pi's example `subagent`
 extension is installed, the adapter observes its documented `details.results`
 shape and projects task cards with no child thread id. Unknown result shapes
@@ -210,7 +235,7 @@ adapter support, disabled state, missing executable, or missing authentication.
 
 ### `delegate_task`
 
-Creates a T3-owned delegated task and immediately dispatches the supplied task
+Creates a GOAT-owned delegated task and immediately dispatches the supplied task
 prompt, in a local child thread or on an SSH host.
 
 ```ts
@@ -246,6 +271,13 @@ that driver; an explicit `providerInstanceId` is honored exactly and fails
 when unavailable. Selecting a different provider without a model uses that
 provider's first advertised model.
 
+A provider runs a runtime mode it does not offer as `approval-required`, so a
+child would ask for approval on every command. `orchestrator_capabilities`
+lists `runtimeModes` only for a provider that offers some of the modes, and
+omits it for a provider that offers all of them. When the target lists
+`runtimeModes`, an explicit `runtimeMode` outside that list is refused, and an
+inherited mode steps down to the broadest mode the target offers.
+
 A local async child outlives an interrupt or Stop of the parent's turn and still wakes
 the parent when it finishes. A local `mode: "wait"` child stops with the turn whose
 blocking call it answers, unless that wait already timed out. `task_cancel` stops
@@ -266,7 +298,12 @@ provider session. The request becomes the V2 command
 `mode: "async"` returns the current durable state immediately.
 `mode: "wait"` waits for the task result, including nested work and completion follow-ups, or until
 the timeout expires. A wait timeout does not cancel the child; the result sets
-`waitTimedOut: true`, and the caller can continue with `task_status`.
+`waitTimedOut: true`, and the caller can continue with `task_status`. A pending blocking
+question also ends the wait with `hasPendingQuestion: true` and `waitTimedOut: false`.
+If `hasPendingQuestion`, pass `threadId=childThreadId` to `goat_pending_request_list`,
+`goat_pending_request_read` (with `requestId`) and `goat_pending_request_respond`, or ask
+the user; the task's completion still wakes this thread. Async questions and approvals
+do not end the wait.
 
 ```ts
 type DelegateTaskResult = {
@@ -286,6 +323,7 @@ type DelegateTaskResult = {
   latestTerminalStatus: "completed" | "failed" | "cancelled" | "interrupted" | null;
   latestTerminalSummary: string | null;
   latestTerminalResultContextTransferId: string | null;
+  hasPendingQuestion: boolean;
   waitTimedOut: boolean;
 };
 ```
@@ -331,7 +369,7 @@ that interrupt.
 
 ### `create_threads`
 
-Creates between one and twenty ordinary top-level T3 threads:
+Creates between one and twenty ordinary top-level GOAT threads:
 
 ```ts
 type CreateThreadsInput = {
@@ -387,12 +425,95 @@ wake or prompt delivery. `goat_ssh_reports` reads the origin's bounded dispatch
 status list. Run-end notifications are controlled separately by
 `notifyOnCompletion` and the launch watch.
 
+A thread launched this way may name a host its own machine cannot reach in
+`goat_thread_send`. The origin then delivers that send as the launcher thread,
+within the launcher's modes, and the remote agent gets `delivery: "relayed"`.
+Only `goat_thread_send` relays, and only for ordinary launched threads.
+
+### Completion webhook
+
+The launch watch's reports can also be posted to an agent outside GOAT. Turn on
+the `completionWebhook` server setting (`{ enabled, url, secret, allLaunches,
+externalLaunches, targets }`, off by default) and opt in per launch. Nothing posts
+for a launch that does not opt in. The webhook rides on the launch watch, so it needs
+`notifyOnCompletion` left on. The launcher's server posts, also for SSH launches.
+
+Several agents can share one server and each hear only the launches they
+dispatched. Pass `notifyTarget` to `goat_thread_launch` or
+`goat_ssh_thread_launch`:
+
+- `{ name }` routes to `completionWebhook.targets.<name>` (`{ url, secret }`). The
+  secret lives in the server secret store like every settings secret, and a
+  settings patch merges targets per name, with `null` removing one.
+- `{ url, secretRef? }` routes to an inline receiver. `secretRef` comes from
+  `request_secret` in the calling thread; the launch consumes it and keeps the
+  value in the secret store until the watch ends.
+  Any agent that may launch can pick this URL, so it must resolve to public
+  addresses only: loopback, private, link-local, CGNAT, and metadata addresses
+  are refused, the check repeats before every post, and redirects are not
+  followed. A receiver on this machine or its network needs a named target.
+
+A launch with a target posts only there; the default `url` never sees it. An
+unknown name, a non-http(s) url, a used or foreign `secretRef`, or webhooks
+switched off refuse the launch before any thread is created. The target is saved
+with the watch, so it survives a restart; a named target removed from settings
+stops receiving. `notifyWebhook: true` without a target posts to the default
+`url`, and `allLaunches: true` sends every watch without a target there too.
+
+A launch from an MCP client outside any GOAT thread has no thread to wake. With
+the webhook on, a `notifyTarget` or `notifyWebhook: true` on that launch, or
+`externalLaunches: true` for every such launch, gives it a launcherless watch: its run end, questions, and
+host outages are posted to the webhook only, and the launch returns
+`watching: true`. Without either, nothing changes: the launch returns
+`watching: false` and nothing is posted. The watch follows remote threads at the
+runtime mode the client was approved for. The watch belongs to the client
+session that launched: only that session sees it in `goat_thread_status`.
+After its run is reported it waits: a later `goat_thread_send` from the same
+session re-arms it, and that run is reported to the webhook too. Another client
+sending to the thread does not. It ends without a report when the webhook stops
+posting it (turned off, or the launch's settings no longer match) or seven days
+after it was last armed.
+`goat_thread_watch`, `goat_thread_unwatch`, and `goat_thread_watch_list` still need
+a thread credential, so a client cannot list or stop these watches.
+
+Each report is one JSON `POST` after the launcher's wake is queued, never
+instead of it: `{ id, event, threadId, runId, requestId?, host, title, status,
+summary, excerpt, prUrl?, launcherThreadId, at }`, where `event` is
+`run.completed`, `question`, or `host.unavailable`, and `launcherThreadId` is
+`null` for a launcherless watch. Headers carry
+`x-goat-event`, `x-goat-delivery` (the stable `id`), and, with a secret,
+`x-goat-signature: sha256=<hex HMAC-SHA256 of the body>`. Network errors, 408,
+429, and 5xx retry with the launch watch backoff, up to six attempts; turning
+the setting off stops retries. Delivery is best effort: a report still
+retrying when the server stops is lost, and a crash right after a wake can
+repeat a report, so receivers dedupe on `x-goat-delivery`.
+
 ### `goat_thread_list`
 
 Lists durable thread shells in one project, newest first: `projectId` when
 given, else the calling thread's project. Callers can filter by title, run
 status, and whether app-owned sub-agent threads are included. Results are
 bounded and offset-paginated. Deleted threads are never listed.
+
+### `goat_thread_search`
+
+Finds threads whose title or finished user or assistant messages contain a
+keyword, one match per thread, newest first. It is read-only. With `host`,
+`hosts`, or `allHosts` it reaches other machines and so needs the same caller
+as `goat_thread_list` with a host. Calls without those fields and their
+existing result fields keep working.
+
+Each environment searches only itself: a host is asked for its own
+`goat_thread_search` and pages by offset. A fan-out merges every
+environment's next page and keeps one offset per environment in an opaque
+cursor, so pages stay exact without a shared index. A host that fails is
+reported in `unavailableHosts` and left out of later pages, which keeps
+them newest first and lets the search end. A host running
+an older GOAT refuses the new arguments, and the error says to update it.
+Each environment considers at most its newest 1000 matching threads per call,
+and only a window of each matched message leaves SQLite, which keeps responses
+small on the shared connection. `truncated` reports a cut, so callers narrow
+the filters.
 
 ### `goat_thread_read`
 
@@ -438,12 +559,26 @@ detail also exposes an in-flight title regeneration.
 
 Sends a message to any ordinary or delegated thread in the environment:
 
-- `auto` starts an idle thread, steers a fully active turn, or queues behind a
-  turn that is not yet steerable;
-- `queue` creates a separate follow-up run after active work;
-- `steer` requires a steerable active provider turn; and
+- A message from an agent in another GOAT thread is delivered like steering in
+  every mode except `restart`: it joins a running turn, waits for a starting
+  turn and joins it as soon as the provider turn runs, or starts an idle thread.
+  The wait inside the call is bounded (`STEER_READY_WAIT_MS`, below a client's
+  tool-call timeout); past it the message is queued durably and the server still
+  promotes it into the turn once it can steer. That promotion lives in the
+  running server: after a restart the queued message runs as the next turn. A
+  parent's follow-up to its own delegated child is not promoted either, because
+  its queued run already owns a follow-up task; it runs after the child's turn.
+  A provider that steers by interrupt-and-restart restarts the turn with the
+  message, as its own steer does. A provider that can do neither, a turn in
+  post-turn settlement, and `/compact`, `/logout` or `/goal` take it as the next
+  turn. A turn the user stopped first fails the send.
+- For a thread sending to itself and for clients outside GOAT threads, `auto`
+  behaves as above, `queue` creates a separate follow-up run after active work,
+  and `steer` requires a steerable active provider turn.
 - `restart` requires an active provider turn and uses the orchestrator's
   interrupt-and-restart path.
+- A send relayed to another host from a GOAT thread forwards `queue` and
+  `steer` as `auto`, because the destination sees an outside client.
 
 The target runtime and interaction modes may not be broader than the caller's.
 Stable command and message IDs are derived from `clientRequestId` for
@@ -455,6 +590,17 @@ Waits for a selected run to become `completed`, `failed`, `cancelled`,
 `interrupted`, or `rolled_back`. Without `runId`, it pins the latest run at call
 time; an idle thread returns immediately. A timeout reports the latest durable
 status and does not cancel work.
+
+### `goat_thread_status`
+
+Answers at once where a thread's current run is, without reading the timeline or
+waiting. `phase` comes from the active run's status (else the latest run's) and
+its pending request: a user question or auth refresh is `waiting_input`, a
+provider approval is `waiting_approval`. `watch` is the caller's own launch
+watch, so a dispatcher can check that the run it just sent will be reported.
+With `host`, a host whose GOAT predates the tool is read with a one-item
+`goat_thread_read` instead, which cannot name the request kind and reports
+`waiting`.
 
 ### `goat_thread_interrupt`
 
@@ -493,6 +639,19 @@ Terminal provider events trigger finalization. The event stream first replays
 persisted events and then follows live events, so finalization also runs after
 a server restart. An existing `subagent_result` transfer makes finalization
 idempotent.
+
+Users rarely watch child threads, so a child question would otherwise go
+unanswered. When a child opens a pending `user_input` request, the parent gets
+a notification message telling it to answer with the pending request tools or
+ask the user. The message says whether the child is blocked or, for a Codex
+async question, still working. If the question is answered or dismissed before
+the notification starts a turn, that queued turn is cancelled. Approvals are not
+routed, because those tools cannot answer them.
+A parent still blocked in a `delegate_task` wait gets the blocking question
+through that wait instead.
+If the provider cuts that wait short, a still-pending live question wakes the
+parent when its launching run completes, fails, or waits for post-turn work.
+Stopping or interrupting the parent prevents this catch-up.
 
 A failed run exposes its provider error before any progress text. Successful
 results use the latest assistant content from the final work turn.

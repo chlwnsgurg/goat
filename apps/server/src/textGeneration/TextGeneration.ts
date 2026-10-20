@@ -1,12 +1,12 @@
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
-import type { ProviderInstanceId } from "@t3tools/contracts";
-import type { ProviderTextGeneration } from "@t3tools/provider-core/server/textGeneration";
-import { TextGenerationError } from "@t3tools/contracts";
+import type { ProviderInstanceId } from "@goat/contracts";
+import type { ProviderTextGeneration } from "@goat/provider-core/server/textGeneration";
+import { TextGenerationError } from "@goat/contracts";
 
 import * as ProviderInstanceRegistry from "../provider/ProviderInstanceRegistry.ts";
-import type { ProviderInstance } from "@t3tools/provider-core/server/driver";
+import type { ProviderInstance } from "@goat/provider-core/server/driver";
 import * as SourceControlProviderRegistry from "../sourceControl/SourceControlProviderRegistry.ts";
 import * as ThreadTitleLinks from "./ThreadTitleLinks.ts";
 
@@ -17,15 +17,21 @@ export type {
   CommitMessageGenerationResult,
   PrContentGenerationInput,
   PrContentGenerationResult,
+  ReviewGuideGenerationInput,
+  ReviewGuideGenerationResult,
   ThreadTitleGenerationInput,
   ThreadTitleGenerationResult,
-} from "@t3tools/provider-core/server/textGeneration";
+  ResolveMemoryConflictInput,
+  ResolveMemoryConflictResult,
+  ResolveMemoryConflictExecutionResult,
+  GenerateMemorySummaryInput,
+  GenerateMemorySummaryResult,
+  GenerateMemorySummaryExecutionResult,
+  MemoryGenerationExecution,
+} from "@goat/provider-core/server/textGeneration";
 
-/**
- * TextGeneration - Service tag for commit and change request text generation.
- */
 export class TextGeneration extends Context.Service<TextGeneration, ProviderTextGeneration>()(
-  "t3/textGeneration/TextGeneration",
+  "goat/textGeneration/TextGeneration",
 ) {}
 
 type TextGenerationOp =
@@ -33,7 +39,10 @@ type TextGenerationOp =
   | "generatePrContent"
   | "generateBranchName"
   | "generateThreadTitle"
-  | "generateChannelReception";
+  | "generateChannelReception"
+  | "generateReviewGuide"
+  | "resolveMemoryConflict"
+  | "generateMemorySummary";
 
 const resolveInstance = (
   registry: ProviderInstanceRegistry.ProviderInstanceRegistry["Service"],
@@ -47,7 +56,10 @@ const resolveInstance = (
         : Effect.fail(
             new TextGenerationError({
               operation,
-              detail: `No provider instance registered for id '${instanceId}'.`,
+              detail:
+                operation === "resolveMemoryConflict" || operation === "generateMemorySummary"
+                  ? "route_unavailable"
+                  : `No provider instance registered for id '${instanceId}'.`,
             }),
           ),
     ),
@@ -58,6 +70,32 @@ export const make = Effect.gen(function* () {
   const registry = yield* ProviderInstanceRegistry.ProviderInstanceRegistry;
   const sourceControl = yield* SourceControlProviderRegistry.SourceControlProviderRegistry;
   return TextGeneration.of({
+    resolveMemoryConflict: (input) =>
+      resolveInstance(registry, "resolveMemoryConflict", input.modelSelection.instanceId).pipe(
+        Effect.flatMap((textGeneration) =>
+          textGeneration.resolveMemoryConflict === undefined
+            ? Effect.fail(
+                new TextGenerationError({
+                  operation: "resolveMemoryConflict",
+                  detail: "unsupported_operation",
+                }),
+              )
+            : textGeneration.resolveMemoryConflict(input),
+        ),
+      ),
+    generateMemorySummary: (input) =>
+      resolveInstance(registry, "generateMemorySummary", input.modelSelection.instanceId).pipe(
+        Effect.flatMap((textGeneration) =>
+          textGeneration.generateMemorySummary === undefined
+            ? Effect.fail(
+                new TextGenerationError({
+                  operation: "generateMemorySummary",
+                  detail: "unsupported_operation",
+                }),
+              )
+            : textGeneration.generateMemorySummary(input),
+        ),
+      ),
     generateCommitMessage: (input) =>
       resolveInstance(registry, "generateCommitMessage", input.modelSelection.instanceId).pipe(
         Effect.flatMap((textGeneration) => textGeneration.generateCommitMessage(input)),
@@ -82,6 +120,10 @@ export const make = Effect.gen(function* () {
               )
             : textGeneration.generateChannelReception(input),
         ),
+      ),
+    generateReviewGuide: (input) =>
+      resolveInstance(registry, "generateReviewGuide", input.modelSelection.instanceId).pipe(
+        Effect.flatMap((textGeneration) => textGeneration.generateReviewGuide(input)),
       ),
     generateThreadTitle: (input) =>
       resolveInstance(registry, "generateThreadTitle", input.modelSelection.instanceId).pipe(

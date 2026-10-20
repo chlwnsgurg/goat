@@ -7,22 +7,11 @@ import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as Stream from "effect/Stream";
-import { discardResponseBody, responsePayloads } from "@t3tools/shared/mcpResponsePayloads";
+import { discardResponseBody, responsePayloads } from "@goat/shared/mcpResponsePayloads";
 
 /**
- * Stdio-to-HTTP bridge for T3's MCP endpoint.
- *
- * ACP agents must support stdio MCP servers, while optional http/sse support
- * is unevenly implemented. `t3 acp-mcp-bridge` runs as the stdio MCP server an
- * ACP agent spawns and forwards each JSON-RPC line to T3's authenticated
- * streamable-HTTP endpoint: single JSON responses and SSE streams are written
- * back as newline-delimited JSON-RPC, notification acknowledgements (202/204)
- * produce no output, and the `mcp-session-id` / negotiated protocol version
- * are replayed on subsequent requests.
- *
- * This entry sits on the ACP first-message critical path (bin.ts fast-paths
- * it before the CLI graph), so it imports only effect core modules; keep the
- * import list lean when changing it.
+ * ACP agents must support stdio MCP servers, while optional http/sse support is
+ * unevenly implemented.
  */
 
 /**
@@ -110,8 +99,6 @@ function openAcpMcpSession(options: {
 }) {
   const fetchImplementation = options.fetchImplementation ?? fetch;
   return Effect.gen(function* () {
-    // The bridge is single-fibered at creation time; concurrent sends only
-    // read these after the sequential handshake, so plain locals suffice.
     let sessionId: string | null = null;
     let protocolVersion: string | null = null;
 
@@ -229,6 +216,8 @@ export interface AcpMcpListedTool {
 export function listAcpMcpTools(options: {
   readonly endpoint: string;
   readonly authorization: string;
+  /** Reject incomplete catalogs when the caller uses them for admission. */
+  readonly strict?: boolean;
   readonly fetchImplementation?:
     | ((url: string, init?: RequestInit) => Promise<Response>)
     | undefined;
@@ -239,6 +228,37 @@ export function listAcpMcpTools(options: {
     const responses = yield* send({ jsonrpc: "2.0", id: listId, method: "tools/list" });
     const result = yield* requestResult(responses, listId, "GOAT MCP tool listing");
     const tools = (result as { readonly tools?: unknown } | null)?.tools;
+    if (
+      options.strict === true &&
+      (!Array.isArray(tools) ||
+        tools.some((tool) => {
+          if (typeof tool !== "object" || tool === null || Array.isArray(tool)) return true;
+          const entry = tool as { readonly name?: unknown; readonly inputSchema?: unknown };
+          if (typeof entry.name !== "string" || entry.name.length === 0) return true;
+          if (
+            typeof entry.inputSchema !== "object" ||
+            entry.inputSchema === null ||
+            Array.isArray(entry.inputSchema)
+          )
+            return true;
+          const schema = entry.inputSchema as {
+            readonly type?: unknown;
+            readonly properties?: unknown;
+          };
+          return (
+            schema.type !== "object" ||
+            (schema.properties !== undefined &&
+              (typeof schema.properties !== "object" ||
+                schema.properties === null ||
+                Array.isArray(schema.properties)))
+          );
+        }))
+    )
+      return yield* Effect.fail(
+        new AcpMcpBridgeError("GOAT MCP returned a malformed tool catalog.", {
+          kind: "protocol",
+        }),
+      );
     if (!Array.isArray(tools)) return [];
     return tools.flatMap((tool): ReadonlyArray<AcpMcpListedTool> => {
       // A remote can return anything here; skip entries that are not objects.
@@ -263,9 +283,6 @@ export function listAcpMcpTools(options: {
 export function runAcpMcpStdioBridge(options: AcpMcpStdioBridgeOptions): Effect.Effect<void> {
   const fetchImplementation = options.fetchImplementation ?? fetch;
   return Effect.gen(function* () {
-    // Dispatch happens synchronously on the single stream fiber, so plain
-    // locals carry the shared session state; forwards mutate them in
-    // completion order exactly like the wire does.
     let sessionId: string | null = null;
     let protocolVersion: string | null = null;
     const running = new Set<Fiber.Fiber<void>>();
@@ -409,18 +426,19 @@ export function runAcpMcpStdioBridge(options: AcpMcpStdioBridgeOptions): Effect.
 }
 
 /**
- * Argv runner for `t3 acp-mcp-bridge` and `t3 acp-mcp-call`, shared by the
- * fast-path dispatch in bin.ts and the full CLI's command handlers. Kept free
- * of heavy imports: these commands run on the ACP first-message critical path.
+ * Kept free of heavy imports: these commands run on the ACP first-message
+ * critical path.
  */
 export async function runAcpMcpCliFastPath(
   command: "acp-mcp-bridge" | "acp-mcp-call",
   args: ReadonlyArray<string>,
 ): Promise<void> {
-  const endpoint = process.env.T3_ACP_MCP_ENDPOINT;
-  const authorization = process.env.T3_ACP_MCP_AUTHORIZATION;
+  const endpoint = process.env.GOAT_ACP_MCP_ENDPOINT;
+  const authorization = process.env.GOAT_ACP_MCP_AUTHORIZATION;
   if (endpoint === undefined || authorization === undefined) {
-    process.stderr.write(`${command} requires T3_ACP_MCP_ENDPOINT and T3_ACP_MCP_AUTHORIZATION.\n`);
+    process.stderr.write(
+      `${command} requires GOAT_ACP_MCP_ENDPOINT and GOAT_ACP_MCP_AUTHORIZATION.\n`,
+    );
     process.exitCode = 2;
     return;
   }

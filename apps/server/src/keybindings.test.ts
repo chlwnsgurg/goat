@@ -1,4 +1,4 @@
-import { KeybindingCommand, KeybindingRule, KeybindingsConfig } from "@t3tools/contracts";
+import { KeybindingCommand, KeybindingRule, KeybindingsConfig } from "@goat/contracts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
 import { assertFailure } from "@effect/vitest/utils";
@@ -11,8 +11,8 @@ import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 import * as ServerConfig from "./config.ts";
 import * as Keybindings from "./keybindings.ts";
-import { KeybindingsConfigError, MAX_KEYBINDINGS_COUNT } from "@t3tools/contracts";
-import * as HostProcess from "@t3tools/shared/HostProcess";
+import { KeybindingsConfigError, MAX_KEYBINDINGS_COUNT } from "@goat/contracts";
+import * as HostProcess from "@goat/shared/HostProcess";
 
 const decodeKeybindingCommandExit = Schema.decodeUnknownExit(KeybindingCommand);
 const decodeKeybindingRuleExit = Schema.decodeUnknownExit(KeybindingRule);
@@ -30,7 +30,7 @@ const layerKeybindings = () => {
     Layer.provideMerge(
       Layer.fresh(
         ServerConfig.layerTest(process.cwd(), {
-          prefix: "t3code-keybindings-test-",
+          prefix: "goat-keybindings-test-",
         }),
       ),
     ),
@@ -403,7 +403,6 @@ it.layer(NodeServices.layer)("keybindings", (it) => {
         existing,
       ]);
 
-      // Removing the added rule later must survive the next startup.
       yield* writeKeybindingsConfig(keybindingsConfigPath, [existing]);
       yield* keybindings.syncDefaultKeybindingsOnStartup;
       assert.deepStrictEqual(yield* backgroundRules, [existing]);
@@ -708,7 +707,6 @@ it.layer(NodeServices.layer)("keybindings", (it) => {
     Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;
       const { keybindingsConfigPath } = yield* ServerConfig.ServerConfig;
-      // A directory where the file should be makes the read itself fail.
       yield* fileSystem.makeDirectory(keybindingsConfigPath, { recursive: true });
 
       const keybindings = yield* Keybindings.Keybindings;

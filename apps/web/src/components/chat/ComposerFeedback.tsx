@@ -1,8 +1,8 @@
 import {
   codexFeedbackNotice,
   type CodexFeedbackSubmission,
-} from "@t3tools/client-runtime/state/threads";
-import { MessageSquareIcon } from "lucide-react";
+} from "@goat/client-runtime/state/threads";
+import { MessageSquareIcon } from "~/components/solar";
 
 import { writeTextToClipboard } from "../../hooks/useCopyToClipboard";
 import { Button } from "../ui/button";

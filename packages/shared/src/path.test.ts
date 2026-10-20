@@ -6,12 +6,70 @@ import {
   isUncPath,
   isWindowsAbsolutePath,
   isWindowsDrivePath,
+  isWindowsShellOs,
+  msysDrivePathToWindows,
   newProjectFolderName,
   normalizeProjectPathForComparison,
   normalizeProjectPathForDispatch,
+  resolveWorkspaceFilePath,
+  toWindowsHostPath,
+  windowsHostPathKey,
 } from "./path.ts";
 
+describe("Windows host paths", () => {
+  it.each([
+    ["/c/Users/x", "C:\\Users\\x"],
+    ["/C/Users/x/", "C:\\Users\\x"],
+    ["/c", "C:\\"],
+    ["/c/", "C:\\"],
+    ["/cygdrive/d/a b", "D:\\a b"],
+    ["/cygdrive/d", "D:\\"],
+    ["C:/Users/x", "C:\\Users\\x"],
+    ["c:\\Users\\x\\", "C:\\Users\\x"],
+    ["C:\\", "C:\\"],
+    ["\\\\server\\share", "\\\\server\\share"],
+    ["/tmp/x", "/tmp/x"],
+    ["/cygdrive", "/cygdrive"],
+    ["/cd/x", "/cd/x"],
+  ])("toWindowsHostPath(%j) is %j", (input, expected) => {
+    expect(toWindowsHostPath(input)).toBe(expected);
+  });
+
+  it("recognizes only drive mounts as MSYS drive paths", () => {
+    expect(msysDrivePathToWindows("/home/x")).toBeNull();
+    expect(msysDrivePathToWindows("C:\\x")).toBeNull();
+    expect(msysDrivePathToWindows("relative/c/x")).toBeNull();
+  });
+
+  it("keys every shell form of one folder the same", () => {
+    const key = windowsHostPathKey("C:\\Users\\Super\\Dev");
+    for (const form of ["/c/users/super/dev/", "/cygdrive/C/Users/Super/Dev", "c:/users/super/dev"])
+      expect(windowsHostPathKey(form)).toBe(key);
+    expect(windowsHostPathKey("D:\\Users\\Super\\Dev")).not.toBe(key);
+  });
+
+  it("detects Git Bash, MSYS2, and Cygwin unames", () => {
+    expect(isWindowsShellOs("MINGW64_NT-10.0-26200")).toBe(true);
+    expect(isWindowsShellOs("MSYS_NT-10.0")).toBe(true);
+    expect(isWindowsShellOs("CYGWIN_NT-10.0")).toBe(true);
+    expect(isWindowsShellOs("Linux")).toBe(false);
+    expect(isWindowsShellOs(null)).toBe(false);
+  });
+});
+
 describe("path helpers", () => {
+  it.each([
+    ["report:123", "/workspace", "/workspace/report:123"],
+    ["/workspace/report:12:3", "/other", "/workspace/report:12:3"],
+    ["src/file", "C:\\Workspace\\", "C:\\Workspace\\src\\file"],
+    ["C:/Workspace/file", "/other", "C:/Workspace/file"],
+    ["file", "\\\\host\\share\\", "\\\\host\\share\\file"],
+    ["file", "/", "/file"],
+    ["~/report:123", "/workspace", "~/report:123"],
+  ])("resolves literal path %s within %s", (path, root, expected) => {
+    expect(resolveWorkspaceFilePath(path, root)).toBe(expected);
+  });
+
   it("detects windows drive paths", () => {
     expect(isWindowsDrivePath("C:\\repo")).toBe(true);
     expect(isWindowsDrivePath("D:/repo")).toBe(true);
@@ -38,12 +96,10 @@ describe("path helpers", () => {
   });
 
   it("normalizes a bare Windows drive root the same as one with a trailing separator", () => {
-    // `C:`, `C:\` and `C:/` all refer to the drive root and must compare equal.
     expect(normalizeProjectPathForDispatch("C:")).toBe("C:\\");
     expect(normalizeProjectPathForComparison("C:")).toBe("c:\\");
     expect(normalizeProjectPathForComparison("C:")).toBe(normalizeProjectPathForComparison("C:\\"));
     expect(normalizeProjectPathForComparison("C:")).toBe(normalizeProjectPathForComparison("C:/"));
-    // Non-root drive paths keep their trailing separator trimmed as before.
     expect(normalizeProjectPathForDispatch("C:\\repo\\")).toBe("C:\\repo");
   });
 
@@ -51,10 +107,8 @@ describe("path helpers", () => {
     expect(newProjectFolderName("Pinball Stats")).toBe("pinball-stats");
     expect(newProjectFolderName("  Café & Crème!  ")).toBe("cafe-creme");
     expect(newProjectFolderName("../../etc")).toBe("etc");
-    // Nothing usable left, so the server falls back to a fixed name.
     expect(newProjectFolderName("🎱🎱")).toBe("project");
     expect(newProjectFolderName(`${"a".repeat(63)} b`)).toBe("a".repeat(63));
-    // Windows cannot make folders with device names.
     expect(newProjectFolderName("Con")).toBe("con-project");
     expect(newProjectFolderName("LPT1")).toBe("lpt1-project");
     expect(newProjectFolderName("console")).toBe("console");

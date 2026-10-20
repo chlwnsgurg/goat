@@ -1,9 +1,9 @@
 import {
   formatSubagentDisplayTitle,
   subagentDetailPreview,
-} from "@t3tools/client-runtime/state/subagent-display";
-import { isActiveSubagentStatus } from "@t3tools/client-runtime/state/subagentRuntime";
-import type { OrchestrationV2Subagent } from "@t3tools/contracts";
+} from "@goat/client-runtime/state/subagent-display";
+import { isActiveSubagentStatus } from "@goat/client-runtime/state/subagentRuntime";
+import type { OrchestrationV2Subagent } from "@goat/contracts";
 
 const PROMPT_TITLE_LIMIT = 80;
 
@@ -11,12 +11,10 @@ export type SubagentRowTone = "working" | "completed" | "failed" | "stopped";
 
 export interface SubagentRowPresentation {
   readonly title: string;
-  /** Live agents lead with progress; settled ones lead with what came out. */
   readonly detail: string | null;
   readonly statusLabel: string;
   readonly tone: SubagentRowTone;
   readonly live: boolean;
-  /** Provider-native tasks have no thread of their own to open. */
   readonly canOpenThread: boolean;
 }
 

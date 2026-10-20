@@ -1,6 +1,6 @@
 import { describe, expect, it } from "@effect/vitest";
 
-import { ProviderInstanceId, type ModelSelection } from "@t3tools/contracts";
+import { ProviderInstanceId, type ModelSelection } from "@goat/contracts";
 
 import { compileClaudeModelSelection } from "./claudeModelOptions.ts";
 
@@ -47,6 +47,25 @@ describe("compileClaudeModelSelection", () => {
         selection("claude-sonnet-4-6", [{ id: "effort", value: "ultrathink" }]),
       ),
     ).toMatchObject({ effort: "high", promptEffort: "ultrathink" });
+  });
+
+  it("keeps explicit effort for models missing from the local catalog", () => {
+    expect(
+      compileClaudeModelSelection(
+        selection("claude-pool-model-not-in-catalog", [{ id: "effort", value: "max" }]),
+      ).effort,
+    ).toBe("max");
+    expect(
+      compileClaudeModelSelection(selection("claude-pool-model-not-in-catalog", [])).effort,
+    ).toBeUndefined();
+  });
+
+  it("omits unsupported effort for models missing from the local catalog", () => {
+    expect(
+      compileClaudeModelSelection(
+        selection("claude-pool-model-not-in-catalog", [{ id: "effort", value: "brutal" }]),
+      ).effort,
+    ).toBeUndefined();
   });
 
   it("compiles the thinking toggle for models that expose it", () => {

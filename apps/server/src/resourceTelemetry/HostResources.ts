@@ -1,6 +1,9 @@
+// Effect FileSystem has no statfs. Disk free space comes from libuv.
+// @effect-diagnostics nodeBuiltinImport:off
+import * as NodeFSP from "node:fs/promises";
 import * as NodeOS from "node:os";
-import type { HostResourcesSnapshot } from "@t3tools/contracts";
-import * as HostProcess from "@t3tools/shared/HostProcess";
+import type { HostCapacitySnapshot } from "@goat/contracts";
+import * as HostProcess from "@goat/shared/HostProcess";
 import * as Cache from "effect/Cache";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
@@ -9,10 +12,12 @@ import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import { ChildProcess, ChildProcessSpawner } from "effect/process";
 
+import { readHostCapacityExtras } from "./hostCapacity.ts";
+
 export class HostResources extends Context.Service<
   HostResources,
-  { readonly read: Effect.Effect<HostResourcesSnapshot> }
->()("t3/resourceTelemetry/HostResources") {}
+  { readonly read: Effect.Effect<HostCapacitySnapshot> }
+>()("goat/resourceTelemetry/HostResources") {}
 
 function readCpu() {
   const cpus = NodeOS.cpus();
@@ -41,12 +46,26 @@ function darwinAvailableMemory(output: string): number | null {
 const make = Effect.fn("makeHostResources")(function* () {
   const fs = yield* FileSystem.FileSystem;
   const platform = yield* HostProcess.Platform;
+  const home = yield* HostProcess.HomeDirectory;
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
 
   const sample = Effect.fn("HostResources.sample")(function* () {
     const previousCpu = readCpu();
-    // CPU counters need two readings; idle servers do no polling or process scans.
-    yield* Effect.sleep("200 millis");
+    // CPU counters need two readings. Load and disk are taken during that
+    // interval so a status read does not wait twice. Idle servers do no
+    // polling or process scans.
+    const [, extras] = yield* Effect.all(
+      [
+        Effect.sleep("200 millis"),
+        readHostCapacityExtras({
+          platform,
+          home,
+          loadavg: NodeOS.loadavg(),
+          statfs: (path) => NodeFSP.statfs(path, { bigint: true }),
+        }),
+      ],
+      { concurrency: "unbounded" },
+    );
     const cpu = readCpu();
     const totalDelta = cpu.total - previousCpu.total;
     const idleDelta = cpu.idle - previousCpu.idle;
@@ -78,10 +97,11 @@ const make = Effect.fn("makeHostResources")(function* () {
       cpuCount: cpu.count,
       availableMemoryBytes: Math.min(totalMemoryBytes, Math.max(0, availableMemoryBytes)),
       totalMemoryBytes,
+      loadAvg: extras.loadAvg,
+      disk: extras.disk,
     };
   });
 
-  // One server-lifetime cache deduplicates simultaneous requests from all sockets.
   const cache = yield* Cache.make({
     capacity: 1,
     lookup: (_key: "host") => sample(),

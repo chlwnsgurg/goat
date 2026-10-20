@@ -1,6 +1,6 @@
 import { isValidElement, type ReactElement, type ReactNode } from "react";
-import { beforeEach, describe, expect, it, vi } from "vite-plus/test";
-import type { DesktopUpdateState } from "@t3tools/contracts";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
+import type { DesktopUpdateState } from "@goat/contracts";
 
 const testState = vi.hoisted(() => ({
   addToast: vi.fn(),
@@ -14,7 +14,6 @@ import { showDesktopUpdateDownloadedToast } from "./desktopUpdate.toast";
 
 type ClickableElement = ReactElement<{ readonly onClick?: () => void }>;
 
-/** Walks the rendered description, invoking function components, to find the link button. */
 function findReleaseNotesLink(node: ReactNode): ClickableElement | null {
   if (Array.isArray(node)) {
     for (const child of node) {
@@ -67,6 +66,24 @@ function downloadedState(overrides: Partial<DesktopUpdateState> = {}): DesktopUp
 describe("showDesktopUpdateDownloadedToast", () => {
   beforeEach(() => {
     testState.addToast.mockReset();
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it("opens release notes from the configured repository", async () => {
+    vi.stubEnv("GOAT_DESKTOP_UPDATE_REPOSITORY", "JustYannicc/t3code");
+    const openExternal = vi.fn().mockResolvedValue(true);
+
+    showDesktopUpdateDownloadedToast({ openExternal }, downloadedState());
+    findReleaseNotesLink(getDescription())?.props.onClick?.();
+
+    await vi.waitFor(() => {
+      expect(openExternal).toHaveBeenCalledWith(
+        "https://github.com/JustYannicc/t3code/releases/tag/v0.0.30",
+      );
+    });
   });
 
   it("opens the downloaded version's release notes", async () => {

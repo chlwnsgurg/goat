@@ -2,6 +2,8 @@ import Constants from "expo-constants";
 import { requireOptionalNativeModule } from "expo";
 import { Linking, Platform } from "react-native";
 
+import { PRODUCTION_SCHEME } from "@goat/shared/mobileAppIdentity";
+
 interface AndroidAgentNotifications {
   configure(deviceId: string, userId: string, scheme: string, ongoingEnabled: boolean): void;
   clear(): void;
@@ -21,7 +23,7 @@ export function supportsAndroidAgentNotifications(): boolean {
 
 function appScheme(): string {
   const scheme = Constants.expoConfig?.scheme;
-  return (Array.isArray(scheme) ? scheme[0] : scheme) ?? "t3code";
+  return (Array.isArray(scheme) ? scheme[0] : scheme) ?? PRODUCTION_SCHEME;
 }
 
 export function configureAndroidAgentNotifications(
@@ -32,7 +34,6 @@ export function configureAndroidAgentNotifications(
   native?.configure?.(deviceId, userId, appScheme(), ongoingEnabled);
 }
 
-/** Posts a staged relay payload for the showcase capture; false when unsupported. */
 export function showAndroidShowcaseAgentActivity(data: Record<string, string>): boolean {
   if (!native?.showShowcaseActivity) return false;
   native.showShowcaseActivity(appScheme(), data);
@@ -43,7 +44,6 @@ export function clearAndroidAgentNotifications(): void {
   native?.clear?.();
 }
 
-/** Tells the FCM handler which thread route is on screen so its alerts stay quiet. */
 export function setAndroidThreadOnScreen(path: string | null): void {
   native?.setThreadOnScreen?.(path);
 }

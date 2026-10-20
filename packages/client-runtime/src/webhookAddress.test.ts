@@ -19,6 +19,8 @@ describe("webhookAddress", () => {
     expect(result.address).toBe(`https://mac.tail1234.ts.net${path}`);
     expect(result.copyable).toBe(true);
     expect(result.note).toContain("Tailscale");
+    expect(result.note).toContain("GOAT Connect (coming soon)");
+    expect(result.note).not.toContain("T3 Connect");
   });
 
   it("says only this computer can call a loopback address", () => {
@@ -31,6 +33,7 @@ describe("webhookAddress", () => {
     expect(webhookAddress(endpoint(null), null)).toMatchObject({
       address: path,
       copyable: false,
+      note: "Public URLs arrive with GOAT Connect (coming soon).",
     });
   });
 });

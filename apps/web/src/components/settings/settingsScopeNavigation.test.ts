@@ -1,4 +1,4 @@
-import { EnvironmentId, ProviderInstanceId, ScheduledTaskId } from "@t3tools/contracts";
+import { EnvironmentId, ProviderInstanceId, ScheduledTaskId } from "@goat/contracts";
 import {
   createMemoryHistory,
   createRootRoute,
@@ -11,7 +11,9 @@ import { describe, expect, it } from "vite-plus/test";
 import { resolveSettingsScope } from "./settingsScope";
 import { retainSettingsScope, validateSettingsRouteSearch } from "./settingsScopeNavigation";
 
+import { validateMemorySettingsSearch } from "./MemorySettings.logic";
 import { validateScheduledTasksSearch } from "./scheduledTasksSettings.logic";
+import { Route as IntegrationsRoute } from "../../routes/settings.integrations";
 
 const checkoutSearch = {
   project: "repository:t3code",
@@ -34,7 +36,12 @@ function createSettingsRouter(initialEntry = "/settings/general") {
   });
   const general = createRoute({ getParentRoute: () => settings, path: "general" });
   const projects = createRoute({ getParentRoute: () => settings, path: "projects" });
-  const integrations = createRoute({ getParentRoute: () => settings, path: "integrations" });
+  const integrations = createRoute({
+    getParentRoute: () => settings,
+    path: "integrations",
+    beforeLoad: (context) => IntegrationsRoute.options.beforeLoad?.(context as never),
+  });
+  const goatBot = createRoute({ getParentRoute: () => settings, path: "goat-bot" });
   const sourceControl = createRoute({ getParentRoute: () => settings, path: "source-control" });
   const providers = createRoute({
     getParentRoute: () => settings,
@@ -47,6 +54,11 @@ function createSettingsRouter(initialEntry = "/settings/general") {
         ? { instanceId: ProviderInstanceId.make(raw.instanceId) }
         : {}),
     }),
+  });
+  const memory = createRoute({
+    getParentRoute: () => settings,
+    path: "memory",
+    validateSearch: validateMemorySettingsSearch,
   });
   const scheduledTasks = createRoute({
     getParentRoute: () => settings,
@@ -67,9 +79,11 @@ function createSettingsRouter(initialEntry = "/settings/general") {
   return createRouter({
     routeTree: root.addChildren([
       settings.addChildren([
+        memory,
         general,
         projects,
         integrations,
+        goatBot,
         sourceControl,
         providers,
         scheduledTasks,
@@ -81,6 +95,27 @@ function createSettingsRouter(initialEntry = "/settings/general") {
 }
 
 describe("settings scope navigation", () => {
+  it.each(["goat-bot", "goat-bot-home", "slack-channel", "slack-connection"])(
+    "sends the old Integrations link #%s to the GOAT Bot page with its scope",
+    async (hash) => {
+      const router = createSettingsRouter(`/settings/integrations?machine=remote-server#${hash}`);
+      await router.load();
+      expect(router.state.redirect).not.toBeUndefined();
+      await router.navigate(router.state.redirect!.options);
+      expect(router.state.location.pathname).toBe("/settings/goat-bot");
+      expect(router.state.location.hash).toBe(hash);
+      expect(router.state.location.search).toEqual({ machine: "remote-server" });
+    },
+  );
+
+  it("keeps other Integrations links on Integrations", async () => {
+    const router = createSettingsRouter("/settings/integrations#browser");
+    await router.load();
+    expect(router.state.redirect).toBeUndefined();
+    expect(router.state.location.pathname).toBe("/settings/integrations");
+    expect(router.state.location.hash).toBe("browser");
+  });
+
   it("replaces the default scope with an explicit environment, then replaces it with a project", async () => {
     const router = createSettingsRouter();
     await router.load();
@@ -97,7 +132,6 @@ describe("settings scope navigation", () => {
   it("clears a checkout when selecting all environments and all projects", async () => {
     const router = createSettingsRouter();
     await router.navigate({ to: "/settings/general", search: checkoutSearch, hash: "old-setting" });
-    // The scope selects send every axis explicitly so "all" does not read as "unchanged".
     await router.navigate({
       to: "/settings/general",
       search: { project: undefined, machine: undefined, checkout: undefined },
@@ -294,4 +328,26 @@ describe("scheduled task scope navigation", () => {
     await router.navigate({ to: "/settings/scheduled-tasks" });
     expect(router.state.matches.at(-1)?.search).toEqual(checkoutSearch);
   });
+});
+
+it("pins memory report destinations, clears inherited filters, and drops record ids on exit", async () => {
+  const router = createSettingsRouter();
+  await router.load();
+  await router.navigate({ to: "/settings/general", search: checkoutSearch });
+  await router.navigate({
+    to: "/settings/memory",
+    search: validateMemorySettingsSearch({
+      environmentId: "foreign-owner",
+      memorySpaceId: "00000000-0000-4000-8000-000000000001",
+      memoryId: "00000000-0000-4000-8000-000000000002",
+    }),
+  });
+  expect(router.state.location.search).toMatchObject({
+    environmentId: "foreign-owner",
+    machine: "foreign-owner",
+  });
+  expect(router.state.location.search.project).toBeUndefined();
+  expect(router.state.location.search.checkout).toBeUndefined();
+  await router.navigate({ to: "/settings/general" });
+  expect(router.state.location.search).toEqual({ machine: "foreign-owner" });
 });

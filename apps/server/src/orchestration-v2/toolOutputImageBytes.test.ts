@@ -1,9 +1,9 @@
-import { NodeId, ThreadId, TurnItemId, type OrchestrationV2TurnItem } from "@t3tools/contracts";
+import { NodeId, ThreadId, TurnItemId, type OrchestrationV2TurnItem } from "@goat/contracts";
 import {
   MAX_TOOL_OUTPUT_IMAGE_BASE64_LENGTH,
   MAX_TOOL_OUTPUT_IMAGES,
   toolOutputImages,
-} from "@t3tools/shared/toolOutput";
+} from "@goat/shared/toolOutput";
 import * as DateTime from "effect/DateTime";
 import { describe, expect, it } from "vite-plus/test";
 
@@ -11,7 +11,6 @@ import { stripUnservedToolOutputImageBytes } from "./toolOutputImageBytes.ts";
 
 const PNG_BYTES = 3_000;
 const PNG_BASE64 = Buffer.alloc(PNG_BYTES, 7).toString("base64");
-// 3,001 bytes encode with `=` padding, which must not count as data.
 const PADDED_BASE64 = Buffer.alloc(PNG_BYTES + 1, 9).toString("base64");
 
 const now = DateTime.makeUnsafe("2026-10-06T00:00:00.000Z");

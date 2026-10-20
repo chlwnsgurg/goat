@@ -1,6 +1,6 @@
 import type * as AcpSchema from "effect-acp/compat";
-import type { AcpToolCallState } from "@t3tools/provider-acp/server/runtimeModel";
-import type { AcpAdapterV2SubagentUpdate } from "@t3tools/provider-acp/server/adapter";
+import type { AcpToolCallState } from "@goat/provider-acp/server/runtimeModel";
+import type { AcpAdapterV2SubagentUpdate } from "@goat/provider-acp/server/adapter";
 
 function record(value: unknown): Record<string, unknown> | undefined {
   return typeof value === "object" && value !== null && !Array.isArray(value)
@@ -8,7 +8,6 @@ function record(value: unknown): Record<string, unknown> | undefined {
     : undefined;
 }
 
-/** Devin's typed extension metadata, captured from its native ACP stream. */
 export function normalizeDevinSessionUpdate(
   notification: AcpSchema.SessionNotification,
 ): AcpSchema.SessionNotification {

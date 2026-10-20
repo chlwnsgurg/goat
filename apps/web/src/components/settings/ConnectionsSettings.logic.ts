@@ -1,11 +1,16 @@
+import { buildMobilePairingLink } from "@goat/shared/mobilePairingLink";
+import { readHostedPairingRequest } from "@goat/shared/remote";
+import { isLoopbackHostname } from "../../environments/primary/target";
+import { resolveDesktopPairingUrl } from "./pairingUrls";
 import {
   type AdvertisedEndpoint,
   type AuthGrantScope,
   AuthTerminalOperateScope,
   AuthTerminalReadScope,
   type DesktopBridge,
+  type DesktopServerExposureState,
   type DesktopWslState,
-} from "@t3tools/contracts";
+} from "@goat/contracts";
 
 /**
  * Operating terminals without being able to list them leaves a client
@@ -30,7 +35,6 @@ export function togglePairingScopeSelection(
     : next;
 }
 
-/** A missing access list says nothing about whether other clients exist. */
 export function canRevokeOtherClients(
   clientSessions: ReadonlyArray<{ readonly current: boolean }> | null,
 ): boolean {
@@ -48,6 +52,20 @@ export function isQrShareableEndpoint(endpoint: AdvertisedEndpoint): boolean {
   return endpoint.status !== "unavailable" && endpoint.reachability !== "loopback";
 }
 
+/**
+ * Copy for the Tailscale HTTPS row when no Tailscale endpoint is advertised.
+ * The desktop skips the Tailscale probe until Network access or Tailscale
+ * Serve is on (it can trigger a macOS privacy prompt), so a missing endpoint
+ * then means "not checked", not "not running".
+ */
+export function missingTailscaleEndpointDescription(
+  state: Pick<DesktopServerExposureState, "mode" | "tailscaleServeEnabled"> | null,
+): string {
+  return state && state.mode !== "network-accessible" && !state.tailscaleServeEnabled
+    ? "Turn on Network access to detect Tailscale."
+    : "Start Tailscale to set up HTTPS access through MagicDNS.";
+}
+
 export function isWslSettingsRowVisible(input: {
   readonly state: DesktopWslState | null;
   readonly error: string | null;
@@ -57,23 +75,15 @@ export function isWslSettingsRowVisible(input: {
 }
 
 export type QrEndpointOption = {
-  /** Unique per endpoint instance (AdvertisedEndpoint.id); safe as a React key. */
   readonly id: string;
   /**
    * Stable per endpoint *type* (endpointDefaultPreferenceKey). Multiple
    * endpoints can share one, so it is only used to match the saved default.
    */
   readonly preferenceKey: string;
-  /** False for endpoints that stay copyable but must never render as a QR. */
   readonly qrShareable: boolean;
 };
 
-/**
- * Resolves which endpoint the share panel shows: the user's explicit pick,
- * else the saved default endpoint, else the first QR-shareable option (so the
- * panel never opens on a loopback QR), else the first option. A stale
- * selectedId (endpoint disappeared) falls back rather than blanking the panel.
- */
 export function selectQrEndpointOption<T extends QrEndpointOption>(
   options: ReadonlyArray<T>,
   selectedId: string | null,
@@ -106,4 +116,60 @@ export async function applyWslEnableSelection(input: {
     await bridge.setWslDistro(nextDistro);
   }
   return await bridge.setWslBackendEnabled(true);
+}
+
+export type HubPhoneQrTarget = {
+  readonly endpoint: AdvertisedEndpoint;
+  readonly endpointOrigin: string;
+  readonly kind: "tailscale-https" | "tailnet" | "lan";
+};
+
+export function selectHubPhoneQrTarget(
+  endpoints: ReadonlyArray<AdvertisedEndpoint>,
+): HubPhoneQrTarget | null {
+  const candidates = endpoints.flatMap((endpoint): HubPhoneQrTarget[] => {
+    if (endpoint.status !== "available" || endpoint.reachability === "loopback") return [];
+    let url: URL;
+    try {
+      url = new URL(endpoint.httpBaseUrl);
+    } catch {
+      return [];
+    }
+    if (
+      (url.protocol !== "http:" && url.protocol !== "https:") ||
+      isLoopbackHostname(url.hostname) ||
+      url.username !== "" ||
+      url.password !== ""
+    )
+      return [];
+    const base = { endpoint, endpointOrigin: url.origin };
+    if (
+      endpoint.provider.id === "tailscale" &&
+      endpoint.reachability === "private-network" &&
+      endpoint.id.startsWith("tailscale-magicdns:") &&
+      url.protocol === "https:"
+    )
+      return [{ ...base, kind: "tailscale-https" }];
+    if (endpoint.provider.id === "tailscale" && endpoint.reachability === "private-network")
+      return [{ ...base, kind: "tailnet" }];
+    return endpoint.reachability === "lan" ? [{ ...base, kind: "lan" }] : [];
+  });
+  return (
+    candidates.find((candidate) => candidate.kind === "tailscale-https") ??
+    candidates.find((candidate) => candidate.kind === "tailnet") ??
+    candidates.find((candidate) => candidate.kind === "lan") ??
+    null
+  );
+}
+
+export function buildHubPhoneQrPayload(target: HubPhoneQrTarget, credential: string): string {
+  return buildMobilePairingLink(resolveDesktopPairingUrl(target.endpointOrigin, credential));
+}
+
+export function buildClientPairingQrPayload(pairingUrl: string): string {
+  const hosted = readHostedPairingRequest(new URL(pairingUrl));
+  const directUrl = hosted
+    ? resolveDesktopPairingUrl(new URL(hosted.host).origin, hosted.token)
+    : pairingUrl;
+  return buildMobilePairingLink(directUrl);
 }

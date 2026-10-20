@@ -8,7 +8,7 @@ import {
   type GitActionProgressEvent,
   type GitRunStackedActionInput,
   type GitRunStackedActionResult,
-} from "@t3tools/contracts";
+} from "@goat/contracts";
 import { describe, expect, it } from "@effect/vitest";
 import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
@@ -680,7 +680,6 @@ describe("vcsActionState", () => {
         expect(registry.get(manager.stateAtom(targetKey))).toEqual(EMPTY_VCS_ACTION_STATE);
         expect(registry.get(state).revision).toBe(1);
         expect(removed).toEqual([`${environmentId}:*`]);
-        // The server links a created pull request to this thread, so the id must ride along.
         expect(rpcInputs).toEqual([
           { actionId: successfulTransportActionId, cwd, action, threadId, projectId },
         ]);
@@ -721,8 +720,6 @@ describe("vcsActionState", () => {
   );
 });
 
-// Transport fixtures have a source-control-only session; authorization edge cases
-// are exercised by commandPermissions.test.ts.
 vi.mock("./session.ts", () => ({
   createEnvironmentSessionAtoms: () => ({ sessionStateAtom: grantedSessions }),
 }));

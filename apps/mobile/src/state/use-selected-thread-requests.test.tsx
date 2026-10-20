@@ -19,7 +19,8 @@ vi.mock("@effect/atom-react", () => ({
           : {},
 }));
 vi.mock("./use-composer-drafts", () => ({
-  composerDraftsAtom: "drafts",
+  composerDraftsAtom: "all-drafts",
+  questionAttachmentDraftsAtom: () => "drafts",
   clearComposerDraft: vi.fn(),
 }));
 vi.mock("./composer-attachment-uploads", async () => ({
@@ -77,7 +78,7 @@ vi.mock("./use-thread-detail", () => ({
   }),
 }));
 
-import { ApprovalRequestId, EnvironmentId, ThreadId } from "@t3tools/contracts";
+import { ApprovalRequestId, EnvironmentId, ThreadId } from "@goat/contracts";
 import { questionAttachmentDraftKey } from "./question-attachments";
 import { useSelectedThreadRequests } from "./use-selected-thread-requests";
 

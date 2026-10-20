@@ -1,6 +1,6 @@
-import type { RuntimeSubagent } from "@t3tools/client-runtime/state/subagentRuntime";
-import { isOrchestrationV2WorkActive } from "@t3tools/contracts";
-import { deriveSubagentElapsedMs } from "@t3tools/shared/orchestrationTiming";
+import type { RuntimeSubagent } from "@goat/client-runtime/state/subagentRuntime";
+import { isOrchestrationV2WorkActive } from "@goat/contracts";
+import { deriveSubagentElapsedMs } from "@goat/shared/orchestrationTiming";
 import { useEffect, useRef } from "react";
 
 function formatElapsedSeconds(totalSeconds: number): string {
@@ -16,7 +16,6 @@ function formatElapsedSeconds(totalSeconds: number): string {
   return `${hours}h ${String(minutes % 60).padStart(2, "0")}m`;
 }
 
-/** Short form for tight rows: "45s", "12m", "1.5h", "14h". Rounds down. */
 export function formatCompactElapsedSeconds(totalSeconds: number): string {
   const seconds = Math.max(0, Math.floor(totalSeconds));
   if (seconds < 60) return `${seconds}s`;
@@ -26,11 +25,6 @@ export function formatCompactElapsedSeconds(totalSeconds: number): string {
   return `${Math.floor(minutes / 6) / 10}h`;
 }
 
-/**
- * Elapsed time for the current activation. Live agents self-tick via DOM
- * writes (zero React commits per tick); settled agents freeze at completedAt.
- * `compact` drops the smaller unit for narrow rows such as Lineage.
- */
 export function AgentElapsed({
   agent,
   compact = false,

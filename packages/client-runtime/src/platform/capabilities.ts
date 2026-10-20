@@ -3,16 +3,23 @@ import {
   type DesktopSshEnvironmentBootstrap,
   type DesktopSshEnvironmentTarget,
   EnvironmentId,
-} from "@t3tools/contracts";
+  type ExecutionEnvironmentDescriptor,
+} from "@goat/contracts";
 import * as Context from "effect/Context";
 import type * as Effect from "effect/Effect";
 import type * as Option from "effect/Option";
 
 import type { ConnectionAttemptError } from "../connection/model.ts";
+import type { AuthorizedRemoteEnvironment } from "../authorization/service.ts";
+import type { VerifiedSshEndpoint } from "../environment/descriptor.ts";
+import type { SshPairingGrant } from "../connection/catalog.ts";
 
 export interface PreparedSshEnvironment {
   readonly bootstrap: DesktopSshEnvironmentBootstrap;
   readonly bearerToken: string;
+  readonly verifiedEndpoint?: VerifiedSshEndpoint;
+  readonly authorization?: AuthorizedRemoteEnvironment;
+  readonly sshPairingGrant?: SshPairingGrant;
 }
 
 export interface ProvisionedSshEnvironment extends PreparedSshEnvironment {
@@ -31,35 +38,34 @@ export class CloudSession extends Context.Service<
     readonly identity: Effect.Effect<Option.Option<CloudSessionIdentity>>;
     readonly clerkToken: Effect.Effect<string, ConnectionAttemptError>;
   }
->()("@t3tools/client-runtime/platform/capabilities/CloudSession") {}
+>()("@goat/client-runtime/platform/capabilities/CloudSession") {}
 
 export class RelayDeviceIdentity extends Context.Service<
   RelayDeviceIdentity,
   {
     readonly deviceId: Effect.Effect<Option.Option<string>, ConnectionAttemptError>;
   }
->()("@t3tools/client-runtime/platform/capabilities/RelayDeviceIdentity") {}
+>()("@goat/client-runtime/platform/capabilities/RelayDeviceIdentity") {}
 
 export class ClientPresentation extends Context.Service<
   ClientPresentation,
   {
     readonly metadata: AuthClientPresentationMetadata;
   }
->()("@t3tools/client-runtime/platform/capabilities/ClientPresentation") {}
+>()("@goat/client-runtime/platform/capabilities/ClientPresentation") {}
 
 export class PrimaryEnvironmentAuth extends Context.Service<
   PrimaryEnvironmentAuth,
   {
     readonly bearerToken: Effect.Effect<Option.Option<string>, ConnectionAttemptError>;
   }
->()("@t3tools/client-runtime/platform/capabilities/PrimaryEnvironmentAuth") {}
+>()("@goat/client-runtime/platform/capabilities/PrimaryEnvironmentAuth") {}
 
 export class SshEnvironmentGateway extends Context.Service<
   SshEnvironmentGateway,
   {
     /**
-     * Starts or reuses the remote server and pairs with it. With
-     * `expectedEnvironmentId`, a server that is a different machine fails
+     * With `expectedEnvironmentId`, a server that is a different machine fails
      * before its one-time pairing credential is spent.
      */
     readonly provision: (
@@ -67,13 +73,26 @@ export class SshEnvironmentGateway extends Context.Service<
       expectedEnvironmentId?: EnvironmentId,
       options?: { readonly keyOnly?: boolean },
     ) => Effect.Effect<ProvisionedSshEnvironment, ConnectionAttemptError>;
+    /**
+     * Starts or reuses the remote server for a saved connection. Returns
+     * `bearerToken`, the token this client saved from an earlier pairing, while
+     * the host still accepts it with the standard scopes, and pairs again only
+     * when it does not, so a reconnect adds no session on the host.
+     */
     readonly prepare: (input: {
       readonly connectionId: string;
       readonly expectedEnvironmentId: EnvironmentId;
       readonly target: DesktopSshEnvironmentTarget;
+      readonly bearerToken?: string;
+      readonly onHostAnswered?: Effect.Effect<void>;
+      /** Runs beside saved-session validation; its result is used only if that session is accepted. */
+      readonly authorize?: (
+        prepared: PreparedSshEnvironment,
+        onEndpointVerified: (descriptor: ExecutionEnvironmentDescriptor) => Effect.Effect<void>,
+      ) => Effect.Effect<AuthorizedRemoteEnvironment, ConnectionAttemptError>;
     }) => Effect.Effect<PreparedSshEnvironment, ConnectionAttemptError>;
     readonly disconnect: (
       target: DesktopSshEnvironmentTarget,
     ) => Effect.Effect<void, ConnectionAttemptError>;
   }
->()("@t3tools/client-runtime/platform/capabilities/SshEnvironmentGateway") {}
+>()("@goat/client-runtime/platform/capabilities/SshEnvironmentGateway") {}

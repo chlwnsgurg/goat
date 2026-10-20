@@ -1,4 +1,4 @@
-import * as HostProcess from "@t3tools/shared/HostProcess";
+import * as HostProcess from "@goat/shared/HostProcess";
 import {
   CLI_RELEASE_BASE_URL_ENV,
   CLI_RELEASE_REPOSITORY,
@@ -7,7 +7,7 @@ import {
   cliReleaseChannelOf,
   newestCliReleaseVersion,
   type CliReleaseChannel,
-} from "@t3tools/shared/cliRelease";
+} from "@goat/shared/cliRelease";
 import * as Clock from "effect/Clock";
 import * as Console from "effect/Console";
 import * as Duration from "effect/Duration";
@@ -48,13 +48,12 @@ const ReleaseIndex = Schema.Array(
   Schema.Struct({
     tag_name: Schema.String,
     draft: Schema.optional(Schema.Boolean),
+    published_at: Schema.optional(Schema.NullOr(Schema.String)),
   }),
 );
 const decodeReleaseIndex = Schema.decodeUnknownEffect(Schema.fromJsonString(ReleaseIndex));
 
 const RELEASE_INDEX_TIMEOUT = Duration.seconds(30);
-// Enough to walk past a long run of nightlies without hammering the API when
-// a channel genuinely has nothing published.
 const RELEASE_INDEX_MAX_PAGES = 10;
 
 const RELEASE_INDEX_CACHE_TTL_MS = 10 * 60 * 1000;
@@ -90,123 +89,138 @@ class CliReleaseIndexError extends Schema.TaggedError<CliReleaseIndexError>()(
           : this.failure === "unpublished"
             ? `No published ${this.channel} release was found.`
             : `Could not list goat releases${this.status === undefined ? "" : ` (HTTP ${this.status})`}.`;
-    return `${reason} Run goat update <version>, or set T3CODE_VERSION to an exact published version when running the installer to bypass release discovery.`;
+    return `${reason} Run goat update <version>, or set GOAT_VERSION to an exact published version when running the installer to bypass release discovery.`;
   }
 }
 
-/** Lists releases for one T3 home, reusing a recent repository/channel index. */
-export const resolveNewestVersion = Effect.fn("cli.update.resolve_newest")(function* (input: {
-  readonly channel: CliReleaseChannel;
-  readonly baseDir: string;
-}) {
-  const { channel } = input;
-  const fs = yield* FileSystem.FileSystem;
-  const path = yield* Path.Path;
-  const httpClient = yield* HttpClient.HttpClient;
-  const cacheDirectory = path.join(input.baseDir, "cache");
-  const cachePath = path.join(cacheDirectory, "release-index.json");
-  const now = yield* Clock.currentTimeMillis;
-  const cache = yield* fs.readFileString(cachePath).pipe(
-    Effect.flatMap(decodeReleaseIndexCache),
-    Effect.orElseSucceed(() => []),
-  );
-  const fresh = cache.filter(
-    (entry) => now >= entry.cachedAt && now - entry.cachedAt < RELEASE_INDEX_CACHE_TTL_MS,
-  );
-  const cached = fresh.find(
-    (entry) => entry.repository === CLI_RELEASE_REPOSITORY && entry.channel === channel,
-  );
-  if (cached !== undefined) {
-    const version = newestCliReleaseVersion(cached.releases, channel);
-    if (version !== undefined) return version;
-  }
+/** Lists releases for one GOAT home, reusing a recent repository/channel index. */
+export const resolveNewestRelease = Effect.fn("cli.update.resolve_newest_release")(
+  function* (input: { readonly channel: CliReleaseChannel; readonly baseDir: string }) {
+    const { channel } = input;
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const httpClient = yield* HttpClient.HttpClient;
+    const cacheDirectory = path.join(input.baseDir, "cache");
+    const cachePath = path.join(cacheDirectory, "release-index.json");
+    const now = yield* Clock.currentTimeMillis;
+    const cache = yield* fs.readFileString(cachePath).pipe(
+      Effect.flatMap(decodeReleaseIndexCache),
+      Effect.orElseSucceed(() => []),
+    );
+    const fresh = cache.filter(
+      (entry) => now >= entry.cachedAt && now - entry.cachedAt < RELEASE_INDEX_CACHE_TTL_MS,
+    );
+    const cached = fresh.find(
+      (entry) => entry.repository === CLI_RELEASE_REPOSITORY && entry.channel === channel,
+    );
+    if (cached !== undefined) {
+      const version = newestCliReleaseVersion(cached.releases, channel);
+      if (version !== undefined) {
+        return {
+          version,
+          publishedAt:
+            cached.releases.find((release) => release.tag_name === `v${version}`)?.published_at ??
+            undefined,
+        };
+      }
+    }
 
-  const listed: Array<(typeof ReleaseIndex.Type)[number]> = [];
-  for (let page = 1; page <= RELEASE_INDEX_MAX_PAGES; page += 1) {
-    const body = yield* Effect.gen(function* () {
-      const response = yield* httpClient
-        .execute(
-          HttpClientRequest.get(cliReleaseIndexPageUrl(page)).pipe(
-            HttpClientRequest.setHeader("Accept", "application/vnd.github+json"),
-          ),
-        )
-        .pipe(
+    const listed: Array<(typeof ReleaseIndex.Type)[number]> = [];
+    for (let page = 1; page <= RELEASE_INDEX_MAX_PAGES; page += 1) {
+      const body = yield* Effect.gen(function* () {
+        const response = yield* httpClient
+          .execute(
+            HttpClientRequest.get(cliReleaseIndexPageUrl(page)).pipe(
+              HttpClientRequest.setHeader("Accept", "application/vnd.github+json"),
+            ),
+          )
+          .pipe(
+            Effect.mapError(
+              (cause) => new CliReleaseIndexError({ failure: "network", channel, cause }),
+            ),
+          );
+        const text = yield* response.text.pipe(
           Effect.mapError(
-            (cause) => new CliReleaseIndexError({ failure: "network", channel, cause }),
+            (cause) =>
+              new CliReleaseIndexError({
+                failure: "network",
+                channel,
+                status: response.status,
+                cause,
+              }),
           ),
         );
-      const text = yield* response.text.pipe(
+        if (response.status < 200 || response.status >= 300) {
+          return yield* new CliReleaseIndexError({
+            failure: "http",
+            channel,
+            status: response.status,
+            secondaryRateLimit:
+              response.status === 403 &&
+              (response.headers["retry-after"] !== undefined ||
+                /secondary rate limit|abuse detection/i.test(text)),
+          });
+        }
+        return text;
+      }).pipe(
+        Effect.timeoutOrElse({
+          duration: RELEASE_INDEX_TIMEOUT,
+          orElse: () => Effect.fail(new CliReleaseIndexError({ failure: "timeout", channel })),
+        }),
+        Effect.retry({
+          times: 2,
+          schedule: Schedule.exponential("1 second"),
+          while: (error) =>
+            error.failure === "network" ||
+            error.failure === "timeout" ||
+            (error.failure === "http" &&
+              (error.status === 429 ||
+                (error.status !== undefined && error.status >= 500) ||
+                error.secondaryRateLimit === true)),
+        }),
+      );
+      const releases = yield* decodeReleaseIndex(body).pipe(
         Effect.mapError(
-          (cause) =>
-            new CliReleaseIndexError({
-              failure: "network",
-              channel,
-              status: response.status,
-              cause,
-            }),
+          (cause) => new CliReleaseIndexError({ failure: "invalid", channel, cause }),
         ),
       );
-      if (response.status < 200 || response.status >= 300) {
-        return yield* new CliReleaseIndexError({
-          failure: "http",
-          channel,
-          status: response.status,
-          secondaryRateLimit:
-            response.status === 403 &&
-            (response.headers["retry-after"] !== undefined ||
-              /secondary rate limit|abuse detection/i.test(text)),
-        });
+      listed.push(...releases);
+      const version = newestCliReleaseVersion(releases, channel);
+      if (version !== undefined) {
+        const cachedAt = yield* Clock.currentTimeMillis;
+        // Cache publication is atomic and best effort; an unwritable cache must not block an update.
+        yield* Effect.gen(function* () {
+          yield* fs.makeDirectory(cacheDirectory, { recursive: true });
+          const staging = yield* fs.makeTempDirectoryScoped({
+            directory: cacheDirectory,
+            prefix: ".release-index-",
+          });
+          const temporary = path.join(staging, "release-index.json");
+          const encoded = yield* encodeReleaseIndexCache([
+            ...fresh.filter(
+              (entry) => entry.repository !== CLI_RELEASE_REPOSITORY || entry.channel !== channel,
+            ),
+            { repository: CLI_RELEASE_REPOSITORY, channel, cachedAt, releases: listed },
+          ]);
+          yield* fs.writeFileString(temporary, encoded);
+          yield* fs.rename(temporary, cachePath);
+        }).pipe(Effect.scoped, Effect.ignore);
+        return {
+          version,
+          publishedAt:
+            releases.find((release) => release.tag_name === `v${version}`)?.published_at ??
+            undefined,
+        };
       }
-      return text;
-    }).pipe(
-      Effect.timeoutOrElse({
-        duration: RELEASE_INDEX_TIMEOUT,
-        orElse: () => Effect.fail(new CliReleaseIndexError({ failure: "timeout", channel })),
-      }),
-      Effect.retry({
-        times: 2,
-        schedule: Schedule.exponential("1 second"),
-        while: (error) =>
-          error.failure === "network" ||
-          error.failure === "timeout" ||
-          (error.failure === "http" &&
-            (error.status === 429 ||
-              (error.status !== undefined && error.status >= 500) ||
-              error.secondaryRateLimit === true)),
-      }),
-    );
-    const releases = yield* decodeReleaseIndex(body).pipe(
-      Effect.mapError((cause) => new CliReleaseIndexError({ failure: "invalid", channel, cause })),
-    );
-    listed.push(...releases);
-    const version = newestCliReleaseVersion(releases, channel);
-    if (version !== undefined) {
-      const cachedAt = yield* Clock.currentTimeMillis;
-      // Cache publication is atomic and best effort; an unwritable cache must not block an update.
-      yield* Effect.gen(function* () {
-        yield* fs.makeDirectory(cacheDirectory, { recursive: true });
-        const staging = yield* fs.makeTempDirectoryScoped({
-          directory: cacheDirectory,
-          prefix: ".release-index-",
-        });
-        const temporary = path.join(staging, "release-index.json");
-        const encoded = yield* encodeReleaseIndexCache([
-          ...fresh.filter(
-            (entry) => entry.repository !== CLI_RELEASE_REPOSITORY || entry.channel !== channel,
-          ),
-          { repository: CLI_RELEASE_REPOSITORY, channel, cachedAt, releases: listed },
-        ]);
-        yield* fs.writeFileString(temporary, encoded);
-        yield* fs.rename(temporary, cachePath);
-      }).pipe(Effect.scoped, Effect.ignore);
-      return version;
+      if (releases.length === 0) break;
     }
-    if (releases.length === 0) break;
-  }
-  return yield* new CliReleaseIndexError({ failure: "unpublished", channel });
-});
+    return yield* new CliReleaseIndexError({ failure: "unpublished", channel });
+  },
+);
 
-/** Whether a launcher target lives inside `<baseDir>/runtime/goat/versions`. */
+export const resolveNewestVersion = (input: Parameters<typeof resolveNewestRelease>[0]) =>
+  resolveNewestRelease(input).pipe(Effect.map((release) => release.version));
+
 export function launcherOwnsVersionsDir(
   path: Path.Path,
   versionsDir: string,
@@ -217,16 +231,11 @@ export function launcherOwnsVersionsDir(
 }
 
 /**
- * The launcher the install scripts leave behind: a symlink at `<bin>/goat` on
- * POSIX, a `goat.cmd` shim on Windows. `goat update` repoints it so the next `goat`
- * invocation is the new version. Only a launcher that already points into
- * this home's `runtime/goat/versions` tree is touched; a plain copy of the
- * executable, or a launcher for some other install, is left alone.
+ * Only a launcher that already points into this home's `runtime/goat/versions` tree is touched;
+ * a plain copy of the executable, or a launcher for some other install, is left alone.
  */
 export const repointLauncher = Effect.fn("cli.update.repoint_launcher")(function* (input: {
-  /** Path the current process was started through, if known. */
   readonly launchedAs: string | undefined;
-  /** `<baseDir>/runtime/goat/versions` of the home being updated. */
   readonly versionsDir: string;
   readonly targetEntryPath: string;
 }) {
@@ -238,10 +247,6 @@ export const repointLauncher = Effect.fn("cli.update.repoint_launcher")(function
     launcherOwnsVersionsDir(path, input.versionsDir, candidate);
 
   if (platform === "win32") {
-    // The shim runs the executable by absolute path, so the executable sees
-    // itself as argv0; the shim is the `goat.cmd` next to it only when launched
-    // from an install script's bin directory. Find it by searching the
-    // directories that would resolve `goat` on this shell's PATH.
     const shimPath = yield* findWindowsShim(input.launchedAs);
     if (shimPath === undefined) return Option.none<string>();
     const current = yield* fs.readFileString(shimPath).pipe(Effect.option);
@@ -276,10 +281,9 @@ export const repointLauncher = Effect.fn("cli.update.repoint_launcher")(function
 });
 
 /**
- * The path the executable was started through. Node keeps the shell's
- * spelling in argv0: a launcher symlink or `./goat` resolves against the
- * working directory, while a bare `goat` was found on PATH and has to be
- * looked up there again, or the launcher symlink is never seen.
+ * Node keeps the shell's spelling in argv0: a launcher symlink or `./goat` resolves against the
+ * working directory, while a bare `goat` was found on PATH and has to be looked up there again,
+ * or the launcher symlink is never seen.
  */
 export const resolveLauncherPath = Effect.gen(function* () {
   const path = yield* Path.Path;
@@ -314,7 +318,7 @@ export const findWindowsShim = Effect.fn("cli.update.find_windows_shim")(functio
   const path = yield* Path.Path;
   const environment = yield* HostProcess.Environment;
   const candidates = [
-    ...(environment["T3CODE_INSTALL_BIN_DIR"] ? [environment["T3CODE_INSTALL_BIN_DIR"]] : []),
+    ...(environment["GOAT_INSTALL_BIN_DIR"] ? [environment["GOAT_INSTALL_BIN_DIR"]] : []),
     ...(environment["PATH"] ?? environment["Path"] ?? "").split(";"),
   ].filter((entry) => entry.trim().length > 0);
   for (const directory of candidates) {
@@ -388,16 +392,6 @@ export const updateCommand = Command.make("update", {
   ),
 );
 
-/**
- * A `goat serve` or `goat` someone started by hand, as opposed to the one the
- * background service supervises. The server records its pid on startup; a
- * stale file from a crashed server is ignored by checking the pid is alive.
- *
- * Servers from before `serviceManaged` was recorded cannot be told apart by
- * the file alone, so the launcher-supervised case is also recognised by
- * lineage: a service server's parent is the launcher, and on Linux that
- * launcher runs inside the unit's cgroup.
- */
 const findForegroundServer = Effect.fn("cli.update.find_foreground_server")(function* (input: {
   readonly serverRuntimeStatePath: string;
   readonly serviceInstalled: boolean;
@@ -418,10 +412,15 @@ const belongsToBootService = Effect.fn("cli.update.belongs_to_boot_service")(fun
   const runner = yield* ProcessRunner.ProcessRunner;
   if (platform === "linux") {
     const cgroup = yield* fs.readFileString(`/proc/${pid}/cgroup`).pipe(Effect.option);
-    return Option.isSome(cgroup) && cgroup.value.includes("/t3code.service");
+    // A service that has not been migrated yet still runs under the legacy unit.
+    return (
+      Option.isSome(cgroup) &&
+      [BootService.BOOT_SERVICE_NAMES, BootService.LEGACY_BOOT_SERVICE_NAMES].some((names) =>
+        cgroup.value.includes(`/${names.unitFile}`),
+      )
+    );
   }
   if (platform === "darwin") {
-    // The service server's parent is the launcher process.
     const parent = yield* runner
       .run({
         command: "ps",
@@ -476,10 +475,6 @@ const runUpdate = Effect.fn("cli.update.run")(function* (input: {
   ).pipe(Effect.ensuring(Effect.sync(progress.finish)));
   const targetChannel = cliReleaseChannelOf(targetVersion);
 
-  // Preview is a maintainers' dogfooding train: it is cut by hand from
-  // unmerged branches, receives no fixes, and is never offered to anyone.
-  // Reaching it from stable or nightly takes an explicit ask and an explicit
-  // acknowledgement; the flag alone is not enough from a script.
   const currentChannel = cliReleaseChannelOf(currentVersion);
   if (targetChannel === "preview" && currentChannel !== "preview") {
     yield* Console.log(
@@ -505,10 +500,8 @@ const runUpdate = Effect.fn("cli.update.run")(function* (input: {
     }
   }
 
-  // Work out everything that will be touched before touching anything, so the
-  // user sees one plan and one question rather than a surprise restart.
   const status = yield* service.status;
-  // The unit name is per user, not per T3 home. Only touch the service when it
+  // The unit name is per user, not per GOAT home. Only touch the service when it
   // serves the home this update targets; otherwise it belongs to another
   // install on this machine and restarting it would take that server down.
   const servesThisHome =
@@ -519,18 +512,8 @@ const runUpdate = Effect.fn("cli.update.run")(function* (input: {
     serverRuntimeStatePath: input.serverRuntimeStatePath,
     serviceInstalled,
   });
-  // What this machine runs is the executable behind the launcher and, when a
-  // service is installed for this home, the version that service runs. Either
-  // being stale is an update to do, and the newest of the two is what the
-  // downgrade check protects.
   const serviceVersion = serviceInstalled ? status.installedVersion : undefined;
   const executableCurrent = targetVersion === currentVersion;
-  // A service whose recorded version is missing or unreadable is not known
-  // to be current, so it gets the update rather than being skipped. Nor is
-  // one on the right version that is stopped, disabled, or still running the
-  // version before it (an earlier update where the restart was declined):
-  // `status.current` covers all of that when the target is this executable,
-  // and the problem list is what can be judged for any other target.
   const restartPending = status.problems?.includes("restart-pending") === true;
   const serviceCurrent =
     !serviceInstalled ||
@@ -652,12 +635,10 @@ const runUpdate = Effect.fn("cli.update.run")(function* (input: {
     targetEntryPath: runtime.entryPath,
   });
 
-  // The service switch runs in this process against the target version: the
-  // downloaded runtime has already proven it runs (the `--version` check
-  // above), and doing it here rather than through the target's own CLI means
-  // a downgrade to a version without today's commands still works. The unit
-  // is rewritten either way so a later `goat service restart` lands on the new
-  // version; only the restart itself waits for the user's answer.
+  // The service switch runs in this process against the target version: the downloaded runtime
+  // has already proven it runs (the `--version` check above), and doing it here rather than
+  // through the target's own CLI means a downgrade to a version without today's commands still
+  // works.
   let serviceUpdated = false;
   if (serviceInstalled && !serviceCurrent) {
     yield* Console.log(
