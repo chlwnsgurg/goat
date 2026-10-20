@@ -392,10 +392,9 @@ describe("ProviderModelPicker add provider", () => {
     vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
     const container = document.createElement("div");
     document.body.append(container);
-    const root = createRoot(container);
-    await act(async () => root.render(node));
-    await act(async () => container.querySelector("button")!.click());
-    return root;
+    pickerRoot = createRoot(container);
+    await act(async () => pickerRoot!.render(node));
+    await click(container.querySelector("button")!);
   }
   const addButton = () =>
     document.querySelector<HTMLButtonElement>("[data-model-picker-add-provider] button");
@@ -413,7 +412,7 @@ describe("ProviderModelPicker add provider", () => {
   // The wizard is code-split, so the first open waits for its chunk.
   const openSetup = async () => {
     await act(async () => addButton()!.click());
-    await vi.waitFor(() => expect(setupDialog()).not.toBeNull());
+    await expect.element(page.getByRole("dialog", { name: "Add provider" })).toBeVisible();
   };
 
   afterEach(() => {
@@ -421,62 +420,55 @@ describe("ProviderModelPicker add provider", () => {
   });
 
   it("ends the rail with Add provider, reachable with the arrow keys", async () => {
-    const root = await openPicker(<Harness />);
+    await openPicker(<Harness />);
 
     expect(addButton()?.getAttribute("aria-label")).toBe("Add provider");
     railButton("Cursor")!.focus();
     await act(async () => userEvent.keyboard("{ArrowDown}"));
     expect(document.activeElement).toBe(addButton());
-    await act(async () => root.unmount());
   });
 
   it("explains why it is unavailable without providers:manage", async () => {
     addProvider.canManage = false;
-    const root = await openPicker(<Harness />);
+    await openPicker(<Harness />);
 
     expect(addButton()?.getAttribute("aria-label")).toBe(
       "You don't have permission to manage providers on Studio Mac.",
     );
     await act(async () => addButton()!.click());
     expect(setupDialog()).toBeNull();
-    await act(async () => root.unmount());
   });
 
   it("is not offered outside the composer", async () => {
-    const root = await openPicker(<Harness composer={false} />);
+    await openPicker(<Harness composer={false} />);
 
     expect(railButton("Codex")).not.toBeNull();
     expect(addButton()).toBeNull();
-    await act(async () => root.unmount());
   });
 
   it("opens setup and returns to the picker on the new provider with its models", async () => {
-    const root = await openPicker(<Harness />);
+    await openPicker(<Harness />);
     await openSetup();
 
     expect(setupDialog()?.textContent).toContain("Studio Mac");
-    expect(document.querySelector("[data-model-picker-sidebar]")).toBeNull();
+    await expect.element(page.getByRole("toolbar", { name: "Providers" })).not.toBeInTheDocument();
 
     await clickText("Finish setup");
-    expect(railButton("Claude New")?.getAttribute("aria-pressed")).toBe("true");
+    await expect
+      .element(page.getByRole("button", { name: "Claude New", exact: true }))
+      .toHaveAttribute("aria-pressed", "true");
     // The model list is virtualized and fills in after it measures.
-    await vi.waitFor(() =>
-      expect(document.querySelector("[data-model-picker-content]")?.textContent).toContain(
-        "Claude Opus",
-      ),
-    );
-    expect(document.querySelector("[data-model-picker-content]")?.textContent).not.toContain(
-      "GPT 5",
-    );
-    await act(async () => root.unmount());
+    await expect.element(page.getByRole("option", { name: /Claude Opus/ })).toBeVisible();
+    await expect.element(page.getByRole("option", { name: /GPT 5/ })).not.toBeInTheDocument();
   });
 
   it("returns to the picker when setup is closed", async () => {
-    const root = await openPicker(<Harness />);
+    await openPicker(<Harness />);
     await openSetup();
     await clickText("Close setup");
 
-    expect(railButton("Codex")?.getAttribute("aria-pressed")).toBe("true");
-    await act(async () => root.unmount());
+    await expect
+      .element(page.getByRole("button", { name: "Codex", exact: true }))
+      .toHaveAttribute("aria-pressed", "true");
   });
 });

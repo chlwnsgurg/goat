@@ -765,6 +765,8 @@ it.layer(NodeServices.layer)("EnvironmentAuth.layer", (it) => {
       });
       yield* upgrade({ origin: "goat://app" });
       yield* upgrade({ origin: "t3code://app" });
+      yield* upgrade({ origin: "goat-dev://app" });
+      yield* upgrade({ origin: "t3code-dev://app" });
       yield* upgrade({ origin: "http://localhost:5733" });
       yield* upgrade({});
 
@@ -796,7 +798,11 @@ it.layer(NodeServices.layer)("EnvironmentAuth.layer", (it) => {
         } as never);
 
       yield* post({ origin: "http://192.168.1.50:5733", "sec-fetch-site": "same-origin" });
-      yield* post({ origin: "http://localhost:13773" });
+      const sameOrigin = yield* post({ origin: "http://localhost:13773" });
+      for (const origin of ["goat://app", "t3code://app", "goat-dev://app", "t3code-dev://app"]) {
+        const authenticated = yield* post({ origin });
+        expect(authenticated.sessionId).toBe(sameOrigin.sessionId);
+      }
 
       const otherPort = yield* Effect.flip(
         post({ origin: "http://localhost:3000", "sec-fetch-site": "same-site" }),
