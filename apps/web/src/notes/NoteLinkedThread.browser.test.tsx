@@ -1,4 +1,3 @@
-// @vitest-environment jsdom
 import { EnvironmentId, ThreadId, type NoteThreadLink } from "@goat/contracts";
 import {
   createMemoryHistory,

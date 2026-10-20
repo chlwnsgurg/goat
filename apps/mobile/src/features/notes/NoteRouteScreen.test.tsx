@@ -1,4 +1,3 @@
-// @vitest-environment jsdom
 import type { ComponentProps, ReactNode } from "react";
 import { act, useState } from "react";
 import { createRoot, type Root } from "react-dom/client";
