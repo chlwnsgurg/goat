@@ -69,6 +69,12 @@ describe("extractFilePatch", () => {
     expect(file && extractFilePatch(patch, file)).toBe(patch.trimEnd());
   });
 
+  it("keeps a hunk's trailing blank context line", () => {
+    const patch = "diff --git a/a.ts b/a.ts\n--- a/a.ts\n+++ b/a.ts\n@@ -1,2 +1,2 @@\n-a\n+b\n \n";
+    const [file] = filesOf(patch);
+    expect(file && extractFilePatch(patch, file)).toBe(patch.slice(0, -1));
+  });
+
   it("keeps the old name of a moved file with a quoted name", () => {
     const patch =
       'diff --git "a//repo/a\\tb.ts" b//repo/c.ts\nsimilarity index 100%\nrename from "/repo/a\\tb.ts"\nrename to /repo/c.ts\n';

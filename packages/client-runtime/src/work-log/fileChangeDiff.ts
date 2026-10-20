@@ -96,7 +96,10 @@ export function extractFilePatch(patch: string, file: FileDiffMetadata): string 
     const header = processFile(firstHunk === -1 ? section : section.slice(0, firstHunk), {
       isGitDiff: true,
     });
-    if (header !== undefined && resolveFileDiffPath(header) === path) return section.trimEnd();
+    // A hunk can end in a blank context line, a single space that trimEnd would drop.
+    if (header !== undefined && resolveFileDiffPath(header) === path) {
+      return section.replace(/[\r\n]+$/, "");
+    }
   }
   return "";
 }

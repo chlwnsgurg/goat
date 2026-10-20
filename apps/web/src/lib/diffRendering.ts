@@ -178,7 +178,8 @@ export function getRenderablePatch(
   options: RenderablePatchOptions = {},
 ): RenderablePatch | null {
   if (!patch) return null;
-  const normalizedPatch = patch.trim();
+  // Only line breaks: a hunk can end in a blank context line, which is a single space.
+  const normalizedPatch = patch.replace(/^\s+/, "").replace(/[\r\n]+$/, "");
   if (normalizedPatch.length === 0) return null;
 
   try {
