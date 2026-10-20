@@ -12,6 +12,7 @@ import {
   type RelayWebSocket,
   pumpFrames,
   pumpGated,
+  relay,
   relaySink,
   webSocketOfTransport,
 } from "./relay.ts";
@@ -27,7 +28,14 @@ const stalledWebSocket = () => {
   const events = new NodeEvents.EventEmitter();
   const queued: Array<{ readonly bytes: number; readonly done: (error?: Error) => void }> = [];
   const frames: Array<string | Uint8Array> = [];
+  let readyState = 1;
+  events.once("close", () => {
+    readyState = 3;
+  });
   const ws: RelayWebSocket = {
+    get readyState() {
+      return readyState;
+    },
     get bufferedAmount() {
       return queued.reduce((total, entry) => total + entry.bytes, 0);
     },
@@ -173,3 +181,56 @@ it("finds the ws that took over an upgraded socket, and nothing on a plain one",
   expect(webSocketOfTransport({})).toBeUndefined();
   expect(webSocketOfTransport(undefined)).toBeUndefined();
 });
+
+const idle: Socket.Reader = { pull: Effect.never, upgrade: () => Effect.void };
+
+it.effect("a relay ends when the node closes while the phone has stopped reading", () =>
+  Effect.gen(function* () {
+    const client = stalledWebSocket();
+    const node = stalledWebSocket();
+    const running = yield* Effect.forkChild(
+      relay({
+        upstreamReader: source(1, () => ["event"]).reader,
+        upstream: relaySink(node.ws),
+        clientReader: idle,
+        client: relaySink(client.ws),
+        scopes: operate,
+        stop: [],
+      }),
+    );
+    yield* Effect.yieldNow;
+    // The forwarded event is still queued for the stalled phone; only the node closes.
+    expect(client.frames).toEqual(["event"]);
+    node.events.emit("close");
+    yield* Fiber.join(running);
+  }),
+);
+
+it.effect("a relay ends when the node closes while a refusal waits for the phone", () =>
+  Effect.gen(function* () {
+    const client = stalledWebSocket();
+    const node = stalledWebSocket();
+    const running = yield* Effect.forkChild(
+      relay({
+        upstreamReader: idle,
+        upstream: relaySink(node.ws),
+        clientReader: source(2, refusedBatch(1)).reader,
+        client: relaySink(client.ws),
+        scopes: operate,
+        stop: [],
+      }),
+    );
+    yield* Effect.yieldNow;
+    expect(client.frames).toHaveLength(1);
+    node.events.emit("close");
+    yield* Fiber.join(running);
+  }),
+);
+
+it.effect("a socket that had already closed counts as closed", () =>
+  Effect.gen(function* () {
+    const gone = stalledWebSocket();
+    gone.events.emit("close");
+    yield* relaySink(gone.ws).closed;
+  }),
+);

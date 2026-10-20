@@ -41,7 +41,7 @@ import {
 } from "../auth/http.ts";
 import * as SessionStore from "../auth/SessionStore.ts";
 import { HTML_CONTENT_SECURITY_POLICY, SVG_CONTENT_SECURITY_POLICY } from "../http.ts";
-import { type RelaySink, pumpFrames, pumpGated, relaySink, webSocketOfTransport } from "./relay.ts";
+import { type RelaySink, relay, relaySink, webSocketOfTransport } from "./relay.ts";
 import { HubProxyNodes } from "./HubProxyNodes.ts";
 import { makeSnapshotBuffer } from "./snapshotBuffer.ts";
 import {
@@ -438,13 +438,18 @@ const proxySocket = Effect.fn("HubProxyHttp.proxySocket")(function* (
   // Relaying without a way to see what is queued could buffer without bound, so close instead.
   if (clientSocket === undefined) return HttpServerResponse.empty();
   const clientSink = relaySink(clientSocket);
-  yield* Effect.raceAllFirst([
-    pumpFrames(socket.reader, clientSink),
+  yield* relay({
+    upstreamReader: socket.reader,
+    upstream: socket.sink,
+    clientReader,
+    client: clientSink,
     // The node session's own scopes: for a linked node that is also within its enrollment.
-    pumpGated(clientReader, socket.sink, clientSink, upstream.scopes),
-    sessionStore.awaitInvalidation(session.sessionId),
-    sessions.revoked(nodeId, upstream.generation),
-  ]).pipe(Effect.ignoreCause);
+    scopes: upstream.scopes,
+    stop: [
+      sessionStore.awaitInvalidation(session.sessionId),
+      sessions.revoked(nodeId, upstream.generation),
+    ],
+  });
   return HttpServerResponse.empty();
 });
 

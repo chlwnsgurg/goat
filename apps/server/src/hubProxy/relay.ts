@@ -15,6 +15,8 @@ export const RELAY_MAX_BUFFERED_BYTES = 8 * 1024 * 1024;
 /** The parts of a ws WebSocket the relay uses; `bufferedAmount` includes the compression queue. */
 export interface RelayWebSocket {
   readonly bufferedAmount: number;
+  /** 2 closing and 3 closed, as in the WebSocket API. */
+  readonly readyState: number;
   send(data: string | Uint8Array, callback: (error?: Error) => void): void;
   once(event: "close", listener: () => void): unknown;
   off(event: "close", listener: () => void): unknown;
@@ -34,11 +36,14 @@ export interface RelaySink {
   /** Waits until every frame written so far has been sent, or the socket closed. */
   readonly sent: Effect.Effect<void>;
   readonly queuedBytes: () => number;
+  /** Completes when the socket closes, whatever either pump is waiting on. */
+  readonly closed: Effect.Effect<void>;
 }
 
 export const relaySink = (ws: RelayWebSocket): RelaySink => {
   let pending = 0;
-  let closed = false;
+  // A socket that closed before this sink existed never emits close again.
+  let closed = ws.readyState >= 2;
   let failure: Error | undefined;
   const waiters = new Set<() => void>();
   const wake = () => {
@@ -48,8 +53,21 @@ export const relaySink = (ws: RelayWebSocket): RelaySink => {
     closed = true;
     wake();
   };
-  ws.once("close", onClose);
+  if (!closed) ws.once("close", onClose);
   const settled = () => pending === 0 || closed;
+  const waitFor = (ready: () => boolean) =>
+    Effect.callback<void>((resume) => {
+      if (ready()) return resume(Effect.void);
+      const done = () => {
+        if (!ready()) return;
+        waiters.delete(done);
+        resume(Effect.void);
+      };
+      waiters.add(done);
+      return Effect.sync(() => {
+        waiters.delete(done);
+      });
+    });
   return {
     write: (frame) =>
       Effect.suspend(() => {
@@ -68,19 +86,9 @@ export const relaySink = (ws: RelayWebSocket): RelaySink => {
         }
         return Effect.void;
       }),
-    sent: Effect.callback<void>((resume) => {
-      if (settled()) return resume(Effect.void);
-      const done = () => {
-        if (!settled()) return;
-        waiters.delete(done);
-        resume(Effect.void);
-      };
-      waiters.add(done);
-      return Effect.sync(() => {
-        waiters.delete(done);
-      });
-    }),
+    sent: waitFor(settled),
     queuedBytes: () => ws.bufferedAmount,
+    closed: waitFor(() => closed),
   };
 };
 
@@ -101,6 +109,7 @@ export const isRelayWebSocket = (value: unknown): value is RelayWebSocket =>
   typeof value === "object" &&
   value !== null &&
   typeof (value as { bufferedAmount?: unknown }).bufferedAmount === "number" &&
+  typeof (value as { readyState?: unknown }).readyState === "number" &&
   typeof (value as { send?: unknown }).send === "function" &&
   typeof (value as { once?: unknown }).once === "function";
 
@@ -143,3 +152,24 @@ export const pumpGated = (
       yield* withinLimit(sinks);
     }
   });
+
+/**
+ * Runs both directions until either socket closes, either pump fails, or a stop effect completes.
+ * A pump blocked on a stalled peer would never see the other side close, so closure is watched on
+ * its own.
+ */
+export const relay = <E>(input: {
+  readonly upstreamReader: Socket.Reader;
+  readonly upstream: RelaySink;
+  readonly clientReader: Socket.Reader;
+  readonly client: RelaySink;
+  readonly scopes: ReadonlyArray<AuthEnvironmentScope>;
+  readonly stop: ReadonlyArray<Effect.Effect<unknown, E>>;
+}) =>
+  Effect.raceAllFirst([
+    pumpFrames(input.upstreamReader, input.client),
+    pumpGated(input.clientReader, input.upstream, input.client, input.scopes),
+    input.upstream.closed,
+    input.client.closed,
+    ...input.stop,
+  ]).pipe(Effect.ignoreCause);
