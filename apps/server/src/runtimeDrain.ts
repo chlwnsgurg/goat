@@ -112,9 +112,6 @@ const make = Effect.gen(function* () {
         Effect.gen(function* () {
           if (input.expectedInstanceId !== instanceId)
             return { status: "instance-changed" as const, instanceId, forced: false };
-          // A dropped refresh never closes admission; the client keeps its attachment and retries.
-          if (Option.isSome(arbiter) && !(yield* arbiter.value.admit(input)))
-            return { status: "cancelled" as const, instanceId, forced: false };
           if (active !== undefined) {
             const drain = active;
             if (drain.status === "draining" && input.force === true && !drain.forced) {
@@ -123,6 +120,10 @@ const make = Effect.gen(function* () {
             }
             return yield* restore(Deferred.await(drain.result));
           }
+          // Arbitration only decides whether to start a drain; a retry joins an active one above.
+          // A dropped refresh never closes admission; the client keeps its attachment and retries.
+          if (Option.isSome(arbiter) && !(yield* arbiter.value.admit(input)))
+            return { status: "cancelled" as const, instanceId, forced: false };
           const now = yield* Clock.currentTimeMillis;
           const result = yield* Deferred.make<RuntimeDrainResult>();
           const drain: ActiveDrain = {

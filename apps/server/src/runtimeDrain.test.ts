@@ -222,3 +222,31 @@ it.effect("a dropped automatic refresh is cancelled without closing admission", 
     }).pipe(Effect.provide(context));
   }).pipe(Effect.scoped),
 );
+
+it.effect("a refresh that would be dropped joins a drain that is already active", () =>
+  Effect.gen(function* () {
+    const { context, checked, stopped } = yield* setup("busy", "newest");
+    yield* Effect.gen(function* () {
+      const drain = yield* RuntimeDrain.RuntimeDrain;
+      // A confirmed drain is under way; it ends drained at its deadline.
+      const first = yield* drain
+        .request({ ...input, targetVersion: "newest", force: true })
+        .pipe(Effect.forkScoped);
+      yield* Deferred.await(checked);
+      // A reconciliation retry after a lost response must observe the real drain, never a
+      // made-up cancellation while admission is closed.
+      const retry = yield* drain
+        .request({ ...input, targetVersion: "older", automatic: true })
+        .pipe(
+          Effect.forkScoped,
+          Effect.tap(() => Effect.yieldNow),
+        );
+      yield* TestClock.adjust(Duration.seconds(1));
+      const result = yield* Fiber.join(first);
+      assert.deepEqual(result, { status: "drained", instanceId: "this-start", forced: true });
+      assert.deepEqual(yield* Fiber.join(retry), result);
+      yield* TestClock.adjust(Duration.millis(250));
+      yield* Deferred.await(stopped);
+    }).pipe(Effect.provide(context));
+  }).pipe(Effect.scoped),
+);

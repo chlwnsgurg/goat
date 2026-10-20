@@ -2234,9 +2234,11 @@ if [ "$NEEDS_OWNED_UPGRADE" = 1 ]; then
   # A lost response or a dead SSH owner cannot prove the server stopped draining.
   printf '%s\\n' "$UPGRADE_INSTANCE" > "$STATE_DIR/draining.next.$$"
   mv "$STATE_DIR/draining.next.$$" "$STATE_DIR/draining"
-  # Only an automatic refresh of an older runtime is a request the runtime may arbitrate.
+  # Only an automatic refresh of an older runtime is a request the runtime may arbitrate. A
+  # reconciliation retry keeps the marker: the runtime joins a drain that is still active and
+  # arbitrates only a request that would start a new one.
   drain_automatic=0
-  if [ "$DRAIN_AUTOMATIC" = 1 ] && [ "$RECONCILING_DRAIN" != 1 ] && [ "$REPLACEMENT_REASON" = older ]; then drain_automatic=1; fi
+  if [ "$DRAIN_AUTOMATIC" = 1 ] && [ "$REPLACEMENT_REASON" = older ]; then drain_automatic=1; fi
   drain_result="$(GOAT_RUNTIME_DRAIN_AUTOMATIC="$drain_automatic" "$RUNNER_CANDIDATE_FILE.pin" __ssh-helper drain --port "$UPGRADE_PORT" --instance-id "$UPGRADE_INSTANCE" --target-version "$TARGET_VERSION" --grace-seconds "$DRAIN_GRACE_SECONDS" $drain_force --token-file "$DEFAULT_SERVER_HOME/userdata/runtime-control.token" 2>/dev/null || true)"
   case "$drain_result" in
     drained) ;;
