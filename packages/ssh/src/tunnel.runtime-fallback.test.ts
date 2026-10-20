@@ -373,6 +373,35 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")(
       }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
     );
 
+    // A plain 1.2.4 sorts above the requested 1.2.3-preview, so only the commit times show
+    // whether it is a newer release or a leftover from before the prerelease (#507).
+    it.live.each([
+      ["older leftover", 1_700_000_000, ARCHIVE.archiveVersion],
+      ["unstamped leftover", undefined, ARCHIVE.archiveVersion],
+      ["newer release", 1_800_000_000, "1.2.4"],
+    ] as const)(
+      "replaces a retained plain release only when it predates the request: %s",
+      ([_name, commitTime, expected]) =>
+        Effect.gen(function* () {
+          const f = yield* makeProtocolFixture({
+            live: false,
+            kind: "managed",
+            oldVersion: "1.2.4",
+            ssh: SSH_RUNTIME_PROTOCOL_VERSION,
+            orchestration: ORCHESTRATION_PROTOCOL_VERSION,
+            ...(commitTime === undefined ? {} : { commitTime }),
+          });
+          const selected = yield* SshTunnel.prepareRemoteRuntime(
+            uploadTarget,
+            {},
+            { ...f.runner, archiveCommitTime: 1_750_000_000 },
+            REMOTE_RUNTIME_STATE_KEY,
+            true,
+          ).pipe(Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, f.transport));
+          assert.equal(selected.version, expected);
+        }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+    );
+
     it.live("fails an upload instead of starting a compatible retained runtime", () =>
       Effect.gen(function* () {
         const f = yield* makeProtocolFixture({
