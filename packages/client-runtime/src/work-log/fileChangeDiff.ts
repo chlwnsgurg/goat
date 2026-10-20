@@ -7,6 +7,14 @@ type FileChangeItem = Extract<OrchestrationV2TurnItem, { type: "file_change" }>;
 /** Larger files open in the full diff view, which virtualizes; the transcript does not. */
 export const INLINE_DIFF_MAX_LINES = 400;
 
+/**
+ * Rows an inline card renders. The file's own unifiedLineCount also counts the unchanged lines
+ * collapsed before each hunk, so a one-line edit deep in a long file would read as huge.
+ */
+export function inlineDiffLineCount(file: FileDiffMetadata): number {
+  return file.hunks.reduce((total, hunk) => total + hunk.unifiedLineCount, 0);
+}
+
 export function fileChangeTargetPaths(item: FileChangeItem): ReadonlyArray<string> {
   const paths = item.changes?.map((change) => change.path) ?? [];
   return paths.length > 0 ? [...new Set(paths)] : [item.fileName];

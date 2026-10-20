@@ -7,11 +7,10 @@
 const HUNK_HEADER = /^@@ -\d+(?:,\d+)? \+\d+(?:,\d+)? @@/m;
 
 // Git C-quotes a path holding a control character, a quote or a backslash; the parser decodes it.
-function headerPath(prefix: "a/" | "b/", path: string): string {
-  const prefixed = `${prefix}${path}`;
+function quotePath(path: string): string {
   let quoted = "";
   let needsQuotes = false;
-  for (const character of prefixed) {
+  for (const character of path) {
     const code = character.charCodeAt(0);
     const escaped =
       character === '"' || character === "\\"
@@ -28,7 +27,11 @@ function headerPath(prefix: "a/" | "b/", path: string): string {
     needsQuotes ||= escaped !== character;
     quoted += escaped;
   }
-  return needsQuotes ? `"${quoted}"` : prefixed;
+  return needsQuotes ? `"${quoted}"` : path;
+}
+
+function headerPath(prefix: "a/" | "b/", path: string): string {
+  return quotePath(`${prefix}${path}`);
 }
 
 function contentLines(content: string, marker: "+" | "-"): string {
@@ -66,7 +69,12 @@ function wholeFileSection(path: string, content: string, kind: "add" | "delete")
 function updateSection(path: string, hunks: string, oldPath = path): string {
   const lines = [`diff --git ${headerPath("a/", oldPath)} ${headerPath("b/", path)}`];
   if (oldPath !== path) {
-    lines.push(`rename from ${oldPath}`, `rename to ${path}`);
+    // The parser keeps the old name only for a rename it recognizes by its similarity line.
+    lines.push(
+      `similarity index ${hunks.length === 0 ? 100 : 50}%`,
+      `rename from ${quotePath(oldPath)}`,
+      `rename to ${quotePath(path)}`,
+    );
   }
   if (hunks.length > 0) {
     lines.push(`--- ${headerPath("a/", oldPath)}`, `+++ ${headerPath("b/", path)}`, hunks);

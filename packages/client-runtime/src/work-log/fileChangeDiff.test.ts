@@ -1,7 +1,13 @@
 import { parsePatchFiles } from "@pierre/diffs/utils/parsePatchFiles";
 import { describe, expect, it } from "vite-plus/test";
 
-import { extractFilePatch, findPatchFile, resolveFileDiffPath } from "./fileChangeDiff.ts";
+import {
+  extractFilePatch,
+  findPatchFile,
+  inlineDiffLineCount,
+  resolveFileDiffPath,
+  resolveFileDiffPreviousPath,
+} from "./fileChangeDiff.ts";
 
 function filesOf(patch: string) {
   return parsePatchFiles(patch).flatMap((parsed) => parsed.files);
@@ -61,5 +67,23 @@ describe("extractFilePatch", () => {
     expect(file && resolveFileDiffPath(file)).toBe("/repo/src/a.ts");
     expect(file?.hunks[0]?.additionStart).toBe(10);
     expect(file && extractFilePatch(patch, file)).toBe(patch.trimEnd());
+  });
+
+  it("keeps the old name of a moved file with a quoted name", () => {
+    const patch =
+      'diff --git "a//repo/a\\tb.ts" b//repo/c.ts\nsimilarity index 100%\nrename from "/repo/a\\tb.ts"\nrename to /repo/c.ts\n';
+    const file = findPatchFile(filesOf(patch), "/repo/a\tb.ts", "/repo");
+    expect(file && resolveFileDiffPath(file)).toBe("/repo/c.ts");
+    expect(file && resolveFileDiffPreviousPath(file)).toBe("/repo/a\tb.ts");
+  });
+});
+
+describe("inlineDiffLineCount", () => {
+  it("counts a small edit deep in a file by its own rows", () => {
+    const patch =
+      "diff --git a/a.ts b/a.ts\n--- a/a.ts\n+++ b/a.ts\n@@ -450,3 +450,3 @@\n x\n-a\n+b\n y\n";
+    const [file] = filesOf(patch);
+    expect(file && inlineDiffLineCount(file)).toBe(4);
+    expect(file?.unifiedLineCount).toBeGreaterThan(400);
   });
 });

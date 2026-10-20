@@ -46,7 +46,7 @@ describe("codexFileChangePatch", () => {
       },
     ]);
     expect(patch).toBe(
-      'diff --git "a//repo/a\\tb.ts" b//repo/c.ts\nrename from /repo/a\tb.ts\nrename to /repo/c.ts\n',
+      'diff --git "a//repo/a\\tb.ts" b//repo/c.ts\nsimilarity index 100%\nrename from "/repo/a\\tb.ts"\nrename to /repo/c.ts\n',
     );
   });
 

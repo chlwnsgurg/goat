@@ -1,7 +1,9 @@
 import type { OrchestrationV2ProjectedTurnItem, RunId, ScopedThreadRef } from "@goat/contracts";
 import {
   extractFilePatch,
+  fileChangeTargetPaths,
   INLINE_DIFF_MAX_LINES,
+  inlineDiffLineCount,
 } from "@goat/client-runtime/work-log/file-change-diff";
 import { turnItemDetailRevision } from "@goat/client-runtime/work-log/item-detail";
 import { workspaceRelativeFilePath } from "@goat/shared/path";
@@ -34,7 +36,7 @@ function InlineDiffNote({ children }: { children: ReactNode }) {
 
 // Every expanded row of a turn reads the same patch; parse it once per patch and theme.
 const parsedPatchCache = new Map<string, ReadonlyArray<FileDiffMetadata>>();
-const PARSED_PATCH_CACHE_SIZE = 4;
+const PARSED_PATCH_CACHE_SIZE = 16;
 
 function parsePatch(patch: string, scope: string): ReadonlyArray<FileDiffMetadata> {
   const key = `${scope}\u0000${patch}`;
@@ -71,14 +73,13 @@ export const FileChangeInlineDiff = memo(function FileChangeInlineDiff(props: {
   readonly threadRef: ScopedThreadRef;
   readonly projectedItem: OrchestrationV2ProjectedTurnItem;
   readonly runId: RunId;
-  readonly paths: ReadonlyArray<string>;
   readonly workspaceRoot: string | undefined;
   readonly resolvedTheme: "light" | "dark";
   readonly onOpenTurnDiff: (runId: RunId, filePath?: string) => void;
 }) {
-  const { threadRef, projectedItem, runId, paths, workspaceRoot, resolvedTheme, onOpenTurnDiff } =
-    props;
+  const { threadRef, projectedItem, runId, workspaceRoot, resolvedTheme, onOpenTurnDiff } = props;
   const wireItem = projectedItem.item;
+  const paths = wireItem.type === "file_change" ? fileChangeTargetPaths(wireItem) : [];
   const hasOwnPatch = wireItem.type === "file_change" && wireItem.patchOmitted === true;
   const detail = useTurnItemDetail(
     hasOwnPatch
@@ -174,7 +175,8 @@ function FileDiffCards(props: {
         const displayPath = workspaceRelativeFilePath(filePath, workspaceRoot) ?? filePath;
         const stat = getDiffLineStat([file]);
         const filePatch = extractFilePatch(patch, file);
-        const tooLarge = file.unifiedLineCount > INLINE_DIFF_MAX_LINES;
+        const lineCount = inlineDiffLineCount(file);
+        const tooLarge = lineCount > INLINE_DIFF_MAX_LINES;
         return (
           <div
             key={filePath}
@@ -208,9 +210,7 @@ function FileDiffCards(props: {
             </div>
             {tooLarge ? (
               <div className="flex items-center gap-2 px-2.5 py-2 text-xs text-muted-foreground">
-                <span>
-                  {file.unifiedLineCount.toLocaleString()} lines is too long to show here.
-                </span>
+                <span>{lineCount.toLocaleString()} lines is too long to show here.</span>
                 <InlineButton onClick={() => onOpenTurnDiff(runId, filePath)}>
                   Show full diff in panel
                 </InlineButton>
