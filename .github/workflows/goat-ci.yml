@@ -215,18 +215,19 @@ jobs:
 
       - name: Test mobile memory
         if: matrix.task == 'test-mobile-memory'
+        working-directory: apps/mobile
         run: >-
-          vp test run --config vite.config.ts
-          apps/mobile/src/features/settings/SettingsMemoryRouteScreen.test.tsx
-          apps/mobile/src/persistence/memory-import-recovery.test.ts
-          apps/mobile/src/features/settings/MemorySyncDiagnostics.test.tsx
-          apps/mobile/src/features/settings/SettingsMemoryRouteScreen.logic.test.ts
-          apps/mobile/src/features/settings/scheduledTaskPresentation.test.ts
-          apps/mobile/src/features/goat-bot/GoatBotScreen.memory.test.tsx
-          apps/mobile/src/features/threads/ThreadHeader.memory.test.tsx
-          apps/mobile/src/features/threads/SubagentRow.memory.test.tsx
-          apps/mobile/src/features/threads/useThreadHeaderOptions.test.tsx
-          apps/mobile/src/features/keyboard/commandPaletteItems.test.ts
+          vp test run
+          src/features/settings/SettingsMemoryRouteScreen.test.tsx
+          src/persistence/memory-import-recovery.test.ts
+          src/features/settings/MemorySyncDiagnostics.test.tsx
+          src/features/settings/SettingsMemoryRouteScreen.logic.test.ts
+          src/features/settings/scheduledTaskPresentation.test.ts
+          src/features/goat-bot/GoatBotScreen.memory.test.tsx
+          src/features/threads/ThreadHeader.memory.test.tsx
+          src/features/threads/SubagentRow.memory.test.tsx
+          src/features/threads/useThreadHeaderOptions.test.tsx
+          src/features/keyboard/commandPaletteItems.test.ts
 
       - name: Test server
         if: matrix.task == 'test-server' && !matrix.related
