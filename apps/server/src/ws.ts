@@ -2730,13 +2730,14 @@ const layerWsRpc = (
           }),
         [WS_METHODS.serverGetProcessDiagnostics]: (_input) => processDiagnostics.read,
         [WS_METHODS.serverGetHostResources]: (_input) => hostResources.read,
-        [WS_METHODS.serverGetHostStatus]: (_input) =>
+        [WS_METHODS.serverGetHostStatus]: (input) =>
           serverEnvironment.getEnvironmentId.pipe(
             Effect.flatMap((environmentId) =>
               hostStatus.readForClient({
                 environmentId,
                 sessionId: currentSessionId,
                 reachHosts: currentSession.scopes.includes(AuthOrchestrationOperateScope),
+                ...(input.local === true ? { local: true } : {}),
               }),
             ),
           ),
