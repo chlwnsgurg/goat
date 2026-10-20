@@ -397,6 +397,24 @@ describe("ssh tunnel scripts", () => {
     );
   });
 
+  it("checks for lsof before a runtime replacement can stop the server", () => {
+    const launch = SshTunnel.buildRemoteLaunchScript(ARCHIVE);
+    assert.include(launch, 'prepend_path_if_dir "/usr/sbin"');
+    assert.include(launch, 'prepend_path_if_dir "/sbin"');
+    assert.include(launch, "for candidate in /usr/sbin/lsof /sbin/lsof; do");
+    const probe = launch.indexOf("if ! listener_probe_available; then");
+    const drain = launch.indexOf('__ssh-helper drain --port "$UPGRADE_PORT"');
+    const loop = launch.indexOf('while [ -z "$REMOTE_PORT" ]; do');
+    assert.isAbove(probe, 0);
+    assert.isBelow(probe, drain);
+    assert.isBelow(probe, loop);
+    assert.equal(launch.indexOf("this host needs /proc or lsof", loop), -1);
+    assert.include(
+      launch,
+      "Cannot verify the launched GOAT listener: this host needs /proc or lsof. The existing server was left running.",
+    );
+  });
+
   it.effect("accepts launch JSON after remote shell startup noise", () => {
     const target = {
       alias: "devbox",
