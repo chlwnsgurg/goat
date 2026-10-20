@@ -26,6 +26,7 @@ export const CLIENT_GUARDED_RPC_SCOPES = {
   [WS_METHODS.providerHostSyncCancel]: AuthProvidersManageScope,
   [WS_METHODS.sshHostHandoffProgress]: AuthOrchestrationReadScope,
   [WS_METHODS.sshHostProbe]: AuthSettingsWriteScope,
+  [WS_METHODS.sshHostPreflight]: AuthSettingsWriteScope,
   [WS_METHODS.sshHostTrust]: AuthSettingsWriteScope,
   [WS_METHODS.sshHostPrepare]: AuthEnvironmentMaintainScope,
   [WS_METHODS.sshHostForget]: AuthSettingsWriteScope,

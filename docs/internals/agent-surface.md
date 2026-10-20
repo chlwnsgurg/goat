@@ -434,9 +434,11 @@ only.
 For SSH setup and runtime updates, the call returns the shared SSH
 `kind: "needs_human"` result with a handoff summary. The server's
 [SshHostSetup](../../apps/server/src/sshRemote/SshHostSetup.ts) continuation worker
-resumes approved `ssh.host_add`, `ssh.host_prepare`, and `ssh.runtime_update`
-targets after rechecking the approving session's target permissions. Fingerprints
-remain private human data. Key-registration instructions run in the person's
+resumes approved `ssh.host_prepare` and `ssh.runtime_update` targets after
+rechecking the approving session's target permissions. An approved `ssh.host_add`
+fingerprint only pins the host; the agent calls the tool again, which reruns the
+preflight before anything is installed. Fingerprints remain private human data; agents see
+only that the host key needs review. Key-registration instructions run in the person's
 terminal on the environment's owning machine; completion triggers another key-auth
 check, not an assumption that registration succeeded.
 

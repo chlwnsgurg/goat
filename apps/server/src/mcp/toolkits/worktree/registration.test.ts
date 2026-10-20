@@ -1,4 +1,5 @@
 import * as NotesService from "../../../notes/NotesService.ts";
+import * as SshDeviceAdd from "../../../sshRemote/SshDeviceAdd.ts";
 import * as SshRemoteDispatch from "../../../sshRemote/SshRemoteDispatch.ts";
 import * as SshHostSetup from "../../../sshRemote/SshHostSetup.ts";
 import * as CloudMachineService from "../../../cloudMachines/CloudMachineService.ts";
@@ -66,6 +67,7 @@ const layerStubServices = Layer.mergeAll(
   Layer.mock(NotesService.NotesService)({}),
   Layer.mock(CloudSource.CloudTaskSourceService)({}),
   Layer.mock(SshRemoteDispatch.SshRemoteDispatch)({}),
+  Layer.mock(SshDeviceAdd.SshDeviceAdd)({}),
   Layer.mock(HostHealthMonitor.HostHealthMonitor)({}),
   Layer.mock(FleetHostStates.FleetHostStates)({}),
   Layer.mock(Rescheduler.Rescheduler)({}),

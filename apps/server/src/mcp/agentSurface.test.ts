@@ -1,5 +1,6 @@
 import { NoteToolkit } from "./toolkits/note/tools.ts";
 import * as NotesService from "../notes/NotesService.ts";
+import * as SshDeviceAdd from "../sshRemote/SshDeviceAdd.ts";
 import * as Onboarding from "../provider/ProviderOnboarding.ts";
 import * as HomeRequests from "../provider/CodexHomeRequests.ts";
 import * as ProviderDiagnosisRouting from "../provider/ProviderDiagnosisRouting.ts";
@@ -183,6 +184,7 @@ const dependencies = Layer.mergeAll(
   Layer.mock(Orchestrator.OrchestratorV2)({}),
   Layer.mock(RemoteReportService.RemoteReportService)({}),
   Layer.mock(SshRemoteDispatch.SshRemoteDispatch)({}),
+  Layer.mock(SshDeviceAdd.SshDeviceAdd)({}),
   Layer.mock(HostHealthMonitor.HostHealthMonitor)({}),
   Layer.mock(FleetHostStates.FleetHostStates)({}),
   Layer.mock(Rescheduler.Rescheduler)({}),
