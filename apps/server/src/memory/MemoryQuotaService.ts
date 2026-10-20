@@ -155,12 +155,7 @@ const make = Effect.gen(function* () {
           op.kind === "forget" && current.tombstone === undefined && current.identity !== undefined;
         const heldReservation = yield* store.readForgetReservation(op.memorySpaceId, op.memoryId);
         const neededReservation =
-          op.kind !== "forget" &&
-          !current.tombstone &&
-          (identityNew ||
-            heldReservation.bytes < M.MEMORY_PAYLOAD_MAX_UTF8_BYTES ||
-            Store.hasSourceEvidence(op.revision) ||
-            op.revision.provenance.importSource !== undefined)
+          op.kind !== "forget" && !current.tombstone
             ? yield* store.firstForgetReservation(op)
             : heldReservation;
         const oldLive = current.item !== undefined && current.item.status !== "forgotten";
@@ -415,10 +410,6 @@ const make = Effect.gen(function* () {
               createdAtUtc:
                 op.kind === "forget" ? op.tombstone.deletedAtUtc : op.revision.createdAtUtc,
             };
-          const updateIdentity =
-            decision.identity !== undefined ||
-            aggregate.identity === undefined ||
-            (op.kind !== "forget" && Store.hasSourceEvidence(op.revision));
           if (
             op.kind === "forget" &&
             decision.admission.kind === "localIntent" &&
@@ -583,9 +574,7 @@ const make = Effect.gen(function* () {
               receipt: decision.receipt,
             },
             store.apply(
-              decision.receipt.outcome === "rejected" || !updateIdentity
-                ? decision
-                : { ...decision, identity },
+              decision.receipt.outcome === "rejected" ? decision : { ...decision, identity },
             ),
           ).pipe(
             Effect.catchTags({

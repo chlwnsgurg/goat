@@ -3244,9 +3244,19 @@ const make = Effect.gen(function* () {
         sql<HistoryRevisionRow>`SELECT r.*,NULL AS body_json FROM memory_revisions r WHERE r.space=${space} AND r.memory_id=${id} AND r.revision_id IN ${sql.in([...wantedMetadata])}`,
       );
       if (r && (r.parents.length > 0 || heads.length > 0)) {
+        // The narrow read is exact only for a revision that extends current heads and
+        // that no stored revision names as a parent: heads are maximal, so a head is
+        // then superseded exactly when it is a direct parent. Anything else, such as
+        // a branch from an older revision or an ancestor arriving after its child,
+        // walks the whole DAG as before.
         const fullDagNeeded =
           blocked ||
+          r.parents.some((parent) => !heads.includes(parent)) ||
           rows.some((row) => row.revision_id === r.revisionId) ||
+          (yield* stored(
+            "revisions-child",
+            sql`SELECT 1 FROM memory_revisions WHERE space=${space} AND memory_id=${id} AND instr(parents_json,${`"${r.revisionId}"`})>0 LIMIT 1`,
+          )).length > 0 ||
           (yield* stored(
             "revisions-pending",
             sql`SELECT 1 FROM memory_inbox_pending WHERE space=${space} AND memory_id=${id} AND record_kind='operation' LIMIT 1`,

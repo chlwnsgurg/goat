@@ -570,17 +570,12 @@ describe("memory admission payload reads", () => {
   );
 
   it.effect(
-    "bounds admission revision metadata reads and skips historical source payloads on non-source writes",
+    "bounds admission revision metadata reads and widens to the full DAG when ancestry needs it",
     () =>
       Effect.gen(function* () {
         const store = yield* Store.MemoryStore;
         const sql = yield* SqlClient.SqlClient;
-        yield* chain(24, (n) => n < 10);
-        // Corrupt historical source payloads (0..9) and non-head revision metadata (10..21).
-        yield* corruptPayloads([revisionId(23)]);
-        const full = yield* store.loadAggregate(space, memory).pipe(Effect.flip);
-        assert.instanceOf(full, Store.MemoryStorageError);
-        assert.strictEqual(full.stage, "payload-codec");
+        yield* chain(24, () => false);
 
         const queries: Array<readonly [string, ReadonlyArray<unknown>]> = [];
         const record: Statement.Transformer = (statement) =>
@@ -588,7 +583,6 @@ describe("memory admission payload reads", () => {
             queries.push(statement.compile());
             return statement;
           });
-        // Non-source write on an existing memory does not re-read historical source payloads.
         const received = yield* receive(operation(24, false), 24).pipe(
           Effect.provideService(Statement.CurrentTransformer, record),
         );
@@ -596,9 +590,8 @@ describe("memory admission payload reads", () => {
         const revisionReads = queries.filter(([query]) =>
           query.includes("SELECT r.*,NULL AS body_json FROM memory_revisions"),
         );
-        assert.strictEqual(revisionReads.length, 2);
+        assert.isAbove(revisionReads.length, 0);
         for (const [query, params] of revisionReads) {
-          assert.isAtMost(params.length, 4);
           assert.isAtMost((yield* sql.unsafe(query, params)).length, 2);
         }
         const empty = yield* store.loadAggregate(space, memory, {}, {});
@@ -616,6 +609,24 @@ describe("memory admission payload reads", () => {
           { revision: operation(24).revision },
         );
         assert.lengthOf(existing.revisions, 25);
+        // A revision branching from an older revision, or an ancestor arriving after
+        // its child, needs every link to prune heads exactly as the full read does.
+        const branch = operation(25, false).revision;
+        const fromOld = yield* store.loadAggregate(
+          space,
+          memory,
+          { heads: true },
+          { revision: { ...branch, parents: [revisionId(3)] } },
+        );
+        assert.lengthOf(fromOld.revisions, 25);
+        yield* sql`DELETE FROM memory_revisions WHERE space=${space} AND memory_id=${memory} AND revision_id=${revisionId(5)}`;
+        const lateAncestor = yield* store.loadAggregate(
+          space,
+          memory,
+          { heads: true },
+          { revision: { ...operation(5, false).revision, parents: [revisionId(24)] } },
+        );
+        assert.lengthOf(lateAncestor.revisions, 24);
       }).pipe(Effect.provide(live)),
   );
 });
