@@ -38,7 +38,7 @@ import {
 } from "../auth/http.ts";
 import * as SessionStore from "../auth/SessionStore.ts";
 import { HTML_CONTENT_SECURITY_POLICY, SVG_CONTENT_SECURITY_POLICY } from "../http.ts";
-import { type OutboundBuffer, outboundBuffer, pumpFrames, pumpGated } from "./relay.ts";
+import { type RelaySink, pumpFrames, pumpGated, relaySink, webSocketOfTransport } from "./relay.ts";
 import { HubProxyNodes } from "./HubProxyNodes.ts";
 import { makeSnapshotBuffer } from "./snapshotBuffer.ts";
 import {
@@ -273,7 +273,7 @@ const proxyRead = Effect.fn("HubProxyHttp.proxyRead")(function* (
 const openUpstreamSocket = (upstream: HubProxyUpstream, search: string) =>
   Effect.suspend(() => {
     let status: number | undefined;
-    let transport: unknown;
+    let ws: NodeSocket.NodeWS.WebSocket | undefined;
     return Effect.gen(function* () {
       const socket = yield* Socket.makeWebSocket(
         new URL(`ws${search}`, upstream.wsBaseUrl).toString(),
@@ -281,8 +281,14 @@ const openUpstreamSocket = (upstream: HubProxyUpstream, search: string) =>
       );
       // Acquiring the reader waits for acceptance before the client is upgraded.
       const reader = yield* socket.reader;
-      const writer = yield* socket.writer;
-      return { reader, writer, buffer: outboundBuffer(transport) };
+      if (ws === undefined)
+        return yield* new Socket.SocketError({
+          reason: new Socket.SocketOpenError({
+            kind: "Unknown",
+            cause: new Error("The node socket is unavailable."),
+          }),
+        });
+      return { reader, sink: relaySink(ws) };
     }).pipe(
       Effect.provideService(Socket.WebSocketConstructor, (url, options) => {
         const socket = new NodeSocket.NodeWS.WebSocket(
@@ -293,9 +299,7 @@ const openUpstreamSocket = (upstream: HubProxyUpstream, search: string) =>
               typeof options === "object" && !Array.isArray(options) ? options.headers : undefined,
           },
         );
-        socket.on("upgrade", (response) => {
-          transport = response.socket;
-        });
+        ws = socket;
         // ws exposes the HTTP status only on this event, not on SocketOpenError.
         socket.on("unexpected-response", (_request, response) => {
           status = response.statusCode;
@@ -325,8 +329,7 @@ const proxySocket = Effect.fn("HubProxyHttp.proxySocket")(function* (
       readonly upstream: HubProxyUpstream;
       readonly socket: {
         readonly reader: Socket.Reader;
-        readonly writer: Socket.Writer;
-        readonly buffer: OutboundBuffer | undefined;
+        readonly sink: RelaySink;
       };
     },
     HubProxyError,
@@ -347,17 +350,19 @@ const proxySocket = Effect.fn("HubProxyHttp.proxySocket")(function* (
   const { upstream, socket } = yield* connect(false);
   if (!(yield* sessions.isCurrent(nodeId, upstream.generation)))
     return unavailableResponse("This node changed while the hub was connecting. Try again.");
-  // ws writes to the request's TCP socket once upgraded; both relays are bounded by what is queued.
-  const clientBuffer = outboundBuffer((request.source as { readonly socket?: unknown }).socket);
-  if (socket.buffer === undefined || clientBuffer === undefined)
-    return unavailableResponse("The hub could not relay this connection.");
   const client = yield* request.upgrade;
   yield* sessions.trackRelay(nodeId);
   const clientReader = yield* client.reader;
-  const clientWriter = yield* client.writer;
+  // ws took over the request's TCP socket during the upgrade above.
+  const clientSocket = webSocketOfTransport(
+    (request.source as { readonly socket?: unknown }).socket,
+  );
+  // Relaying without a way to see what is queued could buffer without bound, so close instead.
+  if (clientSocket === undefined) return HttpServerResponse.empty();
+  const clientSink = relaySink(clientSocket);
   yield* Effect.raceAllFirst([
-    pumpFrames(socket.reader, clientWriter, clientBuffer),
-    pumpGated(clientReader, socket.writer, socket.buffer, clientWriter, clientBuffer, scopes),
+    pumpFrames(socket.reader, clientSink),
+    pumpGated(clientReader, socket.sink, clientSink, scopes),
     sessionStore.awaitInvalidation(session.sessionId),
     sessions.revoked(nodeId, upstream.generation),
   ]).pipe(Effect.ignoreCause);

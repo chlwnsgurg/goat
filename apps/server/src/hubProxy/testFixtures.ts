@@ -75,7 +75,12 @@ export const serve = Effect.fnUntraced(function* <E, R>(
   const services = yield* Layer.build(
     HttpRouter.serve(routes, { disableListenLog: true, disableLogger: true }).pipe(
       Layer.provideMerge(
-        NodeHttpServer.layer(NodeHttp.createServer, { port: 0, host: "127.0.0.1" }),
+        // Compression as the real server negotiates it, so relays see ws's compression queue.
+        NodeHttpServer.layer(NodeHttp.createServer, {
+          port: 0,
+          host: "127.0.0.1",
+          websocket: { perMessageDeflate: true },
+        }),
       ),
     ),
   );
