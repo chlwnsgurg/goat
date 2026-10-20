@@ -37,6 +37,7 @@ const state = vi.hoisted(() => ({
   canAddHubNode: true,
   environments: null as unknown as Atom.Writable<ReadonlyArray<EnvironmentPresentation>>,
   runtimeReply: null as SshHostResult | null,
+  runtimeReplies: new Map<string, SshHostResult>(),
   toast: vi.fn(),
 }));
 
@@ -111,7 +112,8 @@ vi.mock("../../state/sshRuntime", async () => {
   const { Atom } = await import("effect/reactivity");
   return {
     sshRuntime: createSshRuntimeState(Atom.runtime(Layer.empty), {
-      status: () => Effect.sync(() => state.runtimeReply!),
+      status: (target) =>
+        Effect.sync(() => state.runtimeReplies.get(target.alias) ?? state.runtimeReply!),
       update: () => Effect.sync(() => state.runtimeReply!),
     }),
   };
@@ -156,6 +158,7 @@ beforeEach(() => {
       requestedVersion: "0.4.3",
     },
   };
+  state.runtimeReplies.clear();
   state.toast.mockReset();
   state.connectPairing.mockReset();
   state.connectSshEnvironment.mockReset();
@@ -732,9 +735,14 @@ effectIt.effect(
     }),
 );
 
-it.each(["local", "owner", "alternate"] as const)(
-  "updates an open tooltip and subtitle together from mounted %s progress",
-  async (source) => {
+it.each([
+  { source: "local", firstState: "preparing" },
+  { source: "owner", firstState: "preparing" },
+  { source: "alternate", firstState: "failed" },
+  { source: "alternate", firstState: "stopped" },
+] as const)(
+  "updates an open tooltip and subtitle from $source progress with first-route $firstState",
+  async ({ source, firstState }) => {
     const registry = AtomRegistry.make();
     const environmentId = EnvironmentId.make("fixture-vps");
     const target = {
@@ -752,10 +760,16 @@ it.each(["local", "owner", "alternate"] as const)(
       ...sshTarget,
       connectionId: "fixture-ssh-alternate",
     });
+    const alternateSshTarget = {
+      ...target,
+      alias: "fixture-vps-alternate",
+      hostname: "alternate.example.invalid",
+    };
+    const activeTarget = source === "alternate" ? alternateSshTarget : target;
     const routeId = connectionRouteId(source === "alternate" ? alternateTarget : sshTarget);
     const identity = { supervisorId: "fixture-window", attemptId: 2, routeId };
     const ready = {
-      host: target.alias,
+      host: activeTarget.alias,
       state: "ready" as const,
       runtimeVersion: "0.4.3",
       requestedVersion: "0.4.3",
@@ -765,6 +779,13 @@ it.each(["local", "owner", "alternate"] as const)(
         kind: "ok",
         status: { ...ready, state: "preparing", phase: "uploading" },
       };
+    }
+    if (source === "alternate") {
+      state.runtimeReplies.set(target.alias, {
+        kind: "ok",
+        status: { ...ready, host: target.alias, state: "preparing", phase: "checking" },
+      });
+      state.runtimeReplies.set(alternateSshTarget.alias, { kind: "ok", status: ready });
     }
     const environment: EnvironmentPresentation = {
       environmentId,
@@ -793,7 +814,7 @@ it.each(["local", "owner", "alternate"] as const)(
                       environmentId,
                       connectionId: alternateTarget.connectionId,
                       label: "Fixture VPS alternate",
-                      target,
+                      target: alternateSshTarget,
                     }),
                   ),
                 },
@@ -822,6 +843,7 @@ it.each(["local", "owner", "alternate"] as const)(
     };
     (window as { desktopBridge?: unknown }).desktopBridge = {};
     registry.set(state.environments, [environment]);
+    const { sshRuntime } = await import("../../state/sshRuntime");
     await act(async () =>
       root.render(
         <RegistryContext value={registry}>
@@ -858,14 +880,22 @@ it.each(["local", "owner", "alternate"] as const)(
         runtimeStatus: ready,
       },
     };
-    await act(async () =>
+    await act(async () => {
+      if (source === "alternate") {
+        state.runtimeReplies.set(target.alias, {
+          kind: "ok",
+          status: { ...ready, host: target.alias, state: firstState },
+        });
+        await sshRuntime.refresh.run(registry, { environmentId, target });
+        await sshRuntime.refresh.run(registry, { environmentId, target: alternateSshTarget });
+      }
       registry.set(state.environments, [
         {
           ...environment,
           connection: readyConnection,
         },
-      ]),
-    );
+      ]);
+    });
     expect(trigger?.textContent).toContain("Runtime ready · Opening connection");
     expect(trigger?.className).not.toContain("text-destructive");
     expect(document.querySelector('[data-slot="tooltip-popup"]')?.textContent).toContain(
@@ -875,6 +905,18 @@ it.each(["local", "owner", "alternate"] as const)(
       /old setup timeout|unknown/,
     );
     if (source === "alternate") {
+      state.runtimeReplies.set(alternateSshTarget.alias, {
+        kind: "ok",
+        status: { ...ready, state: "failed", detail: "Alternate runtime stopped responding" },
+      });
+      await act(async () => {
+        await sshRuntime.refresh.run(registry, { environmentId, target: alternateSshTarget });
+      });
+      expect(trigger?.textContent).toContain("Reconnecting: old setup timeout");
+      expect(trigger?.className).toContain("text-destructive");
+      expect(document.querySelector('[data-slot="tooltip-popup"]')?.textContent).toContain(
+        "Alternate runtime stopped responding",
+      );
       await act(async () =>
         registry.set(state.environments, [
           {

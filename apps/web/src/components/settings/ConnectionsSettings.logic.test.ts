@@ -407,7 +407,7 @@ import {
   type EnvironmentConnectionPresentation,
 } from "@goat/client-runtime/connection";
 import * as Option from "effect/Option";
-import { savedConnectionPresentation } from "./ConnectionsSettings.logic";
+import { savedConnectionPresentation, savedConnectionSshRoute } from "./ConnectionsSettings.logic";
 
 const sshEnvironmentId = EnvironmentId.make("fixture-vps");
 const sshTarget = new SshConnectionTarget({
@@ -492,6 +492,12 @@ describe("saved SSH row semantic status", () => {
           new SshConnectionProfile({
             ...Option.getOrThrow(sshEntry.profile),
             connectionId: alternateTarget.connectionId,
+            target: {
+              alias: "fixture-vps-alternate",
+              hostname: "alternate.example.invalid",
+              username: null,
+              port: null,
+            },
           }),
         ),
       },
@@ -505,6 +511,45 @@ describe("saved SSH row semantic status", () => {
       sshRuntimeReady: { ...connection.sshRuntimeReady!, routeId: alternateRouteId },
     };
   }
+  it.each(["preparation", "ready", "failure", "none", "unknown"] as const)(
+    "selects the runtime target from %s route evidence",
+    (evidence) => {
+      const connection = alternateAttempt(1, 2);
+      const { sshRuntimeReady, failureOrigin, ...withoutEvidence } = connection;
+      const selected = savedConnectionSshRoute({
+        entry: entryWithAlternate,
+        serverConfig: null,
+        connection: {
+          ...withoutEvidence,
+          ...(evidence === "ready" ? { sshRuntimeReady } : {}),
+          ...(evidence === "failure" ? { failureOrigin } : {}),
+          ...(evidence === "preparation"
+            ? {
+                sshPreparation: {
+                  supervisorId: "window-1",
+                  attemptId: 2,
+                  routeId: alternateRouteId,
+                  operationId: "operation-2",
+                  phase: "uploading",
+                  hostAnswered: true,
+                },
+                sshRuntimeReady: { ...sshRuntimeReady!, routeId: sshRouteId },
+              }
+            : {}),
+          ...(evidence === "unknown"
+            ? { sshRuntimeReady: { ...sshRuntimeReady!, routeId: "removed-route" } }
+            : {}),
+        },
+      });
+      if (evidence === "unknown") {
+        expect(selected).toBeUndefined();
+      } else {
+        expect(selected?.target.hostname).toBe(
+          evidence === "none" ? "example.invalid" : "alternate.example.invalid",
+        );
+      }
+    },
+  );
   it("shows preparation on a saved alternate SSH route without restoring the old timeout", () => {
     const connection = alternateAttempt(1, 2);
     const result = rowPresentation(

@@ -18,6 +18,7 @@ import { sshRuntimeTargetKey } from "@goat/client-runtime/state/sshRuntime";
 import {
   isSshConnectionSuperseded,
   savedConnectionPresentation,
+  savedConnectionSshRoute,
 } from "./ConnectionsSettings.logic";
 import * as Effect from "effect/Effect";
 import { appAtomRegistry } from "~/rpc/atomRegistry";
@@ -235,16 +236,9 @@ function sshSetupError(result: SshHostResult, host: string) {
 
 /** Only saved Desktop SSH profiles can address the Desktop runtime owner. */
 function savedDesktopSshTarget(environment: EnvironmentPresentation) {
-  if (window.desktopBridge === undefined) return null;
-  for (const route of connectionRoutes(environment.entry)) {
-    if (
-      route.target._tag === "SshConnectionTarget" &&
-      Option.isSome(route.profile) &&
-      route.profile.value._tag === "SshConnectionProfile"
-    )
-      return route.profile.value.target;
-  }
-  return null;
+  return window.desktopBridge === undefined
+    ? null
+    : (savedConnectionSshRoute(environment)?.target ?? null);
 }
 
 type SavedBackendListRowProps = {

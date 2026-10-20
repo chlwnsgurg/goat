@@ -31,6 +31,25 @@ export function isSshConnectionSuperseded(error: unknown): boolean {
   return sshPreparationFailure(error)._tag === "ConnectionAttemptSuperseded";
 }
 
+/** Runtime status and presentation must use the route that supplied the evidence. */
+export function savedConnectionSshRoute(environment: EnvironmentPresentation) {
+  const routeId =
+    environment.connection.sshPreparation?.routeId ??
+    environment.connection.sshRuntimeReady?.routeId ??
+    environment.connection.failureOrigin?.routeId;
+  for (const route of connectionRoutes(environment.entry)) {
+    if (
+      route.target._tag === "SshConnectionTarget" &&
+      Option.isSome(route.profile) &&
+      route.profile.value._tag === "SshConnectionProfile" &&
+      (routeId === undefined || connectionRouteId(route.target) === routeId)
+    ) {
+      return { routeId: connectionRouteId(route.target), target: route.profile.value.target };
+    }
+  }
+  return undefined;
+}
+
 /** Both the subtitle and an already-open tooltip must describe the same observation. */
 export function savedConnectionPresentation({
   environment,
@@ -40,23 +59,8 @@ export function savedConnectionPresentation({
   readonly runtimeStatus?: SshHostStatus | undefined;
 }) {
   const original = environment.connection;
-  const sshRoutes = connectionRoutes(environment.entry).filter(
-    (route) =>
-      route.target._tag === "SshConnectionTarget" &&
-      Option.isSome(route.profile) &&
-      route.profile.value._tag === "SshConnectionProfile",
-  );
-  const originRouteId =
-    original.sshPreparation?.routeId ??
-    original.sshRuntimeReady?.routeId ??
-    original.failureOrigin?.routeId;
-  const sshRoute =
-    sshRoutes.find((route) => connectionRouteId(route.target) === originRouteId) ?? sshRoutes[0];
-  const routeId = sshRoute ? connectionRouteId(sshRoute.target) : undefined;
-  const ownerStatus =
-    routeId !== undefined && (originRouteId === undefined || originRouteId === routeId)
-      ? runtimeStatus
-      : undefined;
+  const routeId = savedConnectionSshRoute(environment)?.routeId;
+  const ownerStatus = routeId === undefined ? undefined : runtimeStatus;
   const { sshPreparation, sshRuntimeReady, ...withoutSshEvidence } = original;
   const connection = reconcileSshConnectionPresentation(
     {
