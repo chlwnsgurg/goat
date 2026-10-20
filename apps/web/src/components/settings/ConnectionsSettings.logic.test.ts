@@ -403,6 +403,7 @@ import {
   SshConnectionProfile,
   SshConnectionTarget,
   connectionRouteId,
+  type ConnectionCatalogEntry,
   type EnvironmentConnectionPresentation,
 } from "@goat/client-runtime/connection";
 import * as Option from "effect/Option";
@@ -437,9 +438,10 @@ function rowPresentation(
   connection: EnvironmentConnectionPresentation,
   runtimeStatus = readyRuntime,
   enabled = true,
+  entry: ConnectionCatalogEntry = sshEntry,
 ) {
   return savedConnectionPresentation({
-    environment: { entry: { ...sshEntry, enabled }, connection, serverConfig: null },
+    environment: { entry: { ...entry, enabled }, connection, serverConfig: null },
     runtimeStatus,
   });
 }
@@ -476,6 +478,68 @@ function failedAttempt(
 }
 
 describe("saved SSH row semantic status", () => {
+  const alternateTarget = new SshConnectionTarget({
+    ...sshTarget,
+    connectionId: "fixture-ssh-alternate",
+  });
+  const alternateRouteId = connectionRouteId(alternateTarget);
+  const entryWithAlternate = {
+    ...sshEntry,
+    alternateRoutes: [
+      {
+        target: alternateTarget,
+        profile: Option.some(
+          new SshConnectionProfile({
+            ...Option.getOrThrow(sshEntry.profile),
+            connectionId: alternateTarget.connectionId,
+          }),
+        ),
+      },
+    ],
+  };
+  function alternateAttempt(failureAttempt: number, readyAttempt: number) {
+    const connection = failedAttempt(failureAttempt, readyAttempt);
+    return {
+      ...connection,
+      failureOrigin: { ...connection.failureOrigin!, routeId: alternateRouteId },
+      sshRuntimeReady: { ...connection.sshRuntimeReady!, routeId: alternateRouteId },
+    };
+  }
+  it("shows preparation on a saved alternate SSH route without restoring the old timeout", () => {
+    const connection = alternateAttempt(1, 2);
+    const result = rowPresentation(
+      {
+        ...connection,
+        sshPreparation: {
+          supervisorId: "window-1",
+          attemptId: 2,
+          routeId: alternateRouteId,
+          operationId: "operation-2",
+          phase: "uploading",
+          hostAnswered: true,
+        },
+      },
+      readyRuntime,
+      true,
+      entryWithAlternate,
+    );
+    expect(result.text).toBe("Installing GOAT runtime — first setup can take a few minutes");
+    expect(result.preparationPhase).toBe("uploading");
+    expect(result.tone).toBe("muted");
+    expect(result.tooltipText).not.toContain("did not respond");
+  });
+  it("keeps newer ready evidence on a saved alternate SSH route", () => {
+    const result = rowPresentation(alternateAttempt(1, 2), readyRuntime, true, entryWithAlternate);
+    expect(result.text).toBe("Runtime ready · Opening connection");
+    expect(result.tone).toBe("muted");
+    expect(result.tooltipText).not.toContain("did not respond");
+  });
+  it("keeps a fresh timeout on the active alternate SSH route visible", () => {
+    const result = rowPresentation(alternateAttempt(3, 2), readyRuntime, true, entryWithAlternate);
+    expect(result.tone).toBe("error");
+    expect(result.text).toContain("did not respond");
+    expect(result.tooltipText).toContain("did not respond");
+  });
   it("shows a newer verified ready attempt over the older setup timeout in row and tooltip", () => {
     const result = rowPresentation(failedAttempt(1, 2));
     expect(result.text).toBe("Runtime ready · Opening connection");

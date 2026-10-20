@@ -40,17 +40,19 @@ export function savedConnectionPresentation({
   readonly runtimeStatus?: SshHostStatus | undefined;
 }) {
   const original = environment.connection;
-  const sshRoute = connectionRoutes(environment.entry).find(
+  const sshRoutes = connectionRoutes(environment.entry).filter(
     (route) =>
       route.target._tag === "SshConnectionTarget" &&
       Option.isSome(route.profile) &&
       route.profile.value._tag === "SshConnectionProfile",
   );
-  const routeId = sshRoute ? connectionRouteId(sshRoute.target) : undefined;
   const originRouteId =
     original.sshPreparation?.routeId ??
     original.sshRuntimeReady?.routeId ??
     original.failureOrigin?.routeId;
+  const sshRoute =
+    sshRoutes.find((route) => connectionRouteId(route.target) === originRouteId) ?? sshRoutes[0];
+  const routeId = sshRoute ? connectionRouteId(sshRoute.target) : undefined;
   const ownerStatus =
     routeId !== undefined && (originRouteId === undefined || originRouteId === routeId)
       ? runtimeStatus

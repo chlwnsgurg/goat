@@ -732,7 +732,7 @@ effectIt.effect(
     }),
 );
 
-it.each(["local", "owner"] as const)(
+it.each(["local", "owner", "alternate"] as const)(
   "updates an open tooltip and subtitle together from mounted %s progress",
   async (source) => {
     const registry = AtomRegistry.make();
@@ -748,7 +748,11 @@ it.each(["local", "owner"] as const)(
       connectionId: "fixture-ssh",
       label: "Fixture VPS",
     });
-    const routeId = connectionRouteId(sshTarget);
+    const alternateTarget = new SshConnectionTarget({
+      ...sshTarget,
+      connectionId: "fixture-ssh-alternate",
+    });
+    const routeId = connectionRouteId(source === "alternate" ? alternateTarget : sshTarget);
     const identity = { supervisorId: "fixture-window", attemptId: 2, routeId };
     const ready = {
       host: target.alias,
@@ -779,6 +783,23 @@ it.each(["local", "owner"] as const)(
             target,
           }),
         ),
+        ...(source === "alternate"
+          ? {
+              alternateRoutes: [
+                {
+                  target: alternateTarget,
+                  profile: Option.some(
+                    new SshConnectionProfile({
+                      environmentId,
+                      connectionId: alternateTarget.connectionId,
+                      label: "Fixture VPS alternate",
+                      target,
+                    }),
+                  ),
+                },
+              ],
+            }
+          : {}),
       },
       connection: {
         phase: "reconnecting",
@@ -787,7 +808,7 @@ it.each(["local", "owner"] as const)(
         traceId: null,
         failure: { kind: "retrying", reason: "timeout", detail: "old setup timeout" },
         failureOrigin: { ...identity, attemptId: 1, stage: "preparing", setupTimeout: true },
-        ...(source === "local"
+        ...(source !== "owner"
           ? {
               sshPreparation: {
                 ...identity,
@@ -827,20 +848,21 @@ it.each(["local", "owner"] as const)(
       "Installing GOAT runtime",
     );
     const { sshPreparation: _preparation, ...terminalConnection } = environment.connection;
+    const readyConnection = {
+      ...terminalConnection,
+      stage: "opening" as const,
+      sshRuntimeReady: {
+        ...identity,
+        operationId: "fixture-op",
+        attachmentId: "fixture-attachment",
+        runtimeStatus: ready,
+      },
+    };
     await act(async () =>
       registry.set(state.environments, [
         {
           ...environment,
-          connection: {
-            ...terminalConnection,
-            stage: "opening",
-            sshRuntimeReady: {
-              ...identity,
-              operationId: "fixture-op",
-              attachmentId: "fixture-attachment",
-              runtimeStatus: ready,
-            },
-          },
+          connection: readyConnection,
         },
       ]),
     );
@@ -852,6 +874,30 @@ it.each(["local", "owner"] as const)(
     expect(document.querySelector('[data-slot="tooltip-popup"]')?.textContent).not.toMatch(
       /old setup timeout|unknown/,
     );
+    if (source === "alternate") {
+      await act(async () =>
+        registry.set(state.environments, [
+          {
+            ...environment,
+            connection: {
+              ...readyConnection,
+              error: "fresh active route timeout",
+              failure: {
+                kind: "retrying",
+                reason: "timeout",
+                detail: "fresh active route timeout",
+              },
+              failureOrigin: { ...identity, attemptId: 3, stage: "opening", setupTimeout: false },
+            },
+          },
+        ]),
+      );
+      expect(trigger?.textContent).toContain("Reconnecting: fresh active route timeout");
+      expect(trigger?.className).toContain("text-destructive");
+      expect(document.querySelector('[data-slot="tooltip-popup"]')?.textContent).toContain(
+        "fresh active route timeout",
+      );
+    }
     await act(async () => root.render(<div />));
     registry.dispose();
   },
