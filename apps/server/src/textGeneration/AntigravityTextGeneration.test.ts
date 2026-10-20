@@ -25,6 +25,7 @@ import {
   isAntigravityTextGenerationAvailable,
   makeAntigravityTextGeneration,
 } from "./AntigravityTextGeneration.ts";
+import { MemoryGenerationRunnerError } from "@goat/provider-core/server/memoryGenerationRunner";
 
 type TextRuntime = Effect.Success<ReturnType<AntigravityTextGenerationOptions["makeRuntime"]>>;
 
@@ -369,6 +370,7 @@ it.layer(NodeServices.layer)("AntigravityTextGeneration", (it) => {
               })
         ).pipe(Effect.flip);
         expect(error.detail).toContain("did not disclose");
+        expect(error.cause).toEqual(new MemoryGenerationRunnerError({ code: "unavailable" }));
         expect(fixture.state.prompts).toEqual([]);
         yield* fixture.assertCleaned;
       }).pipe(Effect.scoped),
