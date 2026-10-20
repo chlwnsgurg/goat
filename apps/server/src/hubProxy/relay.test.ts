@@ -1,4 +1,3 @@
-// @effect-diagnostics-next-line nodeBuiltinImport:off -- an EventEmitter stands in for a ws socket.
 import * as NodeEvents from "node:events";
 
 import { expect, it } from "@effect/vitest";
