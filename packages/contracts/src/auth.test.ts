@@ -6,6 +6,7 @@ import {
   AuthMcpApprovalDetails,
   AuthEnvironmentScopes,
   AuthEnvironmentScope,
+  AuthHubProxyScope,
   authScopeRequiredResponse,
   AuthGrantScopes,
   AuthStandardClientScopes,
@@ -41,14 +42,16 @@ describe("authorization grants", () => {
 
   const decodeOldScopes = Schema.decodeUnknownSync(oldScopes);
 
-  it.each(AuthEnvironmentScope.literals.filter((scope) => !scope.startsWith("memory:")))(
-    "keeps %s permission errors decodable by old clients",
-    (scope) => {
-      const response = authScopeRequiredResponse(scope);
-      expect(decodeOldScopes([response.requiredScope])).toEqual([response.requiredScope]);
-      expect(response.requiredPermission).toBe(scope);
-    },
-  );
+  // hub:proxy is only ever required under /hub/nodes, which clients older than it never request.
+  it.each(
+    AuthEnvironmentScope.literals.filter(
+      (scope) => !scope.startsWith("memory:") && scope !== AuthHubProxyScope,
+    ),
+  )("keeps %s permission errors decodable by old clients", (scope) => {
+    const response = authScopeRequiredResponse(scope);
+    expect(decodeOldScopes([response.requiredScope])).toEqual([response.requiredScope]);
+    expect(response.requiredPermission).toBe(scope);
+  });
 
   it("keeps old clients able to decode grants with new permissions", () => {
     const response = authScopeResponse(AuthStandardClientScopes);

@@ -83,6 +83,7 @@ const unusedManager = {
   disconnectEnvironment: () => Effect.void,
   revalidateTunnels: () => Effect.void,
   issueMcpClientSession: () => Effect.die("unexpected session"),
+  issueClientSession: () => Effect.die("unexpected client session"),
   runRemoteScript: () => Effect.die("unexpected remote script"),
 } satisfies SshTunnel.SshEnvironmentManagerShape;
 
@@ -691,6 +692,7 @@ describe("sshEnvironment", () => {
             disconnectEnvironment: () => Effect.die("unused"),
             revalidateTunnels: () => Effect.die("unused"),
             issueMcpClientSession: () => Effect.die("unused"),
+            issueClientSession: () => Effect.die("unexpected client session"),
             runRemoteScript: () => Effect.die("unused"),
           }),
         ),

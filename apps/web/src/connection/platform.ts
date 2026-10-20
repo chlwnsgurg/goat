@@ -720,6 +720,27 @@ const layerCapabilities = Layer.effectContext(
 
     return Context.make(ClientCapabilities.CloudSession, cloudSession).pipe(
       Context.add(ClientCapabilities.PrimaryEnvironmentAuth, primaryAuth),
+      Context.add(ClientCapabilities.PrimaryConnectionEndpoint, {
+        endpoint: Effect.gen(function* () {
+          const target = yield* Effect.try({
+            try: readPrimaryEnvironmentTarget,
+            catch: () =>
+              new ConnectionBlockedError({
+                reason: "configuration",
+                detail: "Could not resolve the primary hub endpoint.",
+              }),
+          });
+          if (target === null)
+            return yield* new ConnectionBlockedError({
+              reason: "configuration",
+              detail: "The primary hub endpoint is unavailable.",
+            });
+          return {
+            httpBaseUrl: target.target.httpBaseUrl,
+            bearerToken: yield* primaryAuth.bearerToken,
+          };
+        }),
+      }),
       Context.add(ClientCapabilities.RelayDeviceIdentity, identity),
       Context.add(ClientCapabilities.ClientPresentation, presentation),
       Context.add(ClientCapabilities.SshEnvironmentGateway, ssh),

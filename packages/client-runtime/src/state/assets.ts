@@ -21,6 +21,7 @@ import * as Schema from "effect/Schema";
 import { AsyncResult, Atom, AtomRegistry } from "effect/reactivity";
 
 import * as EnvironmentRegistry from "../connection/registry.ts";
+import { environmentRoutePrefix } from "../environment/endpoint.ts";
 import * as EnvironmentSupervisor from "../connection/supervisor.ts";
 import { mediaFileReference } from "../mediaReference.ts";
 import { request } from "../rpc/client.ts";
@@ -59,7 +60,12 @@ export function parseAssetCollectionKey(
 
 export function resolveAssetUrl(httpBaseUrl: string, relativeUrl: string): string | null {
   try {
-    return new URL(relativeUrl, httpBaseUrl).toString();
+    const base = new URL(httpBaseUrl);
+    const prefix = environmentRoutePrefix(base);
+    return new URL(
+      prefix !== "" && relativeUrl.startsWith("/api/") ? `${prefix}${relativeUrl}` : relativeUrl,
+      base,
+    ).toString();
   } catch {
     return null;
   }

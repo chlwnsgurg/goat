@@ -201,6 +201,7 @@ describe("SSH runtime IPC", () => {
         disconnectEnvironment: () => Effect.void,
         revalidateTunnels: () => Effect.void,
         issueMcpClientSession: () => Effect.die("unexpected MCP session"),
+        issueClientSession: () => Effect.die("unexpected client session"),
         runRemoteScript: () => Effect.die("unexpected remote script"),
       } satisfies SshTunnel.SshEnvironmentManagerShape;
       return Effect.gen(function* () {

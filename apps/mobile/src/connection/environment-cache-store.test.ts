@@ -216,6 +216,21 @@ function makeDatabase() {
 }
 
 describe("mobile SQLite environment cache store", () => {
+  it.effect("persists shell age metadata independently and clears it with the environment", () =>
+    Effect.gen(function* () {
+      const memory = makeDatabase();
+      const store = yield* make().pipe(
+        Effect.provideService(MobileDatabase.MobileDatabase, memory.database),
+      );
+      const meta = { snapshotSequence: 3, capturedAt: "2026-10-19T12:00:00.000Z" };
+      expect(yield* store.loadShellMeta(ENVIRONMENT_ID)).toEqual(Option.none());
+      yield* store.saveShellMeta(ENVIRONMENT_ID, meta);
+      expect(yield* store.loadShellMeta(ENVIRONMENT_ID)).toEqual(Option.some(meta));
+      yield* store.clear(ENVIRONMENT_ID);
+      expect(yield* store.loadShellMeta(ENVIRONMENT_ID)).toEqual(Option.none());
+    }),
+  );
+
   it.effect("round-trips V2 shell and thread DateTime fields with the shared cache schema", () =>
     Effect.gen(function* () {
       const memory = makeDatabase();

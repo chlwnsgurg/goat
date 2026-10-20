@@ -19,6 +19,7 @@ import { Button } from "../ui/button";
 import { Input } from "../ui/input";
 import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../ui/select";
 import { FoldedSettingsSection } from "./FoldedSettingsSection";
+import { HubProxyNodeAccess } from "./HubProxyNodesSettings";
 import {
   savedHubNodeProfiles,
   canRemoveHubNode,
@@ -188,6 +189,9 @@ export function HubNodesSettings({ environmentId }: { readonly environmentId: En
               {!canRemoveHubNode(node) ? (
                 <span className="text-xs text-muted-foreground">Manage cloud machines below</span>
               ) : null}
+            </div>
+            <div className="basis-full">
+              <HubProxyNodeAccess environmentId={environmentId} node={node} />
             </div>
           </div>
         ))}

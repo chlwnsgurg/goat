@@ -18,6 +18,7 @@ import {
   connectionCatalogDisplayUrl,
   connectionProgressLabel,
   environmentMcpUrl,
+  offlineSnapshotAgeLabel,
   connectionStatusText,
   connectionStatusTitle,
   presentEnvironmentConnection,
@@ -352,5 +353,24 @@ describe("connection presentation", () => {
       error: null,
       traceId: null,
     });
+  });
+});
+
+describe("offlineSnapshotAgeLabel", () => {
+  const captured = "2026-10-19T10:00:00.000Z";
+  const at = (minutes: number) => Date.parse(captured) + minutes * 60_000;
+
+  it("names the age of the captured snapshot in coarse steps", () => {
+    expect(offlineSnapshotAgeLabel(captured, at(0.5))).toBe("last state just now");
+    expect(offlineSnapshotAgeLabel(captured, at(7))).toBe("last state 7 min ago");
+    expect(offlineSnapshotAgeLabel(captured, at(135))).toBe("last state 2 h ago");
+    expect(offlineSnapshotAgeLabel(captured, at(60 * 72))).toBe("last state 3 d ago");
+  });
+
+  it("shows no age it cannot vouch for", () => {
+    expect(offlineSnapshotAgeLabel(null, at(5))).toBeNull();
+    expect(offlineSnapshotAgeLabel("not a time", at(5))).toBeNull();
+    // A clock behind the hub's must not read as a negative age.
+    expect(offlineSnapshotAgeLabel(captured, at(-3))).toBe("last state just now");
   });
 });

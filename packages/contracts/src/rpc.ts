@@ -502,6 +502,13 @@ import {
   HubNodesSubscribeInput,
 } from "./hubNodes.ts";
 import { CloudRunListInput, CloudRunListResult } from "./cloudAgents.ts";
+import {
+  HubProxyEnrollInput,
+  HubProxyEnrollResult,
+  HubProxyNodeInput,
+  HubProxyRpcError,
+  HubProxyUnenrollResult,
+} from "./hubProxy.ts";
 
 export const WS_METHODS = {
   memoryProjectBindingGet: "memory.projectBinding.get",
@@ -716,6 +723,9 @@ export const WS_METHODS = {
   hubNodesCheck: "hub.nodes.check",
   hubNodesImport: "hub.nodes.import",
   hubNodesDismissNotice: "hub.nodes.dismissNotice",
+  hubProxyPrepareNode: "hubProxy.prepareNode",
+  hubProxyEnrollNode: "hubProxy.enrollNode",
+  hubProxyUnenrollNode: "hubProxy.unenrollNode",
 
   cloudGetRelayClientStatus: "cloud.getRelayClientStatus",
   cloudInstallRelayClient: "cloud.installRelayClient",
@@ -2196,6 +2206,23 @@ const WsCloudMachinesEnsureReadyRpc = Rpc.make(WS_METHODS.cloudMachinesEnsureRea
   success: CloudMachinesEnsureReadyResult,
   error: CloudMachineRpcError,
 });
+const HubProxyRpcErrors = Schema.Union([HubProxyRpcError, EnvironmentAuthorizationError]);
+/** Starts an SSH node's GOAT runtime so the hub learns its identity; may install GOAT there. */
+const WsHubProxyPrepareNodeRpc = Rpc.make(WS_METHODS.hubProxyPrepareNode, {
+  payload: HubProxyNodeInput,
+  success: Schema.Struct({}),
+  error: HubProxyRpcErrors,
+});
+const WsHubProxyEnrollNodeRpc = Rpc.make(WS_METHODS.hubProxyEnrollNode, {
+  payload: HubProxyEnrollInput,
+  success: HubProxyEnrollResult,
+  error: HubProxyRpcErrors,
+});
+const WsHubProxyUnenrollNodeRpc = Rpc.make(WS_METHODS.hubProxyUnenrollNode, {
+  payload: HubProxyNodeInput,
+  success: HubProxyUnenrollResult,
+  error: HubProxyRpcErrors,
+});
 
 const HubNodesRpcError = Schema.Union([HubNodesError, EnvironmentAuthorizationError]);
 const WsHubNodesListRpc = Rpc.make(WS_METHODS.hubNodesList, {
@@ -2446,6 +2473,9 @@ export const WsCoreServerRpcGroup = RpcGroup.make(
   WsCloudMachinesForgetRpc,
   WsCloudMachinesDismissUnconfirmedRpc,
   WsCloudMachinesEnsureReadyRpc,
+  WsHubProxyPrepareNodeRpc,
+  WsHubProxyEnrollNodeRpc,
+  WsHubProxyUnenrollNodeRpc,
   WsServerReportClientActivityRpc,
   WsServerReportHostPowerStateRpc,
   WsServerGetBackgroundPolicyRpc,
