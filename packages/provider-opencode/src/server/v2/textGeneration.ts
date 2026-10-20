@@ -331,7 +331,14 @@ export const make = Effect.fn("OpenCode2TextGeneration.make")(function* (
           : new TextGenerationError({
               operation: input.operation,
               detail: "OpenCode text generation failed.",
-              cause,
+              // A runtime that cannot start or is too old fails every memory request; a held
+              // database lock clears on its own.
+              cause:
+                TextGenerationOperations.isMemoryOperation(input.operation) &&
+                OpenCodeRuntime.isOpenCodeRuntimeError(cause) &&
+                cause.reason !== "databaseLocked"
+                  ? new MemoryGenerationRunnerError({ code: "unavailable" })
+                  : cause,
             }),
       ),
       Effect.flatMap((raw) =>

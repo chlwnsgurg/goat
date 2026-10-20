@@ -134,6 +134,24 @@ describe("MemoryGenerationHold", () => {
     }),
   );
 
+  it("retires a conflict attempt only for output GOAT cannot use", () => {
+    const failed = (detail: string, cause?: unknown) =>
+      new M.TextGenerationError({ operation: "resolveMemoryConflict", detail, cause });
+    assert.isTrue(Hold.outputFailure(failed("Memory result is invalid.")));
+    assert.isTrue(Hold.outputFailure(failed("Codex returned invalid structured output.")));
+    assert.isTrue(
+      Hold.outputFailure(
+        failed("Claude failed.", new MemoryGenerationRunnerError({ code: "invalid_output" })),
+      ),
+    );
+    // Refusals and unknown failures leave the ticket resumable.
+    assert.isFalse(Hold.outputFailure(failed("Antigravity text generation failed.")));
+    assert.isFalse(Hold.outputFailure(rejected));
+    assert.isFalse(
+      Hold.outputFailure(failed("x", new MemoryGenerationRunnerError({ code: "unavailable" }))),
+    );
+  });
+
   it("treats only rejections that repeat for every request as deterministic", () => {
     assert.strictEqual(Hold.deterministicFailure(rejected), "schema_rejected");
     assert.strictEqual(
@@ -155,6 +173,27 @@ describe("MemoryGenerationHold", () => {
       "unavailable",
     );
     assert.isUndefined(Hold.deterministicFailure(runner("invalid_output")));
+    // Cursor, Antigravity and managed Codex keep the provider's setup error as the cause.
+    const setup = (detail: string) =>
+      new M.TextGenerationError({
+        operation: "generateMemorySummary",
+        detail: "Cursor SDK text generation failed.",
+        cause: new M.ProviderSetupError({
+          instanceId: M.ProviderInstanceId.make("cursor"),
+          operation: "requireApiKey",
+          detail,
+        }),
+      });
+    assert.strictEqual(
+      Hold.deterministicFailure(
+        setup("Sign in with Cursor or add CURSOR_API_KEY in provider settings."),
+      ),
+      "auth",
+    );
+    assert.strictEqual(
+      Hold.deterministicFailure(setup("Antigravity needs a Gemini API key.")),
+      "unavailable",
+    );
     assert.strictEqual(
       Hold.deterministicFailure(
         new M.TextGenerationError({ operation: "x", detail: "Codex CLI request timed out." }),

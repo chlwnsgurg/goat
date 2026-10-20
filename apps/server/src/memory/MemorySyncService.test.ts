@@ -3878,23 +3878,48 @@ it.effect(
     }),
 );
 
-it.effect(
-  "a model the runner cannot provide keeps the conflict resumable and probes on the hold schedule",
-  () =>
+const refusals = [
+  {
+    shape: "a typed runner refusal",
+    held: true,
+    error: new M.TextGenerationError({
+      operation: "resolveMemoryConflict",
+      detail: "Grok did not disclose or support the selected memory model.",
+      cause: new MemoryGenerationRunnerError({ code: "unavailable" }),
+    }),
+  },
+  {
+    shape: "a provider setup error under a generic detail",
+    held: true,
+    error: new M.TextGenerationError({
+      operation: "resolveMemoryConflict",
+      detail: "Antigravity text generation failed.",
+      cause: new M.ProviderSetupError({
+        instanceId: M.ProviderInstanceId.make("antigravity"),
+        operation: "start",
+        detail: "Antigravity needs a Gemini API key or Google Cloud project.",
+      }),
+    }),
+  },
+  {
+    shape: "an unknown failure",
+    held: false,
+    error: new M.TextGenerationError({
+      operation: "resolveMemoryConflict",
+      detail: "Some provider failed.",
+    }),
+  },
+];
+it.effect.each(refusals)(
+  "$shape keeps the conflict resumable instead of retiring it as invalid output",
+  ({ held, error }) =>
     Effect.gen(function* () {
       let calls = 0;
       const model = realGeneration({
         resolveMemoryConflict: () =>
           Effect.suspend(() => {
             calls++;
-            // Grok's shape: free-text detail, typed runner cause.
-            return Effect.fail(
-              new M.TextGenerationError({
-                operation: "resolveMemoryConflict",
-                detail: "Grok did not disclose or support the selected memory model.",
-                cause: new MemoryGenerationRunnerError({ code: "unavailable" }),
-              }),
-            );
+            return Effect.fail(error);
           }),
       });
       yield* Effect.scoped(
@@ -3909,21 +3934,24 @@ it.effect(
           });
           yield* attempt;
           assert.strictEqual(calls, 1);
-          // Held: further sweeps before the probe make no provider call.
-          for (let n = 0; n < 5; n++) {
-            yield* TestClock.adjust("5 seconds");
-            yield* attempt;
+          if (held) {
+            // Held: further sweeps before the probe make no provider call.
+            for (let n = 0; n < 5; n++) {
+              yield* TestClock.adjust("5 seconds");
+              yield* attempt;
+            }
+            assert.strictEqual(calls, 1);
           }
-          assert.strictEqual(calls, 1);
-          // Not retired as invalid output: the ticket is still there for the probe.
           assert.isFalse(
             (yield* store.pendingReports(100)).some(
               (report) => report.outcome === "failed" && report.failureCode === "invalid_output",
             ),
           );
+          // The ticket is still there: the next due attempt calls the provider again.
           yield* TestClock.adjust("1 minute");
           yield* attempt;
-          assert.strictEqual(calls, 2);
+          assert.isAbove(calls, 1);
+          if (held) assert.strictEqual(calls, 2);
           yield* sync.shutdown;
         }).pipe(Effect.provide(fixture(peer(), model).pipe(Layer.provideMerge(Hold.layer)))),
       );

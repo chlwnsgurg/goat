@@ -710,16 +710,15 @@ const make = Effect.gen(function* () {
             // Renewal failure interrupts the provider, including a hung one-shot execution.
             return yield* Effect.raceFirst(
               hold.guard(holdKey, model(input)).pipe(
-                // A held model or a rejection that repeats for every request stays resumable:
-                // "unavailable" is transient, so the ticket is retried instead of retired.
+                // Only unusable output retires the attempt. A held model, a refusal or an unknown
+                // failure maps to "unavailable", which is transient, so the ticket is retried.
                 Effect.mapError(
                   (error) =>
                     new M.MemoryHubError({
                       code:
-                        error._tag === "MemoryGenerationHeld" ||
-                        Hold.deterministicFailure(error) !== undefined
-                          ? "unavailable"
-                          : "invalid_output",
+                        error._tag !== "MemoryGenerationHeld" && Hold.outputFailure(error)
+                          ? "invalid_output"
+                          : "unavailable",
                     }),
                 ),
               ),

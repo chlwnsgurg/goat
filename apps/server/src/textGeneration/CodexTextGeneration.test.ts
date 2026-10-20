@@ -13,14 +13,21 @@ import * as Scope from "effect/Scope";
 import { createModelSelection } from "@goat/shared/model";
 import { expect } from "vite-plus/test";
 
-import { CodexSettings, ProviderInstanceId, TextGenerationError } from "@goat/contracts";
+import {
+  CodexSettings,
+  ProviderInstanceId,
+  ProviderSetupError,
+  TextGenerationError,
+} from "@goat/contracts";
 
 import * as ServerConfig from "../config.ts";
 import * as TextGeneration from "./TextGeneration.ts";
 import { makeCodexTextGeneration } from "./CodexTextGeneration.ts";
+import * as Hold from "../memory/MemoryGenerationHold.ts";
 import { writeFakeCli } from "@goat/provider-testing/fakeCli";
 import { strictOutputSchemaViolations } from "@goat/provider-core/server/strictOutputSchema";
 const decodeCodexSettings = Schema.decodeSync(CodexSettings);
+const isSetupError = Schema.is(ProviderSetupError);
 
 const DEFAULT_TEST_MODEL_SELECTION = createModelSelection(
   ProviderInstanceId.make("codex"),
@@ -183,7 +190,7 @@ function withFakeCodexEnv<A, E, R>(
     launchArgs?: string;
     environment?: NodeJS.ProcessEnv;
     models?: ReadonlyArray<string>;
-    managedRuntime?: boolean;
+    managedRuntime?: boolean | ProviderSetupError;
     memoryRunnerContext?: import("@goat/provider-core/server/memoryGenerationRunner").MemoryGenerationRunnerContext;
   },
   effectFn: (textGeneration: TextGeneration.TextGeneration["Service"]) => Effect.Effect<A, E, R>,
@@ -208,13 +215,15 @@ function withFakeCodexEnv<A, E, R>(
           capabilities: null,
         })),
       ),
-      input.managedRuntime
-        ? Effect.succeed({
-            config,
-            environment: input.environment ?? process.env,
-            revision: "test",
-          })
-        : undefined,
+      isSetupError(input.managedRuntime)
+        ? Effect.fail(input.managedRuntime)
+        : input.managedRuntime
+          ? Effect.succeed({
+              config,
+              environment: input.environment ?? process.env,
+              revision: "test",
+            })
+          : undefined,
       input.memoryRunnerContext,
     );
     return yield* effectFn(textGeneration);
@@ -322,6 +331,26 @@ it.layer(layerCodexTextGenerationTest)("CodexTextGeneration", (it) => {
       const schema: unknown = JSON.parse(yield* fs.readFileString(schemaCopyPath));
       expect(strictOutputSchemaViolations(schema)).toEqual([]);
     }).pipe(Effect.scoped),
+  );
+  it.effect("keeps a managed setup refusal as the cause so memory pauses the model", () =>
+    withFakeCodexEnv(
+      {
+        output: JSON.stringify(memoryOutput),
+        memoryRunnerContext: memoryContext,
+        managedRuntime: new ProviderSetupError({
+          instanceId: memoryContext.providerInstanceId,
+          operation: "managedRuntime",
+          detail: "Sign in with ChatGPT to use managed Codex.",
+        }),
+      },
+      (generation) =>
+        Effect.gen(function* () {
+          const error = yield* generation.generateMemorySummary!(memorySummary).pipe(Effect.flip);
+          expect(error.detail).toBe("Sign in with ChatGPT to use managed Codex.");
+          expect(isSetupError(error.cause)).toBe(true);
+          expect(Hold.deterministicFailure(error)).toBe("unavailable");
+        }),
+    ),
   );
   it.effect.each(memoryOperations)("rejects forged execution JSON for %s", (operation) =>
     withFakeCodexEnv(

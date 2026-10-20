@@ -14,6 +14,7 @@ import * as Layer from "effect/Layer";
 import * as TestProviderHost from "@goat/provider-testing/TestProviderHost";
 import * as OpenCode2AdapterV2Testkit from "../orchestration-v2/Adapters/OpenCode2AdapterV2.testkit.ts";
 import * as OpenCode2Server from "@goat/provider-opencode/server/v2/OpenCode2Server";
+import * as OpenCodeRuntime from "@goat/provider-opencode/server/OpenCodeRuntime";
 import * as OpenCode2TextGeneration from "@goat/provider-opencode/server/v2/textGeneration";
 import { OPENCODE2_TITLE_GENERATION } from "./OpenCode2TextGeneration.fixture.ts";
 
@@ -371,6 +372,42 @@ it.layer(layer)("OpenCode v2 memory generation", (it) => {
         assert.propertyVal(failure.cause, "_tag", "MemoryGenerationRunnerError");
         assert.propertyVal(failure.cause, "code", code);
         assert.equal(acquisitions, 0);
+      }).pipe(Effect.scoped),
+  );
+  it.effect.each(["resolveMemoryConflict", "generateMemorySummary"] as const)(
+    "%s pauses memory when OpenCode cannot start, but not for a held database lock",
+    (operation) =>
+      Effect.gen(function* () {
+        let startError: OpenCodeRuntime.OpenCodeRuntimeError =
+          new OpenCodeRuntime.OpenCodeRuntimeError({
+            operation: "startOpenCodeServerProcess",
+            detail: "Failed to spawn OpenCode server process: spawn opencode ENOENT",
+          });
+        const server = OpenCode2Server.OpenCode2Server.of({
+          withConnection: () => Effect.die("Memory uses its own isolated server."),
+          withMemoryConnection: () => Effect.fail(startError),
+        });
+        const textGeneration = yield* OpenCode2TextGeneration.make({
+          memoryRunnerContext: memoryContext,
+          external: false,
+        }).pipe(Effect.provideService(OpenCode2Server.OpenCode2Server, server));
+        const invoke = () =>
+          Effect.flip(
+            operation === "resolveMemoryConflict"
+              ? textGeneration.resolveMemoryConflict!(memoryConflict)
+              : textGeneration.generateMemorySummary!(memorySummary),
+          );
+        const missing = yield* invoke();
+        assert.propertyVal(missing.cause, "_tag", "MemoryGenerationRunnerError");
+        assert.propertyVal(missing.cause, "code", "unavailable");
+        // A lock clears on its own, so the item keeps its ordinary retries.
+        startError = new OpenCodeRuntime.OpenCodeRuntimeError({
+          operation: "startOpenCodeServerProcess",
+          detail: "OpenCode database is locked.",
+          reason: "databaseLocked",
+        });
+        const locked = yield* invoke();
+        assert.propertyVal(locked.cause, "reason", "databaseLocked");
       }).pipe(Effect.scoped),
   );
   const operations = ["resolveMemoryConflict", "generateMemorySummary"] as const;

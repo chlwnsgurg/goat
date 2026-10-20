@@ -46,6 +46,7 @@ const runtimeMock = {
     connectCalls: 0,
     clientCalls: 0,
     connectionError: undefined as Error | undefined,
+    startError: undefined as OpenCodeRuntime.OpenCodeRuntimeError | undefined,
     sessionCreateError: undefined as unknown,
     sessionResult: undefined as { data?: { id: string } } | undefined,
     promptRequestError: undefined as unknown,
@@ -78,6 +79,7 @@ const runtimeMock = {
     this.state.connectCalls = 0;
     this.state.clientCalls = 0;
     this.state.connectionError = undefined;
+    this.state.startError = undefined;
     this.state.sessionCreateError = undefined;
     this.state.sessionResult = undefined;
     this.state.promptRequestError = undefined;
@@ -88,6 +90,7 @@ const runtimeMock = {
 const OpenCodeRuntimeTestDouble: OpenCodeRuntime.OpenCodeRuntime["Service"] = {
   startOpenCodeServerProcess: ({ binaryPath, serverPassword, environment }) =>
     Effect.gen(function* () {
+      if (runtimeMock.state.startError) return yield* runtimeMock.state.startError;
       const index = runtimeMock.state.startCalls.length + 1;
       const url = `http://127.0.0.1:${4_300 + index}`;
       runtimeMock.state.startCalls.push(binaryPath);
@@ -967,6 +970,36 @@ it.layer(layerOpenCodeTextGenerationTest)("OpenCode v1 memory generation", (it) 
             expect(runtimeMock.state.deleted).toHaveLength(1);
             const fs = yield* FileSystem.FileSystem;
             expect(yield* fs.exists(runtimeMock.state.directories[0]!)).toBe(false);
+          }),
+        undefined,
+        memoryContext,
+      ),
+  );
+  it.effect.each(operations)(
+    "%s pauses memory when OpenCode cannot start, but not for a held database lock",
+    (operation) =>
+      withOpenCodeTextGeneration(
+        DEFAULT_OPENCODE_SETTINGS,
+        (generation) =>
+          Effect.gen(function* () {
+            setOutput(operation);
+            runtimeMock.state.startError = new OpenCodeRuntime.OpenCodeRuntimeError({
+              operation: "startOpenCodeServerProcess",
+              detail: "Failed to spawn OpenCode server process: spawn opencode ENOENT",
+            });
+            const missing = yield* Effect.flip(invoke(generation, operation));
+            expect(missing.cause).toMatchObject({
+              _tag: "MemoryGenerationRunnerError",
+              code: "unavailable",
+            });
+            // A lock clears on its own, so the item keeps its ordinary retries.
+            runtimeMock.state.startError = new OpenCodeRuntime.OpenCodeRuntimeError({
+              operation: "startOpenCodeServerProcess",
+              detail: "OpenCode database is locked.",
+              reason: "databaseLocked",
+            });
+            const locked = yield* Effect.flip(invoke(generation, operation));
+            expect(locked.cause).toMatchObject({ reason: "databaseLocked" });
           }),
         undefined,
         memoryContext,

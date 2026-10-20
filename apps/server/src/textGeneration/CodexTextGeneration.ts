@@ -331,7 +331,8 @@ export const makeCodexTextGeneration = Effect.fn("makeCodexTextGeneration")(func
       const resolved = resolveRuntime
         ? yield* resolveRuntime.pipe(
             Effect.mapError(
-              (cause) => new TextGenerationError({ operation, detail: cause.detail }),
+              // The setup error stays as the cause so memory can pause a model it cannot run.
+              (cause) => new TextGenerationError({ operation, detail: cause.detail, cause }),
             ),
           )
         : undefined;

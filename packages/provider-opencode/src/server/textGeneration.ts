@@ -491,7 +491,12 @@ export const makeOpenCodeTextGeneration = Effect.fn("makeOpenCodeTextGeneration"
               new TextGenerationError({
                 operation: input.operation,
                 detail: OpenCodeRuntime.openCodeRuntimeErrorDetail(cause),
-                cause,
+                // A runtime that cannot start or is too old fails every memory request; a held
+                // database lock clears on its own.
+                cause:
+                  memory && cause.reason !== "databaseLocked"
+                    ? new MemoryGenerationRunnerError({ code: "unavailable" })
+                    : cause,
               }),
             ),
         }),

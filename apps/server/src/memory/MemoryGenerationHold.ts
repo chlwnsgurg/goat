@@ -79,6 +79,27 @@ export class MemoryGenerationHeld extends Schema.TaggedError<MemoryGenerationHel
 
 const isTextGenerationError = Schema.is(M.TextGenerationError);
 const isRunnerError = Schema.is(MemoryGenerationRunnerError);
+const isSetupError = Schema.is(M.ProviderSetupError);
+
+/**
+ * Whether the provider answered with output GOAT cannot use. Only this retires a conflict
+ * attempt; a refusal, outage or unknown failure leaves the ticket resumable.
+ */
+export function outputFailure(error: unknown): boolean {
+  for (let current = error, depth = 0; current !== undefined && depth < 4; depth += 1) {
+    if (
+      isTextGenerationError(current) &&
+      classifyTextGenerationFailure(current) === "invalid_output"
+    )
+      return true;
+    if (isRunnerError(current)) return current.code === "invalid_output";
+    current =
+      typeof current === "object" && current !== null && "cause" in current
+        ? current.cause
+        : undefined;
+  }
+  return false;
+}
 const encodeKey = Schema.encodeSync(
   Schema.fromJsonString(
     Schema.Tuple([
@@ -104,6 +125,9 @@ export function deterministicFailure(error: unknown): MemoryGenerationHoldReason
     if (isRunnerError(current))
       // Every code but invalid_output repeats until the provider or its models change.
       return current.code === "invalid_output" ? undefined : "unavailable";
+    // A missing install, credential or configuration stays missing until settings change.
+    if (isSetupError(current))
+      return classifyTextGenerationFailure(current) === "auth" ? "auth" : "unavailable";
     current =
       typeof current === "object" && current !== null && "cause" in current
         ? current.cause
