@@ -8,13 +8,14 @@ to keep a terminal open.
 Install the `goat` CLI first ([Install GOAT](./install.md#command-line)), then
 run these commands on the machine that will host GOAT:
 
-| Task                            | Command                  |
-| ------------------------------- | ------------------------ |
-| Install and start               | `goat service install`   |
-| Inspect status and log location | `goat service status`    |
-| Move to a newer release         | `goat update`            |
-| Restart                         | `goat service restart`   |
-| Stop and remove from startup    | `goat service uninstall` |
+| Task                            | Command                           |
+| ------------------------------- | --------------------------------- |
+| Install and start               | `goat service install`            |
+| Install without restarting      | `goat service install --no-start` |
+| Inspect status and log location | `goat service status`             |
+| Move to a newer release         | `goat update`                     |
+| Restart                         | `goat service restart`            |
+| Stop and remove from startup    | `goat service uninstall`          |
 
 Uninstalling the service leaves your projects, threads, and settings intact.
 Running `goat service install` again repairs a service that `goat service status`
@@ -24,8 +25,10 @@ Earlier releases installed the service as `t3code.service` on Linux and
 `com.t3tools.t3code.service` on macOS. The next `goat service install`,
 `goat service restart`, or `goat update` that restarts the service moves it to
 `goat.service` or `si.goat.service`; until then `goat service status` reports
-it as needing repair. A legacy service that serves a different data directory,
-such as an upstream T3 Code install, is left alone.
+it as needing repair. A service that serves a different data directory,
+including one still named `t3code.service` or an upstream T3 Code install, is
+left alone. One user has a single `goat.service`, so installing for a second
+data directory does not replace the first.
 
 `goat update` downloads the newest release on your channel and switches `goat`
 and the service to it. Restarting interrupts running agent turns, terminals,
