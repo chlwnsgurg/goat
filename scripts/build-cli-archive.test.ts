@@ -5,7 +5,12 @@ import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
 
-import { stageCliResourceMonitor } from "./build-cli-archive.ts";
+import {
+  ownRuntimeManifest,
+  decodeRuntimeManifest,
+  RUNTIME_MANIFEST_ARCHIVE_ENTRY,
+} from "@goat/shared/runtimeManifest";
+import { stageCliRuntimeManifest, stageCliResourceMonitor } from "./build-cli-archive.ts";
 
 it.effect.each(["", ".exe"])(
   "stages current and legacy cached CLI monitors with only the new name%s",
@@ -36,5 +41,25 @@ it.effect.each(["", ".exe"])(
         );
         assert.isTrue(yield* fs.exists(path.join(source, mode, legacy)));
       }
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+);
+
+it.effect.each(["darwin-arm64", "linux-x64", "linux-arm64", "win32-x64", "win32-arm64"])(
+  "stages a runtime manifest beside the executable for %s",
+  (platform) =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const root = yield* fs.makeTempDirectoryScoped({ prefix: "goat-cli-manifest-" });
+      const contentDir = path.join(root, `goat-1.2.3-${platform}`);
+      yield* fs.makeDirectory(contentDir);
+      yield* fs.writeFileString(
+        path.join(contentDir, platform.startsWith("win32") ? "goat.exe" : "goat"),
+        "binary",
+      );
+      const input = { version: "1.2.3", commit: "abc123", commitTime: 123456 };
+      yield* stageCliRuntimeManifest(contentDir, input);
+      const text = yield* fs.readFileString(path.join(contentDir, RUNTIME_MANIFEST_ARCHIVE_ENTRY));
+      assert.deepEqual(decodeRuntimeManifest(text), ownRuntimeManifest(input));
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
 );

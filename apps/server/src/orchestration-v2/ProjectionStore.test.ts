@@ -40,6 +40,7 @@ import { projectThreadAwarenessV2 } from "@goat/shared/agentAwareness";
 
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import { CodexProviderCapabilitiesV2 } from "./Adapters/CodexAdapterV2.ts";
+import * as UsageLimitRecoveryWorker from "./UsageLimitRecoveryWorker.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
 import {
   buildBoundedThreadProjection,
@@ -4457,6 +4458,65 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
       }
       yield* applyRun("failed", NodeId.make("new-attempt-root"));
       yield* assertSummary(null, null);
+    }),
+  );
+
+  it.effect("returns a usage limit without a reset time only to the fallback branch", () =>
+    Effect.gen(function* () {
+      const store = yield* ProjectionStore.ProjectionStoreV2;
+      const threadId = yield* addRolledBackRecoveryCandidate("limit-no-reset");
+      const original = (yield* store.getThreadProjection(threadId)).runs[0]!;
+      const now = yield* DateTime.now;
+      yield* store.apply({
+        id: EventId.make("event:limit-no-reset:error"),
+        type: "turn-item.updated",
+        threadId,
+        occurredAt: now,
+        payload: {
+          id: TurnItemId.make("limit-no-reset:error"),
+          threadId,
+          runId: original.id,
+          nodeId: original.rootNodeId,
+          providerThreadId: null,
+          providerTurnId: null,
+          nativeItemRef: null,
+          parentItemId: null,
+          ordinal: 2,
+          status: "failed" as const,
+          title: "Usage limit reached",
+          startedAt: now,
+          completedAt: now,
+          updatedAt: now,
+          type: "error" as const,
+          failure: {
+            class: "usage_limit" as const,
+            message: "Plan limit reached.",
+            code: "usageLimitExceeded",
+            retryable: null,
+          },
+        },
+      });
+      yield* store.apply({
+        id: EventId.make("event:limit-no-reset:run:failed"),
+        type: "run.updated",
+        threadId,
+        occurredAt: now,
+        payload: { ...original, status: "failed" },
+      });
+      const options = { now, autoResume: true, snooze: false };
+      assert.isUndefined(
+        (yield* store.getLimitRecoveryCandidates(options)).find((row) => row.id === threadId),
+      );
+      const fallback = (yield* store.getLimitRecoveryCandidates({
+        ...options,
+        withoutReset: true,
+      })).find((row) => row.id === threadId);
+      assert.strictEqual(fallback?.lastErrorClass, "usage_limit");
+      assert.isNull(fallback?.usageLimitResetAt ?? null);
+      // Nothing is armed for it: the recovery command needs a reset time.
+      assert.isNull(
+        UsageLimitRecoveryWorker.limitRecoveryCommand(fallback!, true, DateTime.toEpochMillis(now)),
+      );
     }),
   );
 

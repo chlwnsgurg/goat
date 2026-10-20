@@ -15,7 +15,7 @@ export const STALL_AFTER_MS = 20 * 60_000;
 export type ThreadHealth =
   | { readonly _tag: "waiting" | "unknown" }
   /** idle: no run is active, so drain may move it without interrupting a turn. */
-  | { readonly _tag: "healthy"; readonly idle: boolean }
+  | { readonly _tag: "healthy"; readonly idle?: boolean }
   | { readonly _tag: "stalled"; readonly idleMs: number }
   | { readonly _tag: "host_lost"; readonly since: string }
   | {

@@ -44,6 +44,8 @@ export const protocolExecutable = (
     commitTime?: number;
     /** The CLI lists memory scopes in `auth session issue --help`; builds before memory do not. */
     memoryScopes?: boolean;
+    /** Exit code of `auth session issue --help` after it prints; 0 when absent. */
+    scopeHelpExit?: number;
     contestedPort?: number;
     contestedAttempts?: number;
   },
@@ -78,6 +80,9 @@ if (args[0] === "--version") {
 } else if (args[0] === "__ssh-helper" && args[1] === "protocol") {
   if (${JSON.stringify(signals.missingCommand ?? false)}) process.exit(2);
   const at = args.indexOf("--runtime-file");
+  // A test writes this file to make another client's server look live from now on.
+  const liveFile = path.join(test, "live-tokens-" + version);
+  if (at >= 0 && args.includes("--shell") && fs.existsSync(liveFile)) { console.log(fs.readFileSync(liveFile, "utf8").trim()); return; }
   const value = at < 0 ? fields : await (await import(${JSON.stringify(helperUrl)})).readLiveSshRuntimeProtocol(args[at+1], flag("--port-file"), flag("--pid-file"));
   event("protocol", { live: at >= 0, status: value.status });
   if (args.includes("--shell")) {
@@ -139,6 +144,7 @@ console.log((value.status ? value.status + " " : "") + [value.serverVersion ?? "
   event("supervise", { status: result.status });
   fs.writeFileSync(flag("--result"), result.status + " " + (result.pid ?? 0) + " " + (result.version ?? "-") + "\\n");
 } else if (args[0] === "__ssh-helper" && args[1] === "pick-port") {
+  if (fs.existsSync(path.join(test, "fail-pick-port-" + version))) process.exit(1);
   const contestedPort = ${JSON.stringify(signals.contestedPort ?? null)};
   const picked = path.join(test, "contested-picked");
   const pickCount = fs.existsSync(picked) ? Number(fs.readFileSync(picked, "utf8")) : 0;
@@ -170,6 +176,7 @@ res.resume(); res.on("end", () => process.exit(res.statusCode === 200 ? 0 : 1));
 } else if (args[0] === "auth" && args.includes("--help")) {
   console.log("  --scope choice  Authorization scope to grant. (choices: " +
     (${JSON.stringify(signals.memoryScopes ?? true)} ? "memory:read, memory:write, " : "") + "orchestration:read, orchestration:operate)");
+  process.exitCode = ${JSON.stringify(signals.scopeHelpExit ?? 0)};
 } else if (args[0] === "auth") {
   event("auth", { args });
   if (fs.existsSync(path.join(test, "pairing-fail"))) process.exit(2);
@@ -586,6 +593,8 @@ if [ "$#" = 1 ] && [ "$1" = +%s ]; then echo $(( ${freezeFileTimes ? '$(cat "$HO
         yield* fs.writeFileString(
           `${bin}/sleep`,
           `#!/bin/sh
+# Listener polling waits for the real child; only fact warm-up advances the frozen file clock.
+case "$1" in 0.1) exit 0 ;; esac
 printf '%s\\n' "$1" >> "$HOME/.test/clock/waits"
 second="$(cat "$HOME/.test/clock/second")"
 wait_seconds="\${1%%.*}"

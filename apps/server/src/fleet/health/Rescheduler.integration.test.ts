@@ -1,6 +1,6 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { describe, expect, it } from "@effect/vitest";
-import { type HostStatusEntry, type RuntimeMode, ThreadId } from "@goat/contracts";
+import { FleetOwnerKey, type HostStatusEntry, type RuntimeMode, ThreadId } from "@goat/contracts";
 import * as NodeSqliteClient from "@goat/shared/nodeSqliteClient";
 import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
@@ -12,11 +12,14 @@ import * as TestClock from "effect/testing/TestClock";
 
 import * as HostPowerMonitor from "../../background/HostPowerMonitor.ts";
 import * as ThreadManagementService from "../../orchestration-v2/ThreadManagementService.ts";
-import Migration0086 from "../../persistence/Migrations/086_FleetHealth.ts";
+import Migration0087 from "../../persistence/Migrations/087_FleetHealth.ts";
 import * as SshRemoteDispatch from "../../sshRemote/SshRemoteDispatch.ts";
+import { Placement, PlacementHostConditions } from "../resources/Placement.ts";
+import { place } from "../resources/placementRules.ts";
 import * as FleetHostStates from "./FleetHostStates.ts";
 import * as Health from "./Health.ts";
 import * as HostHealthMonitor from "./HostHealthMonitor.ts";
+import { layerPlacementConditions } from "./layer.ts";
 import * as Rescheduler from "./Rescheduler.ts";
 
 interface RemoteThread {
@@ -240,6 +243,53 @@ const probeOf = (world: World) => (host: string) =>
       : { host, reachability: "unreachable", message: host + " timed out" },
   );
 
+/** T3 placement over the fake hosts, with its real rules and the cordons this layer provides. */
+const fakePlacement = (world: World) =>
+  Layer.succeed(
+    Placement,
+    Placement.of({
+      place: (input) =>
+        Effect.gen(function* () {
+          const cordoned = yield* (yield* PlacementHostConditions).cordoned;
+          const now = DateTime.toEpochMillis(yield* DateTime.now);
+          const hosts = Object.entries(world.reachable).map(([host, up]): HostStatusEntry =>
+            up
+              ? ({
+                  host,
+                  reachability: "ok",
+                  serverVersion: "1",
+                  metrics: {
+                    threads: { running: 0, waiting: 0, queued: 0 },
+                    quotas: [
+                      {
+                        instanceId: "codex",
+                        driver: "codex",
+                        fromCache: false,
+                        limits: { checkedAt: "2026-10-20T00:00:00.000Z", windows: [] },
+                      },
+                    ],
+                  },
+                } as unknown as HostStatusEntry)
+              : { host, reachability: "unreachable", message: host + " timed out" },
+          );
+          return place(
+            {
+              owner: input.owner,
+              selections: [input.modelSelection],
+              hostSelector: input.hostSelector,
+              avoidHosts: input.avoidHosts,
+              cordoned,
+            },
+            hosts,
+            {},
+            now,
+          );
+        }),
+      status: Effect.die("unused"),
+      statusOf: () => Effect.die("unused"),
+    }),
+  );
+
 /** A fresh server over one database file: host contacts start empty, cordons and claims persist. */
 const layerFor = (
   world: World,
@@ -247,6 +297,8 @@ const layerFor = (
   power?: Layer.Layer<HostPowerMonitor.HostPowerMonitor>,
 ) =>
   Layer.mergeAll(Health.layer, Rescheduler.layer).pipe(
+    Layer.provideMerge(fakePlacement(world)),
+    Layer.provideMerge(layerPlacementConditions),
     Layer.provideMerge(
       Layer.effect(
         HostHealthMonitor.HostHealthMonitor,
@@ -256,7 +308,7 @@ const layerFor = (
     Layer.provideMerge(Layer.mergeAll(FleetHostStates.layer, FleetHostStates.layerClaims)),
     Layer.provideMerge(
       // A restart reopens the same file; the tables already exist then.
-      Layer.effectDiscard(Effect.ignore(Migration0086)).pipe(
+      Layer.effectDiscard(Effect.ignore(Migration0087)).pipe(
         Layer.provideMerge(NodeSqliteClient.layer({ filename })),
       ),
     ),
@@ -292,7 +344,7 @@ const request = (
   overrides: Partial<Rescheduler.RescheduleRequest> = {},
 ): Rescheduler.RescheduleRequest => ({
   ref,
-  owner: "goal:g1",
+  owner: FleetOwnerKey.make("goal:g1"),
   attempt: 1,
   reason: "host_unreachable",
   modelSelection: { instanceId: "codex" as never, model: "gpt-6.1-sol" },

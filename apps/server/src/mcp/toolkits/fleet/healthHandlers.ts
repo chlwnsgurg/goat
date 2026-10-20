@@ -1,4 +1,4 @@
-import { OrchestratorMcpFailure, ThreadId } from "@goat/contracts";
+import { FleetOwnerKey, OrchestratorMcpFailure, ThreadId } from "@goat/contracts";
 import * as Effect from "effect/Effect";
 
 import * as FleetHostStates from "../../../fleet/health/FleetHostStates.ts";
@@ -96,7 +96,7 @@ export const layer = McpToolAccess.toLayer(FleetHealthToolkit, {
       const branch = nextAttemptBranch(input.branch);
       const result = yield* rescheduler.reschedule({
         ref: { host: asHost(input.host), threadId: ThreadId.make(input.threadId), watchId: null },
-        owner: "thread:" + input.threadId,
+        owner: FleetOwnerKey.make("thread:" + input.threadId),
         attempt,
         reason: "manual",
         modelSelection,

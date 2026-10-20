@@ -36,10 +36,7 @@ export interface HealthShape {
 }
 
 /** The goal controller's view of hosts and attempts (agentic-k8s.md "Interfaces"). */
-export class Health extends Context.Service<Health, HealthShape>()(
-  // @effect-diagnostics-next-line deterministicKeys:off -- the key is the T1/T2/T3 agreement in docs/internals/agentic-k8s.md.
-  "goat/fleet/Health",
-) {}
+export class Health extends Context.Service<Health, HealthShape>()("goat/fleet/health/Health") {}
 
 const REMOTE_TIMEOUT_MS = 15_000;
 const decodeStatus = Schema.decodeUnknownEffect(OrchestratorMcpThreadStatusResult);

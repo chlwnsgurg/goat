@@ -4,7 +4,7 @@ import "@goat/contracts/adoptLegacyEnv";
 import { defineConfig, mergeConfig } from "vite-plus";
 
 import baseConfig from "../../vite.config.ts";
-import { resolveBuildCommitTime } from "../../scripts/lib/build-commit-time.ts";
+import { resolveBuildCommit, resolveBuildCommitTime } from "../../scripts/lib/build-commit-time.ts";
 import { loadRepoEnv } from "../../scripts/lib/public-config.ts";
 import packageJson from "./package.json" with { type: "json" };
 import { WeightedShardSequencer } from "./src/testUtils/weightedShardSequencer.ts";
@@ -109,6 +109,7 @@ export default mergeConfig(
       define: {
         __GOAT_BUILD_CHANNEL__: JSON.stringify(cliBuildChannel),
         __GOAT_BUILD_COMMIT_TIME__: JSON.stringify(buildCommitTime),
+        __GOAT_BUILD_COMMIT__: JSON.stringify(resolveBuildCommit(import.meta.dirname) ?? ""),
         __GOAT_TELEMETRY_CHANNEL__: JSON.stringify(telemetryChannel),
         __GOAT_BUILD_RELAY_URL__: JSON.stringify(repoEnv.T3CODE_RELAY_URL?.trim() ?? ""),
         __GOAT_BUILD_CLERK_PUBLISHABLE_KEY__: JSON.stringify(

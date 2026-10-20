@@ -52,6 +52,7 @@ import * as RuntimeIdentity from "./runtimeIdentity.ts";
 import * as SshRemoteDispatch from "./sshRemote/SshRemoteDispatch.ts";
 import * as HandoffExpiry from "./handoffs/HandoffExpiry.ts";
 import * as FleetHealth from "./fleet/health/layer.ts";
+import * as GoalLayers from "./fleet/goals/GoalLayers.ts";
 import * as HostThreadsMcpService from "./mcp/HostThreadsMcpService.ts";
 import * as OrchestratorMcpService from "./mcp/OrchestratorMcpService.ts";
 import * as ThreadResultService from "./threadResults/ThreadResultService.ts";
@@ -145,6 +146,8 @@ import * as ProviderInstanceRegistryHydration from "./provider/ProviderInstanceR
 import * as ProjectSettingsOverrideSweep from "./provider/ProjectSettingsOverrideSweep.ts";
 import * as TerminalManager from "./terminal/Manager.ts";
 import * as McpHttpServer from "./mcp/McpHttpServer.ts";
+import * as FleetFallback from "./fleet/resources/Fallback.ts";
+import * as FleetPlacement from "./fleet/resources/Placement.ts";
 import * as McpSessionRegistry from "./mcp/McpSessionRegistry.ts";
 import * as PreviewAutomationBroker from "./mcp/PreviewAutomationBroker.ts";
 import * as DeviceService from "./device/DeviceService.ts";
@@ -322,6 +325,10 @@ const layerResourceTelemetry = ResourceTelemetry.layer.pipe(
 const layerHostPowerMonitor = HostPowerMonitor.layer.pipe(
   Layer.provide(layerDesktopTelemetryReceiver),
 );
+
+// One self-healing instance for the fleet tools and the goal controller: one host monitor and one
+// move lock. It gets the power monitor background policy uses, so suspend and resume reach it.
+const layerFleetHealth = FleetHealth.layer.pipe(Layer.provide(layerHostPowerMonitor));
 
 // Reuses DesktopTelemetryReceiverLayerLive: a fresh receiver layer here
 // would open a second reader on the desktop telemetry fd.
@@ -1252,25 +1259,28 @@ const layerMakeRoutes = Layer.mergeAll(
     Ws.layer,
   ),
   Layer.mergeAll(
-    // Self-healing serves only the MCP tools; its host status and SSH needs come from below.
-    McpHttpServer.layer.pipe(
-      Layer.provide(
-        // The same power monitor instance as background policy, so suspend and resume reach it.
-        FleetHealth.layer.pipe(Layer.provide(layerHostPowerMonitor)),
-      ),
-    ),
+    McpHttpServer.layer.pipe(Layer.provide(layerFleetHealth)),
     layerMemoryToolkits,
     McpHttpServer.layerProviderToolkit,
     HandoffExpiry.layer,
+    // Fleet goals act through the same launch, watch and dispatch services as these tools.
+    McpHttpServer.layerFleetToolkit.pipe(
+      Layer.provide(GoalLayers.layer.pipe(Layer.provideMerge(layerFleetHealth))),
+    ),
   ).pipe(
     Layer.provide(ProviderAdapterRegistry.layerFromProviderInstanceRegistry),
     Layer.provide(McpOAuth.layerMcpClientAuthenticator),
   ),
 ).pipe(
-  // One instance for the goat_host_status tool and the server.getHostStatus RPC.
+  // One instance for the goat_host_status tool and the server.getHostStatus RPC; fleet
+  // placement reads the same one.
   Layer.provide(
-    McpHttpServer.layerHostStatusService.pipe(
-      Layer.provide(ProviderAdapterRegistry.layerFromProviderInstanceRegistry),
+    Layer.mergeAll(FleetPlacement.layer, FleetFallback.layerChains).pipe(
+      Layer.provideMerge(
+        McpHttpServer.layerHostStatusService.pipe(
+          Layer.provide(ProviderAdapterRegistry.layerFromProviderInstanceRegistry),
+        ),
+      ),
     ),
   ),
   Layer.provide(CloudTaskSource.layer.pipe(Layer.provide(GitVcsDriver.layer))),

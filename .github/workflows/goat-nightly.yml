@@ -790,6 +790,9 @@ jobs:
           node scripts/render-third-party-notices.ts \
             --input apps/server/dist/client/third-party-licenses.json --output release/THIRD_PARTY_NOTICES.md
 
+      - name: Write runtime compatibility manifest
+        run: node scripts/release-runtime-manifest.ts --dir release --version "$VERSION"
+
       - name: Verify release and write SHA256SUMS
         run: node scripts/verify-release-artifacts.ts assemble --dir release --reports reports --version "$VERSION"
 
@@ -923,7 +926,7 @@ jobs:
             exit 0
           fi
           mkdir release-runtime
-          grep -E '^[0-9a-f]{64} [ *]goat-[^ ]+-(darwin|linux|win32)-(arm64|x64)\.(tar\.gz|zip)$' \
+          grep -E '^[0-9a-f]{64} [ *]goat-[^ ]+(-(darwin|linux|win32)-(arm64|x64)\.(tar\.gz|zip)|-runtime\.json)$' \
             release/SHA256SUMS > release-runtime/SHA256SUMS
           while read -r _ name; do cp "release/${name#\*}" release-runtime/; done < release-runtime/SHA256SUMS
           node scripts/publish-nightly-release.ts --repo goat-si/goat --dir release-runtime --assets-only \

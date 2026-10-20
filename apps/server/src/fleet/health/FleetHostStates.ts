@@ -28,6 +28,8 @@ export interface FleetHostStatesShape {
     readonly changedBy: string | null;
   }) => Effect.Effect<FleetHostState>;
   readonly uncordon: (host: string) => Effect.Effect<void>;
+  /** Cordoned and draining hosts, with null for this machine, as placement reads them. */
+  readonly cordonedHosts: Effect.Effect<ReadonlySet<string | null>>;
 }
 
 export class FleetHostStates extends Context.Service<FleetHostStates, FleetHostStatesShape>()(
@@ -81,6 +83,12 @@ export const make = Effect.gen(function* () {
         `.pipe(Effect.orDie);
         return fromRow(rows[0]!);
       }),
+    cordonedHosts: sql<{
+      readonly host: string;
+    }>`SELECT host FROM fleet_host_states WHERE cordoned = 1 OR draining = 1`.pipe(
+      Effect.orDie,
+      Effect.map((rows) => new Set(rows.map((row) => (row.host === LOCAL_HOST ? null : row.host)))),
+    ),
     uncordon: (host) =>
       sql`DELETE FROM fleet_host_states WHERE host = ${host}`.pipe(Effect.orDie, Effect.asVoid),
   });

@@ -77,6 +77,8 @@ export * from "./connectionCatalog.ts";
 export * from "./resourceTelemetry.ts";
 export * from "./hostStatus.ts";
 export * from "./fleetHealth.ts";
+export * from "./fleetGoal.ts";
+export * from "./fleetResources.ts";
 export * from "./usage.ts";
 export * from "./scheduledTask.ts";
 export * from "./worktreeMcp.ts";

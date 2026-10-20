@@ -39,6 +39,7 @@ export const resolveDesktopSshCliRunner = (
     ...(buildCommitTime === undefined ? {} : { archiveCommitTime: buildCommitTime }),
     ...archiveOptions,
     hostDownload: true,
+    publishedFallback: true,
     ...(environment.isPackaged ? { refreshOwnedRuntimeOnFirstConnection: true } : {}),
   };
 };

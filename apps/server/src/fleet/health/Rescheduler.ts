@@ -1,10 +1,9 @@
 import {
-  type HostStatusEntry,
+  type FleetOwnerKey,
   type ModelSelection,
   type RuntimeMode,
   ThreadId,
 } from "@goat/contracts";
-import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
 import * as Data from "effect/Data";
 import * as Effect from "effect/Effect";
@@ -12,14 +11,13 @@ import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
 import * as Semaphore from "effect/Semaphore";
 
-import { choosePlacement, type PlacementCandidate } from "../../channels/channelPlacement.ts";
 import { isTerminalPhase } from "../../mcp/threadStatus.ts";
 import * as ThreadManagementService from "../../orchestration-v2/ThreadManagementService.ts";
 import * as SshRemoteDispatch from "../../sshRemote/SshRemoteDispatch.ts";
 import { FleetRescheduleClaims } from "./FleetHostStates.ts";
 import { probeRemoteStatus, readLocalStatus, type FleetThreadRef } from "./Health.ts";
 import { HostHealthMonitor } from "./HostHealthMonitor.ts";
-import { isSchedulable } from "./hostHealthModel.ts";
+import { Placement } from "../resources/Placement.ts";
 import {
   fenceNote,
   MAX_ATTEMPTS_PER_WORKER,
@@ -28,9 +26,6 @@ import {
 } from "./reschedulePolicy.ts";
 
 export type { RescheduleReason } from "./reschedulePolicy.ts";
-
-/** "goal:<id>" or "thread:<id>". */
-export type FleetOwnerKey = string;
 
 /** The caller lost the authority the request was made with. */
 export class RescheduleNotAllowed extends Data.TaggedError("RescheduleNotAllowed")<{
@@ -94,8 +89,7 @@ export interface ReschedulerShape {
 
 /** Moves one attempt to another host (agentic-k8s.md "Resume from the branch or a replica"). */
 export class Rescheduler extends Context.Service<Rescheduler, ReschedulerShape>()(
-  // @effect-diagnostics-next-line deterministicKeys:off -- the key is the T1/T2/T3 agreement in docs/internals/agentic-k8s.md.
-  "goat/fleet/Rescheduler",
+  "goat/fleet/health/Rescheduler",
 ) {}
 
 const REMOTE_TIMEOUT_MS = 15_000;
@@ -152,22 +146,13 @@ const refused = (reason: RescheduleRefusal, message: string): RescheduleResult =
   message,
 });
 
-const quotaWindows = (sample: HostStatusEntry | null, instanceId: string) => {
-  const quota = sample?.metrics?.quotas.find((entry) => entry.instanceId === instanceId);
-  if (quota === undefined || quota.limits.windows.length === 0) return null;
-  return quota.limits.windows.map((window) => ({
-    label: window.label,
-    usedPercent: window.usedPercent,
-    resetsAt: window.resetsAt,
-  }));
-};
-
 const clip = (text: string) => Array.from(text).slice(0, 300).join("");
 
 export const make = Effect.gen(function* () {
   const dispatch = yield* SshRemoteDispatch.SshRemoteDispatch;
   const monitor = yield* HostHealthMonitor;
   const claims = yield* FleetRescheduleClaims;
+  const placement = yield* Placement;
   const context = yield* Effect.context<
     | SshRemoteDispatch.SshRemoteDispatch
     | HostHealthMonitor
@@ -201,22 +186,6 @@ export const make = Effect.gen(function* () {
       { host, tool, arguments: args, writes, timeoutMs: REMOTE_TIMEOUT_MS },
       writes ? recheck(request) : Effect.succeed<RuntimeMode>("approval-required"),
     );
-
-  /** Hosts that can take work. Connected hosts never contacted are probed by their conditions. */
-  const schedulableHosts = (exclude: string | null) =>
-    Effect.gen(function* () {
-      const connected = yield* dispatch.connectedHosts;
-      const hosts = new Set([...(yield* monitor.known).map((entry) => entry.host), ...connected]);
-      const schedulable: Array<{ readonly host: string; readonly sample: HostStatusEntry | null }> =
-        [];
-      for (const host of hosts) {
-        if (host === exclude) continue;
-        if (!isSchedulable((yield* monitor.conditions(host)).conditions)) continue;
-        const sample = (yield* monitor.known).find((entry) => entry.host === host)?.sample ?? null;
-        schedulable.push({ host, sample });
-      }
-      return schedulable;
-    });
 
   /** Null: the list could not be read, so whether the launch happened is unknown. */
   const findOnHost = (request: RescheduleRequest, host: string, title: string) =>
@@ -339,6 +308,7 @@ export const make = Effect.gen(function* () {
     target: string,
     title: string,
     resumedFrom: "branch" | "base",
+    modelSelection: ModelSelection,
   ) =>
     Effect.gen(function* () {
       const cwd = yield* targetCwd(request, target);
@@ -375,7 +345,7 @@ export const make = Effect.gen(function* () {
                 reason: request.reason,
               }),
             ].join("\n"),
-            modelSelection: request.modelSelection,
+            modelSelection,
             runtimeMode: request.runtimeMode,
             callerRuntimeMode: request.runtimeMode,
           },
@@ -497,29 +467,32 @@ export const make = Effect.gen(function* () {
             );
           }
 
-          const candidates = yield* schedulableHosts(request.ref.host);
           const requested = pinned ?? request.targetHost ?? null;
-          let target = requested;
-          if (target === null) {
-            const now = yield* Clock.currentTimeMillis;
-            const scored: Array<PlacementCandidate<string>> = candidates.map((entry) => ({
-              value: entry.host,
-              host: entry.host,
-              providerLabel: request.modelSelection.instanceId,
-              preferred: false,
-              windows: quotaWindows(entry.sample, request.modelSelection.instanceId),
-              activeTasks: entry.sample?.metrics?.threads.running ?? 0,
-            }));
-            target = choosePlacement(scored, now)?.chosen.value ?? null;
-          } else if (!candidates.some((entry) => entry.host === target)) {
+          const placed = yield* placement.place({
+            owner: request.owner,
+            modelSelection: request.modelSelection,
+            fallbackChain: null,
+            // Moved work runs on another machine over SSH, never here or back on the old host.
+            hostSelector: requested === null ? { exclude: [null] } : { hosts: [requested] },
+            project: { host: null, projectId: null, cwd: request.project?.cwd ?? null },
+            avoidHosts: [request.ref.host],
+          });
+          if (placed._tag === "Refused" || placed.host === null) {
+            const reasons =
+              placed._tag === "Refused"
+                ? placed.reasons.map(
+                    (item) => (item.host ?? "this machine") + ": " + item.reason.message,
+                  )
+                : [];
             return refused(
               "no_capacity",
-              target + " is not Ready or is cordoned; read goat_host_status.",
+              (requested === null
+                ? "No host can take the work"
+                : requested + " cannot take the work") +
+                (reasons.length === 0 ? "." : " (" + reasons.join("; ") + ")."),
             );
           }
-          if (target === null)
-            return refused("no_capacity", "No Ready, uncordoned host can take the work.");
-          return yield* launchOn(request, target, title, resumedFrom);
+          return yield* launchOn(request, placed.host, title, resumedFrom, placed.modelSelection);
         }).pipe(
           Effect.catchTags({
             RescheduleNotAllowed: (error) => Effect.succeed(refused("not_allowed", error.message)),

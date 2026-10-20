@@ -438,6 +438,8 @@ export function applyServerSettingsPatch(
     goatBotHome: goatBotHomePatch,
     // Its targets merge per name below; their `null` removals must not reach deepMerge.
     completionWebhook: completionWebhookPatch,
+    // Per top-level key: deepMerge would keep a fallback chain or host limit the patch removed.
+    fleet: fleetPatch,
     ...patchForMerge
   } = patch;
   const currentBackgroundActivity = normalizeServerBackgroundActivitySettings(current);
@@ -604,6 +606,7 @@ export function applyServerSettingsPatch(
           ),
         }
       : {}),
+    ...(fleetPatch !== undefined ? { fleet: { ...current.fleet, ...fleetPatch } } : {}),
     ...(patch.defaultModelSelection !== undefined
       ? { defaultModelSelection: patch.defaultModelSelection }
       : {}),

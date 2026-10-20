@@ -59,7 +59,7 @@ export function nextHealingStep(
       return { _tag: "none" };
     case "healthy":
       // Drain moves an attempt only between runs; a running turn is left to finish.
-      return context.hostDraining && health.idle
+      return context.hostDraining && health.idle === true
         ? { _tag: "reschedule", reason: "drain" }
         : { _tag: "none" };
     case "waiting":
