@@ -146,6 +146,7 @@ it.layer(NodeServices.layer)("ServerEnvironmentLive", (it) => {
         expect(descriptor.capabilities.memory?.hubDiagnostics).toBe(true);
         expect(supportsMemoryProtocol(descriptor.capabilities)).toBe(true);
         expect(descriptor.capabilities.memory?.importProvider).toBeUndefined();
+        expect(descriptor.capabilities.memory?.importTurnStartFit).toBeUndefined();
         expect(descriptor.capabilities.memory?.importProvider === true).toBe(false);
         expect(descriptor.capabilities.memory?.hub).toBeUndefined();
         expect(descriptor.capabilities.memoryHubProtocolVersion).toBeUndefined();
@@ -172,6 +173,7 @@ it.layer(NodeServices.layer)("ServerEnvironmentLive", (it) => {
       expect(descriptor.capabilities.memory).toEqual({
         protocolVersion: 1,
         importProvider: true,
+        importTurnStartFit: true,
         refusedReverts: true,
         resolutionInputs: true,
         retainedLocalSpace: true,
@@ -344,6 +346,7 @@ it.layer(NodeServices.layer)("ServerEnvironmentLive", (it) => {
       expect(second.capabilities.threadPullRequestLinking).toBe(true);
       expect(second.capabilities.serverResolvedCommandContext).toBe(true);
       expect(second.capabilities.projectProviderInstanceOverrides).toBe(true);
+      expect(second.capabilities.automaticServerUpdates).toBe(true);
       expect(second.capabilities.agentActivityPublishing).toBe(false);
     }),
   );

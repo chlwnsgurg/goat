@@ -6,7 +6,7 @@ import * as SqlClient from "effect/sql/SqlClient";
 import * as Statement from "effect/sql/Statement";
 import * as M from "@goat/contracts";
 import * as NodeSqliteClient from "@goat/shared/nodeSqliteClient";
-import { runMigrations, migrationManifest } from "../Migrations.ts";
+import { runMigrations } from "../Migrations.ts";
 import migration, {
   memoryUsageHeadBytes,
   memoryUsageSummary,
@@ -49,7 +49,18 @@ it.effect(
         before,
       );
       assert.deepStrictEqual(yield* runMigrations(), [
-        ...migrationManifest.filter(([id]) => id >= 80),
+        [80, "MemoryUsageCounters"],
+        [81, "MemoryRevertResults"],
+        [82, "HandoffLookupIndex"],
+        [83, "MemoryLastReadySpace"],
+        [84, "MemoryHubAdministered"],
+        [85, "MemoryCheckpointLifecycle"],
+        [86, "FleetGoals"],
+        [87, "FleetHealth"],
+        [88, "ThreadRunObservedChecks"],
+        [89, "RemoteDispatchObservation"],
+        [90, "MemoryRevisionCheckpointSize"],
+        [91, "HubNodes"],
       ]);
       yield* assertUsageCounters;
       assert.deepStrictEqual(yield* runMigrations(), []);

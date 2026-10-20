@@ -12,6 +12,8 @@ import * as FileSystem from "effect/FileSystem";
 import { HttpClient } from "effect/http";
 import { ChildProcessSpawner } from "effect/process";
 
+import { CLI_RELEASE_REPOSITORY } from "@goat/shared/cliRelease";
+
 import * as DesktopBackendConfiguration from "./DesktopBackendConfiguration.ts";
 import * as DesktopBackendManager from "./DesktopBackendManager.ts";
 import * as DesktopObservability from "../app/DesktopObservability.ts";
@@ -22,9 +24,12 @@ import * as DesktopWindow from "../window/DesktopWindow.ts";
 import * as DesktopWslEnvironment from "../wsl/DesktopWslEnvironment.ts";
 import * as ElectronDialog from "../electron/ElectronDialog.ts";
 import * as ElectronApp from "../electron/ElectronApp.ts";
+import * as ElectronShell from "../electron/ElectronShell.ts";
 
 const { logWarning: logBackendPoolWarning } =
   DesktopObservability.makeComponentLogger("desktop-backend-pool");
+
+const GOAT_DOWNLOAD_URL = `https://github.com/${CLI_RELEASE_REPOSITORY}/releases`;
 
 export type BackendInstanceId = DesktopBackendManager.BackendInstanceId;
 export const BackendInstanceId = DesktopBackendManager.BackendInstanceId;
@@ -105,6 +110,7 @@ export const layer = Layer.effect(
     const desktopWindow = yield* DesktopWindow.DesktopWindow;
     const electronDialog = yield* ElectronDialog.ElectronDialog;
     const electronApp = yield* ElectronApp.ElectronApp;
+    const electronShell = yield* ElectronShell.ElectronShell;
     const appSettings = yield* DesktopAppSettings.DesktopAppSettings;
     // Without this, instance scopes are orphaned: they only close via explicit unregister() calls,
     // so on app shutdown the WSL backend child process gets hard-killed by the OS instead of
@@ -183,6 +189,26 @@ export const layer = Layer.effect(
             "Another GOAT server, such as the background service, is using this data directory. Stop that server and reopen GOAT, or set a separate GOAT_HOME and pair with the running server.",
           )
           .pipe(Effect.andThen(electronApp.quit)),
+      onDatabaseAhead: () =>
+        electronDialog
+          .showMessageBox({
+            type: "error",
+            title: "This GOAT version is older than your data",
+            message: "This GOAT version is older than your data",
+            detail:
+              "A newer GOAT version upgraded this GOAT home's database, so this version cannot open it. Install the latest GOAT to keep using it. Your threads and settings are unchanged.",
+            buttons: ["Download GOAT", "Quit"],
+            cancelId: 1,
+          })
+          .pipe(
+            Effect.flatMap((choice) =>
+              choice.response === 0
+                ? electronShell.openExternal(GOAT_DOWNLOAD_URL)
+                : Effect.succeed(false),
+            ),
+            Effect.ignore,
+            Effect.andThen(electronApp.quit),
+          ),
     });
 
     const instancesRef = yield* SynchronizedRef.make<

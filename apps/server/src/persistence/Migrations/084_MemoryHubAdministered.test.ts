@@ -2,7 +2,7 @@ import { assert, it } from "@effect/vitest";
 import * as NodeSqliteClient from "@goat/shared/nodeSqliteClient";
 import * as Effect from "effect/Effect";
 import * as SqlClient from "effect/sql/SqlClient";
-import { runMigrations, migrationManifest } from "../Migrations.ts";
+import { runMigrations } from "../Migrations.ts";
 import migration from "./084_MemoryHubAdministered.ts";
 
 it.effect.each(["empty", "admin", "guard", "member", "last-ready"] as const)(
@@ -32,7 +32,14 @@ it.effect("082 participates in the migration ledger and preserves its flag on re
     const sql = yield* SqlClient.SqlClient;
     yield* runMigrations({ toMigrationInclusive: 83 });
     assert.deepStrictEqual(yield* runMigrations(), [
-      ...migrationManifest.filter(([id]) => id >= 84),
+      [84, "MemoryHubAdministered"],
+      [85, "MemoryCheckpointLifecycle"],
+      [86, "FleetGoals"],
+      [87, "FleetHealth"],
+      [88, "ThreadRunObservedChecks"],
+      [89, "RemoteDispatchObservation"],
+      [90, "MemoryRevisionCheckpointSize"],
+      [91, "HubNodes"],
     ]);
     yield* sql`INSERT INTO memory_hub_administration_state VALUES(1,1)`;
     assert.deepStrictEqual(yield* runMigrations(), []);

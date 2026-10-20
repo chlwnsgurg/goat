@@ -94,6 +94,8 @@ export const ExecutionEnvironmentCapabilities = Schema.Struct({
       protocolVersion: Schema.Int,
       hub: Schema.optionalKey(Schema.Boolean),
       importProvider: Schema.optionalKey(Schema.Boolean),
+      /** Import preview can flag items too large for the turn-start frame; absent on older servers. */
+      importTurnStartFit: Schema.optionalKey(Schema.Boolean),
       refusedReverts: Schema.optionalKey(Schema.Boolean),
       resolutionInputs: Schema.optionalKey(Schema.Boolean),
       retainedLocalSpace: Schema.optionalKey(Schema.Boolean),
@@ -165,6 +167,11 @@ export const ExecutionEnvironmentCapabilities = Schema.Struct({
   threadPullRequestWatch: Schema.optionalKey(Schema.Boolean),
   pullRequestStackActions: Schema.optionalKey(Schema.Boolean),
   serverSelfUpdate: Schema.optionalKey(ServerSelfUpdateCapability),
+  /**
+   * Older servers strip the unknown settings key, so the preference would
+   * snap back; clients disable the switch unless this is true.
+   */
+  automaticServerUpdates: Schema.optionalKey(Schema.Boolean),
   /** Manual commands must update this install, not the host's default global prefix. */
   serverInstallation: ForwardCompatibleOptional(ServerInstallation),
   serverSelfUpdateProgress: Schema.optionalKey(Schema.Boolean),

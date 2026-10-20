@@ -6,6 +6,7 @@ import {
   reconcileGoatMigrationIds,
 } from "./reconcileGoatMigrationIds.ts";
 import { reconcileV2PreviewMigration } from "./reconcileV2PreviewMigration.ts";
+import { DatabaseNewerThanBuildError } from "./Errors.ts";
 
 import Migration0001 from "./Migrations/001_OrchestrationEvents.ts";
 import Migration0002 from "./Migrations/002_OrchestrationCommandReceipts.ts";
@@ -96,7 +97,8 @@ import Migration0086 from "./Migrations/086_FleetGoals.ts";
 import Migration0087 from "./Migrations/087_FleetHealth.ts";
 import Migration0088 from "./Migrations/088_ThreadRunObservedChecks.ts";
 import Migration0089 from "./Migrations/089_RemoteDispatchObservation.ts";
-import Migration0090 from "./Migrations/090_HubNodes.ts";
+import Migration0090 from "./Migrations/090_MemoryRevisionCheckpointSize.ts";
+import Migration0091 from "./Migrations/091_HubNodes.ts";
 
 export const migrationEntries = [
   [1, "OrchestrationEvents", Migration0001],
@@ -191,10 +193,13 @@ export const migrationEntries = [
   [87, "FleetHealth", Migration0087],
   [88, "ThreadRunObservedChecks", Migration0088],
   [89, "RemoteDispatchObservation", Migration0089],
-  [90, "HubNodes", Migration0090],
+  [90, "MemoryRevisionCheckpointSize", Migration0090],
+  [91, "HubNodes", Migration0091],
 ] as const;
 
 export const migrationManifest = migrationEntries.map(([id, name]) => [id, name] as const);
+
+const knownMigrationNames: ReadonlySet<string> = new Set(migrationEntries.map(([, name]) => name));
 
 const makeMigrationLoader = (throughId?: number) =>
   Migrator.fromRecord(
@@ -247,6 +252,28 @@ const assertV2MigrationsCanRun = Effect.fn("assertV2MigrationsCanRun")(function*
 
 const run = Migrator.make({});
 
+const failIfDatabaseNewerThanBuild = Effect.fn("failIfDatabaseNewerThanBuild")(function* (
+  error: Migrator.MigrationError,
+) {
+  const sql = yield* SqlClient.SqlClient;
+  const recorded = yield* Effect.catch(
+    sql<{ readonly name: string }>`SELECT name FROM effect_sql_migrations`,
+    () => Effect.fail(error),
+  );
+  const unknownMigrations: Array<string> = [];
+  const seen = new Set<string>();
+  for (const row of recorded) {
+    if (knownMigrationNames.has(row.name) || seen.has(row.name)) continue;
+    seen.add(row.name);
+    unknownMigrations.push(row.name);
+  }
+  if (unknownMigrations.length === 0) return yield* error;
+  return yield* new DatabaseNewerThanBuildError({
+    unknownMigrations,
+    originalMessage: error.message,
+  });
+});
+
 export interface RunMigrationsOptions {
   readonly toMigrationInclusive?: number | undefined;
 }
@@ -256,19 +283,21 @@ export const runMigrations = Effect.fn("runMigrations")(function* ({
 }: RunMigrationsOptions = {}) {
   const includesV2 =
     toMigrationInclusive === undefined || toMigrationInclusive >= FIRST_V2_MIGRATION_ID;
-  yield* assertMemoryMigrationsCompatible(migrationEntries);
-  const previewMigrations = includesV2 ? yield* reconcileV2PreviewMigration() : [];
-  // GOAT ledgers move before the V2 check, which would otherwise read GOAT's
-  // old ids as upstream migrations the migrator skips.
-  const goatMigrations = yield* reconcileGoatMigrationIds(migrationEntries);
-  if (includesV2) {
-    yield* assertV2MigrationsCanRun(toMigrationInclusive);
-  }
-  const executedMigrations = [
-    ...previewMigrations,
-    ...goatMigrations,
-    ...(yield* run({ loader: makeMigrationLoader(toMigrationInclusive) })),
-  ];
+  const executedMigrations = yield* Effect.gen(function* () {
+    yield* assertMemoryMigrationsCompatible(migrationEntries);
+    const previewMigrations = includesV2 ? yield* reconcileV2PreviewMigration() : [];
+    // GOAT ledgers move before the V2 check, which would otherwise read GOAT's
+    // old ids as upstream migrations the migrator skips.
+    const goatMigrations = yield* reconcileGoatMigrationIds(migrationEntries);
+    if (includesV2) {
+      yield* assertV2MigrationsCanRun(toMigrationInclusive);
+    }
+    return [
+      ...previewMigrations,
+      ...goatMigrations,
+      ...(yield* run({ loader: makeMigrationLoader(toMigrationInclusive) })),
+    ];
+  }).pipe(Effect.catchTags({ MigrationError: failIfDatabaseNewerThanBuild }));
   const migrations = executedMigrations.map(([id, name]) => `${id}_${name}`);
   yield* migrations.length === 0
     ? Effect.logDebug("Database schema is current")

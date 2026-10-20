@@ -241,7 +241,9 @@ export const make = Effect.gen(function* () {
         retainedLocalSpace: true,
         generationHold: true,
         hubDiagnostics: true,
-        ...(importRuntime._tag === "Some" ? { importProvider: true } : {}),
+        ...(importRuntime._tag === "Some"
+          ? { importProvider: true, importTurnStartFit: true }
+          : {}),
       },
       repositoryIdentity: true,
       connectionProbe: true,
@@ -286,6 +288,7 @@ export const make = Effect.gen(function* () {
       serverResolvedCommandContext: true,
       environmentIcon: true,
       projectCloneTracking: true,
+      automaticServerUpdates: true,
       ...(serverSelfUpdate === null ? {} : { serverSelfUpdate }),
       ...(serverInstallation === null ? {} : { serverInstallation }),
       ...(serverSelfUpdate === "boot-service" || desktopAppUpdate

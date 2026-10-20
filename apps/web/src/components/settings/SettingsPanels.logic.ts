@@ -2,6 +2,7 @@ import { migratingStorage } from "@goat/client-runtime/storage-migration";
 import type {
   BackgroundActivityProfile,
   BackgroundActivitySettings,
+  ExecutionEnvironmentCapabilities,
   ProviderInstanceConfig,
   PreviewViewportSetting,
   ProviderInstanceId,
@@ -18,6 +19,23 @@ import {
 } from "@goat/shared/backgroundActivitySettings";
 import * as Duration from "effect/Duration";
 import * as Equal from "effect/Equal";
+
+export function supportsAutomaticServerUpdates(
+  connectedEnvironments: ReadonlyArray<{
+    readonly serverConfig?: {
+      readonly environment: {
+        readonly capabilities: Pick<ExecutionEnvironmentCapabilities, "automaticServerUpdates">;
+      };
+    } | null;
+  }>,
+): boolean {
+  return (
+    connectedEnvironments.length > 0 &&
+    connectedEnvironments.every(
+      (target) => target.serverConfig?.environment.capabilities.automaticServerUpdates === true,
+    )
+  );
+}
 
 export function isProjectGroupingEnabled(mode: SidebarProjectGroupingMode): boolean {
   return mode !== "separate";

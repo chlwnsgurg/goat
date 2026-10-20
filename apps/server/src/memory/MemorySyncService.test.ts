@@ -39,13 +39,14 @@ import * as Generation from "../textGeneration/TextGeneration.ts";
 import * as Secrets from "../auth/ServerSecretStore.ts";
 import * as Events from "../orchestration-v2/EventSink.ts";
 import * as RuntimeIdentity from "../runtimeIdentity.ts";
-import { migrationManifest, runMigrations } from "../persistence/Migrations.ts";
+import { runMigrations } from "../persistence/Migrations.ts";
 import migration from "../persistence/Migrations/073_Memory.ts";
 import lastReadyMigration from "../persistence/Migrations/083_MemoryLastReadySpace.ts";
 import hubMigration from "../persistence/Migrations/074_MemoryHubSync.ts";
 import searchMigration from "../persistence/Migrations/075_MemorySearchCounters.ts";
 import lineageMigration from "../persistence/Migrations/077_MemoryImportLineage.ts";
 import checkpointMigration from "../persistence/Migrations/078_MemoryCheckpointAccounting.ts";
+import revisionSizeMigration from "../persistence/Migrations/090_MemoryRevisionCheckpointSize.ts";
 import reportMigration from "../persistence/Migrations/079_MemoryReportLifecycle.ts";
 import usageMigration from "../persistence/Migrations/080_MemoryUsageCounters.ts";
 import revertMigration from "../persistence/Migrations/081_MemoryRevertResults.ts";
@@ -92,6 +93,7 @@ const setup = Layer.effectDiscard(
     yield* hubMigration;
     yield* lineageMigration;
     yield* checkpointMigration;
+    yield* revisionSizeMigration;
     yield* reportMigration;
     yield* usageMigration;
     yield* revertMigration;
@@ -2119,7 +2121,11 @@ it.effect.each([
               Store.layer.pipe(
                 Layer.provideMerge(
                   Layer.effectDiscard(
-                    runMigrations({ toMigrationInclusive: through }).pipe(Effect.orDie),
+                    runMigrations({ toMigrationInclusive: through }).pipe(
+                      // The current store reads cached revision sizes on any schema.
+                      Effect.andThen(revisionSizeMigration),
+                      Effect.orDie,
+                    ),
                   ).pipe(Layer.provideMerge(NodeSqliteClient.layer({ filename }))),
                 ),
               ),
@@ -2164,10 +2170,17 @@ it.effect.each([
             assert.isEmpty(
               yield* sql`SELECT name FROM sqlite_master WHERE name='memory_last_ready_space'`,
             );
-            // The upgrade runs everything after 082, starting with MemoryLastReadySpace.
-            const upgraded = migrationManifest.filter(([id]) => id > 82);
-            assert.deepStrictEqual(upgraded[0], [83, "MemoryLastReadySpace"]);
-            assert.deepStrictEqual(yield* runMigrations(), upgraded);
+            assert.deepStrictEqual(yield* runMigrations(), [
+              [83, "MemoryLastReadySpace"],
+              [84, "MemoryHubAdministered"],
+              [85, "MemoryCheckpointLifecycle"],
+              [86, "FleetGoals"],
+              [87, "FleetHealth"],
+              [88, "ThreadRunObservedChecks"],
+              [89, "RemoteDispatchObservation"],
+              [90, "MemoryRevisionCheckpointSize"],
+              [91, "HubNodes"],
+            ]);
             const adapter = yield* statusRuntime;
             const result = yield* Effect.scoped(
               Effect.gen(function* () {

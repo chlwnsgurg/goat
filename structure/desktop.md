@@ -24,8 +24,11 @@ for a rolled-back build:
   On macOS Electron's item is service `<name> Safe Storage` with account `<name> Key`, and a
   packaged build's initial name is the staged package name `t3code` on every channel.
 - `apps/desktop/src/app/DesktopRendererOriginMigration.ts` copies localStorage and every IndexedDB
-  database from the legacy origin before the first window, never replacing existing data. Marker:
-  `renderer-origin-migrated`.
+  database from the legacy origin before the first window, never replacing existing data. Main
+  relays bounded chunks between a page on each origin; it must never hold the whole origin, which
+  can be 100+ MB of blobs and aborts main with a V8 OOM. Marker: `renderer-origin-migrated`; an
+  attempt that died leaves `renderer-origin-migration-attempt`, and the next launch marks it
+  aborted instead of retrying.
 
 The OS hands both `goat` and `t3code` links to the app (`getDesktopLinkSchemes`), and the server
 accepts both renderer origins (`DESKTOP_RENDERER_ORIGINS` in `apps/server/src/httpCors.ts`).

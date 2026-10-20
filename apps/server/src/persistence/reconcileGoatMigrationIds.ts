@@ -32,6 +32,7 @@ export const GOAT_MIGRATION_NAMES: ReadonlySet<string> = new Set([
   "FleetHealth",
   "ThreadRunObservedChecks",
   "RemoteDispatchObservation",
+  "MemoryRevisionCheckpointSize",
   "HubNodes",
 ]);
 

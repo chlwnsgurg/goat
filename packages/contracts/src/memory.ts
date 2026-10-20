@@ -252,6 +252,18 @@ export type MemoryProviderCapabilities = typeof MemoryProviderCapabilities.Type;
 export const MemoryImportFormat = Schema.Literals(["codex", "claude", "omo"]);
 export type MemoryImportFormat = typeof MemoryImportFormat.Type;
 
+/**
+ * The import format named in revision provenance. Decoders accept any format token
+ * so a revision from a newer import source never blocks sync or reads. Writers still
+ * record only `MemoryImportFormat` values until every peer of a space decodes this
+ * (the next hub protocol version); `parserVersion` and `sourceLocator` name the
+ * real source meanwhile. A known value encodes byte-for-byte as before.
+ */
+export const MemoryProvenanceImportFormat = Schema.String.check(
+  Schema.makeFilter((s) => /^[a-z][a-z0-9-]{0,31}$/.test(s)),
+);
+export type MemoryProvenanceImportFormat = typeof MemoryProvenanceImportFormat.Type;
+
 export const MemoryFailureCode = Schema.Literals([
   "unavailable",
   "source_unavailable",
@@ -363,7 +375,7 @@ export type MemorySourceExclusion = typeof MemorySourceExclusion.Type;
 
 export const MemoryImportSourceMetadata = struct({
   sourceId: MemoryImportSourceId,
-  format: MemoryImportFormat,
+  format: MemoryProvenanceImportFormat,
   parserVersion: canonical,
   sourceLocator: canonical.check(
     Schema.makeFilter((s) => !s.startsWith("/") && !/^[a-zA-Z]:[\\/]/.test(s)),
@@ -2046,6 +2058,8 @@ export const MemoryImportPreviewItem = struct({
   issue: Schema.optionalKey(MemoryImportIssue),
   memoryId: Schema.optionalKey(MemoryId),
   revisionId: Schema.optionalKey(MemoryRevisionId),
+  /** Imports normally but never fits the turn-start memory frame. Only sent when requested. */
+  tooLargeForTurnStart: Schema.optionalKey(Schema.Literal(true)),
 }).check(
   Schema.makeFilter(
     (v) =>
@@ -2097,7 +2111,13 @@ const importSelector = struct({
 export const MemoryImportProviderInput = bounded(
   Schema.Union([
     struct({ ...space, action: Schema.Literal("discover"), format: MemoryImportFormat }),
-    struct({ ...space, action: Schema.Literal("preview"), sourceId: MemoryImportSourceId }),
+    struct({
+      ...space,
+      action: Schema.Literal("preview"),
+      sourceId: MemoryImportSourceId,
+      /** Older clients decode preview items strictly, so the server adds the field only on request. */
+      includeTurnStartFit: Schema.optionalKey(Schema.Literal(true)),
+    }),
     struct({
       ...space,
       action: Schema.Literal("apply"),
