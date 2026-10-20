@@ -492,70 +492,70 @@ it.effect("refuses a read-only thread before creating a sync approval", () => {
   }).pipe(Effect.provide(layer));
 });
 
-it.effect(
-  "an outside full-access client installs only while providers:manage is live",
-  () => {
-    const { layer, state } = harness({ answer: remoteSyncAnswer });
-    return Effect.gen(function* () {
-      const sync = yield* HostSync.ProviderHostSync;
-      const ceilingOnly = outsideClient(["orchestration:read", "orchestration:operate"]);
-      const refused = yield* sync
-        .sync({ driver: "opencode", hosts: ["box"], version: "1.2.3" }, { kind: "mcp", scope: ceilingOnly })
-        .pipe(Effect.flip);
-      expect(refused).toMatchObject({
-        _tag: "EnvironmentAuthorizationError",
-        requiredScope: "providers:manage",
-      });
-      expect(state.calls).toEqual([]);
-      expect(state.spawned).toEqual([]);
-      expect(state.handoffs).toEqual([]);
-
-      const seen: Array<ReadonlyArray<string>> = [];
-      const managing = outsideClient(["providers:manage"], (required) =>
-        Effect.sync(() => void seen.push(required)),
-      );
-      const started = yield* sync.sync(
+it.effect("an outside full-access client installs only while providers:manage is live", () => {
+  const { layer, state } = harness({ answer: remoteSyncAnswer });
+  return Effect.gen(function* () {
+    const sync = yield* HostSync.ProviderHostSync;
+    const ceilingOnly = outsideClient(["orchestration:read", "orchestration:operate"]);
+    const refused = yield* sync
+      .sync(
         { driver: "opencode", hosts: ["box"], version: "1.2.3" },
-        { kind: "mcp", scope: managing },
-      );
-      expect(started.kind).toBe("started");
-      if (started.kind !== "started") return;
-      yield* sync.awaitDone(started.sync.syncId);
-      expect(state.spawned).toEqual([]);
-      expect(state.calls).toHaveLength(1);
-      expect(state.calls[0]).toMatchObject({
-        ceiling: "full-access",
-        call: {
-          host: "box",
-          tool: "goat_provider_sync",
-          writes: true,
-          providersManage: true,
-        },
-      });
-      expect(seen).toEqual([["providers:manage"], ["providers:manage"]]);
+        { kind: "mcp", scope: ceilingOnly },
+      )
+      .pipe(Effect.flip);
+    expect(refused).toMatchObject({
+      _tag: "EnvironmentAuthorizationError",
+      requiredScope: "providers:manage",
+    });
+    expect(state.calls).toEqual([]);
+    expect(state.spawned).toEqual([]);
+    expect(state.handoffs).toEqual([]);
 
-      const revoked = yield* sync
-        .sync(
-          { driver: "opencode", hosts: ["box"] },
-          {
-            kind: "mcp",
-            scope: outsideClient(["providers:manage"], () =>
-              Effect.fail(
-                new EnvironmentAuthorizationError({
-                  requiredScope: "providers:manage",
-                  message: "The grant is no longer live.",
-                }),
-              ),
+    const seen: Array<ReadonlyArray<string>> = [];
+    const managing = outsideClient(["providers:manage"], (required) =>
+      Effect.sync(() => void seen.push(required)),
+    );
+    const started = yield* sync.sync(
+      { driver: "opencode", hosts: ["box"], version: "1.2.3" },
+      { kind: "mcp", scope: managing },
+    );
+    expect(started.kind).toBe("started");
+    if (started.kind !== "started") return;
+    yield* sync.awaitDone(started.sync.syncId);
+    expect(state.spawned).toEqual([]);
+    expect(state.calls).toHaveLength(1);
+    expect(state.calls[0]).toMatchObject({
+      ceiling: "full-access",
+      call: {
+        host: "box",
+        tool: "goat_provider_sync",
+        writes: true,
+        providersManage: true,
+      },
+    });
+    expect(seen).toEqual([["providers:manage"], ["providers:manage"]]);
+
+    const revoked = yield* sync
+      .sync(
+        { driver: "opencode", hosts: ["box"] },
+        {
+          kind: "mcp",
+          scope: outsideClient(["providers:manage"], () =>
+            Effect.fail(
+              new EnvironmentAuthorizationError({
+                requiredScope: "providers:manage",
+                message: "The grant is no longer live.",
+              }),
             ),
-          },
-        )
-        .pipe(Effect.flip);
-      expect(revoked).toMatchObject({ message: "The grant is no longer live." });
-      expect(state.calls).toHaveLength(1);
-      expect(state.spawned).toEqual([]);
-    }).pipe(Effect.provide(layer));
-  },
-);
+          ),
+        },
+      )
+      .pipe(Effect.flip);
+    expect(revoked).toMatchObject({ message: "The grant is no longer live." });
+    expect(state.calls).toHaveLength(1);
+    expect(state.spawned).toEqual([]);
+  }).pipe(Effect.provide(layer));
+});
 
 it.effect("does not carry providers:manage on a read-only remote matrix call", () => {
   const { layer, state } = harness({ answer: remoteSyncAnswer });

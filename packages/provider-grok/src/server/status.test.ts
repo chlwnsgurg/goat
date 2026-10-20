@@ -11,7 +11,11 @@ import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 
-import { GROK_API_KEY_ENV, GROK_CREDENTIAL_NAMESPACE, resolveGrokLaunchEnvironment } from "./auth.ts";
+import {
+  GROK_API_KEY_ENV,
+  GROK_CREDENTIAL_NAMESPACE,
+  resolveGrokLaunchEnvironment,
+} from "./auth.ts";
 import { checkGrokProviderStatus } from "./status.ts";
 
 const decodeGrokSettings = Schema.decodeSync(GrokSettings);
@@ -27,7 +31,7 @@ const fakeGrok = (directory: string, markerPath: string) =>
     name: "grok",
     source: [
       'import { writeFileSync as writeKeyMarker } from "node:fs";',
-      "const key = process.env.XAI_API_KEY?.trim() ?? \"\";",
+      'const key = process.env.XAI_API_KEY?.trim() ?? "";',
       `writeKeyMarker(${JSON.stringify(markerPath)}, key === ${JSON.stringify(secret)} ? "stored" : key === "env-key" ? "env" : key ? "other" : "absent");`,
       'if (process.argv[2] === "--version") { process.stdout.write("grok 1.0.13\\n"); process.exit(0); }',
       'if (process.argv[2] === "models") { process.stdout.write("You are not authenticated.\\n"); process.exit(0); }',

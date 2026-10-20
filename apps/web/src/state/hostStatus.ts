@@ -12,7 +12,10 @@ export const HOST_STATUS_REFRESH_MS = 15_000;
  * graph, and the Fleet console all read through these atoms, so views asking the
  * same question share one answer and its refresh.
  */
-export function hostStatusAtom(environmentId: EnvironmentId, options?: { readonly local?: boolean }) {
+export function hostStatusAtom(
+  environmentId: EnvironmentId,
+  options?: { readonly local?: boolean },
+) {
   return serverEnvironment.hostStatus({
     environmentId,
     input: options?.local === true ? { local: true } : {},

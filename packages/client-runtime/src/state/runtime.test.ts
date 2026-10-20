@@ -1012,11 +1012,10 @@ describe("environment query lifecycle", () => {
         const derived = Atom.make((get) => (get(toggle) === 1 ? null : get(harness.atom)));
         const unmount = registry.mount(derived);
         yield* Effect.addFinalizer(() => Effect.sync(unmount));
-        const read = AtomRegistry.getResult(
-          registry,
-          derived as Atom.Atom<AsyncResult.AsyncResult<number, unknown>>,
-          { suspendOnWaiting: true },
-        ).pipe(Effect.tap(() => Effect.yieldNow));
+        // While mounted, `derived` only reads null when the toggle hides the query;
+        // `read` runs when it is visible, so it carries the query's own result type.
+        type QueryResult = typeof harness.atom extends Atom.Atom<infer R> ? R : never;
+        const read = readEnvironmentQuery(registry, derived as Atom.Atom<QueryResult>);
 
         expect(yield* read).toBe(1);
         expect(executions).toBe(1);
@@ -1043,10 +1042,12 @@ describe("environment query lifecycle", () => {
       }),
     );
 
-  it.effect("does not re-execute a query a derived atom drops and rereads inside its idle TTL", () =>
-    Effect.gen(function* () {
-      expect(yield* executionsAfterDerivedGap(15_000)).toBe(2);
-    }),
+  it.effect(
+    "does not re-execute a query a derived atom drops and rereads inside its idle TTL",
+    () =>
+      Effect.gen(function* () {
+        expect(yield* executionsAfterDerivedGap(15_000)).toBe(2);
+      }),
   );
 
   it.effect("re-executes a query a derived atom drops and rereads when its idle TTL is zero", () =>
