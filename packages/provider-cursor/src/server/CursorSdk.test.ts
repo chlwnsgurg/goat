@@ -1,5 +1,6 @@
 // @effect-diagnostics nodeBuiltinImport:off globalTimers:off -- The probe is a plain Node child; this deadline kills it if it hangs.
 import * as NodeChildProcess from "node:child_process";
+import * as NodePath from "node:path";
 import { describe, expect, it } from "vite-plus/test";
 
 import { isCursorShellSpawnFailure } from "./CursorSdk.ts";
@@ -93,7 +94,12 @@ function runProbe(mode: string): Promise<{ code: number | null; stdout: string; 
         probeProgram,
         mode,
       ],
-      { stdio: ["ignore", "pipe", "pipe"] },
+      {
+        // The probe imports `effect` from an eval module whose URL is the child cwd.
+        // Root `vp test run` would otherwise fail to resolve the package dependency.
+        cwd: NodePath.resolve(import.meta.dirname, "../.."),
+        stdio: ["ignore", "pipe", "pipe"],
+      },
     );
     let stdout = "";
     let stderr = "";

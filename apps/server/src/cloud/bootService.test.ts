@@ -1,15 +1,21 @@
+// A real listener: `goat update` builds its own FetchHttpClient, so the mock client never sees the probe.
+// @effect-diagnostics nodeBuiltinImport:off
+import * as NodeHttp from "node:http";
+
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { expect, it } from "@effect/vitest";
 import * as HostProcess from "@goat/shared/HostProcess";
 import * as NetService from "@goat/shared/Net";
 import * as ConfigProvider from "effect/ConfigProvider";
+import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import { Command } from "effect/cli";
-import { HttpClient } from "effect/http";
+import { HttpClient, HttpClientResponse } from "effect/http";
 import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 import { vi } from "vite-plus/test";
 
@@ -168,12 +174,48 @@ const makeHarness = Effect.fn("test.make_boot_service_harness")(function* (
     linger: string;
     enabled: boolean;
     active: boolean;
+    /** When false, a start command returns success but the server never answers. */
+    answers: boolean;
+    answeredVersion: string | undefined;
   } = {
     failCommand: undefined,
     linger: "yes",
     enabled: true,
     active: true,
+    answers: true,
+    answeredVersion: undefined,
   };
+  const readinessServer = NodeHttp.createServer((request, response) => {
+    if (
+      request.url?.startsWith("/.well-known/goat/environment") &&
+      control.answeredVersion !== undefined
+    ) {
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify({ serverVersion: control.answeredVersion }));
+      return;
+    }
+    response.writeHead(404);
+    response.end();
+  });
+  yield* Effect.acquireRelease(
+    Effect.callback<void>((resume) => {
+      readinessServer.once("error", (error) => {
+        resume(Effect.die(error));
+      });
+      readinessServer.listen(0, "127.0.0.1", () => {
+        resume(Effect.void);
+      });
+    }),
+    () =>
+      Effect.callback<void>((resume) => {
+        readinessServer.close(() => {
+          resume(Effect.void);
+        });
+      }),
+  );
+  const readinessAddress = readinessServer.address();
+  const readinessPort =
+    typeof readinessAddress === "object" && readinessAddress !== null ? readinessAddress.port : 0;
   const runner = ProcessRunner.ProcessRunner.of({
     run: Effect.fn("test.run_boot_service_command")(function* (
       input: ProcessRunner.ProcessRunInput,
@@ -185,7 +227,45 @@ const makeHarness = Effect.fn("test.make_boot_service_harness")(function* (
       if (!failed && command === "loginctl enable-linger --no-ask-password 501")
         control.linger = "yes";
       if (!failed && command === "systemctl --user enable goat.service") control.enabled = true;
-      if (!failed && command === "systemctl --user restart goat.service") control.active = true;
+      const publishAnswer = (unitFile: string) =>
+        Effect.gen(function* () {
+          if (!control.answers) {
+            control.active = false;
+            return;
+          }
+          const contents = yield* fs.readFileString(unitFile).pipe(Effect.option);
+          if (Option.isNone(contents)) return;
+          const served = BootService.bootServiceBaseDirOf(contents.value);
+          const version = /versions\/([^/]+)\/goat/.exec(contents.value)?.[1];
+          if (served === undefined || version === undefined) return;
+          control.answeredVersion = version;
+          control.active = true;
+          const runtimePath = path.join(served, "userdata", "server-runtime.json");
+          const startedAt = DateTime.formatIso(yield* DateTime.now);
+          yield* fs.makeDirectory(path.dirname(runtimePath), { recursive: true });
+          yield* fs.writeFileString(
+            runtimePath,
+            JSON.stringify({
+              version: 1,
+              pid: 4242,
+              port: readinessPort,
+              origin: `http://127.0.0.1:${readinessPort}`,
+              startedAt,
+              serviceManaged: true,
+              serverVersion: version,
+            }),
+          );
+        }).pipe(Effect.orDie);
+      if (!failed && command === "systemctl --user restart goat.service") {
+        yield* publishAnswer(path.join(home, ".config", "systemd", "user", "goat.service"));
+      }
+      if (!failed && command === "systemctl --user restart t3code.service") {
+        yield* publishAnswer(path.join(home, ".config", "systemd", "user", "t3code.service"));
+      }
+      if (!failed && command.startsWith("launchctl bootstrap ")) {
+        const plist = input.args.at(-1);
+        if (plist !== undefined) yield* publishAnswer(plist);
+      }
       // A stop that fails (a timeout, say) has still stopped the service.
       if (command === "systemctl --user stop goat.service") control.active = false;
       if (
@@ -247,7 +327,20 @@ const makeHarness = Effect.fn("test.make_boot_service_harness")(function* (
           Layer.succeed(HostProcess.ExecutablePath, "/usr/bin/goat"),
           Layer.succeed(
             HttpClient.HttpClient,
-            HttpClient.make(() => Effect.die("no release download expected")),
+            HttpClient.make((request) =>
+              Effect.suspend(() => {
+                const url = String(request.url);
+                return url.includes("/.well-known/goat/environment") &&
+                  control.answeredVersion !== undefined
+                  ? Effect.succeed(
+                      HttpClientResponse.fromWeb(
+                        request,
+                        Response.json({ serverVersion: control.answeredVersion }),
+                      ),
+                    )
+                  : Effect.die(`no release download expected: ${url}`);
+              }),
+            ),
           ),
           ConfigProvider.layer(
             ConfigProvider.fromEnv({
@@ -686,6 +779,27 @@ it.layer(NodeServices.layer)("boot service install", (it) => {
 
       const other = yield* makeService(undefined, "1.2.3", path.join(otherHome, ".t3"));
       expect(yield* other.restart).toBe(false);
+      expect(commands.filter((command) => command.startsWith("systemctl "))).toEqual([]);
+    }),
+  );
+
+  it.effect("leaves another home's goat.service installed, reported, and untouched", () =>
+    Effect.gen(function* () {
+      const { service, fs, commands, makeService, baseDir } = yield* makeHarness();
+      const plan = yield* service.install();
+      const unit = yield* fs.readFileString(plan.unitPath);
+      const path = yield* Path.Path;
+      const otherHome = yield* fs.makeTempDirectoryScoped({ prefix: "goat-other-home-" });
+      const other = yield* makeService(undefined, "1.2.3", path.join(otherHome, ".t3"));
+      commands.length = 0;
+
+      expect(yield* other.status).toMatchObject({
+        installed: false,
+        installedBaseDir: baseDir,
+      });
+      expect(yield* other.uninstall).toBe(false);
+      expect((yield* other.install().pipe(Effect.flip))._tag).toBe("BootServiceCommandError");
+      expect(yield* fs.readFileString(plan.unitPath)).toBe(unit);
       expect(commands.filter((command) => command.startsWith("systemctl "))).toEqual([]);
     }),
   );
@@ -1176,6 +1290,106 @@ it.layer(NodeServices.layer)("boot service legacy migration", (it) => {
       expect(yield* harness.service.uninstall).toBe(true);
       expect(yield* harness.fs.exists(legacy.unitPath)).toBe(false);
       expect((yield* harness.service.status).installed).toBe(false);
+    }),
+  );
+
+  it.effect("status reports restart-pending for an owned legacy unit", () =>
+    Effect.gen(function* () {
+      const harness = yield* makeHarness();
+      yield* installLegacy(harness, "linux");
+      const path = yield* Path.Path;
+      yield* harness.fs.writeFileString(
+        path.join(harness.baseDir, "runtime", SERVICE_RESTART_PENDING_FILE),
+        "1.2.4\n",
+      );
+
+      expect((yield* harness.service.status).problems).toContain("restart-pending");
+    }),
+  );
+
+  it.effect("withStopped stops an owned legacy unit when goat.service is absent", () =>
+    Effect.gen(function* () {
+      const harness = yield* makeHarness();
+      yield* installLegacy(harness, "linux");
+      harness.commands.length = 0;
+
+      yield* harness.service.withStopped(Effect.sync(() => harness.commands.push("repair")));
+
+      expect(harness.commands).toContain("systemctl --user is-active t3code.service");
+      expect(harness.commands).toContain("systemctl --user stop t3code.service");
+      expect(harness.commands).toContain("repair");
+      expect(harness.commands).toContain("systemctl --user restart t3code.service");
+      expect(harness.commands.some((command) => command.includes("goat.service"))).toBe(false);
+    }),
+  );
+
+  it.effect("a migrated unit that never answers restores the previous runtime selection", () =>
+    Effect.gen(function* () {
+      const harness = yield* makeHarness();
+      const legacy = yield* installLegacy(harness, "linux");
+      const beforeState = yield* harness.fs.readFileString(harness.statePath);
+      const path = yield* Path.Path;
+      const pending = path.join(harness.baseDir, "runtime", SERVICE_RESTART_PENDING_FILE);
+      harness.control.answers = false;
+      const newer = yield* harness.makeService(undefined, "1.2.4");
+
+      const error = yield* newer.install().pipe(Effect.flip);
+
+      expect(error).toMatchObject({ _tag: "BootServiceCommandError" });
+      expect(error.message).toContain("waiting for the service to answer");
+      expect(yield* harness.fs.readFileString(harness.statePath)).toBe(beforeState);
+      expect(yield* harness.fs.exists(pending)).toBe(false);
+      expect(yield* harness.fs.readFileString(legacy.unitPath)).toBe(legacy.contents);
+      expect(yield* harness.fs.exists(`${harness.home}/.config/systemd/user/goat.service`)).toBe(
+        false,
+      );
+    }),
+  );
+
+  it.effect("goat update still migrates a legacy unit whose state already names the target", () =>
+    Effect.gen(function* () {
+      const harness = yield* makeHarness();
+      const legacy = yield* installLegacy(harness, "linux");
+      const path = yield* Path.Path;
+      const targetVersion = "1.2.4";
+      yield* harness.fs.writeFileString(
+        harness.statePath,
+        JSON.stringify({ protocol: SERVICE_LAUNCHER_PROTOCOL, activeVersion: targetVersion }),
+      );
+      yield* harness.fs.writeFileString(
+        path.join(harness.baseDir, "runtime", SERVICE_RESTART_PENDING_FILE),
+        `${targetVersion}\n`,
+      );
+      yield* harness.makeService(undefined, targetVersion);
+      const runnerLayer = vi
+        .spyOn(ProcessRunner, "layer", "get")
+        .mockReturnValue(Layer.succeed(ProcessRunner.ProcessRunner, harness.runner));
+      try {
+        yield* Command.runWith(updateCommand, { version: "0.1.0" })([
+          targetVersion,
+          "--base-dir",
+          harness.baseDir,
+          "--yes",
+        ]).pipe(
+          Effect.provide(NetService.layer),
+          Effect.provideService(HostProcess.Platform, "linux"),
+          Effect.provideService(HostProcess.IsExecutable, false),
+          Effect.provideService(HostProcess.ExecutablePath, "/usr/bin/goat"),
+          Effect.provideService(HostProcess.UserId, 501),
+          Effect.provideService(HostProcess.Environment, {}),
+          Effect.provide(
+            ConfigProvider.layer(
+              ConfigProvider.fromEnv({ env: { HOME: harness.home, PATH: "/usr/bin" } }),
+            ),
+          ),
+        );
+        expect(yield* harness.fs.exists(legacy.unitPath)).toBe(false);
+        expect(yield* harness.fs.exists(`${harness.home}/.config/systemd/user/goat.service`)).toBe(
+          true,
+        );
+      } finally {
+        runnerLayer.mockRestore();
+      }
     }),
   );
 });

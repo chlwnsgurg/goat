@@ -25,6 +25,7 @@ import {
   isAntigravityTextGenerationAvailable,
   makeAntigravityTextGeneration,
 } from "./AntigravityTextGeneration.ts";
+import { MemoryGenerationRunnerError } from "@goat/provider-core/server/memoryGenerationRunner";
 
 type TextRuntime = Effect.Success<ReturnType<AntigravityTextGenerationOptions["makeRuntime"]>>;
 
@@ -369,6 +370,7 @@ it.layer(NodeServices.layer)("AntigravityTextGeneration", (it) => {
               })
         ).pipe(Effect.flip);
         expect(error.detail).toContain("did not disclose");
+        expect(error.cause).toEqual(new MemoryGenerationRunnerError({ code: "unavailable" }));
         expect(fixture.state.prompts).toEqual([]);
         yield* fixture.assertCleaned;
       }).pipe(Effect.scoped),
@@ -812,6 +814,20 @@ it.layer(NodeServices.layer)("AntigravityTextGeneration", (it) => {
         })
         .pipe(Effect.flip);
       expect(error.detail).toContain("select the Antigravity model");
+      expect(fixture.state.prompts).toEqual([]);
+      yield* fixture.assertCleaned;
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect("pauses memory on a model the account cannot select", () =>
+    Effect.gen(function* () {
+      const fixture = yield* makeFixture({ memoryRunnerContext: memoryContext });
+      const error = yield* fixture.textGeneration.generateMemorySummary!({
+        ...memorySummary,
+        modelSelection: { ...memorySelection, model: "not-in-the-account" },
+      }).pipe(Effect.flip);
+      expect(error.detail).toContain("select the Antigravity model");
+      expect(error.cause).toEqual(new MemoryGenerationRunnerError({ code: "unavailable" }));
       expect(fixture.state.prompts).toEqual([]);
       yield* fixture.assertCleaned;
     }).pipe(Effect.scoped),

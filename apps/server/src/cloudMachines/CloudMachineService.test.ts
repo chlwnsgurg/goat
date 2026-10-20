@@ -1,6 +1,7 @@
 import { describe, expect, it } from "@effect/vitest";
 import { type CloudMachineState } from "@goat/contracts";
 import * as Deferred from "effect/Deferred";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as Stream from "effect/Stream";
@@ -122,12 +123,17 @@ describe("CloudMachineService.ensureReady", () => {
 
           world.states.set(ID, "provisioning");
           const reading = yield* Deferred.make<void>();
-          world.milestones.onGet = Deferred.succeed(reading, undefined).pipe(Effect.asVoid);
+          const release = yield* Deferred.make<void>();
+          // The deadline is captured before boat.get: hold that call while the clock passes it.
+          world.milestones.onGet = Deferred.succeed(reading, undefined).pipe(
+            Effect.andThen(Deferred.await(release)),
+          );
           const waiting = yield* service
             .ensureReady(ALIAS, { wake: true })
             .pipe(Effect.flip, Effect.forkChild);
           yield* Deferred.await(reading);
-          yield* TestClock.adjust("180 seconds");
+          yield* TestClock.adjust(Duration.millis(CloudMachineService.READY_DEADLINE_MS));
+          yield* Deferred.succeed(release, undefined);
           expect((yield* Fiber.join(waiting)).reason).toBe("readiness_timeout");
         }),
       );

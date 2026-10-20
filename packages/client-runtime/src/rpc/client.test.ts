@@ -862,7 +862,11 @@ describe("staged memory RPC", () => {
                     protocolVersion: 1,
                     ...(supported === undefined
                       ? {}
-                      : { resolutionInputs: supported, retainedLocalSpace: supported }),
+                      : {
+                          resolutionInputs: supported,
+                          retainedLocalSpace: supported,
+                          generationHold: supported,
+                        }),
                   },
                 },
               },
@@ -878,7 +882,12 @@ describe("staged memory RPC", () => {
           includeRetainedLocalSpaceId: true,
         }).pipe(provide, permit);
         expect(inputs).toEqual([
-          { method: "sync", input: supported ? { includeRetainedLocalSpaceId: true } : {} },
+          {
+            method: "sync",
+            input: supported
+              ? { includeRetainedLocalSpaceId: true, includeGenerationHold: true }
+              : {},
+          },
         ]);
         const result = yield* requestGuarded(WS_METHODS.memoryHistory, {
           memorySpaceId,

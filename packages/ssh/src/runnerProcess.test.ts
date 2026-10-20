@@ -152,6 +152,7 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")(
           yield* fs.makeDirectory(stateDir, { recursive: true });
           const signalPath = path.join(fixture, "signals");
           const cliPath = path.join(fixture, "installed cli.mjs");
+          // Ownership matches the published port against argv, so the server binds that port.
           const port = yield* NetService.make().reserveLoopbackPort();
           const args = [
             "serve",
@@ -170,7 +171,7 @@ const server = net.createServer((socket) => socket.end());
 let signals = 0;
 process.on("SIGTERM", () => {
   fs.writeFileSync(process.env.GOAT_TEST_SIGNAL_PATH, String(++signals));
-  if (process.env.GOAT_TEST_STOP_MODE !== "timeout" || signals > 1) server.close();
+  if (process.env.GOAT_TEST_STOP_MODE !== "timeout" || signals > 1) process.exit(0);
 });
 server.listen(Number(process.argv[process.argv.indexOf("--port") + 1]), "127.0.0.1", () => {
   process.stdout.write(JSON.stringify({ pid: process.pid, port: server.address().port, args: process.argv.slice(2) }) + "\\n");
@@ -218,8 +219,17 @@ server.listen(Number(process.argv[process.argv.indexOf("--port") + 1]), "127.0.0
             '#!/bin/sh\n[ "$1 $2" = "__ssh-helper activity" ] && { echo idle; exit 0; }\nexit 2\n',
           );
           yield* fs.chmod(runnerPath, 0o700);
-          const script = buildRemoteStopScript(REMOTE_RUNTIME_STATE_KEY);
-          const runStop = Effect.fn("test.remoteStop")(function* () {
+          // Interval 0 follows the process instead of a wall-clock window. The timeout case
+          // fails on the first attempt; the stop that should succeed polls until exit.
+          const timingOutScript = buildRemoteStopScript(REMOTE_RUNTIME_STATE_KEY, {
+            stopWaitAttempts: 1,
+            stopWaitIntervalSeconds: "0",
+          });
+          const stoppingScript = buildRemoteStopScript(REMOTE_RUNTIME_STATE_KEY, {
+            stopWaitAttempts: 100_000,
+            stopWaitIntervalSeconds: "0",
+          });
+          const runStop = Effect.fn("test.remoteStop")(function* (script: string) {
             const stop = yield* spawner.spawn(
               ChildProcess.make(remoteShell, ["-s"], {
                 cwd: fixture,
@@ -236,7 +246,7 @@ server.listen(Number(process.argv[process.argv.indexOf("--port") + 1]), "127.0.0
               { concurrency: "unbounded" },
             );
           }, Effect.scoped);
-          let result = yield* runStop();
+          let result = yield* runStop(mode === "timeout" ? timingOutScript : stoppingScript);
           if (mode !== "graceful") {
             assert.isTrue(yield* child.isRunning);
             yield* Effect.callback<void, Error>((resume) => {
@@ -249,12 +259,13 @@ server.listen(Number(process.argv[process.argv.indexOf("--port") + 1]), "127.0.0
           if (mode === "timeout") {
             assert.equal(result.exitCode, 1);
             assert.equal(result.stdout, "");
-            assert.include(result.stderr, "did not stop within 2 seconds");
+            assert.include(result.stderr, "did not stop within the stop deadline");
+            assert.include(result.stderr, "ownership files were kept");
             assert.equal(yield* fs.readFileString(signalPath), "1");
             for (const [name, contents] of Object.entries(savedState)) {
               assert.equal(yield* fs.readFileString(path.join(stateDir, name)), contents);
             }
-            result = yield* runStop();
+            result = yield* runStop(stoppingScript);
           }
           assert.equal(result.exitCode, 0, result.stderr);
           assert.equal(result.stdout, '{"stopped":true}\n');

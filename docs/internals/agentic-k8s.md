@@ -569,8 +569,10 @@ goal resumes them through its own claims instead.
    `Cordoned`, is outside the goal's `hostSelector`, lacks the provider instance or the project, is at
    `maxThreads`, or when the global cap is reached. Each refusal keeps a reason.
 2. **Score** the survivors with the existing `choosePlacement`. It moves from
-   `apps/server/src/channels/channelPlacement.ts` to `apps/server/src/fleet/resources/placement.ts`; the
-   channel module re-exports it unchanged. There is one scorer.
+   `apps/server/src/channels/channelPlacement.ts` to
+   `apps/server/src/fleet/resources/placementScore.ts`; the channel module re-exports it unchanged.
+   There is one scorer. The scorer file is `placementScore.ts` rather than `placement.ts`: on a
+   case-insensitive filesystem that name is the same file as `Placement.ts`.
 3. Return `Placed` or `Refused` with the per-candidate reasons, which become the goal's `Blocked`
    condition message.
 
@@ -578,8 +580,7 @@ There is no preemption. A goal never stops someone's thread to make room; it wai
 `preemptionPolicy: Never` ([priority and preemption](https://kubernetes.io/docs/concepts/scheduling-eviction/pod-priority-preemption/)).
 
 **Now (T3).** `fleet` settings and `Placement` (`apps/server/src/fleet/resources/Placement.ts`)
-ship as above. The filter is `placementRules.ts`, not `placement.ts`: on a case-insensitive
-filesystem that name is the same file as `Placement.ts`. `choosePlacement` stays in
+ship as above. The filter is `placementRules.ts`. `choosePlacement` stays in
 `channelPlacement.ts` and is imported rather than moved while channel work is in flight; it is
 still the only scorer. The filter cannot see projects on a host or cordons yet: missing projects
 surface at launch, and the cordon set is an input that T2's `Health` fills. Goal reservations
