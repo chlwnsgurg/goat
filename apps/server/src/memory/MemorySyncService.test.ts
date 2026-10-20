@@ -46,6 +46,7 @@ import hubMigration from "../persistence/Migrations/074_MemoryHubSync.ts";
 import searchMigration from "../persistence/Migrations/075_MemorySearchCounters.ts";
 import lineageMigration from "../persistence/Migrations/077_MemoryImportLineage.ts";
 import checkpointMigration from "../persistence/Migrations/078_MemoryCheckpointAccounting.ts";
+import revisionSizeMigration from "../persistence/Migrations/090_MemoryRevisionCheckpointSize.ts";
 import reportMigration from "../persistence/Migrations/079_MemoryReportLifecycle.ts";
 import usageMigration from "../persistence/Migrations/080_MemoryUsageCounters.ts";
 import revertMigration from "../persistence/Migrations/081_MemoryRevertResults.ts";
@@ -92,6 +93,7 @@ const setup = Layer.effectDiscard(
     yield* hubMigration;
     yield* lineageMigration;
     yield* checkpointMigration;
+    yield* revisionSizeMigration;
     yield* reportMigration;
     yield* usageMigration;
     yield* revertMigration;
@@ -2119,7 +2121,11 @@ it.effect.each([
               Store.layer.pipe(
                 Layer.provideMerge(
                   Layer.effectDiscard(
-                    runMigrations({ toMigrationInclusive: through }).pipe(Effect.orDie),
+                    runMigrations({ toMigrationInclusive: through }).pipe(
+                      // The current store reads cached revision sizes on any schema.
+                      Effect.andThen(revisionSizeMigration),
+                      Effect.orDie,
+                    ),
                   ).pipe(Layer.provideMerge(NodeSqliteClient.layer({ filename }))),
                 ),
               ),
@@ -2172,6 +2178,7 @@ it.effect.each([
               [87, "FleetHealth"],
               [88, "ThreadRunObservedChecks"],
               [89, "RemoteDispatchObservation"],
+              [90, "MemoryRevisionCheckpointSize"],
             ]);
             const adapter = yield* statusRuntime;
             const result = yield* Effect.scoped(

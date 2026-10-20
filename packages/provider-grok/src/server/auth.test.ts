@@ -166,14 +166,12 @@ it.layer(layer)("GrokAuth", (it) => {
       });
       const started = yield* auth.controller.start(owner);
       yield* phase(auth.controller, "waiting");
-      const empty = yield* auth.controller
-        .respond!(owner, {
-          instanceId: emptyId,
-          flowId: started.flowId!,
-          interactionId: "api-key",
-          response: { type: "credentials", values: { apiKey: "  " } },
-        })
-        .pipe(Effect.result);
+      const empty = yield* auth.controller.respond!(owner, {
+        instanceId: emptyId,
+        flowId: started.flowId!,
+        interactionId: "api-key",
+        response: { type: "credentials", values: { apiKey: "  " } },
+      }).pipe(Effect.result);
       expect(empty._tag).toBe("Failure");
       expect(Option.isNone(yield* storedBytes(emptyId))).toBe(true);
 

@@ -274,6 +274,9 @@ export function MemoryImportSettings({
                   <span>
                     {item.title ?? `Memory ${index + 1}`}
                     {item.issue !== undefined ? " · Unavailable for import" : ""}
+                    {item.tooLargeForTurnStart
+                      ? " · Stored, but too large to add to new turns automatically"
+                      : ""}
                   </span>
                 </label>
               ))}

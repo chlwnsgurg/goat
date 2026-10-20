@@ -23,7 +23,12 @@ export const GROK_CREDENTIAL_NAMESPACE = "grok";
 const API_KEY_METHOD_ID = "api-key";
 const API_KEY_FIELD = "apiKey";
 
-const failure = (instanceId: ProviderInstanceId, operation: string, detail: string, cause?: unknown) =>
+const failure = (
+  instanceId: ProviderInstanceId,
+  operation: string,
+  detail: string,
+  cause?: unknown,
+) =>
   new ProviderSetupError({
     instanceId,
     operation,
@@ -161,16 +166,18 @@ export const makeGrokAuth = Effect.fnUntraced(function* (options: {
         // returns interrupts that handler and the client sees a failed submit.
         yield* Effect.yieldNow;
         yield* context.verifying;
-        yield* credentials.set(new TextEncoder().encode(key)).pipe(
-          Effect.mapError((cause) =>
-            failure(
-              options.instanceId,
-              "start",
-              "Could not save the Grok API key. Try again.",
-              cause,
+        yield* credentials
+          .set(new TextEncoder().encode(key))
+          .pipe(
+            Effect.mapError((cause) =>
+              failure(
+                options.instanceId,
+                "start",
+                "Could not save the Grok API key. Try again.",
+                cause,
+              ),
             ),
-          ),
-        );
+          );
         const verified = yield* options.onChanged(true).pipe(Effect.exit);
         if (Exit.isFailure(verified)) {
           yield* credentials.remove.pipe(Effect.ignore);

@@ -55,11 +55,7 @@ import {
   XAiExitPlanModeRequest,
 } from "./xaiAcpExtension.ts";
 import { mergeProviderInstanceEnvironment } from "@goat/provider-core/server/instanceEnvironment";
-import {
-  applyStoredGrokApiKey,
-  GROK_CREDENTIAL_NAMESPACE,
-  readStoredGrokApiKey,
-} from "./auth.ts";
+import { applyStoredGrokApiKey, GROK_CREDENTIAL_NAMESPACE, readStoredGrokApiKey } from "./auth.ts";
 import { acpPermissionDisposition } from "@goat/provider-acp/server/clientPolicy";
 import { sessionModelStateFromInitialize } from "@goat/provider-acp/server/runtimeModel";
 import * as AcpSessionRuntime from "@goat/provider-acp/server/AcpSessionRuntime";
