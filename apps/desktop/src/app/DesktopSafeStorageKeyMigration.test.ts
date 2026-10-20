@@ -6,6 +6,7 @@ import * as Path from "effect/Path";
 
 import {
   copySafeStorageKey,
+  macKeychainItem,
   makeWith,
   MARKER_FILE_NAME,
   type SafeStorageKeyStore,
@@ -38,6 +39,7 @@ it.effect("copies the first legacy key it finds and never replaces the new name'
       "copied",
     );
     assert.equal(fallback.keys.get("GOAT Alpha"), "old-key");
+    assert.equal(fallback.keys.get("T3 Code Alpha"), "old-key");
 
     const same = memoryStore({ GOAT: "key", "GOAT Alpha": "key" });
     assert.equal(await copySafeStorageKey(same.store, ["GOAT"], "GOAT Alpha"), "present");
@@ -45,6 +47,7 @@ it.effect("copies the first legacy key it finds and never replaces the new name'
     const diverged = memoryStore({ GOAT: "old-key", "GOAT Alpha": "fresh-key" });
     assert.equal(await copySafeStorageKey(diverged.store, ["GOAT"], "GOAT Alpha"), "conflict");
     assert.equal(diverged.keys.get("GOAT Alpha"), "fresh-key");
+    assert.equal(diverged.keys.get("GOAT"), "old-key");
 
     const fresh = memoryStore({});
     assert.equal(
@@ -53,6 +56,36 @@ it.effect("copies the first legacy key it finds and never replaces the new name'
     );
     assert.isFalse(fresh.keys.has("GOAT Alpha"));
   }),
+);
+
+it.effect.each<{ result: string; initial: Record<string, string> }>([
+  { result: "present", initial: { "GOAT Alpha": "current-key" } },
+  { result: "no-legacy-key", initial: {} },
+  { result: "conflict", initial: { GOAT: "legacy-key", "GOAT Alpha": "current-key" } },
+])("marks $result without changing keys and skips the next launch", ({ result, initial }) =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const userDataPath = yield* fs.makeTempDirectoryScoped();
+    const { keys, store } = memoryStore(initial);
+    const before = [...keys];
+    let opened = 0;
+    const migration = yield* makeWith(
+      async () => {
+        opened++;
+        return store;
+      },
+      "darwin",
+      "GOAT",
+    );
+    const input = { userDataPath, legacyRuntimeName: "T3 Code Alpha", runtimeName: "GOAT Alpha" };
+
+    yield* migration.run(input);
+    assert.include(yield* fs.readFileString(path.join(userDataPath, MARKER_FILE_NAME)), result);
+    yield* migration.run(input);
+    assert.equal(opened, 1);
+    assert.deepEqual([...keys], before);
+  }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
 );
 
 it.effect("marks success, retries after a store failure, and skips unkeyed platforms", () =>
@@ -91,3 +124,17 @@ it.effect("marks success, retries after a store failure, and skips unkeyed platf
     assert.equal(opened, 1);
   }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
 );
+
+it("addresses the Keychain item Electron itself reads and writes", () => {
+  // Items found on a real macOS install: pre-#127 GOAT created "t3code Safe Storage" / "t3code Key"
+  // and Electron 44 created "GOAT Alpha Safe Storage" / "GOAT Alpha Key". A lookup under any other
+  // account finds nothing, so the copy reported no-legacy-key and Electron started a fresh key.
+  assert.deepEqual(macKeychainItem("t3code"), {
+    service: "t3code Safe Storage",
+    account: "t3code Key",
+  });
+  assert.deepEqual(macKeychainItem("GOAT Alpha"), {
+    service: "GOAT Alpha Safe Storage",
+    account: "GOAT Alpha Key",
+  });
+});

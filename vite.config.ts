@@ -24,6 +24,7 @@ const DOM_TEST_ENVIRONMENT_ALLOWLIST: Array<string> = [
   "apps/mobile/src/features/threads/SubagentRow.memory.test.tsx",
   "apps/mobile/src/features/threads/ThreadHeader.memory.test.tsx",
   "apps/mobile/src/features/threads/ThreadMarkdownImage.test.tsx",
+  "apps/mobile/src/features/threads/useThreadHeaderOptions.test.tsx",
   "apps/mobile/src/lib/visible-animations.test.tsx",
   "apps/web/src/components/ChatView.ssh.test.tsx",
   "apps/web/src/components/ComposerPromptEditorTiptap.mount.test.tsx",

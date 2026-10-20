@@ -404,6 +404,22 @@ const GOAT_MCP_TOOLS: Readonly<Record<string, GoatMcpToolDefinition>> = {
     ["Set", "Setting", "Set", "a fallback chain"],
     "environment-update",
   ),
+  goat_goal_apply: tool(["Apply", "Applying", "Applied", "a fleet goal"], "environment-update"),
+  goat_goal_get: tool(["Read", "Reading", "Read", "a fleet goal"], "host-status"),
+  goat_goal_list: tool(["List", "Listing", "Listed", "fleet goals"], "host-status"),
+  goat_goal_delete: tool(["Delete", "Deleting", "Deleted", "a fleet goal"], "environment-update"),
+  goat_goal_pause: tool(["Pause", "Pausing", "Paused", "a fleet goal"], "environment-update"),
+  goat_goal_resume: tool(["Resume", "Resuming", "Resumed", "a fleet goal"], "environment-update"),
+  goat_host_cordon: tool(["Cordon", "Cordoning", "Cordoned", "a host"], "environment-update"),
+  goat_host_uncordon: tool(
+    ["Uncordon", "Uncordoning", "Uncordoned", "a host"],
+    "environment-update",
+  ),
+  goat_host_drain: tool(["Drain", "Draining", "Drained", "a host"], "environment-update"),
+  goat_thread_reschedule: tool(
+    ["Reschedule", "Rescheduling", "Rescheduled", "a thread"],
+    "thread-update",
+  ),
   goat_provider_home_request: tool(
     ["Request", "Requesting", "Requested", "Codex Home approval"],
     "provider-diagnose",
