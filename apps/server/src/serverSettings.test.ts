@@ -1,7 +1,7 @@
 import * as HomeRoutes from "./provider/CodexRouteService.ts";
 import * as HomeRouteFixture from "./provider/CodexRouteService.testkit.ts";
 import * as Scope from "effect/Scope";
-import { CodexSettings } from "@goat/contracts";
+import { CodexSettings, ServerSettingsError } from "@goat/contracts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import {
   DEFAULT_SERVER_SETTINGS,
@@ -788,6 +788,62 @@ it.layer(NodeServices.layer)("server settings", (it) => {
       );
       assert.equal(afterProviderSave.responseStreamingMode, "paragraph");
       assert.equal(afterProviderSave.providerInstances[instanceId]?.displayName, "Kilo");
+    }).pipe(Effect.provide(layerServerSettings())),
+  );
+
+  it.effect("read-modify-write of a nested key keeps an external edit made after the read", () =>
+    Effect.gen(function* () {
+      const config = yield* ServerConfig.ServerConfig;
+      const fs = yield* FileSystem.FileSystem;
+      const serverSettings = yield* ServerSettingsModule.ServerSettingsService;
+      const step = { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5" };
+      yield* serverSettings.updateSettings({
+        fleet: { fallbackChains: { stale: { steps: [step] } } },
+      });
+      const staleRead = yield* serverSettings.getSettings;
+      assert.deepEqual(Object.keys(staleRead.fleet.fallbackChains ?? {}), ["stale"]);
+
+      yield* writeFileStringAtomically({
+        filePath: config.settingsPath,
+        contents: JSON.stringify({
+          fleet: { fallbackChains: { stale: { steps: [step] }, theirs: { steps: [step] } } },
+        }),
+      });
+      const next = yield* serverSettings.updateSettingsWith((current) => {
+        const { stale: _removed, ...kept } = current.fleet.fallbackChains ?? {};
+        return Effect.succeed({ fleet: { fallbackChains: { ...kept, mine: { steps: [step] } } } });
+      });
+
+      assert.deepEqual(Object.keys(next.fleet.fallbackChains ?? {}).toSorted(), ["mine", "theirs"]);
+      const saved = yield* decodeServerSettingsJson(yield* fs.readFileString(config.settingsPath));
+      assert.deepEqual(Object.keys(saved.fleet.fallbackChains ?? {}).toSorted(), [
+        "mine",
+        "theirs",
+      ]);
+    }).pipe(Effect.provide(layerServerSettings())),
+  );
+
+  it.effect("read-modify-write checks authorization before computing the patch", () =>
+    Effect.gen(function* () {
+      const serverSettings = yield* ServerSettingsModule.ServerSettingsService;
+      let computed = false;
+      const error = yield* Effect.flip(
+        serverSettings.updateSettingsWith(
+          () => {
+            computed = true;
+            return Effect.succeed({ responseStreamingMode: "turn" as const });
+          },
+          Effect.fail(
+            new ServerSettingsError({
+              settingsPath: "revoked",
+              operation: "normalize",
+            }),
+          ),
+        ),
+      );
+      assert.equal(error.settingsPath, "revoked");
+      assert.isFalse(computed);
+      assert.notEqual((yield* serverSettings.getSettings).responseStreamingMode, "turn");
     }).pipe(Effect.provide(layerServerSettings())),
   );
 

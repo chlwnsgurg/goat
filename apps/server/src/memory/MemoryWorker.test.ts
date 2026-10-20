@@ -19,6 +19,7 @@ import migration from "../persistence/Migrations/073_Memory.ts";
 import hubMigration from "../persistence/Migrations/074_MemoryHubSync.ts";
 import lineageMigration from "../persistence/Migrations/077_MemoryImportLineage.ts";
 import checkpointMigration from "../persistence/Migrations/078_MemoryCheckpointAccounting.ts";
+import revisionSizeMigration from "../persistence/Migrations/090_MemoryRevisionCheckpointSize.ts";
 import reportMigration from "../persistence/Migrations/079_MemoryReportLifecycle.ts";
 import usageMigration from "../persistence/Migrations/080_MemoryUsageCounters.ts";
 import revertMigration from "../persistence/Migrations/081_MemoryRevertResults.ts";
@@ -48,6 +49,7 @@ const setup = Layer.effectDiscard(
     yield* hubMigration;
     yield* lineageMigration;
     yield* checkpointMigration;
+    yield* revisionSizeMigration;
     yield* reportMigration;
     yield* usageMigration;
     yield* revertMigration;

@@ -16,6 +16,7 @@ import {
   type OrchestrationV2ThreadShell,
   type PullRequestSummary,
   type ServerSettings as ContractServerSettings,
+  type ServerSettingsError,
   type ServerSettingsPatch,
 } from "@goat/contracts";
 import { applyServerSettingsPatch } from "@goat/shared/serverSettings";
@@ -611,8 +612,12 @@ const makeHarness = Effect.fn("makeThreadSettlementHarness")(function* (options:
   const scriptRuns =
     yield* Queue.unbounded<ProjectSetupScriptRunner.ProjectSetupScriptRunnerInput>();
 
-  const updateSettings = (patch: ServerSettingsPatch) =>
+  const updateSettings = (
+    patch: ServerSettingsPatch,
+    authorizeAtCommit?: Effect.Effect<void, ServerSettingsError>,
+  ) =>
     Effect.gen(function* () {
+      if (authorizeAtCommit) yield* authorizeAtCommit;
       const next = applyServerSettingsPatch(yield* Ref.get(settings), patch);
       yield* Ref.set(settings, next);
       yield* PubSub.publish(settingsChanges, next);
@@ -659,6 +664,10 @@ const makeHarness = Effect.fn("makeThreadSettlementHarness")(function* (options:
     ready: Effect.void,
     getSettings: Ref.get(settings),
     updateSettings,
+    updateSettingsWith: (patchFor, authorizeAtCommit) =>
+      Effect.flatMap(Ref.get(settings), patchFor).pipe(
+        Effect.flatMap((patch) => updateSettings(patch, authorizeAtCommit)),
+      ),
     updateProviderInstance: () => Effect.die("Unexpected provider mutation"),
     withSettingsSnapshot: (use) => Ref.get(settings).pipe(Effect.flatMap(use)),
     streamChanges: Stream.fromPubSub(settingsChanges),

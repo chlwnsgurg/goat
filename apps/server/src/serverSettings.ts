@@ -804,6 +804,19 @@ export class ServerSettingsService extends Context.Service<
       authorizeAtCommit?: Effect.Effect<void, ServerSettingsError>,
     ) => Effect.Effect<ServerSettings, ServerSettingsError>;
 
+    /**
+     * Read-modify-write: `patchFor` sees the latest stored settings inside the
+     * write lock and returns the patch to apply, so a nested key edited by
+     * another writer between a caller's read and its write is never lost.
+     */
+    readonly updateSettingsWith: (
+      patchFor: (
+        current: ServerSettings,
+      ) => Effect.Effect<ServerSettingsPatch, ServerSettingsError>,
+      /** Runs inside the write lock before `patchFor`, so a revoked grant cannot commit. */
+      authorizeAtCommit?: Effect.Effect<void, ServerSettingsError>,
+    ) => Effect.Effect<ServerSettings, ServerSettingsError>;
+
     readonly updateProviderInstance: (
       mutation: ProviderInstanceMutation,
       patch?: ServerSettingsPatch,
@@ -937,6 +950,15 @@ const makeTest = (overrides: DeepPartial<ServerSettings> = {}) =>
             Effect.andThen(rejectMemoryHubSettingsPatch(patch, "test settings")),
             Effect.map(() => applyServerSettingsPatch(currentSettings, patch)),
           ),
+        ),
+      updateSettingsWith: (patchFor, authorizeAtCommit) =>
+        updateTestSettings((currentSettings) =>
+          Effect.gen(function* () {
+            if (authorizeAtCommit) yield* authorizeAtCommit;
+            const patch = yield* patchFor(currentSettings);
+            yield* rejectMemoryHubSettingsPatch(patch, "test settings");
+            return applyServerSettingsPatch(currentSettings, patch);
+          }),
         ),
       updateProviderInstance: (mutation, patch = {}) =>
         updateTestSettings((currentSettings) =>
@@ -2173,6 +2195,15 @@ const make = Effect.gen(function* () {
             Effect.map(() => applyServerSettingsPatch(current, patch)),
           ),
         Object.keys(patch.providerInstances ?? {}).map((id) => id as ProviderInstanceId),
+      ),
+    updateSettingsWith: (patchFor, authorizeAtCommit) =>
+      updateAndPersistSettings((current) =>
+        Effect.gen(function* () {
+          if (authorizeAtCommit) yield* authorizeAtCommit;
+          const patch = yield* patchFor(current);
+          yield* rejectMemoryHubSettingsPatch(patch, settingsPath);
+          return applyServerSettingsPatch(current, patch);
+        }),
       ),
     updateProviderInstance: (mutation, patch = {}, approval, authorizeAtCommit) =>
       updateAndPersistSettings(

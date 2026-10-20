@@ -367,6 +367,20 @@ function makeMutableServerSettingsService(
           yield* PubSub.publish(changes, next);
           return next;
         }),
+      updateSettingsWith: (patchFor) =>
+        Ref.get(settingsRef).pipe(
+          Effect.flatMap(patchFor),
+          Effect.flatMap((patch) =>
+            Effect.gen(function* () {
+              const current = yield* Ref.get(settingsRef);
+              const next = applyServerSettingsPatch(current, patch);
+              encodeServerSettings(next);
+              yield* Ref.set(settingsRef, next);
+              yield* PubSub.publish(changes, next);
+              return next;
+            }),
+          ),
+        ),
       updateProviderInstance: (mutation, patch = {}) =>
         Effect.gen(function* () {
           const current = yield* Ref.get(settingsRef);

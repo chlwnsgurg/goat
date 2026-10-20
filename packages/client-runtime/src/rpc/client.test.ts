@@ -4,6 +4,7 @@ import {
   type AuthSessionState,
   MemorySpaceId,
   MemoryId,
+  MemoryImportSourceId,
   EnvironmentAuthorizationError,
   EnvironmentId,
   type RelayClientInstallProgressEvent,
@@ -847,6 +848,87 @@ describe("staged memory RPC", () => {
         expect(inputs.filter((value) => value.method === "history")).toHaveLength(
           supported ? 1 : 0,
         );
+      }),
+  );
+  it.effect.each([undefined, false, true] as const)(
+    "gates turn-start fit on import preview for the selected session: %s",
+    (supported) =>
+      Effect.gen(function* () {
+        const h = yield* makeHarness();
+        const inputs: Array<{ method: string; input: unknown }> = [];
+        const client = {
+          [WS_METHODS.memoryImportProvider]: (input: unknown) => {
+            inputs.push({ method: "import", input });
+            return Effect.succeed({});
+          },
+        } as unknown as WsRpcProtocolClient;
+        yield* SubscriptionRef.set(
+          h.activeSession,
+          Option.some({
+            ...session(client),
+            initialConfig: Effect.succeed({
+              environment: {
+                capabilities: {
+                  memory: {
+                    protocolVersion: 1,
+                    importProvider: true,
+                    ...(supported === undefined ? {} : { importTurnStartFit: supported }),
+                  },
+                },
+              },
+            } as ServerConfig),
+          }),
+        );
+        const provide = Effect.provideService(
+          EnvironmentSupervisor.EnvironmentSupervisor,
+          h.supervisor,
+        );
+        const permit = Effect.provideService(RpcPermissionGuard, { authorize: () => Effect.void });
+        const sourceId = MemoryImportSourceId.make("00000000-0000-4000-8000-000000000003");
+        const discover = {
+          memorySpaceId,
+          action: "discover" as const,
+          format: "claude" as const,
+        };
+        const hintedDiscover = {
+          memorySpaceId,
+          action: "discover" as const,
+          format: "codex" as const,
+          includeTurnStartFit: true as const,
+        };
+        yield* requestGuarded(WS_METHODS.memoryImportProvider, discover).pipe(provide, permit);
+        yield* requestGuarded(WS_METHODS.memoryImportProvider, hintedDiscover as never).pipe(
+          provide,
+          permit,
+        );
+        expect(inputs).toEqual([
+          { method: "import", input: discover },
+          { method: "import", input: hintedDiscover },
+        ]);
+        for (const optedIn of [true, false] as const) {
+          const preview = {
+            memorySpaceId,
+            action: "preview" as const,
+            sourceId,
+            ...(optedIn ? { includeTurnStartFit: true as const } : {}),
+          };
+          yield* requestGuarded(WS_METHODS.memoryImportProvider, preview).pipe(provide, permit);
+          expect(inputs.at(-1)).toEqual({
+            method: "import",
+            input: {
+              memorySpaceId,
+              action: "preview",
+              sourceId,
+              ...(supported === true ? { includeTurnStartFit: true } : {}),
+            },
+          });
+          expect(preview).toEqual({
+            memorySpaceId,
+            action: "preview",
+            sourceId,
+            ...(optedIn ? { includeTurnStartFit: true } : {}),
+          });
+        }
       }),
   );
   it.effect("denies a raw memory subscription without a read grant", () =>

@@ -241,7 +241,9 @@ export const make = Effect.gen(function* () {
         retainedLocalSpace: true,
         generationHold: true,
         hubDiagnostics: true,
-        ...(importRuntime._tag === "Some" ? { importProvider: true } : {}),
+        ...(importRuntime._tag === "Some"
+          ? { importProvider: true, importTurnStartFit: true }
+          : {}),
       },
       repositoryIdentity: true,
       connectionProbe: true,
