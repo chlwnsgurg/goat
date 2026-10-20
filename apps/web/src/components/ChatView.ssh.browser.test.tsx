@@ -25,7 +25,7 @@ import type { LegendListRef } from "@legendapp/list/react";
 import type { MessagesTimeline } from "./chat/MessagesTimeline";
 import type { ChatComposer, ChatComposerHandle } from "./chat/ChatComposer";
 const state = vi.hoisted(() => ({
-  registry: null as typeof import("effect/reactivity").AtomRegistry.AtomRegistry | null,
+  registry: null as import("effect/reactivity").AtomRegistry.AtomRegistry | null,
   launch: vi.fn(),
   navigate: vi.fn(),
   retry: vi.fn(),
