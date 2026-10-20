@@ -19,7 +19,7 @@ import migration from "../persistence/Migrations/073_Memory.ts";
 import hubMigration from "../persistence/Migrations/074_MemoryHubSync.ts";
 import lineageMigration from "../persistence/Migrations/077_MemoryImportLineage.ts";
 import checkpointMigration from "../persistence/Migrations/078_MemoryCheckpointAccounting.ts";
-import revisionSizeMigration from "../persistence/Migrations/089_MemoryRevisionCheckpointSize.ts";
+import revisionSizeMigration from "../persistence/Migrations/090_MemoryRevisionCheckpointSize.ts";
 import reportMigration from "../persistence/Migrations/079_MemoryReportLifecycle.ts";
 import usageMigration from "../persistence/Migrations/080_MemoryUsageCounters.ts";
 import revertMigration from "../persistence/Migrations/081_MemoryRevertResults.ts";
@@ -29,6 +29,8 @@ import { decideMemoryOperation } from "./MemoryDecider.ts";
 import * as Service from "./MemoryService.ts";
 import * as Maintenance from "./MemoryFtsMaintenance.ts";
 import * as Worker from "./MemoryWorker.ts";
+import { MemoryGenerationRunnerError } from "@goat/provider-core/server/memoryGenerationRunner";
+import * as Hold from "./MemoryGenerationHold.ts";
 import * as Snapshot from "./MemorySnapshot.ts";
 import { threadProvenanceCases } from "./threadProvenance.testkit.ts";
 import * as Sync from "./MemorySyncService.ts";
@@ -73,7 +75,8 @@ const service = Service.layer.pipe(
 );
 const maintenance = Maintenance.layer.pipe(Layer.provideMerge(quota));
 const live = (
-  failure = false,
+  // A function decides per call: a detail string fails with it, undefined succeeds.
+  failure: boolean | (() => string | M.TextGenerationError | undefined) = false,
   onInput?: (input: M.GenerateMemorySummaryInput) => void,
   local = false,
   elapsedPerCallMs = 0,
@@ -104,40 +107,42 @@ const live = (
       Layer.mock(Generation.TextGeneration)({
         generateMemorySummary: (input) => {
           onInput?.(input);
-          const result = failure
-            ? Effect.fail(
-                new M.TextGenerationError({
-                  operation: "generateMemorySummary",
-                  detail: "synthetic failure",
-                }),
-              )
-            : Effect.succeed({
-                result: {
-                  text: [
-                    input.previousSummary?.text,
-                    ...input.messages.map((message) => message.messageId),
-                  ]
-                    .filter(Boolean)
-                    .join(" "),
-                  assertionKind: "inference" as const,
-                  evidence: [
-                    ...(input.previousSummary?.evidence ?? []),
-                    {
-                      origin: "thread" as const,
-                      sourceThread: input.sourceThread,
-                      watermark: input.sourceWatermark,
-                      messageIds: input.messages.map((m) => m.messageId),
-                    },
-                  ],
-                },
-                execution: {
-                  requestedModelSelection: input.modelSelection,
-                  effectiveModel: "fixture",
-                  effectiveProvider: M.ProviderDriverKind.make("codex"),
-                  providerInstanceId: selection.instanceId,
-                  environmentId,
-                },
-              });
+          const detail =
+            typeof failure === "function" ? failure() : failure ? "synthetic failure" : undefined;
+          const result =
+            detail !== undefined
+              ? Effect.fail(
+                  typeof detail === "string"
+                    ? new M.TextGenerationError({ operation: "generateMemorySummary", detail })
+                    : detail,
+                )
+              : Effect.succeed({
+                  result: {
+                    text: [
+                      input.previousSummary?.text,
+                      ...input.messages.map((message) => message.messageId),
+                    ]
+                      .filter(Boolean)
+                      .join(" "),
+                    assertionKind: "inference" as const,
+                    evidence: [
+                      ...(input.previousSummary?.evidence ?? []),
+                      {
+                        origin: "thread" as const,
+                        sourceThread: input.sourceThread,
+                        watermark: input.sourceWatermark,
+                        messageIds: input.messages.map((m) => m.messageId),
+                      },
+                    ],
+                  },
+                  execution: {
+                    requestedModelSelection: input.modelSelection,
+                    effectiveModel: "fixture",
+                    effectiveProvider: M.ProviderDriverKind.make("codex"),
+                    providerInstanceId: selection.instanceId,
+                    environmentId,
+                  },
+                });
           return elapsedPerCallMs
             ? TestClock.adjust(elapsedPerCallMs).pipe(Effect.andThen(result))
             : result;
@@ -1024,6 +1029,134 @@ describe("MemoryWorker", () => {
       assert.deepStrictEqual(rows, [{ kind: "consolidate", status: "completed" }]);
     }).pipe(Effect.provide(live())),
   );
+  it.effect.each([
+    [
+      "schema_rejected",
+      'Codex CLI command failed: {"error":{"message":"Invalid schema for response_format","code":"invalid_json_schema"},"status":400}',
+      5,
+    ],
+    [
+      "unavailable",
+      // Grok's shape: free-text detail, typed runner cause.
+      new M.TextGenerationError({
+        operation: "generateMemorySummary",
+        detail: "Grok did not disclose or support the selected memory model.",
+        cause: new MemoryGenerationRunnerError({ code: "unavailable" }),
+      }),
+      6,
+    ],
+  ] as const)(
+    "pauses a model the provider keeps refusing (%s) instead of failing every summary",
+    ([reason, schemaRejection, probes]) => {
+      let reject = true;
+      let calls = 0;
+      return Effect.gen(function* () {
+        yield* TestClock.setTime(Date.parse(now));
+        yield* seed;
+        const sql = yield* SqlClient.SqlClient;
+        const store = yield* Store.MemoryStore;
+        const worker = yield* Worker.MemoryWorker;
+        const template = work();
+        for (let index = 0; index < 19; index++)
+          yield* store.enqueueWork({
+            ...template,
+            id: "queued-" + index,
+            memoryId: M.MemoryId.make(id(9000 + index)),
+            status: "pending",
+            claimedBy: null,
+            claimedUntil: null,
+            metadata: {
+              ...(template.metadata as Extract<Store.MemoryWork["metadata"], { kind: "summary" }>),
+              memoryId: M.MemoryId.make(id(9000 + index)),
+              operationId: M.MemoryOperationId.make(id(9100 + index)),
+              revisionId: M.MemoryRevisionId.make(id(9200 + index)),
+            },
+          });
+        const summaries = sql<{
+          status: string;
+          attempt: number;
+        }>`SELECT status,attempt FROM memory_outbox WHERE kind='summary'`;
+        yield* worker.sweepDue();
+        yield* worker.sweepDue();
+        // The first rejection holds the model: no other summary was claimed or reported.
+        assert.strictEqual(calls, 1);
+        assert.strictEqual((yield* store.pendingReports(100)).length, 1);
+        const statuses = (yield* summaries).map((row) => row.status);
+        assert.deepStrictEqual(
+          [
+            statuses.filter((status) => status === "retry").length,
+            statuses.filter((status) => status === "pending").length,
+          ],
+          [1, 19],
+        );
+        const hold = yield* Hold.MemoryGenerationHold;
+        const key = yield* hold.keyFor(selection);
+        assert.strictEqual((yield* hold.status(key))?.reason, reason);
+        // Probes at 1 minute, 10 minutes and 1 hour, then once a day (hourly for an outage).
+        for (const step of [60_000, 600_000, 3_600_000, 82_800_000, 3_600_000]) {
+          yield* TestClock.adjust(step);
+          yield* worker.sweepDue();
+          yield* worker.sweepDue();
+        }
+        assert.strictEqual(calls, probes);
+        assert.isAtMost((yield* store.pendingReports(100)).length, probes);
+        // The provider is fixed: the next daily probe succeeds and the queue drains.
+        reject = false;
+        yield* TestClock.adjust(24 * 3_600_000);
+        yield* worker.sweepDue();
+        // The success lifts the hold and rearms rows that failed earlier probes, so every row is
+        // generated again at once. The clones share one source chunk, so only one of them commits.
+        assert.strictEqual(calls, probes + 20);
+        assert.isTrue((yield* summaries).some((row) => row.status === "completed"));
+        assert.isUndefined(yield* hold.status(key));
+      }).pipe(
+        Effect.provide(
+          live(
+            () => (reject ? schemaRejection : undefined),
+            () => void (calls += 1),
+          ).pipe(Layer.provideMerge(Hold.layer)),
+        ),
+      );
+    },
+  );
+  it.effect("resumes held summaries right away when the memory model changes", () => {
+    let calls = 0;
+    const models: Array<string> = [];
+    return Effect.gen(function* () {
+      yield* TestClock.setTime(Date.parse(now));
+      yield* seed;
+      const store = yield* Store.MemoryStore;
+      const worker = yield* Worker.MemoryWorker;
+      yield* worker.sweepDue();
+      assert.strictEqual(calls, 1);
+      const settings = yield* Settings.ServerSettingsService;
+      yield* settings.updateSettings({
+        memoryModelSelection: { instanceId: selection.instanceId, model: "fixture-next" },
+      });
+      // No clock advance: the change alone makes the held summary due again.
+      yield* worker.sweepDue();
+      assert.strictEqual(calls, 2);
+      assert.deepStrictEqual(models, ["fixture", "fixture-next"]);
+      const rows = yield* (yield* SqlClient.SqlClient)<{
+        status: string;
+      }>`SELECT status FROM memory_outbox WHERE kind='summary'`;
+      assert.isTrue(rows.every((row) => row.status === "completed"));
+      assert.strictEqual(yield* store.rearmGenerationWork(Date.parse(now)), 0);
+    }).pipe(
+      Effect.provide(
+        live(
+          () =>
+            models.at(-1) === "fixture"
+              ? 'Codex CLI command failed: {"error":{"code":"invalid_json_schema"},"status":400}'
+              : undefined,
+          (input) => {
+            calls += 1;
+            models.push(input.modelSelection.model);
+          },
+        ),
+      ),
+    );
+  });
   it.effect("records one safe report and durable future retry on provider failure", () =>
     Effect.gen(function* () {
       yield* seed;

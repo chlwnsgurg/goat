@@ -172,6 +172,9 @@ function makeDatabase() {
   const schemaVersions = new Map<string, number>();
   const removed: Array<string> = [];
   const database = MobileDatabase.MobileDatabase.of({
+    loadNoteOutbox: Effect.succeed([]),
+    saveNoteOutbox: () => Effect.void,
+    removeNoteOutbox: () => Effect.void,
     loadCache: (environmentId, kind, cacheKey) =>
       Effect.succeed(Option.fromUndefinedOr(values.get(cacheId(environmentId, kind, cacheKey)))),
     listCache: (kind) =>

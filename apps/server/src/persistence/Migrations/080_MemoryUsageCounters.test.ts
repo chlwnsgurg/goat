@@ -58,7 +58,8 @@ it.effect(
         [86, "FleetGoals"],
         [87, "FleetHealth"],
         [88, "ThreadRunObservedChecks"],
-        [89, "MemoryRevisionCheckpointSize"],
+        [89, "RemoteDispatchObservation"],
+        [90, "MemoryRevisionCheckpointSize"],
       ]);
       yield* assertUsageCounters;
       assert.deepStrictEqual(yield* runMigrations(), []);

@@ -11,7 +11,7 @@ import hub from "../persistence/Migrations/074_MemoryHubSync.ts";
 import lineage from "../persistence/Migrations/077_MemoryImportLineage.ts";
 import checkpointMigration from "../persistence/Migrations/078_MemoryCheckpointAccounting.ts";
 import lifecycleMigration from "../persistence/Migrations/085_MemoryCheckpointLifecycle.ts";
-import revisionSizeMigration from "../persistence/Migrations/089_MemoryRevisionCheckpointSize.ts";
+import revisionSizeMigration from "../persistence/Migrations/090_MemoryRevisionCheckpointSize.ts";
 import {
   CheckpointAccountingError,
   refreshCheckpointAccounting,

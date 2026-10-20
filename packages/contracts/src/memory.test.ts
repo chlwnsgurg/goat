@@ -2322,6 +2322,13 @@ it("opts into retained local space without changing legacy sync status requests"
   round(M.MemorySyncStatusInput, { includeRetainedLocalSpaceId: true });
   rejects(M.MemorySyncStatusInput, { includeRetainedLocalSpaceId: false });
   rejects(M.MemorySyncStatusInput, { includeRetainedLocalSpaceId: null });
+  round(M.MemorySyncStatusInput, { includeGenerationHold: true });
+  round(M.MemorySyncStatusInput, {
+    includeRetainedLocalSpaceId: true,
+    includeGenerationHold: true,
+  });
+  rejects(M.MemorySyncStatusInput, { includeGenerationHold: false });
+  rejects(M.MemorySyncStatusInput, { includeGenerationHold: true, extra: true });
 });
 
 // Frozen outer response shapes from origin/dev before automatic hub initialization.

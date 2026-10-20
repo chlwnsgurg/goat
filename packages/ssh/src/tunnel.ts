@@ -692,6 +692,8 @@ export interface RemoteMcpClientSessionOptions {
   readonly runtimeModeCeiling: string | null;
   /** Also grant `orchestration:approve`. A remote CLI that predates it fails the issue. */
   readonly approvals?: boolean;
+  /** Also grant `providers:manage`, only for a caller that holds it live on this machine. */
+  readonly providersManage?: boolean;
   /** Explicit task memory grants; an older CLI must refuse rather than omit them. */
   readonly memoryScopes?: ReadonlyArray<"memory:read" | "memory:write">;
 }
@@ -1244,8 +1246,18 @@ else
     printf '%s\n' "$process_table" | awk -v p="$1" '$1==p { found=1 } END { print found ? "present" : "absent" }'
   }
   # An exited, unreaped server still passes kill -0; it cannot be reused.
+  # /proc is authoritative for that zombie. ps can return an empty stat under load
+  # and must not turn a dead server back into a live one.
   server_alive() {
     [ -n "$1" ] && kill -0 "$1" 2>/dev/null || return 1
+    if [ -r "/proc/$1/stat" ]; then
+      alive_state="$(sed -n 's/.*) //p' "/proc/$1/stat" 2>/dev/null | awk '{ print $1 }' || true)"
+      case "$alive_state" in
+        Z) return 1 ;;
+        ?*) return 0 ;;
+      esac
+    fi
+    kill -0 "$1" 2>/dev/null || return 1
     case "$(ps -o stat= -p "$1" 2>/dev/null || true)" in *Z*) return 1 ;; esac
   }
   server_kill() { kill "$1" 2>/dev/null; }
@@ -2477,13 +2489,15 @@ if [ "$REMOTE_MANAGED" = managed ] && [ -n "$REMOTE_PID" ]; then
     fi
     verify_owned_identity "$REMOTE_PID" "$REMOTE_PORT" || ownership_unverified
     server_kill "$REMOTE_PID" || true
+    STOP_WAIT_ATTEMPTS=@@GOAT_STOP_WAIT_ATTEMPTS@@
+    STOP_WAIT_INTERVAL=@@GOAT_STOP_WAIT_INTERVAL@@
     WAIT_COUNT=0
-    while server_alive "$REMOTE_PID" && [ "$WAIT_COUNT" -lt 20 ]; do
+    while server_alive "$REMOTE_PID" && [ "$WAIT_COUNT" -lt "$STOP_WAIT_ATTEMPTS" ]; do
       WAIT_COUNT=$((WAIT_COUNT + 1))
-      sleep 0.1
+      sleep "$STOP_WAIT_INTERVAL"
     done
     if server_alive "$REMOTE_PID"; then
-      printf 'Remote GOAT server with PID %s did not stop within 2 seconds. Its ownership files were kept.\\n' "$REMOTE_PID" >&2
+      printf 'Remote GOAT server with PID %s did not stop within @@GOAT_STOP_WAIT_LABEL@@. Its ownership files were kept.\\n' "$REMOTE_PID" >&2
       exit 1
     fi
   fi
@@ -2704,6 +2718,7 @@ export function buildRemoteMcpSessionScript(
     GOAT_MEMORY_SCOPES: (options.memoryScopes?.length ?? 0) > 0 ? "required" : "none",
     GOAT_EXTRA_SCOPES:
       (options.approvals === true ? "--scope orchestration:approve " : "") +
+      (options.providersManage === true ? "--scope providers:manage " : "") +
       (options.memoryScopes ?? []).map((scope) => `--scope ${shellSingleQuote(scope)} `).join(""),
     GOAT_RUNNER_SETUP: buildRemoteRunnerSetupScript(input, {
       ...selection,
@@ -4150,9 +4165,44 @@ function archiveUnavailableText(alias: string, error: SshLaunchError, directory:
   };
 }
 
+const DEFAULT_STOP_WAIT_ATTEMPTS = 20;
+const DEFAULT_STOP_WAIT_INTERVAL_SECONDS = "0.1";
+const STOP_WAIT_INTERVAL_PATTERN = /^(?:0|[1-9]\d*)(?:\.\d+)?$/;
+
+/** Production waits 20×0.1s. Tests pass interval `0` so the loop follows process exit. */
+function stopWaitPlaceholders(options: {
+  readonly stopWaitAttempts?: number;
+  readonly stopWaitIntervalSeconds?: string;
+}): {
+  readonly GOAT_STOP_WAIT_ATTEMPTS: string;
+  readonly GOAT_STOP_WAIT_INTERVAL: string;
+  readonly GOAT_STOP_WAIT_LABEL: string;
+} {
+  const attempts = options.stopWaitAttempts ?? DEFAULT_STOP_WAIT_ATTEMPTS;
+  const interval = options.stopWaitIntervalSeconds ?? DEFAULT_STOP_WAIT_INTERVAL_SECONDS;
+  if (!Number.isInteger(attempts) || attempts < 1 || attempts > 1_000_000) {
+    throw new Error(`stopWaitAttempts must be an integer from 1 to 1000000, got ${attempts}`);
+  }
+  if (!STOP_WAIT_INTERVAL_PATTERN.test(interval)) {
+    throw new Error(`stopWaitIntervalSeconds must be a non-negative decimal, got ${interval}`);
+  }
+  return {
+    GOAT_STOP_WAIT_ATTEMPTS: String(attempts),
+    GOAT_STOP_WAIT_INTERVAL: interval,
+    GOAT_STOP_WAIT_LABEL:
+      attempts === DEFAULT_STOP_WAIT_ATTEMPTS && interval === DEFAULT_STOP_WAIT_INTERVAL_SECONDS
+        ? "2 seconds"
+        : "the stop deadline",
+  };
+}
+
 export function buildRemoteStopScript(
   stateKey: string,
-  options: { readonly ownedOnly?: boolean } = {},
+  options: {
+    readonly ownedOnly?: boolean;
+    readonly stopWaitAttempts?: number;
+    readonly stopWaitIntervalSeconds?: string;
+  } = {},
 ): string {
   return applyScriptPlaceholders(REMOTE_STOP_SCRIPT, {
     GOAT_STATE_KEY: stateKey,
@@ -4160,6 +4210,7 @@ export function buildRemoteStopScript(
     GOAT_PROTOCOL_TOKENS: REMOTE_PROTOCOL_TOKEN_SCRIPT,
     GOAT_REPLACEMENT_LOCK: REMOTE_REPLACEMENT_LOCK_SCRIPT,
     GOAT_OWNED_IDENTITY: REMOTE_OWNED_IDENTITY_SCRIPT,
+    ...stopWaitPlaceholders(options),
   });
 }
 

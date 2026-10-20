@@ -20,7 +20,6 @@ vi.mock("./useMobileGoatBotHomeSettings", () => ({
   useMobileGoatBotHomeSettings: () => ({ moveTarget: null, error: null }),
 }));
 vi.mock("./useMobileGoatBotSession", () => ({ useMobileGoatBotSession: () => ({}) }));
-vi.mock("./GoatBotAvatar", () => ({ GoatBotAvatar: () => null }));
 vi.mock("react-native-svg", () => ({ default: () => null, Path: () => null }));
 vi.mock("../settings/appearance/AppearancePreferencesProvider", () => ({
   useAppearancePreferences: () => ({

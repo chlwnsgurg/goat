@@ -81,6 +81,7 @@ export * from "./fleetGoal.ts";
 export * from "./fleetResources.ts";
 export * from "./usage.ts";
 export * from "./scheduledTask.ts";
+export * from "./notes.ts";
 export * from "./worktreeMcp.ts";
 export * from "./resourceTelemetry.ts";
 export * from "./rpc.ts";

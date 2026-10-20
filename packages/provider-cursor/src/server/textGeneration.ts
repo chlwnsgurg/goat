@@ -15,6 +15,7 @@ import { type ProviderSetupError, TextGenerationError } from "@goat/contracts";
 import type { CursorSettings } from "../settings.ts";
 
 import * as TextGenerationOperations from "@goat/provider-core/server/textGenerationOperations";
+import { MemoryGenerationRunnerError } from "@goat/provider-core/server/memoryGenerationRunner";
 import { cursorSdkModelSelection } from "./sdkModel.ts";
 import type { CursorAuth } from "./auth.ts";
 import * as CursorSdk from "./CursorSdk.ts";
@@ -99,6 +100,8 @@ export const makeCursorTextGeneration = Effect.fn("makeCursorTextGeneration")(fu
           operation,
           detail:
             "Cursor text generation cannot enforce workspace isolation with a custom ~/.cursor/sandbox.json. Use another text-generation provider.",
+          // Typed so memory pauses this model: the policy refuses every request.
+          cause: new MemoryGenerationRunnerError({ code: "unavailable" }),
         });
       }
       const cwd = yield* fs.makeTempDirectoryScoped({ prefix: "goat-cursor-text-" });
@@ -166,7 +169,8 @@ export const makeCursorTextGeneration = Effect.fn("makeCursorTextGeneration")(fu
                     new TextGenerationError({
                       operation,
                       detail: "Cursor memory generation requires its isolated sandbox.",
-                      cause,
+                      // Typed so memory pauses this model: the sandbox is missing on every try.
+                      cause: new MemoryGenerationRunnerError({ code: "unavailable" }),
                     }),
                   )
                 : createCursorAgent(false),

@@ -3929,7 +3929,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
             const status = codexItemStatus(item.status);
             const completedAt = status.completed ? updatedAt : null;
             const lineCounts = codexFileChangeLineCounts(item.changes);
-            const patch = codexFileChangePatch(item.changes);
+            const patch = codexFileChangePatch(item.changes, context.input.runtimePolicy.cwd);
             const nodeId = idAllocator.derive.nodeFromProviderItem({
               driver: CODEX_PROVIDER,
               nativeItemId: item.id,
@@ -7340,12 +7340,12 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                       : null;
                   if (goalCommand !== null) return runGoalCommand(turnInput, goalCommand);
                   return Effect.gen(function* () {
-                    yield* startNativeTurn(
-                      turnInput,
-                      turnInput.restartContinuationOfRunId === undefined
-                        ? yield* toCodexInput(turnInput)
-                        : [],
-                    );
+                    // `turn/start` steers a turn that is already active. Codex
+                    // rejects an empty steer (`failed to submit turn input:
+                    // EmptyInput`) after that turn has emitted `turn/started`,
+                    // which is how a restart continuation dies on a shared
+                    // app-server (#552). The continuation message is the prompt.
+                    yield* startNativeTurn(turnInput, yield* toCodexInput(turnInput));
                   }).pipe(
                     Effect.mapError(
                       (cause) =>

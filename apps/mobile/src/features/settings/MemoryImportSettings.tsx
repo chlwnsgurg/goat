@@ -13,6 +13,7 @@ import { AppState } from "react-native";
 import * as Crypto from "expo-crypto";
 import * as Option from "effect/Option";
 import { AsyncResult } from "effect/reactivity";
+import { memoryImportRequestFailureMessage } from "@goat/client-runtime/memory-import-workflow";
 import { mobileMemoryImportRecovery } from "../../persistence/memory-import-recovery";
 import { useSavedRemoteConnections } from "../../state/use-remote-environment-registry";
 import { memoryEnvironment as memory } from "../../state/memory";
@@ -118,9 +119,12 @@ export function MemoryImportSettings({
       if (!mounted.current || token !== generation.current) return;
       const request = action();
       await request;
-    } catch {
+    } catch (error) {
       if (mounted.current && token === generation.current)
-        setError("Import could not finish. Check the saved result before previewing again.");
+        setError(
+          memoryImportRequestFailureMessage(error) ??
+            "Import could not finish. Check the saved result before previewing again.",
+        );
     } finally {
       if (mounted.current && token === generation.current) {
         setBusy(false);

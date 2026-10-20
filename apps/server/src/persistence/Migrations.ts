@@ -95,7 +95,8 @@ import Migration0085 from "./Migrations/085_MemoryCheckpointLifecycle.ts";
 import Migration0086 from "./Migrations/086_FleetGoals.ts";
 import Migration0087 from "./Migrations/087_FleetHealth.ts";
 import Migration0088 from "./Migrations/088_ThreadRunObservedChecks.ts";
-import Migration0089 from "./Migrations/089_MemoryRevisionCheckpointSize.ts";
+import Migration0089 from "./Migrations/089_RemoteDispatchObservation.ts";
+import Migration0090 from "./Migrations/090_MemoryRevisionCheckpointSize.ts";
 
 export const migrationEntries = [
   [1, "OrchestrationEvents", Migration0001],
@@ -189,7 +190,8 @@ export const migrationEntries = [
   [86, "FleetGoals", Migration0086],
   [87, "FleetHealth", Migration0087],
   [88, "ThreadRunObservedChecks", Migration0088],
-  [89, "MemoryRevisionCheckpointSize", Migration0089],
+  [89, "RemoteDispatchObservation", Migration0089],
+  [90, "MemoryRevisionCheckpointSize", Migration0090],
 ] as const;
 
 export const migrationManifest = migrationEntries.map(([id, name]) => [id, name] as const);

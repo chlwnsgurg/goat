@@ -99,6 +99,8 @@ export const ExecutionEnvironmentCapabilities = Schema.Struct({
       refusedReverts: Schema.optionalKey(Schema.Boolean),
       resolutionInputs: Schema.optionalKey(Schema.Boolean),
       retainedLocalSpace: Schema.optionalKey(Schema.Boolean),
+      /** memory.syncStatus may report a paused memory model when the request opts in. */
+      generationHold: Schema.optionalKey(Schema.Boolean),
       /** Separate diagnostics/read and Settings reconcile RPCs; absent on older servers. */
       hubDiagnostics: Schema.optionalKey(Schema.Boolean),
     }),

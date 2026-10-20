@@ -239,6 +239,7 @@ export const make = Effect.gen(function* () {
         refusedReverts: true,
         resolutionInputs: true,
         retainedLocalSpace: true,
+        generationHold: true,
         hubDiagnostics: true,
         ...(importRuntime._tag === "Some"
           ? { importProvider: true, importTurnStartFit: true }
