@@ -88,6 +88,19 @@ describe("ExecutionEnvironmentDescriptor", () => {
     ).toBe(true);
   });
 
+  it("treats a missing automatic server updates capability as unsupported", () => {
+    expect(decodeDescriptor(descriptor).capabilities.automaticServerUpdates).toBeUndefined();
+  });
+
+  it("preserves an advertised automatic server updates capability", () => {
+    expect(
+      decodeDescriptor({
+        ...descriptor,
+        capabilities: { ...descriptor.capabilities, automaticServerUpdates: true },
+      }).capabilities.automaticServerUpdates,
+    ).toBe(true);
+  });
+
   it("treats a missing pull-request capability as unsupported under version skew", () => {
     expect(decodeDescriptor(descriptor).capabilities.pullRequests).toBeUndefined();
   });

@@ -239,6 +239,10 @@ function ServerSettingsDetail(props: { readonly page: SettingsPage }) {
     (target) =>
       target.environment.serverConfig.environment.capabilities.threadRestartContinuation === true,
   );
+  const supportsAutomaticServerUpdates = targets.every(
+    (target) =>
+      target.environment.serverConfig.environment.capabilities.automaticServerUpdates === true,
+  );
   const disabledFor = (key: string) =>
     disabled ||
     (projectSelected &&
@@ -493,10 +497,14 @@ function ServerSettingsDetail(props: { readonly page: SettingsPage }) {
                         subtitle={
                           projectSelected
                             ? "Environment-wide setting. Select All projects to change it."
-                            : "When this server runs as a background service, install new releases from its channel while no threads are running. A failed update rolls back."
+                            : supportsAutomaticServerUpdates
+                              ? "When this server runs as a background service, install new releases from its channel while no threads are running. A failed update rolls back."
+                              : "Update this server to change this setting."
                         }
                         value={uniform("automaticServerUpdates")}
-                        disabled={disabledFor("automaticServerUpdates")}
+                        disabled={
+                          disabledFor("automaticServerUpdates") || !supportsAutomaticServerUpdates
+                        }
                         onValueChange={(value) => write({ automaticServerUpdates: value })}
                       />
                     </View>
