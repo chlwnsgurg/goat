@@ -252,7 +252,10 @@ export const isLinuxZombie = (
   try {
     const stat = readStat(`/proc/${pid}/stat`);
     // The command name in parentheses may itself contain ") Z", so read after the last one.
-    return stat.slice(stat.lastIndexOf(")") + 1).trimStart().startsWith("Z");
+    return stat
+      .slice(stat.lastIndexOf(")") + 1)
+      .trimStart()
+      .startsWith("Z");
   } catch {
     return false;
   }
@@ -263,7 +266,7 @@ const processExists = (pid: number) => {
   } catch (cause) {
     return cause instanceof Error && "code" in cause && cause.code === "EPERM";
   }
-  return !(process.platform === "linux" && isLinuxZombie(pid));
+  return !isLinuxZombie(pid);
 };
 const hasLoopbackListener = (port: number) =>
   new Promise<boolean>((resolve) => {

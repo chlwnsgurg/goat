@@ -291,7 +291,7 @@ export const runMigrations = Effect.fn("runMigrations")(function* ({
       ...goatMigrations,
       ...(yield* run({ loader: makeMigrationLoader(toMigrationInclusive) })),
     ];
-  }).pipe(Effect.catchTag("MigrationError", failIfDatabaseNewerThanBuild));
+  }).pipe(Effect.catchTags({ MigrationError: failIfDatabaseNewerThanBuild }));
   const migrations = executedMigrations.map(([id, name]) => `${id}_${name}`);
   yield* migrations.length === 0
     ? Effect.logDebug("Database schema is current")

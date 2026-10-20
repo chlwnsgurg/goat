@@ -1,4 +1,4 @@
-// @effect-diagnostics nodeBuiltinImport:off
+// @effect-diagnostics nodeBuiltinImport:off globalTimers:off globalDate:off
 import * as NodeChildProcess from "node:child_process";
 import * as NodeFS from "node:fs";
 import * as NodeNet from "node:net";
@@ -155,7 +155,7 @@ const firstLine = (stream: NodeJS.ReadableStream) =>
     });
   });
 
-it.runIf(process.platform === "linux")(
+it.runIf(NodeFS.existsSync("/proc/self/stat"))(
   "treats an unreaped zombie old server as exited and starts the replacement",
   async () => {
     const parent = NodeChildProcess.spawn("sh", ["-c", "sleep 600 & echo $!; exec sleep 600"], {

@@ -77,8 +77,8 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")(
           const database = `${f.home}/.goat/userdata/statev2.sqlite`;
           yield* f.fs.makeDirectory(`${f.home}/.goat/userdata`, { recursive: true });
           yield* f.fs.writeFileString(database, "rewritten-by-newer-runtime");
-          const future = new Date(Date.now() + 120_000);
-          yield* Effect.sync(() => NodeFS.utimesSync(database, future, future));
+          // 2100-01-01, in seconds: always newer than the marker.
+          yield* Effect.sync(() => NodeFS.utimesSync(database, 4_102_444_800, 4_102_444_800));
           const third = yield* f.run("launch");
           assert.isTrue(Result.isFailure(third));
           assert.isAbove(serveCount(yield* events(f)), started);
