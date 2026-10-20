@@ -60,6 +60,14 @@ ${script}
   }
 };
 
+// macOS CI has no unshare, and some Linux hosts disable unprivileged user namespaces.
+const canIsolateListenerPath =
+  HostProcess.Platform.defaultValue() === "linux" &&
+  NodeChildProcess.spawnSync("unshare", ["--user", "--map-root-user", "true"], {
+    encoding: "utf8",
+    timeout: 5_000,
+  }).status === 0;
+
 describe.skipIf(HostProcess.Platform.defaultValue() === "win32")("SSH launch identity", () => {
   it.live("checks the socket PID with noglob enabled and preserves the caller's options", () =>
     Effect.gen(function* () {
@@ -225,7 +233,7 @@ case "$-" in *f*) ;; *) exit 3 ;; esac
       }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
   );
 
-  it("finds lsof from a minimal PATH that omits /usr/sbin", () => {
+  it.skipIf(!canIsolateListenerPath)("finds lsof from a minimal PATH that omits /usr/sbin", () => {
     const fake = `#!/bin/sh
 pid=
 prev=
@@ -254,10 +262,12 @@ if server_owns_listener 1 9; then exit 2; fi
     assert.equal(result.status, 0, `${result.stderr}\n${result.stdout}`);
   });
 
-  it("leaves a server running when a minimal PATH has no listener probe", () => {
-    const result = runWithoutProc(
-      undefined,
-      `/bin/sleep 30 &
+  it.skipIf(!canIsolateListenerPath)(
+    "leaves a server running when a minimal PATH has no listener probe",
+    () => {
+      const result = runWithoutProc(
+        undefined,
+        `/bin/sleep 30 &
 old=$!
 trap 'if kill -0 "$old" 2>/dev/null; then printf left-running; kill "$old" 2>/dev/null || true; else printf already-dead; fi' EXIT
 NEEDS_OWNED_UPGRADE=1
@@ -270,13 +280,14 @@ fi
 kill "$old"
 printf reached-replacement
 `,
-    );
-    assert.equal(result.status, 1, `${result.stderr}\n${result.stdout}`);
-    assert.equal(result.stdout.trim(), "left-running");
-    assert.include(
-      result.stderr,
-      "Cannot verify the launched GOAT listener: this host needs /proc or lsof. The existing server was left running.",
-    );
-    assert.notInclude(result.stdout, "reached-replacement");
-  });
+      );
+      assert.equal(result.status, 1, `${result.stderr}\n${result.stdout}`);
+      assert.equal(result.stdout.trim(), "left-running");
+      assert.include(
+        result.stderr,
+        "Cannot verify the launched GOAT listener: this host needs /proc or lsof. The existing server was left running.",
+      );
+      assert.notInclude(result.stdout, "reached-replacement");
+    },
+  );
 });
