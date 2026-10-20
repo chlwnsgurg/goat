@@ -18,6 +18,7 @@ import * as DateTime from "effect/DateTime";
 import * as Schema from "effect/Schema";
 
 import {
+  boundFileChangeForStorage,
   projectTurnItemForWire,
   projectTurnItemForDetail,
   projectDomainEventForWire,
@@ -365,6 +366,41 @@ describe("orchestration V2 wire projection", () => {
     });
     expect(failed).toMatchObject({ diffStr: "String to replace not found" });
     expect(failed).not.toHaveProperty("newStr");
+  });
+
+  it("sends an edit's own patch only on demand", () => {
+    const patch = "diff --git a/src/main.ts b/src/main.ts\n--- a/src/main.ts\n+++ b/src/main.ts\n";
+    const item = {
+      ...base,
+      type: "file_change" as const,
+      fileName: "src/main.ts",
+      diffStr: "@@ -1 +1 @@",
+      patch,
+    };
+    const wire = projectTurnItemForWire(item);
+    expect(wire).not.toHaveProperty("patch");
+    expect(wire).toMatchObject({ patchOmitted: true });
+    expect(projectTurnItemForWire(wire)).toEqual(wire);
+    const detail = projectTurnItemForDetail(item);
+    expect(detail).toMatchObject({ patch });
+    expect(detail).not.toHaveProperty("patchOmitted");
+    expect(detail).not.toHaveProperty("diffStr");
+    expect(projectTurnItemForWire({ ...item, status: "failed" })).not.toHaveProperty(
+      "patchOmitted",
+    );
+    expect(projectTurnItemForDetail({ ...item, status: "failed" })).not.toHaveProperty("patch");
+  });
+
+  it("stores no patch too large to send whole", () => {
+    const item = {
+      ...base,
+      type: "file_change" as const,
+      fileName: "src/main.ts",
+      patch: `diff --git a/a b/a\n${"+x\n".repeat(200_000)}`,
+    };
+    expect(boundFileChangeForStorage(item)).not.toHaveProperty("patch");
+    const small = { ...item, patch: "diff --git a/a b/a\n" };
+    expect(boundFileChangeForStorage(small)).toBe(small);
   });
 
   it("retains only result identities and failure metadata in live tool events", () => {

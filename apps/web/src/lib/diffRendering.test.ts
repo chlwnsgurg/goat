@@ -75,6 +75,15 @@ describe("buildPatchCacheKey", () => {
 });
 
 describe("getRenderablePatch", () => {
+  it("keeps a hunk's trailing blank context line", () => {
+    const renderable = getRenderablePatch(
+      "diff --git a/a.ts b/a.ts\n--- a/a.ts\n+++ b/a.ts\n@@ -1,2 +1,2 @@\n-a\n+b\n \n",
+      "trailing-context",
+    );
+    const hunk = renderable?.kind === "files" ? renderable.files[0]?.hunks[0] : undefined;
+    expect(hunk?.unifiedLineCount).toBe(3);
+  });
+
   it("hides indentation changes around inserted JSX without moving review lines", () => {
     const patch = [
       "diff --git a/item.tsx b/item.tsx",

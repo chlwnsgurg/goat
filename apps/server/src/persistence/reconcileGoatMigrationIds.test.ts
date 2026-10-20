@@ -101,7 +101,8 @@ describe("GOAT migration ids", () => {
         [85, "MemoryCheckpointLifecycle"],
         [86, "FleetGoals"],
         [87, "FleetHealth"],
-        [88, "HubNodes"],
+        [88, "ThreadRunObservedChecks"],
+        [89, "HubNodes"],
       ]);
       assert.isTrue(yield* hasReviewGuides);
       assert.deepStrictEqual(yield* history, migrationManifest);
@@ -137,7 +138,8 @@ describe("GOAT migration ids", () => {
         [85, "MemoryCheckpointLifecycle"],
         [86, "FleetGoals"],
         [87, "FleetHealth"],
-        [88, "HubNodes"],
+        [88, "ThreadRunObservedChecks"],
+        [89, "HubNodes"],
       ]);
       assert.isTrue(yield* hasReviewGuides);
       assert.deepStrictEqual(yield* history, migrationManifest);
@@ -180,7 +182,8 @@ describe("GOAT migration ids", () => {
           [85, "MemoryCheckpointLifecycle"],
           [86, "FleetGoals"],
           [87, "FleetHealth"],
-          [88, "HubNodes"],
+          [88, "ThreadRunObservedChecks"],
+          [89, "HubNodes"],
         ]);
         assert.deepStrictEqual(yield* history, migrationManifest);
         assert.deepStrictEqual(yield* runMigrations(), []);

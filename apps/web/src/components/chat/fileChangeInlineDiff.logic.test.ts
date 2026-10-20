@@ -2,8 +2,7 @@ import { RunId, ThreadId, TurnItemId } from "@goat/contracts";
 import type { OrchestrationV2TurnItem } from "@goat/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
-import { getRenderablePatch } from "../../lib/diffRendering";
-import { extractFilePatch, fileChangeRowLabel } from "./fileChangeInlineDiff.logic";
+import { fileChangeRowLabel } from "./fileChangeInlineDiff.logic";
 
 type FileChangeItem = Extract<OrchestrationV2TurnItem, { type: "file_change" }>;
 
@@ -45,29 +44,5 @@ describe("fileChangeRowLabel", () => {
         }),
       ),
     ).toBe("Created coggs-resume.mjs +1 more");
-  });
-});
-
-describe("extractFilePatch", () => {
-  it("copies one file's section of a multi-file patch", () => {
-    const patch = [
-      "diff --git a/a.ts b/a.ts",
-      "--- a/a.ts",
-      "+++ b/a.ts",
-      "@@ -1 +1 @@",
-      "-a",
-      "+b",
-      "diff --git a/b.ts b/b.ts",
-      "--- a/b.ts",
-      "+++ b/b.ts",
-      "@@ -1 +1 @@",
-      "-c",
-      "+d",
-    ].join("\n");
-    const renderable = getRenderablePatch(patch, "extract-file-patch");
-    const second = renderable?.kind === "files" ? renderable.files[1] : undefined;
-    expect(second && extractFilePatch(patch, second)).toBe(
-      "diff --git a/b.ts b/b.ts\n--- a/b.ts\n+++ b/b.ts\n@@ -1 +1 @@\n-c\n+d",
-    );
   });
 });

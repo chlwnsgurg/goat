@@ -635,8 +635,18 @@ const make = Effect.fnUntraced(function* (
         const current = yield* store.loadAggregate(
           op.memorySpaceId,
           op.memoryId,
-          { heads: true, revisionIds: op.kind === "revert" ? [op.restoredRevisionId] : [] },
-          op.kind === "revert" ? { resolutionId: op.revertsResolutionId } : {},
+          op.kind === "forget"
+            ? {}
+            : { heads: true, revisionIds: op.kind === "revert" ? [op.restoredRevisionId] : [] },
+          op.kind === "forget"
+            ? {}
+            : {
+                ...(op.kind === "revert" ? { resolutionId: op.revertsResolutionId } : {}),
+                revision: op.revision,
+                ...(op.kind === "resolve"
+                  ? { metadataRevisionIds: op.resolution.inputRevisionIds }
+                  : {}),
+              },
         );
         if (admission.kind !== "approvedReplica" && current.pendingForget && op.kind !== "forget")
           return yield* new Store.MemoryStoreConflict({ code: "forget_pending" });
@@ -851,10 +861,16 @@ const make = Effect.fnUntraced(function* (
               return yield* new Store.MemoryStoreConflict({ code: "invalid_output" });
             return;
           }
+          const priorObservation = previous?.pending ?? previous?.accepted;
           const current = yield* store.loadAggregate(
             batch.memorySpaceId,
             next.memoryId,
-            undefined,
+            {
+              revisionIds: [
+                ...(priorObservation ? [priorObservation.revisionId] : []),
+                ...input.parents,
+              ],
+            },
             {},
           );
           if (current.identity && !NodeUtil.isDeepStrictEqual(current.identity.scope, next.scope))
@@ -1061,7 +1077,7 @@ const make = Effect.fnUntraced(function* (
           const current = yield* store.loadAggregate(
             input.memorySpaceId,
             input.memoryId,
-            undefined,
+            { heads: true },
             {},
           );
           if (current.identity && !NodeUtil.isDeepStrictEqual(current.identity.scope, input.scope))
@@ -1876,7 +1892,12 @@ const make = Effect.fnUntraced(function* (
           op.memorySpaceId,
           op.memoryId,
           { heads: true },
-          {},
+          {
+            revision: op.revision,
+            ...(op.kind === "resolve"
+              ? { metadataRevisionIds: op.resolution.inputRevisionIds }
+              : {}),
+          },
         );
         const old = yield* store.receipt(op.memorySpaceId, op.operationId);
         if (!old || !("hubSequence" in old.receipt)) return false;
@@ -2080,7 +2101,12 @@ const make = Effect.fnUntraced(function* (
   const sourceLocator = Effect.fn("MemoryService.sourceLocator")(function* (
     input: M.MemoryReadSourceInput,
   ) {
-    const aggregate = yield* store.loadAggregate(input.memorySpaceId, input.memoryId);
+    const aggregate = yield* store.loadAggregate(
+      input.memorySpaceId,
+      input.memoryId,
+      { heads: true },
+      {},
+    );
     if (aggregate.tombstone || aggregate.pendingForget)
       return yield* new Store.MemoryStoreConflict({ code: "forgotten" });
     if (!aggregate.item || aggregate.item.localAvailability.exposure !== "visible")
@@ -2253,16 +2279,26 @@ const make = Effect.fnUntraced(function* (
     const current = yield* store.loadAggregate(
       op.memorySpaceId,
       op.memoryId,
-      {
-        heads: true,
-        revisionIds:
-          op.kind === "resolve"
-            ? op.expectedHeads
-            : op.kind === "revert"
-              ? [op.restoredRevisionId]
-              : [],
-      },
-      op.kind === "revert" ? { resolutionId: op.revertsResolutionId } : {},
+      op.kind === "forget"
+        ? {}
+        : {
+            heads: true,
+            revisionIds:
+              op.kind === "resolve"
+                ? op.expectedHeads
+                : op.kind === "revert"
+                  ? [op.restoredRevisionId]
+                  : [],
+          },
+      op.kind === "forget"
+        ? {}
+        : {
+            ...(op.kind === "revert" ? { resolutionId: op.revertsResolutionId } : {}),
+            revision: op.revision,
+            ...(op.kind === "resolve"
+              ? { metadataRevisionIds: op.resolution.inputRevisionIds }
+              : {}),
+          },
     );
     // Only the read-only semantic decision is caught; every subsequent write can fail the outer transaction.
     const prepared = yield* Effect.gen(function* () {

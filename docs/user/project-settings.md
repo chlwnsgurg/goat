@@ -152,6 +152,19 @@ itself, or **Skip** to leave them for a setup script. It resolves in the same or
 workspace default: a `"worktreeSubmodules"` value in the `t3.json` of the branch being checked out
 applies when the project and environment are both on **Inherit**.
 
+## Check an agent's work when its run completes
+
+An agent's reported tests are only what it says it ran. To have GOAT run a check itself, turn on
+**Run as a check when an agent's run completes** for one of the project's actions, such as
+`vp test run`. Each time a run completes, the action runs in the thread's worktree, and its exit
+code, duration and last lines of output are stored with that run's result next to the agent's
+reported tests, where orchestrating agents read them with `goat_thread_read`. A check that runs
+longer than 10 minutes is stopped and recorded as timed out. A failing check does not change the
+run's outcome.
+
+Threads in the project's main checkout record the check as skipped, because other threads may be
+editing there. Turn on **Also check threads in the shared checkout** to run it there as well.
+
 ## Worktree location
 
 New worktrees go in the `worktrees` folder of the GOAT home directory. To put them somewhere else,

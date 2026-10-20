@@ -4,11 +4,11 @@ import * as Effect from "effect/Effect";
 import * as SqlClient from "effect/sql/SqlClient";
 import { runMigrations } from "../Migrations.ts";
 
-it.effect("upgrades 087 with empty hub tables and retains their data on restart", () =>
+it.effect("upgrades 088 with empty hub tables and retains their data on restart", () =>
   Effect.gen(function* () {
     const sql = yield* SqlClient.SqlClient;
-    yield* runMigrations({ toMigrationInclusive: 87 });
-    expect(yield* runMigrations()).toEqual([[88, "HubNodes"]]);
+    yield* runMigrations({ toMigrationInclusive: 88 });
+    expect(yield* runMigrations()).toEqual([[89, "HubNodes"]]);
     const tables = yield* sql<{
       name: string;
     }>`SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE 'hub_node_%' ORDER BY name`;
