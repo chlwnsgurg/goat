@@ -7370,6 +7370,15 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
       if (initial !== undefined) statuses.set(key, initial);
       statuses.delete(knownKey);
     }
+    yield* Effect.logDebug("ssh.environment.target.resolved", {
+      ...sshTargetLogFields(resolvedTarget),
+      key,
+    });
+    yield* Effect.logDebug("ssh.environment.runner.resolved", {
+      ...sshTargetLogFields(resolvedTarget),
+      ...sshRunnerLogFields(runner),
+      key,
+    });
     if (requestOptions?.preparedAttachmentId !== undefined) {
       const prepared = yield* withTargetLock(
         key,
