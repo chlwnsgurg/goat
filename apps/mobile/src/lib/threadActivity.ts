@@ -48,6 +48,7 @@ import {
   type GoatMcpToolLogo,
   type GoatMcpToolPresentation,
 } from "@goat/shared/goatMcpToolPresentation";
+import { workspaceRelativeFilePath } from "@goat/shared/path";
 import type {
   ChatAttachment,
   MessageId,
@@ -294,8 +295,35 @@ function commandActionsRowLabel(entry: WorkLogPresentationEntry): string | null 
     : null;
 }
 
+/**
+ * A label that repeats a provider path shows that path relative to the thread workspace.
+ * Paths outside the workspace stay as the provider reported them.
+ */
+export function relativizeWorkLabelPaths(
+  label: string,
+  paths: readonly string[] | undefined,
+  workspaceRoot: string | null | undefined,
+): string {
+  if (!workspaceRoot || paths === undefined || paths.length === 0) return label;
+  const replacements = paths
+    .flatMap((path) => {
+      const relative = workspaceRelativeFilePath(path, workspaceRoot);
+      return relative !== null && relative !== path ? [{ path, relative }] : [];
+    })
+    .sort((left, right) => right.path.length - left.path.length);
+  let next = label;
+  for (const { path, relative } of replacements) {
+    if (next.includes(path)) next = next.replaceAll(path, relative);
+  }
+  return next;
+}
+
 /** Expanded work rows keep their detail while compact rows show a stable one-line label. */
-export function workEntryRowLabel(entry: WorkLogPresentationEntry, expanded = false): string {
+export function workEntryRowLabel(
+  entry: WorkLogPresentationEntry,
+  expanded = false,
+  workspaceRoot?: string | null,
+): string {
   if (expanded && entry.itemType === "reasoning")
     return entry.toolLifecycleStatus === "inProgress" ? "Thinking" : "Thought";
   const presentation = resolveWorkEntryToolPresentation(entry);
@@ -331,11 +359,18 @@ export function workEntryRowLabel(entry: WorkLogPresentationEntry, expanded = fa
       : entry.detail) ??
     (entry.changedFiles?.length
       ? entry.changedFiles.length === 1
-        ? entry.changedFiles[0]!
-        : `${entry.changedFiles[0]!} +${entry.changedFiles.length - 1} more`
+        ? (workspaceRelativeFilePath(entry.changedFiles[0]!, workspaceRoot) ??
+          entry.changedFiles[0]!)
+        : `${workspaceRelativeFilePath(entry.changedFiles[0]!, workspaceRoot) ?? entry.changedFiles[0]!} +${entry.changedFiles.length - 1} more`
       : null);
-  if (expanded) return preview?.trim() ? truncate(preview, WORK_LOG_LABEL_MAX_LENGTH) : entry.label;
-  return preview ? compactWorkEntryText(preview) || entry.label : entry.label;
+  const label = expanded
+    ? preview?.trim()
+      ? truncate(preview, WORK_LOG_LABEL_MAX_LENGTH)
+      : entry.label
+    : preview
+      ? compactWorkEntryText(preview) || entry.label
+      : entry.label;
+  return relativizeWorkLabelPaths(label, entry.changedFiles, workspaceRoot);
 }
 
 type ThreadFeedActivityGroup = Extract<ThreadFeedEntry, { readonly type: "activity-group" }>;

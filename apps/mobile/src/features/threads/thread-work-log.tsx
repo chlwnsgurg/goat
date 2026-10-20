@@ -65,6 +65,7 @@ import { THREAD_WORK_ROW_MIN_HEIGHT, type deriveThreadWorkLogSizing } from "../.
 import {
   type AgentSpawnSummary,
   formatItemFullDetail,
+  relativizeWorkLabelPaths,
   type ThreadFeedActivity,
   workEntryRowLabel,
 } from "../../lib/threadActivity";
@@ -487,6 +488,8 @@ interface ThreadWorkLogProps {
   readonly activities: ReadonlyArray<ThreadFeedActivity>;
   readonly anchorKey: string;
   readonly environmentId: EnvironmentId;
+  /** Thread workspace, so an edit row can name files relative to it. */
+  readonly workspaceRoot?: string | null;
   readonly copiedRowId: string | null;
   readonly expandedRows: Readonly<Record<string, boolean>>;
   readonly rowSizing: ReturnType<typeof deriveThreadWorkLogSizing>;
@@ -511,6 +514,7 @@ export function ThreadWorkLog(props: ThreadWorkLogProps) {
       copied={props.copiedRowId === row.id}
       expanded={props.expandedRows[row.id] ?? false}
       environmentId={props.environmentId}
+      workspaceRoot={props.workspaceRoot}
       iconSubtleColor={props.iconSubtleColor}
       onCopyRow={props.onCopyRow}
       onToggleRow={props.onToggleRow}
@@ -1019,12 +1023,20 @@ const ThreadWorkLogRow = function ThreadWorkLogRow(
       </Text>
     );
   const toolPresentation = resolveWorkEntryToolPresentation(row.workEntry);
-  const previewText = row.groupStandIn?.label ?? workEntryRowLabel(row.workEntry);
+  const previewText = relativizeWorkLabelPaths(
+    row.groupStandIn?.label ?? workEntryRowLabel(row.workEntry, false, props.workspaceRoot),
+    row.workEntry.changedFiles,
+    props.workspaceRoot,
+  );
   const answerPreview = row.workEntry.questionAnswer
     ? getQuestionAnswerPreview(row.workEntry.questionAnswer)
     : null;
   const accessiblePreview = [previewText, answerPreview].filter(Boolean).join(": ");
-  const displayText = row.groupStandIn?.label ?? workEntryRowLabel(row.workEntry, expanded);
+  const displayText = relativizeWorkLabelPaths(
+    row.groupStandIn?.label ?? workEntryRowLabel(row.workEntry, expanded, props.workspaceRoot),
+    row.workEntry.changedFiles,
+    props.workspaceRoot,
+  );
   const isSystemNotice = row.projectedItem.item.type === "system_notice";
   const isUsageLimit =
     row.projectedItem.item.type === "error" &&
