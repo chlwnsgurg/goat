@@ -354,11 +354,9 @@ it.effect(
       expect(seen).toEqual([["orchestration:read"], ["orchestration:read"]]);
       expect(starts).toEqual([]);
 
-      const readOnly = yield* call(
-        { ...thread, readOnly: true },
-        "goat_provider_login_start",
-        { instanceId },
-      );
+      const readOnly = yield* call({ ...thread, readOnly: true }, "goat_provider_login_start", {
+        instanceId,
+      });
       expect(readOnly.structuredContent).toMatchObject({ kind: "error", code: "unsupported" });
       const dead = yield* call(
         {
