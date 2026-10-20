@@ -1,5 +1,3 @@
-// @vitest-environment jsdom
-
 import {
   EnvironmentId,
   ProjectReadFileError,
@@ -42,7 +40,10 @@ vi.mock("~/hooks/useActiveProjectTarget", () => ({
 }));
 vi.mock("~/hooks/useTheme", () => ({ useTheme: () => ({ resolvedTheme: "dark" }) }));
 vi.mock("../chat/PierreEntryIcon", () => ({ PierreEntryIcon: () => null }));
-vi.mock("@effect/atom-react", () => ({ useAtomValue: (atom: unknown) => atom }));
+vi.mock("@effect/atom-react", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@effect/atom-react")>()),
+  useAtomValue: (atom: unknown) => atom,
+}));
 vi.mock("~/state/server", () => ({
   primaryServerKeybindingsAtom: [],
   serverEnvironment: {
