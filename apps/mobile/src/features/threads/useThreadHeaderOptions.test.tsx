@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 import type { VcsStatusResult } from "@goat/contracts";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
