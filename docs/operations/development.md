@@ -122,6 +122,8 @@ vp run --filter <package> typecheck
 In `apps/web`, a test that renders React or touches the DOM is named `*.browser.test.{ts,tsx}`
 and runs in headless Chromium with the React Compiler on, like the app. There is no jsdom; other
 `*.test.ts` files run in Node.
+Install that browser once before running the browser suite locally, as CI does:
+`node apps/web/node_modules/playwright/cli.js install --only-shell chromium`.
 
 TypeScript workspaces typecheck with tsc-rs, which has Effect diagnostics built in.
 Keep `typescript`, `@effect/tsgo`, and the `effect-tsgo patch` prepare step: editors
@@ -134,6 +136,20 @@ Use `vp run lint:mobile` for native mobile changes. CI owns the full suite; see
 [ci.yml](../../.github/workflows/ci.yml) for its current jobs.
 The [manual Windows lane](../../.github/workflows/windows-tests.yml) is available for focused
 Windows investigation while that suite is not a required gate.
+
+### Windows hosts
+
+Use Git Bash for shell scripts and POSIX-shell test suites such as `packages/ssh`.
+In agent shells launched on Windows, plain `bash` on `PATH` can resolve to the WSL launcher in
+`System32`, which cannot read GOAT worktrees because their `.git` file points at a Windows
+`C:/...` `gitdir`. Put Git's `usr\bin` ahead of `System32` on `PATH`, or invoke
+`C:\Program Files\Git\bin\bash.exe` directly on a script file.
+
+On Windows, `vp i` logs `[WARN] Failed to create bin at ...\node_modules\.bin\vitest`.
+The warning is harmless; run tests through `vp test`.
+Run a package's tests from the repo root (`vp test run packages/ssh/src/<file>.test.ts`) or
+through its `test` script. A plain `vp test` inside a package without its own Vite config skips
+the root timeouts, and slow SSH fixtures then fail at vitest's 5 second default.
 
 ### Unused code
 
