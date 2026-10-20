@@ -1,3 +1,6 @@
+import * as PubSub from "effect/PubSub";
+import * as Scope from "effect/Scope";
+import * as Stream from "effect/Stream";
 import {
   type OrchestrationV2AppThread,
   type OrchestrationV2Run,
@@ -103,6 +106,7 @@ export class ThreadResultService extends Context.Service<
       threadId: ThreadId,
       report: ThreadResultReport,
     ) => Effect.Effect<ThreadResult, ThreadResultError>;
+    readonly subscribeReports: Effect.Effect<Stream.Stream<ThreadId>, never, Scope.Scope>;
     /** One run's result; the latest run when runId is omitted, null when there is none. */
     readonly forRun: (
       threadId: ThreadId,
@@ -136,6 +140,8 @@ export const readStoredThreadResultReport = (threadId: ThreadId, runId: RunId) =
   }).pipe(Effect.mapError((cause) => new ThreadResultError({ reason: "storage", cause })));
 
 const make = Effect.gen(function* () {
+  const reports = yield* PubSub.unbounded<ThreadId>();
+  yield* Effect.addFinalizer(() => PubSub.shutdown(reports));
   const sql = yield* SqlClient.SqlClient;
   const threads = yield* ThreadManagementService.ThreadManagementService;
   const storage = (cause: unknown) => new ThreadResultError({ reason: "storage", cause });
@@ -189,6 +195,7 @@ const make = Effect.gen(function* () {
         report_json = excluded.report_json,
         reported_at = excluded.reported_at
     `.pipe(Effect.mapError(storage));
+    yield* PubSub.publish(reports, threadId);
     return buildThreadResult({
       thread: records.thread,
       run,
@@ -197,7 +204,11 @@ const make = Effect.gen(function* () {
     });
   });
 
-  return ThreadResultService.of({ report, forRun });
+  return ThreadResultService.of({
+    report,
+    forRun,
+    subscribeReports: PubSub.subscribe(reports).pipe(Effect.map(Stream.fromSubscription)),
+  });
 });
 
 export const layer = Layer.effect(ThreadResultService, make);

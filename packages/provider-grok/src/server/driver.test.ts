@@ -10,6 +10,7 @@ import * as Sink from "effect/Sink";
 import * as Stream from "effect/Stream";
 import * as HttpClient from "effect/http/HttpClient";
 import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
+import { lazyChildProcessSpawner } from "@goat/shared/testing/lazyChildProcessSpawner";
 
 import * as ProviderLatestVersions from "@goat/provider-core/server/ProviderLatestVersions";
 import * as ProviderEventLoggers from "@goat/provider-core/server/ProviderEventLoggers";
@@ -38,13 +39,13 @@ const layerTest = TestProviderHost.layer({ runBackgroundWork: false }).pipe(
   ),
 );
 
-const noSpawner = ChildProcessSpawner.make(() =>
+const noSpawner = lazyChildProcessSpawner(() =>
   Effect.die("Disabled Grok must not spawn a process"),
 );
 
 /** Answers every spawn with `onSpawn(command, args)` on stdout, like a stub `brew`. */
 function stdoutSpawner(onSpawn: (command: string, args: ReadonlyArray<string>) => string) {
-  return ChildProcessSpawner.make((command) => {
+  return lazyChildProcessSpawner((command) => {
     const { command: executable, args } = command as unknown as {
       readonly command: string;
       readonly args: ReadonlyArray<string>;
@@ -214,6 +215,26 @@ it.layer(layerTest)("GrokDriver", (it) => {
         config: { ...GrokDriver.defaultConfig(), binaryPath: path.join(tempDir, "grok") },
       });
       expect((yield* instance.snapshot.resolveMaintenance()).update).toBeNull();
+    }).pipe(
+      Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, noSpawner),
+      Effect.scoped,
+    ),
+  );
+
+  it.effect("exposes in-app API key sign-in", () =>
+    Effect.gen(function* () {
+      const instance = yield* GrokDriver.create({
+        instanceId: ProviderInstanceId.make("grok-auth"),
+        displayName: "Grok test",
+        enabled: false,
+        environment: [{ name: "XAI_API_KEY", value: "", sensitive: true }],
+        config: GrokDriver.defaultConfig(),
+      });
+      expect(instance.auth?.start).toEqual(expect.any(Function));
+      expect(instance.auth?.logout).toEqual(expect.any(Function));
+      const snapshot = yield* instance.snapshot.getSnapshot;
+      expect(snapshot.setup).toEqual({ canAuthenticate: false, canInstall: false });
+      expect(snapshot.auth.canLogout).toBe(false);
     }).pipe(
       Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, noSpawner),
       Effect.scoped,

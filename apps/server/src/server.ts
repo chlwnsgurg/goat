@@ -1,6 +1,7 @@
 import * as SshDeviceAdd from "./sshRemote/SshDeviceAdd.ts";
 import { isGoatConnectEnabled } from "@goat/shared/goatConnect";
 import { desiredLinkReconcileStartup } from "./cloud/DesiredLinkReconcile.ts";
+import * as NotesLayers from "./notes/NotesLayers.ts";
 import * as HomeRoute from "./provider/OpenCodexRoute.ts";
 import * as CodexRoutes from "./provider/CodexRouteService.ts";
 import * as HomeRequests from "./provider/CodexHomeRequests.ts";
@@ -36,6 +37,7 @@ import * as MemoryQuota from "./memory/MemoryQuotaService.ts";
 import * as MemoryService from "./memory/MemoryService.ts";
 import * as MemoryMaintenance from "./memory/MemoryFtsMaintenance.ts";
 import * as MemorySync from "./memory/MemorySyncService.ts";
+import * as MemoryGenerationHold from "./memory/MemoryGenerationHold.ts";
 import * as MemorySettings from "./memory/MemorySettingsService.ts";
 import * as MemoryOwnerSourceReadPolicyBinding from "./memory/MemoryOwnerSourceReadPolicyBinding.ts";
 import * as MemorySyncRuntimeLive from "./memory/MemorySyncRuntimeLive.ts";
@@ -600,6 +602,11 @@ export const layerMemorySourceReadBinding = Layer.effect(
     });
   }),
 );
+// One layer reference for the worker and layerMemorySync, so the worker, conflict resolution and
+// the status read share one set of holds. The registry supplies the provider version in each key.
+const layerMemoryGenerationHold = MemoryGenerationHold.layer.pipe(
+  Layer.provide(ProviderRegistry.layer),
+);
 const layerMemoryQuota = MemoryQuota.layer.pipe(Layer.provideMerge(MemoryStore.layer));
 export const layerMemorySourceReadService = Layer.unwrap(
   Effect.gen(function* () {
@@ -624,6 +631,7 @@ const layerMemoryWorker = Layer.mergeAll(
   Layer.provide(RuntimeLayer.layerEventSink),
   Layer.provide(layerTextGeneration),
   Layer.provide(RuntimeIdentity.layer),
+  Layer.provide(layerMemoryGenerationHold),
 );
 const layerMemoryStarted = Layer.effectDiscard(
   Effect.gen(function* () {
@@ -787,6 +795,7 @@ const layerMemorySync = layerMemorySyncStarted.pipe(
   Layer.provide(layerMemoryHub),
   Layer.provide(layerTextGeneration),
   Layer.provide(ServerEnvironment.layerIdentity),
+  Layer.provide(layerMemoryGenerationHold),
 );
 
 /** Acquisition is isolated from the core graph; only a fully acquired reader publishes the tag. */
@@ -1230,6 +1239,21 @@ const layerSshWorkspace = SshWorkspaceSync.layer.pipe(
   Layer.provide(RuntimeLayer.layerProjectService),
 );
 
+const layerNotes = NotesLayers.layer.pipe(
+  Layer.provide(RuntimeLayer.layerEventSink),
+  Layer.provide(
+    HostThreadsMcpService.layer.pipe(
+      Layer.provide(
+        OrchestratorMcpService.layer.pipe(
+          Layer.provide(ProviderAdapterRegistry.layerFromProviderInstanceRegistry),
+        ),
+      ),
+      Layer.provide(ThreadResultService.layer),
+    ),
+  ),
+  Layer.provide(ThreadResultService.layer),
+);
+
 const layerMakeRoutes = Layer.mergeAll(
   Layer.effectDiscard(
     Effect.gen(function* () {
@@ -1275,7 +1299,7 @@ const layerMakeRoutes = Layer.mergeAll(
   // One instance for the goat_host_status tool and the server.getHostStatus RPC; fleet
   // placement reads the same one.
   Layer.provide(
-    Layer.mergeAll(FleetPlacement.layer, FleetFallback.layerChains).pipe(
+    Layer.mergeAll(layerNotes, FleetPlacement.layer, FleetFallback.layerChains).pipe(
       Layer.provideMerge(
         McpHttpServer.layerHostStatusService.pipe(
           Layer.provide(ProviderAdapterRegistry.layerFromProviderInstanceRegistry),
@@ -1295,7 +1319,13 @@ const layerMakeRoutes = Layer.mergeAll(
       Layer.provideMerge(
         SshHostSetup.layer.pipe(
           Layer.provide(MaintenanceAudit.layer),
-          Layer.provideMerge(ProviderHostSync.layer),
+          Layer.provideMerge(
+            ProviderHostSync.layer.pipe(
+              Layer.provide(
+                ProviderDiagnosisService.layer.pipe(Layer.provide(ProviderHostLive.layer)),
+              ),
+            ),
+          ),
         ),
       ),
     ),
@@ -1309,8 +1339,9 @@ const layerMakeRoutes = Layer.mergeAll(
   Layer.provide(
     Layer.mergeAll(
       ProviderDiagnosisRouting.layer,
-      // Cloud launches route to a credential holder with the same diagnosis and host reads.
+      // Cloud launches read readiness from the provider × host matrix.
       CloudAgentService.layer.pipe(
+        Layer.provide(ProviderHostSync.layer),
         Layer.provide(
           ThreadLaunchMcpService.layer.pipe(
             Layer.provide(ProviderAdapterRegistry.layerFromProviderInstanceRegistry),

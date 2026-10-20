@@ -2390,8 +2390,12 @@ function claudeNativeToolOutputText(output: ClaudeNativeToolOutput): string {
   return typeof value === "string" ? value : value === undefined ? "" : jsonStringifyForTool(value);
 }
 
-function claudeFileChangeArtifacts(fileName: string, result: unknown) {
-  const patch = claudeFileChangePatch(fileName, result);
+function claudeFileChangeArtifacts(
+  fileName: string,
+  result: unknown,
+  workspaceRoot?: string | null,
+) {
+  const patch = claudeFileChangePatch(fileName, result, workspaceRoot);
   return { ...claudeFileChangeLineCounts(result), ...(patch === undefined ? {} : { patch }) };
 }
 
@@ -4664,6 +4668,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
                       ? claudeFileChangeArtifacts(
                           fileNameFromClaudeTool(input.toolName, input.toolInput),
                           input.output.value,
+                          input.context?.input.runtimePolicy.cwd,
                         )
                       : undefined),
                   }

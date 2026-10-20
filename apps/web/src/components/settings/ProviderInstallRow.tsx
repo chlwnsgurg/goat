@@ -38,20 +38,27 @@ export function ProviderInstallRow({
     installation?.phase === "extracting" ||
     installation?.phase === "verifying";
   const megabytes = (bytes: number) => (bytes / 1_000_000).toFixed(1);
+  const installedVersion = installation?.installedVersion ?? null;
+  const updateAvailable =
+    installedVersion && installation?.version && installation.version !== installedVersion
+      ? ` ${installation.version} is available.`
+      : "";
   const status =
     installation?.phase === "downloading"
       ? `Downloading ${megabytes(installation.downloadedBytes)} MB${installation.totalBytes === null ? "" : ` of ${megabytes(installation.totalBytes)} MB`}.`
       : installation?.phase === "extracting"
-        ? `Extracting ${label}.`
+        ? (installation.message ?? `Extracting ${label}.`)
         : installation?.phase === "verifying"
-          ? "Checking the download."
+          ? (installation.message ?? "Checking the download.")
           : installation?.phase === "succeeded"
             ? "Installed. Checking the provider…"
             : installation?.phase === "failed"
               ? (installation.message ?? "Installation failed.")
-              : installation?.totalBytes
-                ? `Not installed. ${Math.ceil(installation.totalBytes / 1_000_000)} MB download.`
-                : `${label} isn't installed on this environment.`;
+              : installedVersion
+                ? `Installed · v${installedVersion}.${updateAvailable}`
+                : installation?.totalBytes
+                  ? `Not installed. ${Math.ceil(installation.totalBytes / 1_000_000)} MB download.`
+                  : `${label} isn't installed on this environment.`;
 
   async function run(command: () => Promise<AtomCommandResult<unknown, unknown>>) {
     if (pendingRef.current) return;
@@ -105,9 +112,13 @@ export function ProviderInstallRow({
             disabled={disabled || pending || active || !installation || query.error !== null}
             onClick={() => void run(() => startInstall(target))}
           >
-            {installation?.phase === "failed" || installation?.phase === "cancelled"
-              ? "Retry install"
-              : `Install ${label}`}
+            {installedVersion
+              ? installation?.version && installation.version !== installedVersion
+                ? `Update ${label}`
+                : `Reinstall ${label}`
+              : installation?.phase === "failed" || installation?.phase === "cancelled"
+                ? "Retry install"
+                : `Install ${label}`}
           </Button>
         )
       }

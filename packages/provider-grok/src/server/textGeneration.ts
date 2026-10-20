@@ -38,8 +38,12 @@ const isTextGenerationError = Schema.is(TextGenerationError);
 
 export const makeGrokTextGeneration = Effect.fn("makeGrokTextGeneration")(function* (
   grokSettings: GrokSettings,
-  environment: NodeJS.ProcessEnv = process.env,
-  options: { readonly memoryRunnerContext?: MemoryGenerationRunnerContext } = {},
+  baseEnvironment: NodeJS.ProcessEnv = process.env,
+  options: {
+    readonly memoryRunnerContext?: MemoryGenerationRunnerContext;
+    /** Re-read at each launch so a key saved after startup reaches the CLI. */
+    readonly resolveEnvironment?: Effect.Effect<NodeJS.ProcessEnv>;
+  } = {},
 ) {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
@@ -50,6 +54,9 @@ export const makeGrokTextGeneration = Effect.fn("makeGrokTextGeneration")(functi
     const { operation, cwd, prompt, modelSelection } = request;
     return Effect.gen(function* () {
       const memory = TextGenerationOperations.isMemoryOperation(operation);
+      const environment = options.resolveEnvironment
+        ? yield* options.resolveEnvironment
+        : baseEnvironment;
       const isolated = memory
         ? yield* requireGrokMemoryIsolation(operation, environment).pipe(
             Effect.provideService(FileSystem.FileSystem, fs),
@@ -177,7 +184,8 @@ export const makeGrokTextGeneration = Effect.fn("makeGrokTextGeneration")(functi
             new TextGenerationError({
               operation,
               detail: "Failed to set Grok ACP base model for text generation.",
-              cause,
+              // Memory treats a model it cannot select as unavailable until settings change.
+              cause: memory ? new MemoryGenerationRunnerError({ code: "unavailable" }) : cause,
             }),
         });
         promptStarted = true;

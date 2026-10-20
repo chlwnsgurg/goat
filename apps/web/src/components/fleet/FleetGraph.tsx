@@ -104,6 +104,26 @@ function useHeatPaint(): HeatPaint {
   return { flame: base + "-flame", core: base + "-core" };
 }
 
+/**
+ * Flat oklch and oklab fills (including Tailwind's `fill-info/10`) drop a channel while a
+ * shape is CSS-animated in Chromium, so a busy halo leaves yellow specks. A gradient fill
+ * does not.
+ */
+function HaloDefs(props: { readonly info: string; readonly primary: string }) {
+  return (
+    <defs>
+      <radialGradient id={props.info}>
+        <stop offset="0" style={{ stopColor: "var(--info)", stopOpacity: 0.1 }} />
+        <stop offset="1" style={{ stopColor: "var(--info)", stopOpacity: 0.1 }} />
+      </radialGradient>
+      <radialGradient id={props.primary}>
+        <stop offset="0" style={{ stopColor: "var(--primary)", stopOpacity: 0.1 }} />
+        <stop offset="1" style={{ stopColor: "var(--primary)", stopOpacity: 0.1 }} />
+      </radialGradient>
+    </defs>
+  );
+}
+
 function HeatDefs({ paint }: { readonly paint: HeatPaint }) {
   return (
     <defs>
@@ -394,6 +414,9 @@ export const FleetGraph = memo(function FleetGraph(props: {
   const svgRef = useRef<SVGSVGElement>(null);
   const reduced = useMediaQuery("(prefers-reduced-motion: reduce)");
   const paint = useHeatPaint();
+  const haloBase = "fleet-halo-" + useId().replace(/[^a-zA-Z0-9_-]/g, "");
+  const infoHalo = haloBase + "-info";
+  const primaryHalo = haloBase + "-primary";
   usePauseWhileHidden(svgRef);
   const { offsets, press, move, release } = usePullableNodes(svgRef, width, reduced);
   // Below 340 the orbits cannot keep labels apart; see ORBIT_GAP in fleetLayout.
@@ -470,6 +493,7 @@ export const FleetGraph = memo(function FleetGraph(props: {
             }
           >
             <HeatDefs paint={paint} />
+            <HaloDefs info={infoHalo} primary={primaryHalo} />
             <ellipse
               cx={layout.center.x}
               cy={layout.center.y}
@@ -635,6 +659,7 @@ export const FleetGraph = memo(function FleetGraph(props: {
                 <MachineNode
                   key={"machine:" + entry.layout.id}
                   at={entry.at}
+                  halo={infoHalo}
                   machine={machinesById.get(entry.layout.id)!}
                   connection={connections.get(entry.layout.id) ?? UNKNOWN_FLEET_CONNECTION}
                   heat={heat?.get(entry.layout.id) ?? NO_FLEET_HEAT}
@@ -651,7 +676,7 @@ export const FleetGraph = memo(function FleetGraph(props: {
 
             <g transform={"translate(" + layout.center.x + " " + layout.center.y + ")"}>
               {live > 0 && !reduced ? (
-                <circle r={36} className="fleet-breathe fill-primary/10" />
+                <circle r={36} className="fleet-breathe" fill={"url(#" + primaryHalo + ")"} />
               ) : null}
               <circle
                 r={29}
@@ -720,6 +745,8 @@ type NodeHandlers = {
 
 function MachineNode(props: {
   readonly at: FleetPoint;
+  /** Gradient id for the busy halo. A flat oklab fill speckles while the halo breathes. */
+  readonly halo: string;
   readonly machine: FleetMachine;
   readonly connection: FleetConnection;
   readonly heat: FleetMachineHeat;
@@ -775,7 +802,11 @@ function MachineNode(props: {
     >
       <title>{[machine.label, ...description, heat.summary].join("\n")}</title>
       {busy > 0 && !reduced && !glowing ? (
-        <circle r={MACHINE_RADIUS + 8} className="fleet-breathe fill-info/10" />
+        <circle
+          r={MACHINE_RADIUS + 8}
+          className="fleet-breathe"
+          fill={"url(#" + props.halo + ")"}
+        />
       ) : null}
       {current ? (
         <circle r={MACHINE_RADIUS + 4} fill="none" className="stroke-foreground/25" />

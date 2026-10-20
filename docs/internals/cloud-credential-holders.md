@@ -14,12 +14,17 @@ the driver is ready. Each holder answers for itself with the same read-only chec
 can carry a secret: diagnosis results never hold credential values, and the account label is the
 provider snapshot's display label.
 
-[CloudAgentService](../../apps/server/src/cloudAgents/CloudAgentService.ts) asks this
-environment and each connected SSH host (`goat_cloud_holders` with `local:true` there), caches
-answers for a minute, forgets hosts that disconnect, and never caches an unreachable host. A host
-whose GOAT predates `goat_cloud_holders` is read through its `goat_provider_diagnose` and shown
-with `runtime: "update_required"`: its login is visible, but routed launches would fail, so it is
-never chosen.
+[CloudAgentService](../../apps/server/src/cloudAgents/CloudAgentService.ts) reads that
+answer from the provider × host matrix. The `cloud` column (claudeCloud, cursorCloud,
+devinCloud) is opt-in: a matrix includes it only when called with `cloud: true`, because
+that diagnoses Claude Cloud, Cursor Cloud and Devin Cloud on every machine. Settings
+reads the matrix without the flag and does not diagnose. Holder routing passes
+`cloud: true` for this environment and for each connected SSH host. It caches answers
+for a minute, forgets hosts that disconnect, and never caches an unreachable host. A
+host that lacks `goat_provider_host_matrix`, or whose row omits `cloud`, is read the
+older way: `goat_cloud_holders`, then `goat_provider_diagnose`. Diagnosis-only hosts
+are `runtime: "update_required"` and are never chosen. If this environment's matrix
+cannot be read, its holders are not ready.
 
 Selection is deliberately small: the caller's `holder`, else a ready current holder with the
 fewest active cloud runs, then this environment, then hosts by name. Fallback chains, budgets and
@@ -53,8 +58,9 @@ Three rules keep registration from being a confused deputy:
 - Devin's CLI binds sessions to the sign-in that created them, so registered Devin sessions are
   link-only by design.
 
-Forgetting a registered run deletes its thread, which detaches observation. The vendor run keeps
-running; GOAT never cancels it on forget.
+GOAT never cancels a run it did not launch. Stopping a registered run's turn ends observation and
+leaves the task `tracking: "link-only"` (the Cursor adapter's `interruptTurn`); forgetting it
+deletes its thread. Either way the vendor run keeps running, and only its owner cancels it.
 
 ## Adding a provider
 

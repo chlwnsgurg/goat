@@ -60,6 +60,7 @@ export type EnvironmentRpcTag = keyof EnvironmentProtocolClient & string;
 type RpcMethod<TTag extends EnvironmentRpcTag> = EnvironmentProtocolClient[TTag];
 
 export type EnvironmentSubscriptionRpcTag =
+  | typeof WS_METHODS.notesSubscribe
   | typeof WS_METHODS.memoryChanges
   | typeof WS_METHODS.connectionCatalogServe
   | typeof WS_METHODS.codexAuthCallbackSubscribe
@@ -232,13 +233,34 @@ export const requestGuarded = Effect.fn("EnvironmentRpc.request")(function* <
     );
     if (tag === WS_METHODS.memorySyncStatus) {
       // Only an opted-in response may add fields unknown to a strict legacy decoder.
-      const { includeRetainedLocalSpaceId: _hint, ...legacyInput } = input as {
+      const {
+        includeRetainedLocalSpaceId: _retained,
+        includeGenerationHold: _hold,
+        ...legacyInput
+      } = input as {
         readonly includeRetainedLocalSpaceId?: true;
+        readonly includeGenerationHold?: true;
+      };
+      const memory = config.environment.capabilities.memory;
+      dispatchInput = {
+        ...legacyInput,
+        ...(memory?.retainedLocalSpace === true
+          ? { includeRetainedLocalSpaceId: true as const }
+          : {}),
+        ...(memory?.generationHold === true ? { includeGenerationHold: true as const } : {}),
+      } as EnvironmentRpcInput<TTag>;
+    }
+    if (
+      tag === WS_METHODS.memoryImportProvider &&
+      (input as { action?: string }).action === "preview"
+    ) {
+      const { includeTurnStartFit: _hint, ...legacyInput } = input as {
+        readonly includeTurnStartFit?: true;
       };
       dispatchInput = {
         ...legacyInput,
-        ...(config.environment.capabilities.memory?.retainedLocalSpace === true
-          ? { includeRetainedLocalSpaceId: true as const }
+        ...(config.environment.capabilities.memory?.importTurnStartFit === true
+          ? { includeTurnStartFit: true as const }
           : {}),
       } as EnvironmentRpcInput<TTag>;
     }

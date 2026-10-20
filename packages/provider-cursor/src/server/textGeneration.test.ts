@@ -18,6 +18,7 @@ import { beforeEach, vi } from "vite-plus/test";
 import { makeCursorAuth } from "./auth.ts";
 import { makeCursorTextGeneration } from "./textGeneration.ts";
 import * as CursorSdk from "./CursorSdk.ts";
+import { MemoryGenerationRunnerError } from "@goat/provider-core/server/memoryGenerationRunner";
 
 const cursorSdkMock = vi.hoisted(() => ({
   resume: vi.fn(),
@@ -369,6 +370,7 @@ describe("CursorTextGeneration", () => {
         const error = yield* runMemory(generation, operation).pipe(Effect.flip);
         expect(error.operation).toBe(operation);
         expect(error.detail).toContain("requires its isolated sandbox");
+        expect(error.cause).toEqual(new MemoryGenerationRunnerError({ code: "unavailable" }));
         expect(cursorSdkMock.create).toHaveBeenCalledOnce();
         expect(cursorSdkMock.create).toHaveBeenCalledWith(
           expect.objectContaining({
@@ -799,6 +801,8 @@ describe("CursorTextGeneration", () => {
         }),
       );
       expect(failure.detail).toContain("custom ~/.cursor/sandbox.json");
+      // Typed so memory pauses the model instead of retrying a policy that refuses every time.
+      expect(failure.cause).toEqual(new MemoryGenerationRunnerError({ code: "unavailable" }));
       expect(cursorSdkMock.prompt).not.toHaveBeenCalled();
     }).pipe(Effect.provide(layerTest)),
   );
