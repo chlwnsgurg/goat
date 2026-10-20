@@ -24,7 +24,8 @@ const canonical = (text: string) => text.normalize("NFC").replace(/\r\n?/g, "\n"
 const headingText = (text: string) => canonical(text).replace(/\s+/g, " ");
 const H2 = /^ {0,3}##(?!#)(?:[ \t]+(.*?))?(?:[ \t]+#+)?[ \t]*$/;
 const H3 = /^ {0,3}###(?!#)(?:[ \t]+(.*?))?(?:[ \t]+#+)?[ \t]*$/;
-const FENCE = /^ {0,3}(\x60{3,}|~{3,})/;
+// A backtick fence's info string cannot contain backticks, so ```code``` on one line is a span.
+const FENCE = /^ {0,3}(\x60{3,}(?=[^\x60]*$)|~{3,})/;
 const H1 = /^ {0,3}#(?!#)(?:[ \t]|$)/;
 const SETEXT = /^ {0,3}(?:=+|-+)[ \t]*$/;
 
@@ -207,8 +208,6 @@ export const parseAsideMemory: MemoryImportParser = (input) =>
       totalBytes += size;
       if (size > 256 * 1024 || totalBytes > M.MEMORY_IMPORT_SNAPSHOT_MAX_UTF8_BYTES)
         return yield* new M.MemoryImportRpcError({ issue: "limit_exceeded" });
-      if (scanMemoryValue(file.text).kind === "blocked")
-        return yield* new M.MemoryImportRpcError({ issue: "secret_detected" });
     }
     // projects/ pages describe one project; they import only into an explicit project binding.
     const requiresProject = directory === "projects" ? { requiresProject: true } : {};
@@ -226,6 +225,10 @@ export const parseAsideMemory: MemoryImportParser = (input) =>
         return yield* new M.MemoryImportRpcError({ issue: "limit_exceeded" });
       if (file.issue) {
         reject(file.issue);
+        continue;
+      }
+      if (scanMemoryValue(file.text).kind === "blocked") {
+        reject("secret_detected");
         continue;
       }
       const parsed = page(file.text);

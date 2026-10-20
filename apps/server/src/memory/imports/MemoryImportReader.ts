@@ -461,7 +461,14 @@ const nodeSnapshot = (config: MemoryImportReaderConfig, input: SnapshotOperation
               depth: number,
               git: boolean,
             ): Promise<void> => {
-              for (const name of await names(parent, (git ? 4096 : 512) - count, true)) {
+              const aside = input.format === "aside";
+              // Aside folders may hold many skipped logs; only pages count against the file budget.
+              for (const name of await names(
+                parent,
+                aside ? 4096 : (git ? 4096 : 512) - count,
+                true,
+              )) {
+                if (aside && !asidePage(name)) continue;
                 const selector = rel ? `${rel}/${name}` : name;
                 safe(selector);
                 const obj = selector === "objects" || selector.startsWith("objects/");
@@ -471,11 +478,7 @@ const nodeSnapshot = (config: MemoryImportReaderConfig, input: SnapshotOperation
                 const s = await stat(path);
                 // Aside reads only regular pages directly in the selected directory. Links,
                 // subdirectories and non-page files are skipped without being opened or followed.
-                if (
-                  input.format === "aside" &&
-                  (s.isSymbolicLink() || !s.isFile() || !asidePage(name))
-                )
-                  continue;
+                if (aside && (s.isSymbolicLink() || !s.isFile())) continue;
                 await child(parent, name, s.isDirectory(), true, s);
                 if (
                   git &&
@@ -537,7 +540,8 @@ const nodeSnapshot = (config: MemoryImportReaderConfig, input: SnapshotOperation
                       strictText(data);
                     } catch (cause) {
                       if (!isImportError(cause)) throw cause;
-                      refuse(cause.issue === "path_rejected" ? "unsupported_format" : cause.issue);
+                      // strictText reports a NUL byte as path_rejected; for a page it is bad text.
+                      refuse(cause.issue === "path_rejected" ? "invalid_utf8" : cause.issue);
                       continue;
                     }
                     result.files!.push({
@@ -1087,7 +1091,8 @@ export const acquireMemoryImportReader = (config: MemoryImportReaderConfig) =>
                 : PROFILES[2];
             yield* Effect.try({
               try: () => {
-                if (!files.length) throw error("source_missing");
+                // An Aside folder whose entries are all skipped previews as empty.
+                if (!files.length && slot.format !== "aside") throw error("source_missing");
                 for (const file of files) {
                   safe(file.selector);
                   if (file.text.includes("\0")) throw error("path_rejected");

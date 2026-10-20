@@ -771,6 +771,9 @@ it.effect(
       NodeFS.symlinkSync(`${memory}/MEMORY.md`, `${memory}/agent/link.md`);
       write("projects/goat.md", page("Ship small PRs.", "GOAT"));
       write("sites/readme.txt", "not a page");
+      // Skipped entries do not count against the 512-page budget.
+      for (let n = 0; n < 600; n++) write(`agent/2026-01-01-${n}.md`, "log");
+      NodeFS.mkdirSync(`${memory}/sites/folder.md`);
       NodeFS.mkdirSync(`${memory}/people`);
       const before = stamp(root);
       const g = yield* graph({
@@ -789,9 +792,10 @@ it.effect(
         [
           ["slot-a/agent", "aside", "aside-semantic-v1"],
           ["slot-a/projects", "aside", "aside-semantic-v1"],
+          ["slot-a/sites", "aside", "aside-semantic-v1"],
         ],
       );
-      const [agent, projects] = discovered.sources.map((s) => s.sourceId);
+      const [agent, projects, sites] = discovered.sources.map((s) => s.sourceId);
       const preview = (sourceId: M.MemoryImportSourceId) =>
         g
           .call({ action: "preview", memorySpaceId: g.space, sourceId })
@@ -830,6 +834,7 @@ it.effect(
           );
 
       const first = yield* preview(agent!);
+      assert.deepEqual((yield* preview(sites!)).items, []);
       assert.deepEqual(
         first.items.map((item) => [item.sourceItemKey, item.issue ?? null]),
         [

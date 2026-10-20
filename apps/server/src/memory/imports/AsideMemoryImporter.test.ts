@@ -69,6 +69,13 @@ describe("Aside semantic page parser", () => {
 
   it.effect("treats headings inside code fences as text", () =>
     Effect.gen(function* () {
+      const span = page(FENCE + "inline" + FENCE + " span\n\n### After span\n\nB.");
+      assert.deepEqual(
+        candidates(yield* parseAsideMemory(snapshot({ "span.md": span }))).map(
+          (c) => c.sourceItemKey,
+        ),
+        ["agent/span.md#current", "agent/span.md#current:After span"],
+      );
       const text = [
         "---",
         "title: Fenced",
