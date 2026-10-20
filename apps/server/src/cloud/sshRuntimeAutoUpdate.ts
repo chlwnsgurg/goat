@@ -115,19 +115,32 @@ export const layerHost = Layer.succeed(SshRuntimeHost, {
       });
       child.stdin?.on("error", () => undefined);
       child.stdin?.end(input.stdin ?? "");
-      const stopGroup = () => {
-        if (child.pid === undefined || child.exitCode !== null || child.signalCode !== null) return;
-        signalGroup(child.pid, "SIGTERM");
-        setTimeout(() => signalGroup(child.pid!, "SIGKILL"), 5_000).unref();
-      };
-      const bound = setTimeout(stopGroup, input.timeoutMs);
-      void collect(child).then((result) => {
+      // Done means every process holding the output has exited, which the leader alone does not
+      // show: a shell can exit and leave its downloader running.
+      let done = false;
+      const closed = collect(child).then((result) => {
+        done = true;
         clearTimeout(bound);
-        resume(Effect.succeed(result));
+        return result;
       });
-      return Effect.sync(() => {
+      const bound = setTimeout(() => {
+        if (done || child.pid === undefined) return;
+        signalGroup(child.pid, "SIGTERM");
+        setTimeout(() => {
+          if (!done && child.pid !== undefined) signalGroup(child.pid, "SIGKILL");
+        }, 5_000).unref();
+      }, input.timeoutMs);
+      void closed.then((result) => resume(Effect.succeed(result)));
+      // Interruption waits for the group to end, so a server shutting down cannot drop the kill.
+      return Effect.promise(async () => {
         clearTimeout(bound);
-        stopGroup();
+        if (done || child.pid === undefined) return;
+        signalGroup(child.pid, "SIGTERM");
+        const ended = await Promise.race([
+          closed.then(() => true),
+          new Promise<false>((resolve) => setTimeout(() => resolve(false), 5_000)),
+        ]);
+        if (!ended) signalGroup(child.pid, "SIGKILL");
       });
     }),
   runDetached: (input) =>

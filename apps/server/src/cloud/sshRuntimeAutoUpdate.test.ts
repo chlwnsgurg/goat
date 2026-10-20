@@ -423,3 +423,18 @@ it.effect("a timed-out host command also stops the processes it started", () =>
     expect(() => process.kill(descendant, 0)).toThrow();
   }).pipe(Effect.provide(SshRuntimeAutoUpdate.layerHost)),
 );
+
+it.effect("a host command whose shell exits first still stops what it left running", () =>
+  Effect.gen(function* () {
+    const host = yield* SshRuntimeAutoUpdate.SshRuntimeHost;
+    const result = yield* host.run({
+      command: "/bin/sh",
+      args: ["-c", 'sleep 600 & printf "%s\n" "$!"; exit 0'],
+      env: { PATH: process.env.PATH },
+      timeoutMs: 200,
+    });
+    const descendant = Number(result.stdout.trim());
+    expect(descendant).toBeGreaterThan(0);
+    expect(() => process.kill(descendant, 0)).toThrow();
+  }).pipe(Effect.provide(SshRuntimeAutoUpdate.layerHost)),
+);
