@@ -216,7 +216,7 @@ jobs:
       - name: Test mobile memory
         if: matrix.task == 'test-mobile-memory'
         run: >-
-          vp test run --config vite.config.ts
+          vp test run --root apps/mobile --config vite.config.ts
           apps/mobile/src/features/settings/SettingsMemoryRouteScreen.test.tsx
           apps/mobile/src/persistence/memory-import-recovery.test.ts
           apps/mobile/src/features/settings/MemorySyncDiagnostics.test.tsx
