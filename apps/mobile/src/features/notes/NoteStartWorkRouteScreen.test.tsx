@@ -97,18 +97,14 @@ vi.mock("./rpc/queries", () => {
   };
 });
 vi.mock("../../state/use-atom-command", () => ({ useAtomCommand: (command: unknown) => command }));
-vi.mock("../threads/RequestActionButton", () => ({
-  RequestActionButton: (props: {
+vi.mock("../../components/ui/Button", () => ({
+  Button: (props: {
     label: string;
     disabled?: boolean;
-    accessibilityState?: { selected?: boolean };
+    selected?: boolean;
     onPress: () => void;
   }) => (
-    <button
-      disabled={props.disabled}
-      aria-pressed={props.accessibilityState?.selected}
-      onClick={props.onPress}
-    >
+    <button disabled={props.disabled} aria-pressed={props.selected} onClick={props.onPress}>
       {props.label}
     </button>
   ),

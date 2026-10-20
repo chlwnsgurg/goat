@@ -23,8 +23,8 @@ vi.mock("react-native-safe-area-context", () => ({ useSafeAreaInsets: () => ({ b
 vi.mock("@react-navigation/native", () => ({ useNavigation: () => ({ goBack: mocks.back }) }));
 vi.mock("../../components/ui/AppBar", () => ({ AppBar: () => null }));
 vi.mock("../../components/ui/AppText", () => ({ AppText: Children }));
-vi.mock("../threads/RequestActionButton", () => ({
-  RequestActionButton: ({
+vi.mock("../../components/ui/Button", () => ({
+  Button: ({
     label,
     disabled,
     onPress,

@@ -28,8 +28,8 @@ vi.mock("@react-navigation/native", () => ({
 vi.mock("@effect/atom-react", () => ({ useAtomValue: () => ({ entries: mocks.entries }) }));
 vi.mock("../../connection/catalog", () => ({ environmentCatalog: { catalogValueAtom: {} } }));
 vi.mock("../../state/entities", () => ({ useThreadShell: mocks.shell }));
-vi.mock("../threads/RequestActionButton", () => ({
-  RequestActionButton: ({ label, onPress }: { label: string; onPress: () => void }) => (
+vi.mock("../../components/ui/Button", () => ({
+  Button: ({ label, onPress }: { label: string; onPress: () => void }) => (
     <button onClick={onPress}>{label}</button>
   ),
 }));

@@ -7,7 +7,7 @@ import { View } from "react-native";
 import { AppBar } from "../../components/ui/AppBar";
 import { ScreenScrollView } from "../../components/ui/ScreenScrollView";
 import { AppText as Text } from "../../components/ui/AppText";
-import { RequestActionButton } from "../threads/RequestActionButton";
+import { Button } from "../../components/ui/Button";
 import {
   flushNotes,
   notesError,
@@ -82,7 +82,8 @@ export function NoteConflictRouteScreen({
             ) : null}
             <View className="flex-row gap-2">
               <View className="flex-1">
-                <RequestActionButton
+                <Button
+                  fullWidth
                   label="Use theirs"
                   tone="secondary"
                   disabled={pending}
@@ -90,7 +91,9 @@ export function NoteConflictRouteScreen({
                 />
               </View>
               <View className="flex-1">
-                <RequestActionButton
+                <Button
+                  fullWidth
+                  tone="primary"
                   label="Keep mine"
                   disabled={pending || !allowed}
                   onPress={() => void resolve("mine")}

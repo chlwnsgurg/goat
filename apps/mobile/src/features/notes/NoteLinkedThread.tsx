@@ -7,7 +7,7 @@ import { View } from "react-native";
 import { AppText as Text } from "../../components/ui/AppText";
 import { environmentCatalog } from "../../connection/catalog";
 import { useThreadShell } from "../../state/entities";
-import { RequestActionButton } from "../threads/RequestActionButton";
+import { Button } from "../../components/ui/Button";
 import { noteThreadPresentation } from "./notes-model";
 
 export function NoteLinkedThread({
@@ -42,7 +42,8 @@ export function NoteLinkedThread({
         <Text className="text-foreground">{link.lastResult.summary}</Text>
       ) : null}
       {destination ? (
-        <RequestActionButton
+        <Button
+          fullWidth
           label="Open thread"
           tone="secondary"
           onPress={() =>

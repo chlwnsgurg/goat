@@ -14,7 +14,7 @@ import { useAtomCommand } from "../../state/use-atom-command";
 import { SelectableMarkdownText } from "../../native/SelectableMarkdownText";
 import { tryOpenExternalUrl } from "../../lib/openExternalUrl";
 import { useMarkdownPreviewStyles } from "../files/FileMarkdownPreview";
-import { RequestActionButton } from "../threads/RequestActionButton";
+import { Button } from "../../components/ui/Button";
 import { applyNoteCheckboxEvent, type NoteCheckboxEvent } from "./note-markdown";
 import { NoteLinkedThread } from "./NoteLinkedThread";
 import { noteSyncLabel, noteSyncState } from "./notes-model";
@@ -220,7 +220,7 @@ function NoteContent(props: NoteParams) {
           </Text>
         ) : null}
         <View className="flex-row flex-wrap gap-2">
-          <RequestActionButton
+          <Button
             label="Refresh / sync"
             tone="secondary"
             disabled={saving || dirty}
@@ -230,7 +230,7 @@ function NoteContent(props: NoteParams) {
             }}
           />
           {row ? (
-            <RequestActionButton
+            <Button
               label="Discard saved edits"
               tone="secondary"
               disabled={saving || Boolean(row.inFlight)}
@@ -262,7 +262,8 @@ function NoteContent(props: NoteParams) {
             />
           ) : null}
           {row?.state === "conflict" ? (
-            <RequestActionButton
+            <Button
+              tone="primary"
               label="Compare versions"
               onPress={() =>
                 navigation.navigate("NoteConflict", { environmentId, path: props.path })
@@ -271,7 +272,9 @@ function NoteContent(props: NoteParams) {
           ) : null}
         </View>
         {dirty && !editing ? (
-          <RequestActionButton
+          <Button
+            fullWidth
+            tone="primary"
             label="Retry saving on phone"
             disabled={saving || !canWrite}
             onPress={() => void save(localBody.current, localStatus.current)}
@@ -281,12 +284,12 @@ function NoteContent(props: NoteParams) {
           <>
             <View className="flex-row gap-2">
               {(["idea", "doing", "done"] as const).map((value) => (
-                <RequestActionButton
+                <Button
                   key={value}
                   label={value}
                   tone={status === value ? "primary" : "secondary"}
                   disabled={!canWrite || saving || row?.state === "conflict"}
-                  accessibilityState={{ selected: status === value }}
+                  selected={status === value}
                   onPress={() => {
                     if (editing) {
                       setStatus(value);
@@ -313,7 +316,9 @@ function NoteContent(props: NoteParams) {
                   }}
                   className="min-h-[320px] rounded-xl border border-input-border bg-input p-4 text-base text-foreground"
                 />
-                <RequestActionButton
+                <Button
+                  fullWidth
+                  tone="primary"
                   label={saving ? "Saving…" : "Save on phone"}
                   disabled={!canWrite || saving || !restored}
                   onPress={() => void save(localBody.current, localStatus.current)}
@@ -334,7 +339,8 @@ function NoteContent(props: NoteParams) {
                     } else if (next !== localBody.current) void save(next, localStatus.current);
                   }}
                 />
-                <RequestActionButton
+                <Button
+                  fullWidth
                   label="Edit markdown"
                   tone="secondary"
                   disabled={!canWrite || saving || row?.state === "conflict"}
@@ -345,7 +351,9 @@ function NoteContent(props: NoteParams) {
                 />
               </>
             )}
-            <RequestActionButton
+            <Button
+              fullWidth
+              tone="primary"
               label="Start work from this note"
               disabled={!canStart || !note || Boolean(row) || editing || saving || dirty}
               onPress={() =>

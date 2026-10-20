@@ -84,8 +84,8 @@ vi.mock("../../native/SelectableMarkdownText", () => ({
 }));
 vi.mock("../../lib/openExternalUrl", () => ({ tryOpenExternalUrl: vi.fn() }));
 vi.mock("../files/FileMarkdownPreview", () => ({ useMarkdownPreviewStyles: () => ({}) }));
-vi.mock("../threads/RequestActionButton", () => ({
-  RequestActionButton: (props: { label: string; disabled?: boolean; onPress: () => void }) => (
+vi.mock("../../components/ui/Button", () => ({
+  Button: (props: { label: string; disabled?: boolean; onPress: () => void }) => (
     <button disabled={props.disabled} onClick={props.onPress}>
       {props.label}
     </button>

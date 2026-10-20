@@ -10,7 +10,7 @@ import { ScreenScrollView as ScrollView } from "../../components/ui/ScreenScroll
 import { AppText as Text, AppTextInput as TextInput } from "../../components/ui/AppText";
 import { EmptyState } from "../../components/ui/EmptyState";
 import { useSavedRemoteConnections } from "../../state/use-remote-environment-registry";
-import { RequestActionButton } from "../threads/RequestActionButton";
+import { Button } from "../../components/ui/Button";
 import { noteListRows, noteSyncLabel } from "./notes-model";
 import {
   notesError,
@@ -45,7 +45,7 @@ export function NotesRouteScreen() {
         </Text>
         <View className="flex-row flex-wrap gap-2">
           {environments.map((entry) => (
-            <RequestActionButton
+            <Button
               key={entry.environmentId}
               label={entry.environmentLabel}
               tone={entry === environment ? "primary" : "secondary"}
@@ -109,7 +109,8 @@ function EnvironmentNotes({ environmentId }: { readonly environmentId: Environme
             onChangeText={setPath}
             className="rounded-xl border border-input-border bg-input p-3 text-foreground"
           />
-          <RequestActionButton
+          <Button
+            fullWidth
             label="Create note"
             tone="secondary"
             disabled={!path.trim()}

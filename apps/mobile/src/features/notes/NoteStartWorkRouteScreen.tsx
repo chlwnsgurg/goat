@@ -13,7 +13,7 @@ import { useAtomCommand } from "../../state/use-atom-command";
 import { useEnvironmentServerConfig } from "../../state/entities";
 import { buildModelOptions, groupByProvider } from "../../lib/modelOptions";
 import { uuidv4 } from "../../lib/uuid";
-import { RequestActionButton } from "../threads/RequestActionButton";
+import { Button } from "../../components/ui/Button";
 import { beginNoteWorkAttempt, captureNoteWorkAttempt, type NoteWorkAttempt } from "./notes-model";
 import { notesCommandOptions, notesError, useNotesPermissions } from "./notes-state";
 import { notesRpc } from "./rpc/notes";
@@ -173,7 +173,8 @@ export function NoteStartWorkRouteScreen({
             );
           }}
         >
-          <RequestActionButton
+          <Button
+            fullWidth
             label={
               host === null
                 ? "This hub"
@@ -182,6 +183,8 @@ export function NoteStartWorkRouteScreen({
             accessibilityLabel="Choose node"
             tone="secondary"
             disabled={frozen}
+            // The surrounding Menu opens on press; the button only draws the trigger.
+            onPress={() => undefined}
           />
         </Menu>
         <Text className="font-goat-bold text-lg text-foreground">Project</Text>
@@ -189,10 +192,11 @@ export function NoteStartWorkRouteScreen({
           ? targets?.hub.projects.map((project) => {
               const selected = target?.type === "hub" && target.projectId === project.projectId;
               return (
-                <RequestActionButton
+                <Button
+                  fullWidth
                   key={project.projectId}
                   label={selected ? `${project.title} · Selected` : project.title}
-                  accessibilityState={{ selected }}
+                  selected={selected}
                   tone={selected ? "primary" : "secondary"}
                   disabled={frozen}
                   onPress={() => setTarget({ type: "hub", projectId: project.projectId })}
@@ -205,10 +209,11 @@ export function NoteStartWorkRouteScreen({
                 target.host === host &&
                 target.projectPath === project.path;
               return (
-                <RequestActionButton
+                <Button
+                  fullWidth
                   key={project.path}
                   label={selected ? `${project.title} · Selected` : project.title}
-                  accessibilityState={{ selected }}
+                  selected={selected}
                   tone={selected ? "primary" : "secondary"}
                   disabled={frozen}
                   onPress={() => setTarget({ type: "host", host, projectPath: project.path })}
@@ -254,7 +259,8 @@ export function NoteStartWorkRouteScreen({
             }
           }}
         >
-          <RequestActionButton
+          <Button
+            fullWidth
             label={
               model
                 ? `${selectedModel?.providerLabel ?? model.instanceId} · ${selectedModel?.label ?? model.model}`
@@ -263,6 +269,8 @@ export function NoteStartWorkRouteScreen({
             accessibilityLabel="Choose model"
             tone="secondary"
             disabled={frozen}
+            // The surrounding Menu opens on press; the button only draws the trigger.
+            onPress={() => undefined}
           />
         </Menu>
         <Text className="text-sm text-foreground-muted">
@@ -284,7 +292,9 @@ export function NoteStartWorkRouteScreen({
             {error ?? queryError}
           </Text>
         ) : null}
-        <RequestActionButton
+        <Button
+          fullWidth
+          tone="primary"
           label={pending ? "Starting…" : attempt.input ? "Retry this attempt" : "Start work"}
           disabled={
             !allowed || !target || pending || completed || discoveryBlocked || attempt.ambiguous
@@ -292,7 +302,8 @@ export function NoteStartWorkRouteScreen({
           onPress={() => void launch()}
         />
         {attempt.input ? (
-          <RequestActionButton
+          <Button
+            fullWidth
             label="Start again"
             tone="secondary"
             disabled={pending || completed}
@@ -302,7 +313,8 @@ export function NoteStartWorkRouteScreen({
             }}
           />
         ) : null}
-        <RequestActionButton
+        <Button
+          fullWidth
           label="Reload targets"
           tone="secondary"
           disabled={pending || completed}
