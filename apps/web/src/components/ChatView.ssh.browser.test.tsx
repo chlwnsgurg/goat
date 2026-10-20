@@ -1,4 +1,3 @@
-// @vitest-environment jsdom
 import { act, type ComponentProps } from "react";
 import { flushSync } from "react-dom";
 import { createRoot } from "react-dom/client";
@@ -26,6 +25,7 @@ import type { LegendListRef } from "@legendapp/list/react";
 import type { MessagesTimeline } from "./chat/MessagesTimeline";
 import type { ChatComposer, ChatComposerHandle } from "./chat/ChatComposer";
 const state = vi.hoisted(() => ({
+  registry: null as typeof import("effect/reactivity").AtomRegistry.AtomRegistry | null,
   launch: vi.fn(),
   navigate: vi.fn(),
   retry: vi.fn(),
@@ -48,13 +48,15 @@ vi.mock("./ui/toast", () => ({
   toastManager: { add: state.toast },
   stackedThreadToast: (v: unknown) => v,
 }));
-vi.mock("@tanstack/react-router", () => ({
+vi.mock("@tanstack/react-router", async (original) => ({
+  ...(await original<typeof import("@tanstack/react-router")>()),
   useNavigate: () => state.navigate,
   useLocation: ({ select }: { select: (v: unknown) => unknown }) =>
     select({ href: "/", state: {} }),
   useParams: () => ({}),
 }));
-vi.mock("../hooks/useSettings", () => ({
+vi.mock("../hooks/useSettings", async (original) => ({
+  ...(await original<typeof import("../hooks/useSettings")>()),
   useEnvironmentSettings: () => ({ ...DEFAULT_SERVER_SETTINGS, ...DEFAULT_CLIENT_SETTINGS }),
   useClientSettings: (select?: (settings: typeof DEFAULT_CLIENT_SETTINGS) => unknown) =>
     select ? select(DEFAULT_CLIENT_SETTINGS) : DEFAULT_CLIENT_SETTINGS,
@@ -75,7 +77,8 @@ vi.mock("../state/session", async (original) => ({
   readEnvironmentScope: () => true,
   readPreparedConnection: () => Option.none(),
 }));
-vi.mock("../state/query", () => ({
+vi.mock("../state/query", async (original) => ({
+  ...(await original<typeof import("../state/query")>()),
   useEnvironmentQuery: () => ({
     data: null,
     isPending: false,
@@ -142,7 +145,10 @@ vi.mock("../hooks/useLoadBalancedEnvironment", () => ({
 vi.mock("../hooks/useScratchProject", () => ({
   useScratchProject: () => ({ scratchWorkspaceRootFor: () => null, openScratchProject: vi.fn() }),
 }));
-vi.mock("../remoteOpen", () => ({ useRemoteOpenState: () => ({}) }));
+vi.mock("../remoteOpen", async (original) => ({
+  ...(await original<typeof import("../remoteOpen")>()),
+  useRemoteOpenState: () => ({}),
+}));
 vi.mock("./chat/useAutoBalanceUpdateBanner", () => ({ useAutoBalanceUpdateBanner: () => null }));
 vi.mock("./ThreadStatusIndicators", () => ({ useLinkedThreadPullRequest: () => null }));
 vi.mock("./chat/ChatHeader", () => ({ ChatHeader: () => null }));
@@ -192,18 +198,22 @@ vi.mock("./chat/MessagesTimeline", async () => {
         <div
           key={version}
           data-timeline
+          style={{ height: 400, overflow: "auto" }}
           ref={attach}
           onScroll={() => {
             const atEnd = resolveTimelineIsAtEnd(props.listRef.current?.getState());
             if (atEnd !== undefined) props.onIsAtEndChange(atEnd);
           }}
-        />
+        >
+          <div style={{ height: state.contentLength }} />
+        </div>
       );
     },
   };
 });
 vi.mock("./chat/DraftHeroHeadline", () => ({ DraftHeroHeadline: () => null }));
 vi.mock("./chat/ExpandedImageDialog", () => ({
+  ExpandedImageDialog: () => null,
   ExpandedImageDialogHost: () => null,
   openExpandedImagePreview: () => {},
 }));
@@ -250,7 +260,21 @@ vi.mock("./chat/ChatComposer", async () => {
     },
   };
 });
-import { AppAtomRegistryProvider, appAtomRegistry } from "../rpc/atomRegistry";
+// Browser mocks snapshot exports; forward method reads to the registry under test.
+vi.mock("../rpc/atomRegistry", async (original) => {
+  const actual = await original<typeof import("../rpc/atomRegistry")>();
+  state.registry = actual.appAtomRegistry;
+  return {
+    ...actual,
+    appAtomRegistry: new Proxy(actual.appAtomRegistry, {
+      get: (_target, key) => {
+        const value = Reflect.get(state.registry!, key);
+        return typeof value === "function" ? value.bind(state.registry) : value;
+      },
+    }),
+  };
+});
+import { AppAtomRegistryProvider } from "../rpc/atomRegistry";
 import { environmentCatalog } from "../connection/catalog";
 import { vcsEnvironment } from "../state/vcs";
 import {
@@ -390,13 +414,14 @@ beforeEach(() => {
   state.normal.mockReset();
   state.uploads.mockReset();
   state.toast.mockReset();
-  const get = appAtomRegistry.get.bind(appAtomRegistry);
-  vi.spyOn(appAtomRegistry, "get").mockImplementation(((atom: Atom.Atom<unknown>) =>
+  const registry = state.registry!;
+  const get = registry.get.bind(registry);
+  vi.spyOn(registry, "get").mockImplementation(((atom: Atom.Atom<unknown>) =>
     atom === environmentCatalog.catalogValueAtom
       ? catalog
       : atom === vcsEnvironment.sshWorkspaceLaunch.permissionAtom(local)
         ? true
-        : get(atom)) as typeof appAtomRegistry.get);
+        : get(atom)) as typeof registry.get);
   container = document.createElement("div");
   document.body.append(container);
   root = createRoot(container);
@@ -894,6 +919,7 @@ describe("timeline follow navigation", () => {
   // Simulate the virtualizer's observable append behavior at its public follow boundary.
   async function append(growth = 100) {
     state.contentLength += growth;
+    (state.scrollNode!.firstElementChild as HTMLElement).style.height = `${state.contentLength}px`;
     if (state.timeline!.liveFollowEnabled) {
       state.scrollNode!.scrollTop = state.contentLength - 400;
     }
