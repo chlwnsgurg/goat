@@ -23,7 +23,7 @@ import { DraftId, useComposerDraftStore } from "../../composerDraftStore";
 import type { ChatComposer } from "./ChatComposer";
 const state = vi.hoisted(() => ({
   noopCommand: vi.fn(async () => ({ _tag: "Success", value: { providers: [] } })),
-  registry: null as typeof import("effect/reactivity").AtomRegistry.AtomRegistry | null,
+  registry: null as import("effect/reactivity").AtomRegistry.AtomRegistry | null,
   launch: vi.fn(),
   navigate: vi.fn(),
   retry: vi.fn(),
