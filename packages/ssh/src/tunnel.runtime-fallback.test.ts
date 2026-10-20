@@ -596,9 +596,8 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")(
               assert.instanceOf(result.failure, SshLaunchError);
               assert.include(
                 result.failure.message,
-                `Cannot prepare GOAT ${ARCHIVE.archiveVersion}`,
+                `that works with this app (GOAT ${ARCHIVE.archiveVersion}) could be installed on devbox. Update this app, then reconnect.`,
               );
-              assert.include(result.failure.message, "Public HTTPS release is not published");
               if (result.failure instanceof SshLaunchError) {
                 assert.equal(result.failure.reason, "archive-unavailable");
                 assert.equal(result.failure.acquisition?.requestedVersion, ARCHIVE.archiveVersion);
@@ -630,7 +629,7 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")(
               platformKey: `${HostProcess.Platform.defaultValue()}-${HostProcess.Architecture.defaultValue()}`,
               sourcesTried: ["cache", "https", "gh"],
             });
-            assert.include(status?.failure?.fix.instruction ?? "", ARCHIVE.archiveVersion);
+            assert.equal(status?.failure?.fix.instruction, "Update this app, then reconnect.");
           }
         }).pipe(Effect.provide(layer), Effect.scoped);
         if (state === "stopped-compatible") {

@@ -25,7 +25,7 @@ import {
   testNetService,
 } from "./tunnel.fixture.ts";
 
-const ARCHIVE_ADVICE = "Supply the requested runtime archive";
+const ARCHIVE_ADVICE = "No GOAT runtime for";
 afterEach(() => vi.unstubAllGlobals());
 
 const makeExitedProcess = (exitCode: number, stderr: string) =>
@@ -133,10 +133,9 @@ describe("SSH runtime preparation errors", () => {
         assert.instanceOf(result.failure, SshLaunchError);
         if (result.failure instanceof SshLaunchError) {
           assert.equal(result.failure.reason, "archive-unavailable");
-          assert.include(
-            result.failure.message,
-            "Bundled SSH runtime archive is missing its SHA-256 sidecar",
-          );
+          // The sidecar detail goes to the log; the person gets the one step that fixes it.
+          assert.equal(result.failure.action, "Reinstall this app, then reconnect.");
+          assert.match(result.failure.message, /Reinstall this app, then reconnect\.$/);
           assert.deepEqual(result.failure.acquisition?.sourcesTried, ["bundle"]);
           assert.equal(result.failure.acquisition?.requestedVersion, ARCHIVE.archiveVersion);
         }
@@ -231,8 +230,10 @@ describe("SSH runtime preparation errors", () => {
           platformKey: "linux-x64",
           sourcesTried: [],
         });
-        assert.include(result.failure.message, "no writable user archive cache");
-        assert.include(result.failure.message, ARCHIVE_ADVICE);
+        assert.equal(
+          result.failure.message,
+          `No GOAT runtime for linux-x64 that works with this app (GOAT ${ARCHIVE.archiveVersion}) could be installed on devbox. Reinstall this app, then reconnect.`,
+        );
       }
     }).pipe(Effect.provide(NodeServices.layer)),
   );

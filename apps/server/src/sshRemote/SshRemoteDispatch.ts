@@ -2019,6 +2019,7 @@ export const resolveSshCliRunner = (baseDir: string) =>
       ...(bundledArchiveDirectory === undefined ? {} : { bundledArchiveDirectory }),
       ...(releaseBaseUrl === undefined ? {} : { releaseBaseUrl }),
       hostDownload: true,
+      publishedFallback: true,
       refreshOwnedRuntimeOnFirstConnection: true,
     } satisfies SshTunnel.RemoteGoatRunnerOptions;
   });
