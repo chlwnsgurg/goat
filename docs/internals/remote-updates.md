@@ -381,8 +381,9 @@ updater's in-flight guard and never creates a second replacement path.
 
 A runtime started by `run-t3.sh` updates itself when its launch records
 (`~/.goat/ssh-launch/runtime/pid` and `managed`) name its own process and it runs in
-the default `~/.goat` home on a POSIX host. Windows hosts, whose supervisor needs a
-native detached spawn, stay client-driven. Preparation runs the same host download a
+the default `~/.goat` home. Windows hosts take part when Git for Windows bash is
+found (the OpenSSH DefaultShell or a standard install path) and otherwise stay
+client-driven. Preparation runs the same host download a
 client would, verified against `SHA256SUMS`, checks the executable against its install
 record, and runs `__service-preflight`. Activation checks idle, then runs the owning
 launch script in its own session with the target release as the requested version.

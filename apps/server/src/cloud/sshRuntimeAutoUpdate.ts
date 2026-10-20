@@ -39,6 +39,7 @@ import { SSH_REPLACEMENT_ID_ENV } from "../serverOwnerLock.ts";
 import { automaticUpdateChannel, arbitrateAutomaticTargets } from "./autoUpdatePolicy.ts";
 import { decodeServicePreflightResult } from "./servicePreflight.ts";
 import { SERVICE_LAUNCHER_PROTOCOL } from "./serviceProtocol.ts";
+import { bashScriptArg, defaultWindowsGitBash } from "./sshRuntimeGitBash.ts";
 
 const INSTALL_TIMEOUT_MS = 15 * 60_000;
 const PREFLIGHT_TIMEOUT_MS = 30_000;
@@ -67,6 +68,8 @@ export class SshRuntimeHost extends Context.Service<
       readonly timeoutMs: number;
     }) => Effect.Effect<SshRuntimeProcessResult>;
     readonly runDetached: (input: {
+      /** `/bin/sh` on POSIX, Git for Windows `bash.exe` on Windows. */
+      readonly shell: string;
       readonly script: string;
       readonly args: ReadonlyArray<string>;
       readonly env: NodeJS.ProcessEnv;
@@ -104,16 +107,37 @@ const signalGroup = (pid: number, signal: NodeJS.Signals) => {
   }
 };
 
+// Windows has no negative-pid process groups. taskkill /T /F stops the tree the way a
+// signal to the group does on POSIX; a later call is harmless once those processes are gone.
+const stopProcessTree = (pid: number, signal: NodeJS.Signals) => {
+  // oxlint-disable-next-line goat/no-global-process-runtime -- This follows the process Node just spawned. An injected platform would send taskkill at a Linux child.
+  if (process.platform !== "win32") {
+    signalGroup(pid, signal);
+    return;
+  }
+  const killer = NodeChildProcess.spawn("taskkill", ["/PID", String(pid), "/T", "/F"], {
+    windowsHide: true,
+    stdio: "ignore",
+  });
+  killer.once("error", () => undefined);
+  killer.unref();
+};
+
 export const layerHost = Layer.succeed(SshRuntimeHost, {
   run: (input) =>
     Effect.callback<SshRuntimeProcessResult>((resume) => {
       // Its own process group, so a timeout or an interruption also stops the downloader the
       // install script waits on, and with it the install lock.
-      const child = NodeChildProcess.spawn(input.command, [...input.args], {
-        env: input.env,
-        detached: true,
-        stdio: ["pipe", "pipe", "pipe"],
-      });
+      const child = NodeChildProcess.spawn(
+        input.command,
+        input.args.map((arg) => bashScriptArg(input.command, arg)),
+        {
+          env: input.env,
+          detached: true,
+          windowsHide: true,
+          stdio: ["pipe", "pipe", "pipe"],
+        },
+      );
       child.stdin?.on("error", () => undefined);
       child.stdin?.end(input.stdin ?? "");
       // Done means every process holding the output has exited, which the leader alone does not
@@ -126,9 +150,9 @@ export const layerHost = Layer.succeed(SshRuntimeHost, {
       });
       const bound = setTimeout(() => {
         if (done || child.pid === undefined) return;
-        signalGroup(child.pid, "SIGTERM");
+        stopProcessTree(child.pid, "SIGTERM");
         setTimeout(() => {
-          if (!done && child.pid !== undefined) signalGroup(child.pid, "SIGKILL");
+          if (!done && child.pid !== undefined) stopProcessTree(child.pid, "SIGKILL");
         }, 5_000).unref();
       }, input.timeoutMs);
       void closed.then((result) => resume(Effect.succeed(result)));
@@ -136,12 +160,12 @@ export const layerHost = Layer.succeed(SshRuntimeHost, {
       return Effect.promise(async () => {
         clearTimeout(bound);
         if (done || child.pid === undefined) return;
-        signalGroup(child.pid, "SIGTERM");
+        stopProcessTree(child.pid, "SIGTERM");
         const ended = await Promise.race([
           closed.then(() => true),
           new Promise<false>((resolve) => setTimeout(() => resolve(false), 5_000)),
         ]);
-        if (!ended) signalGroup(child.pid, "SIGKILL");
+        if (!ended) stopProcessTree(child.pid, "SIGKILL");
       });
     }),
   runDetached: (input) =>
@@ -159,9 +183,12 @@ export const layerHost = Layer.succeed(SshRuntimeHost, {
       const stderr = NodeFS.openSync(stderrFile, "w", 0o600);
       // Never killed from here: once it drains this server, the script and the supervisor it
       // starts own the host until the replacement answers or the previous version is restored.
-      const child = NodeChildProcess.spawn("/bin/sh", [scriptFile, ...input.args], {
+      // Detached leaves the script outside libuv's kill-on-close job, so it outlives the drain.
+      const scriptArg = bashScriptArg(input.shell, scriptFile);
+      const child = NodeChildProcess.spawn(input.shell, [scriptArg, ...input.args], {
         cwd: input.cwd,
         detached: true,
+        windowsHide: true,
         env: input.env,
         stdio: ["ignore", stdout, stderr],
       });
@@ -173,7 +200,7 @@ export const layerHost = Layer.succeed(SshRuntimeHost, {
         // Still alive here means the script never drained this server: it is stuck before the
         // swap, so stopping it (its trap releases the replacement lock) cannot strand the host.
         const bound = setTimeout(() => {
-          if (child.pid !== undefined) signalGroup(child.pid, "SIGTERM");
+          if (child.pid !== undefined) stopProcessTree(child.pid, "SIGTERM");
         }, DETACHED_TIMEOUT_MS);
         bound.unref();
         child.once("close", () => clearTimeout(bound));
@@ -209,7 +236,10 @@ export const layerHost = Layer.succeed(SshRuntimeHost, {
 export class SshRuntimeAutoUpdate extends Context.Service<
   SshRuntimeAutoUpdate,
   {
-    /** This server runs in the user's default home outside the desktop app and Windows. */
+    /**
+     * This server runs in the user's default home, outside the desktop app, on a host
+     * whose shell can replace it. Windows qualifies when Git for Windows bash is installed.
+     */
     readonly supported: boolean;
     /** The shared SSH runtime's launch records name this process as their managed server. */
     readonly owned: Effect.Effect<boolean>;
@@ -250,6 +280,8 @@ export const make = Effect.fn("server.ssh_runtime_auto_update.make")(function* (
   readonly homeDir?: string;
   readonly platform?: NodeJS.Platform;
   readonly pid?: number;
+  /** Windows only. Tests supply this; production reads the registry and standard install paths. */
+  readonly resolveGitBash?: () => Effect.Effect<string | undefined>;
 }) {
   const config = yield* ServerConfig.ServerConfig;
   const host = yield* SshRuntimeHost;
@@ -262,21 +294,28 @@ export const make = Effect.fn("server.ssh_runtime_auto_update.make")(function* (
   const ownVersion = options?.ownVersion ?? packageJson.version;
   const homeDir = options?.homeDir ?? NodeOS.homedir();
   const pid = options?.pid ?? process.pid;
+  const platform = options?.platform ?? (yield* HostProcess.Platform);
   const defaultHome = NodePath.join(homeDir, ".goat");
   const stateDir = NodePath.join(defaultHome, "ssh-launch", REMOTE_RUNTIME_STATE_KEY);
   const versionsDir = NodePath.join(defaultHome, "runtime", "goat", "versions");
-  // Launch scripts only manage the server in the user's default home, and the Windows
-  // supervisor needs a native detached spawn this POSIX path does not provide.
+  // `/bin/sh` on POSIX. On Windows, Git for Windows bash, which is what OpenSSH already
+  // uses to run these scripts. Undefined means this host stays client-driven.
+  const shell =
+    platform === "win32" ? yield* (options?.resolveGitBash ?? defaultWindowsGitBash)() : "/bin/sh";
+  // Launch scripts only manage the server in the user's default home.
   const supported =
     config.mode !== "desktop" &&
-    (options?.platform ?? (yield* HostProcess.Platform)) !== "win32" &&
+    shell !== undefined &&
     NodePath.resolve(config.baseDir) === NodePath.resolve(defaultHome);
+  const executableName = platform === "win32" ? "goat.exe" : "goat";
   const inFlight = yield* Ref.make(false);
   const pending = yield* Ref.make<string | undefined>(undefined);
   // The protocol each prepared target speaks, read from its own binary.
   const protocols = new Map<string, { readonly ssh: number; readonly orchestration: number }>();
   const fail = (reason: string) => new ServerSelfUpdateError({ reason });
   const { [SSH_REPLACEMENT_ID_ENV]: _replacementId, ...inherited } = process.env;
+  // On Windows this is the native profile. Git Bash maps that HOME to a POSIX home as it
+  // starts; converting it first would be rewritten a second time.
   const env: NodeJS.ProcessEnv = { ...inherited, HOME: homeDir };
   const runner = (targetVersion: string): RemoteGoatRunnerOptions => ({
     archiveVersion: targetVersion,
@@ -308,7 +347,7 @@ export const make = Effect.fn("server.ssh_runtime_auto_update.make")(function* (
       const [complete, record, actual] = yield* Effect.all([
         host.readText(NodePath.join(dir, ".install-complete")),
         host.readText(NodePath.join(dir, ".install-record")),
-        host.sha256(NodePath.join(dir, "goat")),
+        host.sha256(NodePath.join(dir, executableName)),
       ]);
       const fields = record?.trim().split(" ") ?? [];
       if (
@@ -323,6 +362,8 @@ export const make = Effect.fn("server.ssh_runtime_auto_update.make")(function* (
 
   const prepare = (targetVersion: string) =>
     Effect.gen(function* () {
+      if (shell === undefined)
+        return yield* fail("This host has no Git Bash to update the SSH runtime.");
       // The host download trusts a completion marker, so an install whose executable no longer
       // matches a verified record is moved aside and downloaded again.
       const dir = NodePath.join(versionsDir, targetVersion);
@@ -337,7 +378,7 @@ export const make = Effect.fn("server.ssh_runtime_auto_update.make")(function* (
         return yield* fail(`Could not replace the unverified install of goat@${targetVersion}.`);
       // Verified against the release's SHA256SUMS exactly as a host download for a client is.
       const install = yield* host.run({
-        command: "/bin/sh",
+        command: shell,
         args: ["-s"],
         stdin: buildRemoteHostDownloadScript(runner(targetVersion)),
         env,
@@ -348,7 +389,7 @@ export const make = Effect.fn("server.ssh_runtime_auto_update.make")(function* (
       yield* verifiedExecutableSha256(targetVersion);
       if (aside !== undefined) yield* host.remove(aside);
       const preflight = yield* host.run({
-        command: NodePath.join(versionsDir, targetVersion, "goat"),
+        command: NodePath.join(versionsDir, targetVersion, executableName),
         args: [
           "__service-preflight",
           "--database-path",
@@ -367,7 +408,7 @@ export const make = Effect.fn("server.ssh_runtime_auto_update.make")(function* (
         return yield* fail(`goat@${targetVersion} failed its preflight.`);
       if (result.status === "blocked") return yield* fail(result.reason);
       const own = yield* host.run({
-        command: NodePath.join(versionsDir, targetVersion, "goat"),
+        command: NodePath.join(versionsDir, targetVersion, executableName),
         args: ["__ssh-helper", "protocol", "--shell"],
         env,
         timeoutMs: PREFLIGHT_TIMEOUT_MS,
@@ -434,7 +475,10 @@ export const make = Effect.fn("server.ssh_runtime_auto_update.make")(function* (
               expectedLiveRunnerSha256: liveRunnerSha256,
               installedExecutableSha256,
             };
+            if (shell === undefined)
+              return yield* fail("This host has no Git Bash to update the SSH runtime.");
             const result = yield* host.runDetached({
+              shell,
               script: buildRemoteLaunchScript(options, selection),
               args: [REMOTE_RUNTIME_STATE_KEY],
               env,
