@@ -180,6 +180,20 @@ const fixture = Effect.fn("fixture")(function* (
             deviceOnboardingCompleted:
               patch.deviceOnboardingCompleted ?? current.deviceOnboardingCompleted,
           })),
+        updateSettingsWith: (patchFor) =>
+          Ref.get(settings).pipe(
+            Effect.flatMap(patchFor),
+            Effect.flatMap((patch) =>
+              Ref.updateAndGet(settings, (current) => ({
+                ...current,
+                enableDeviceSupport: patch.enableDeviceSupport ?? current.enableDeviceSupport,
+                enableAgentDeviceAccess:
+                  patch.enableAgentDeviceAccess ?? current.enableAgentDeviceAccess,
+                deviceOnboardingCompleted:
+                  patch.deviceOnboardingCompleted ?? current.deviceOnboardingCompleted,
+              })),
+            ),
+          ),
         streamChanges: Stream.empty,
         subscribeChanges: Effect.succeed(Stream.empty),
       }),
