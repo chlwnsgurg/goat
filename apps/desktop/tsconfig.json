@@ -18,6 +18,7 @@
     "../../packages/ssh/src/runtimeArchive.ts",
     "../../packages/ssh/src/runtimeArchiveGh.ts",
     "../../packages/ssh/src/runtimeArchiveHttp.ts",
+    "../../packages/ssh/src/runtimePublished.ts",
     "../../packages/ssh/src/tunnel.ensure-flight.fixture.ts",
     "../../packages/ssh/src/tunnel.fixture.ts",
     "../../packages/ssh/src/tunnel.ts",
