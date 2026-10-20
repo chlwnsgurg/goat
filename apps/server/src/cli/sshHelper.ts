@@ -37,6 +37,7 @@ import {
 import {
   compareRuntimeProtocols,
   ownRuntimeProtocolRanges,
+  type RuntimeProtocolVerdict,
   SSH_RUNTIME_PROTOCOL_VERSION,
 } from "@goat/shared/sshRuntimeProtocol";
 import { PersistedServerRuntimeState } from "../serverRuntimeState.ts";
@@ -240,13 +241,29 @@ const protocolVersion = (value: unknown): value is string =>
   );
 const protocolInteger = (value: unknown) =>
   typeof value === "number" && Number.isSafeInteger(value) && value > 0;
+/**
+ * An exited server that nothing reaps (PID 1 in a container without an init) stays a zombie
+ * and still answers signal 0, but it serves nothing and holds no locks.
+ */
+export const isLinuxZombie = (
+  pid: number,
+  readStat: (file: string) => string = (file) => NodeFS.readFileSync(file, "utf8"),
+) => {
+  try {
+    const stat = readStat(`/proc/${pid}/stat`);
+    // The command name in parentheses may itself contain ") Z", so read after the last one.
+    return stat.slice(stat.lastIndexOf(")") + 1).trimStart().startsWith("Z");
+  } catch {
+    return false;
+  }
+};
 const processExists = (pid: number) => {
   try {
     process.kill(pid, 0);
-    return true;
   } catch (cause) {
     return cause instanceof Error && "code" in cause && cause.code === "EPERM";
   }
+  return !(process.platform === "linux" && isLinuxZombie(pid));
 };
 const hasLoopbackListener = (port: number) =>
   new Promise<boolean>((resolve) => {
@@ -746,6 +763,22 @@ const writeAtomically = (file: string, contents: string, mode = 0o600) => {
   NodeFS.renameSync(next, file);
 };
 
+const writeLaunchRecords = (stateDir: string, identity: string, pid: number, port: number) => {
+  for (const [name, contents] of [
+    ["identity", `${identity}\n`],
+    ["pid", `${pid}\n`],
+    ["port", `${port}\n`],
+    ["managed", "managed\n"],
+  ] as const)
+    writeAtomically(NodePath.join(stateDir, name), contents);
+};
+
+const restoreRunner = (input: SshRuntimeSupervisorInput) => {
+  NodeFS.copyFileSync(input.previousRunnerFile, `${input.runnerFile}.restore`);
+  NodeFS.chmodSync(`${input.runnerFile}.restore`, 0o700);
+  NodeFS.renameSync(`${input.runnerFile}.restore`, input.runnerFile);
+};
+
 export interface SshRuntimeSupervisorInput {
   /** The drained server. The supervisor never signals it; it waits for it to exit. */
   readonly oldPid: number;
@@ -826,8 +859,17 @@ const spawnWindowsDetached = (
 export const superviseSshRuntimeReplacement = async (
   input: SshRuntimeSupervisorInput,
 ): Promise<SshRuntimeSupervisorResult> => {
-  if (!(await waitForExit(input.oldPid, input.exitTimeoutMs)))
-    return { status: "old-alive", reason: "The drained server did not exit; it was left running." };
+  if (!(await waitForExit(input.oldPid, input.exitTimeoutMs))) {
+    // The drained server still owns the data, so it stays the recorded runtime and is never
+    // signalled. The draining marker keeps launches from starting a second server beside it.
+    restoreRunner(input);
+    NodeFS.rmSync(input.previousRunnerFile, { force: true });
+    writeLaunchRecords(input.stateDir, input.previousIdentity, input.oldPid, input.port);
+    return {
+      status: "old-alive",
+      reason: `The drained GOAT ${input.previousVersion} (pid ${input.oldPid}) did not exit; it was left running.`,
+    };
+  }
   const userdata = NodePath.join(input.baseDir, "userdata");
   const backup = NodePath.join(input.stateDir, "replacement-backup");
   const replacementId = NodeCrypto.randomUUID();
@@ -851,6 +893,7 @@ export const superviseSshRuntimeReplacement = async (
     executable: string | undefined,
     version: string,
     identity: string,
+    accepts: (verdict: RuntimeProtocolVerdict) => boolean,
     extraEnv: Record<string, string> = {},
   ) => {
     const args = [
@@ -887,17 +930,11 @@ export const superviseSshRuntimeReplacement = async (
         const value = await readSshRuntimeCompatibility(input.port);
         if (
           value.serverVersion === version &&
-          value.verdict === "compatible" &&
+          accepts(value.verdict) &&
           value.instanceId !== undefined &&
           value.instanceId !== input.oldInstanceId
         ) {
-          for (const [name, contents] of [
-            ["identity", `${identity}\n`],
-            ["pid", `${pid}\n`],
-            ["port", `${input.port}\n`],
-            ["managed", "managed\n"],
-          ] as const)
-            writeAtomically(NodePath.join(input.stateDir, name), contents);
+          writeLaunchRecords(input.stateDir, identity, pid, input.port);
           return pid;
         }
       } catch {
@@ -919,6 +956,7 @@ export const superviseSshRuntimeReplacement = async (
     input.executable,
     input.targetVersion,
     input.identity,
+    (verdict) => verdict === "compatible",
     { [SSH_REPLACEMENT_ID_ENV]: replacementId },
   );
   if (started !== undefined) {
@@ -938,14 +976,16 @@ export const superviseSshRuntimeReplacement = async (
   } finally {
     restoreLock.release();
   }
-  NodeFS.copyFileSync(input.previousRunnerFile, `${input.runnerFile}.restore`);
-  NodeFS.chmodSync(`${input.runnerFile}.restore`, 0o700);
-  NodeFS.renameSync(`${input.runnerFile}.restore`, input.runnerFile);
+  restoreRunner(input);
+  // The previous version served this host before the swap. After an incompatible replacement
+  // it does not speak this build's protocol, so it must only prove it is that version, freshly
+  // started, advertising protocol ranges of its own.
   const restored = await start(
     input.runnerFile,
     input.previousExecutable,
     input.previousVersion,
     input.previousIdentity,
+    (verdict) => verdict !== "unknown",
   );
   if (restored === undefined)
     return {
