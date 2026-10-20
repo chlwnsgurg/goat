@@ -7,12 +7,16 @@ import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
+import * as TestClock from "effect/testing/TestClock";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 import { HttpClient } from "effect/http";
 import { ChildProcessSpawner } from "effect/process";
 import * as SshAuth from "./auth.ts";
 import {
+  ARCHIVE,
+  arch,
+  platform,
   isRemoteLaunch,
   makeProtocolTestSpawner,
   makeRunningProcess,
@@ -157,6 +161,127 @@ describe("SSH manager shutdown ownership", () => {
       }).pipe(
         Effect.provideContext(services),
         Effect.ensuring(Deferred.succeed(releaseLaunch, undefined)),
+        Effect.ensuring(Scope.close(scope, Exit.void)),
+      );
+    }),
+  );
+
+  it.effect.each([
+    {
+      name: "shutdown cancels a preparation that has not launched a runtime",
+      shutdown: true,
+      delayedInstall: false,
+    },
+    {
+      name: "preparation stops by its 15-minute deadline before launching a runtime",
+      shutdown: false,
+      delayedInstall: false,
+    },
+    {
+      name: "shutdown finishes by the flight deadline without waiting for a later launch timeout",
+      shutdown: true,
+      delayedInstall: true,
+    },
+  ])("$name", ({ shutdown, delayedInstall }) =>
+    Effect.gen(function* () {
+      const probeEntered = yield* Deferred.make<void>();
+      const releaseProbe = yield* Deferred.make<void>();
+      const count = { launches: 0, stops: 0, probeInterrupted: false };
+      // The protocol fixture answers probes itself; observe the real preparation boundary here.
+      const spawner = ChildProcessSpawner.make((command) =>
+        Effect.gen(function* () {
+          if (command._tag !== "StandardCommand") return yield* Effect.die("Unexpected command");
+          if (command.args.includes("-G"))
+            return makeSuccessfulProcess("hostname devbox.example.com\nuser julius\nport 2222\n");
+          if (command.args.includes("-N")) return makeRunningProcess(() => {});
+          const stdin = command.options.stdin;
+          const script =
+            stdin !== undefined &&
+            typeof stdin === "object" &&
+            "stream" in stdin &&
+            Stream.isStream(stdin.stream)
+              ? yield* stdin.stream.pipe(Stream.decodeText(), Stream.mkString)
+              : command.args.join(" ");
+          if (script.includes('"stopped":true')) {
+            count.stops++;
+            return makeSuccessfulProcess('{"stopped":true}');
+          }
+          if (delayedInstall && script.includes("installedCandidates"))
+            return makeSuccessfulProcess(JSON.stringify({ platform, arch, ready: false }));
+          if (
+            script.includes("installedCandidates") ||
+            (delayedInstall && script.startsWith("set -- --version\n"))
+          ) {
+            // The probe never answers; the slow install would leave one minute before the deadline.
+            return {
+              ...makeSuccessfulProcess(""),
+              exitCode: Deferred.succeed(probeEntered, undefined).pipe(
+                Effect.andThen(
+                  delayedInstall ? Effect.sleep(840_000) : Deferred.await(releaseProbe),
+                ),
+                Effect.as(ChildProcessSpawner.ExitCode(0)),
+                Effect.onInterrupt(() =>
+                  Effect.sync(() => {
+                    count.probeInterrupted = true;
+                  }),
+                ),
+              ),
+            };
+          }
+          if (isRemoteLaunch(command.args)) {
+            count.launches++;
+            return {
+              ...makeSuccessfulProcess(
+                JSON.stringify({
+                  status: "ready",
+                  remotePort: 3773,
+                  serverKind: "managed",
+                  selectedVersion: ARCHIVE.archiveVersion,
+                }),
+              ),
+              exitCode: Deferred.await(releaseProbe).pipe(
+                Effect.as(ChildProcessSpawner.ExitCode(0)),
+              ),
+            };
+          }
+          return makeSuccessfulProcess("");
+        }),
+      );
+      const scope = yield* Scope.make();
+      const layer = Layer.mergeAll(
+        NodeServices.layer,
+        Layer.succeed(FileSystem.FileSystem, memoryFileSystem),
+        Layer.succeed(ChildProcessSpawner.ChildProcessSpawner, spawner),
+        Layer.succeed(NetService.NetService, testNetService),
+        Layer.succeed(HttpClient.HttpClient, testHttpClient),
+        SshAuth.SshPasswordPrompt.disabledLayer,
+        SshEnvironmentManager.layer({
+          resolveCliRunner: Effect.succeed({ ...ARCHIVE, hostDownload: delayedInstall }),
+          leaveRemoteServerRunning: false,
+        }),
+      );
+      const services = yield* Layer.buildWithScope(layer, scope);
+      yield* Effect.gen(function* () {
+        const manager = yield* SshEnvironmentManager;
+        const ensure = yield* manager.ensureEnvironment(uploadTarget).pipe(Effect.forkChild);
+        const reached = yield* Effect.raceFirst(
+          Deferred.await(probeEntered).pipe(Effect.as("probe")),
+          Fiber.await(ensure).pipe(Effect.as("ensure ended before the probe")),
+        );
+        assert.equal(reached, "probe");
+        const completion = shutdown
+          ? yield* Scope.close(scope, Exit.void).pipe(Effect.forkChild({ startImmediately: true }))
+          : ensure;
+        yield* TestClock.adjust(shutdown && !delayedInstall ? 0 : 900_000);
+        assert.isDefined(
+          completion.pollUnsafe(),
+          `Worker unfinished after ${count.launches} launches`,
+        );
+        assert.deepEqual(count, { launches: 0, stops: 0, probeInterrupted: true });
+        yield* Fiber.await(ensure);
+      }).pipe(
+        Effect.provideContext(services),
+        Effect.ensuring(Deferred.succeed(releaseProbe, undefined)),
         Effect.ensuring(Scope.close(scope, Exit.void)),
       );
     }),

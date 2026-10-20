@@ -4510,6 +4510,14 @@ export const launchOrReuseRemoteServer = Effect.fn("ssh/tunnel.launchOrReuseRemo
     runner?: RemoteGoatRunnerOptions,
     onPhase?: SshRuntimeProgressCallback,
     previousSelection?: PreparedRemoteRuntime,
+    onLaunched?: (launch: {
+      readonly status: "ready" | "pending";
+      readonly pending?: SshRuntimePendingReplacement;
+    }) => Effect.Effect<
+      void,
+      never,
+      ChildProcessSpawner.ChildProcessSpawner | Crypto.Crypto | FileSystem.FileSystem | Path.Path
+    >,
   ): Effect.fn.Return<
     | {
         readonly status: "ready";
@@ -4523,133 +4531,146 @@ export const launchOrReuseRemoteServer = Effect.fn("ssh/tunnel.launchOrReuseRemo
     SshCommandError | SshInvalidTargetError | SshLaunchError,
     ChildProcessSpawner.ChildProcessSpawner | Crypto.Crypto | FileSystem.FileSystem | Path.Path
   > {
-    const stateKey = REMOTE_RUNTIME_STATE_KEY;
-    yield* Effect.logInfo("ssh.remoteServer.launch.start", {
-      ...sshTargetLogFields(target),
-      ...sshRunnerLogFields(runner),
-      stateKey,
-    });
-    const canFoldProbe =
-      previousSelection?.reconnectProbe !== undefined &&
-      previousSelection.requestedVersion === runner?.archiveVersion?.trim() &&
-      previousSelection.runner.archiveCommitTime === runner?.archiveCommitTime &&
-      (previousSelection.runner.keepExistingRunner === true) ===
-        (runner?.keepExistingRunner === true) &&
-      previousSelection.upgradeFailure === undefined &&
-      previousSelection.updateBlocked === undefined &&
-      !isNodeScriptRunner(runner) &&
-      runner?.refreshOwnedRuntimeOnFirstConnection !== true &&
-      runner?.confirmReplacement !== true;
-    const launch = (selected: PreparedRemoteRuntime, expectedProbe?: string) =>
-      runSshCommand(target, {
-        remoteCommandArgs: ["sh", "-l", "-s", "--", stateKey],
-        stdin:
-          isNodeScriptRunner(selected.runner) || selected.hostPlatform === "win32"
-            ? buildRemoteLaunchScript(selected.runner, selected)
-            : buildReconnectLaunchScript(selected, expectedProbe),
-        timeoutStage: "runtime-launch",
-        timeoutMs: isNodeScriptRunner(selected.runner)
-          ? REMOTE_LAUNCH_TIMEOUT_MS
-          : REMOTE_ARCHIVE_LAUNCH_TIMEOUT_MS,
-        ...input,
-      });
-    let folded = canFoldProbe
-      ? yield* measureSshReconnectStep(
-          "runtime-probe-folded",
-          launch(
-            { ...previousSelection, uploaded: false, requireInstalled: true },
-            previousSelection.reconnectProbe,
-          ),
-        )
-      : undefined;
-    const observedProbe = folded?.stdout
-      .split(/\r?\n/u)
-      .find((line) => line.startsWith("GOAT_RECONNECT_PROBE="))
-      ?.slice("GOAT_RECONNECT_PROBE=".length);
-    if (
-      folded !== undefined &&
-      getLastNonEmptyOutputLine(folded.stdout) === '{"status":"reprobe"}'
-    ) {
-      yield* Effect.logDebug("ssh.runtime.reconnect.reprobe", sshTargetLogFields(target));
-      folded = undefined;
-    }
-    const selected =
-      folded !== undefined && previousSelection !== undefined
-        ? { ...previousSelection, uploaded: false, requireInstalled: true }
-        : yield* prepareRemoteRuntime(
-            target,
-            input ?? {},
-            runner,
-            stateKey,
-            true,
-            onPhase,
-            observedProbe,
-          );
-    yield* Effect.annotateCurrentSpan("goat.runtime.selectedVersion", selected.version);
-    yield* Effect.annotateCurrentSpan("goat.runtime.requestedVersion", selected.requestedVersion);
-    const result = folded ?? (yield* launch(selected));
-    if (!getLastNonEmptyOutputLine(result.stdout)) {
-      return yield* new SshLaunchError({
-        message: "SSH launch did not return a remote port.",
-        stdout: result.stdout,
-      });
-    }
-    const parsed = yield* decodeRemoteLaunchOutput(
-      result.stdout
-        .split(/\r?\n/u)
-        .filter((line) => !line.startsWith("GOAT_RECONNECT_PROBE="))
-        .join("\n"),
-    ).pipe(
-      Effect.mapError(
-        (cause) =>
-          new SshLaunchError({
-            message: "SSH launch returned unparseable output.",
+    return yield* Effect.uninterruptibleMask((restore) =>
+      Effect.gen(function* () {
+        const stateKey = REMOTE_RUNTIME_STATE_KEY;
+        yield* Effect.logInfo("ssh.remoteServer.launch.start", {
+          ...sshTargetLogFields(target),
+          ...sshRunnerLogFields(runner),
+          stateKey,
+        });
+        const canFoldProbe =
+          previousSelection?.reconnectProbe !== undefined &&
+          previousSelection.requestedVersion === runner?.archiveVersion?.trim() &&
+          previousSelection.runner.archiveCommitTime === runner?.archiveCommitTime &&
+          (previousSelection.runner.keepExistingRunner === true) ===
+            (runner?.keepExistingRunner === true) &&
+          previousSelection.upgradeFailure === undefined &&
+          previousSelection.updateBlocked === undefined &&
+          !isNodeScriptRunner(runner) &&
+          runner?.refreshOwnedRuntimeOnFirstConnection !== true &&
+          runner?.confirmReplacement !== true;
+        const launch = (selected: PreparedRemoteRuntime, expectedProbe?: string) => {
+          const command = runSshCommand(target, {
+            remoteCommandArgs: ["sh", "-l", "-s", "--", stateKey],
+            stdin:
+              isNodeScriptRunner(selected.runner) || selected.hostPlatform === "win32"
+                ? buildRemoteLaunchScript(selected.runner, selected)
+                : buildReconnectLaunchScript(selected, expectedProbe),
+            timeoutStage: "runtime-launch",
+            timeoutMs: isNodeScriptRunner(selected.runner)
+              ? REMOTE_LAUNCH_TIMEOUT_MS
+              : REMOTE_ARCHIVE_LAUNCH_TIMEOUT_MS,
+            ...input,
+          });
+          return onLaunched === undefined ? restore(command) : command;
+        };
+        let folded = canFoldProbe
+          ? yield* measureSshReconnectStep(
+              "runtime-probe-folded",
+              launch(
+                { ...previousSelection, uploaded: false, requireInstalled: true },
+                previousSelection.reconnectProbe,
+              ),
+            )
+          : undefined;
+        const observedProbe = folded?.stdout
+          .split(/\r?\n/u)
+          .find((line) => line.startsWith("GOAT_RECONNECT_PROBE="))
+          ?.slice("GOAT_RECONNECT_PROBE=".length);
+        if (
+          folded !== undefined &&
+          getLastNonEmptyOutputLine(folded.stdout) === '{"status":"reprobe"}'
+        ) {
+          yield* Effect.logDebug("ssh.runtime.reconnect.reprobe", sshTargetLogFields(target));
+          folded = undefined;
+        }
+        const selected =
+          folded !== undefined && previousSelection !== undefined
+            ? { ...previousSelection, uploaded: false, requireInstalled: true }
+            : yield* restore(
+                prepareRemoteRuntime(
+                  target,
+                  input ?? {},
+                  runner,
+                  stateKey,
+                  true,
+                  onPhase,
+                  observedProbe,
+                ),
+              );
+        yield* Effect.annotateCurrentSpan("goat.runtime.selectedVersion", selected.version);
+        yield* Effect.annotateCurrentSpan(
+          "goat.runtime.requestedVersion",
+          selected.requestedVersion,
+        );
+        const result = folded ?? (yield* launch(selected));
+        if (!getLastNonEmptyOutputLine(result.stdout)) {
+          return yield* new SshLaunchError({
+            message: "SSH launch did not return a remote port.",
             stdout: result.stdout,
-            cause,
-          }),
-      ),
-    );
-    if (parsed.status === "pending") return parsed;
-    const pending =
-      parsed.pending ??
-      (folded !== undefined && parsed.selectedVersion === previousSelection?.version
-        ? previousSelection?.reconnectPending
-        : undefined);
-    if (!Number.isInteger(parsed.remotePort)) {
-      return yield* new SshLaunchError({
-        message: `SSH launch returned an invalid remote port: ${String(parsed.remotePort)}.`,
-        stdout: result.stdout,
-      });
-    }
-    yield* Effect.logInfo("ssh.remoteServer.launch.ready", {
-      ...sshTargetLogFields(target),
-      remotePort: parsed.remotePort,
-      remoteServerKind: parsed.serverKind ?? null,
-      selectedVersion: parsed.selectedVersion ?? selected.version,
-      requestedVersion: selected.requestedVersion,
-      refresh: parsed.refresh ?? null,
-      stateKey,
-    });
-    let probeOutput = result.stdout
-      .split(/\r?\n/u)
-      .find((line) => line.startsWith("GOAT_RECONNECT_PROBE="))
-      ?.slice("GOAT_RECONNECT_PROBE=".length);
-    if (
-      !isNodeScriptRunner(selected.runner) &&
-      // Garbage appears only when this launch installed a runtime; skip the round trip otherwise.
-      (selected.uploaded === true || !selected.requireInstalled) &&
-      parsed.pending === undefined &&
-      parsed.refresh === undefined &&
-      parsed.selectedVersion === selected.version
-    ) {
-      // A separate round trip makes even a hung cleanup or a dropped SSH connection best-effort.
-      yield* Effect.gen(function* () {
-        const cleanup = yield* runSshCommand(target, {
-          ...input,
-          // The trailing word is only $1 to the script; it names this call in traces and tests.
-          remoteCommandArgs: ["sh", "-l", "-s", "goat-runtime-cleanup"],
-          timeoutMs: runner?.cleanupTimeoutMs ?? 10_000,
-          stdin: `set -eu
+          });
+        }
+        const parsed = yield* decodeRemoteLaunchOutput(
+          result.stdout
+            .split(/\r?\n/u)
+            .filter((line) => !line.startsWith("GOAT_RECONNECT_PROBE="))
+            .join("\n"),
+        ).pipe(
+          Effect.mapError(
+            (cause) =>
+              new SshLaunchError({
+                message: "SSH launch returned unparseable output.",
+                stdout: result.stdout,
+                cause,
+              }),
+          ),
+        );
+        if (parsed.status === "pending") return parsed;
+        const pending =
+          parsed.pending ??
+          (folded !== undefined && parsed.selectedVersion === previousSelection?.version
+            ? previousSelection?.reconnectPending
+            : undefined);
+        if (!Number.isInteger(parsed.remotePort)) {
+          return yield* new SshLaunchError({
+            message: `SSH launch returned an invalid remote port: ${String(parsed.remotePort)}.`,
+            stdout: result.stdout,
+          });
+        }
+        // The response and cleanup ownership must be atomic with respect to interruption.
+        if (onLaunched !== undefined)
+          yield* onLaunched({ status: "ready", ...(pending === undefined ? {} : { pending }) });
+        yield* Effect.logInfo("ssh.remoteServer.launch.ready", {
+          ...sshTargetLogFields(target),
+          remotePort: parsed.remotePort,
+          remoteServerKind: parsed.serverKind ?? null,
+          selectedVersion: parsed.selectedVersion ?? selected.version,
+          requestedVersion: selected.requestedVersion,
+          refresh: parsed.refresh ?? null,
+          stateKey,
+        });
+        let probeOutput = result.stdout
+          .split(/\r?\n/u)
+          .find((line) => line.startsWith("GOAT_RECONNECT_PROBE="))
+          ?.slice("GOAT_RECONNECT_PROBE=".length);
+        if (
+          !isNodeScriptRunner(selected.runner) &&
+          // Garbage appears only when this launch installed a runtime; skip the round trip otherwise.
+          (selected.uploaded === true || !selected.requireInstalled) &&
+          parsed.pending === undefined &&
+          parsed.refresh === undefined &&
+          parsed.selectedVersion === selected.version
+        ) {
+          // A separate round trip makes even a hung cleanup or a dropped SSH connection best-effort.
+          yield* restore(
+            Effect.gen(function* () {
+              const cleanup = yield* runSshCommand(target, {
+                ...input,
+                // The trailing word is only $1 to the script; it names this call in traces and tests.
+                remoteCommandArgs: ["sh", "-l", "-s", "goat-runtime-cleanup"],
+                timeoutMs: runner?.cleanupTimeoutMs ?? 10_000,
+                stdin: `set -eu
 DEFAULT_SERVER_HOME="$HOME/.goat"
 STATE_DIR="$DEFAULT_SERVER_HOME/ssh-launch/${stateKey}"
 DEFAULT_RUNTIME_FILE="$DEFAULT_SERVER_HOME/userdata/server-runtime.json"
@@ -4675,96 +4696,99 @@ ${REMOTE_RUNTIME_FACT_WARMUP_SCRIPT}
 # A fresh install could not be keyed before warm-up; return its baseline in this round trip.
 ${buildReconnectProbeScript(selected)}
 if probe_output="$(reconnect_probe capture)"; then printf 'GOAT_RECONNECT_PROBE=%s\\n' "$probe_output"; fi`,
-        });
-        probeOutput =
-          cleanup.stdout
-            .split(/\r?\n/u)
-            .find((line) => line.startsWith("GOAT_RECONNECT_PROBE="))
-            ?.slice("GOAT_RECONNECT_PROBE=".length) ?? probeOutput;
-        for (const line of cleanup.stderr.split(/\r?\n/u)) {
-          if (line.startsWith("ssh.runtime.cleanup.")) {
-            yield* Effect.logInfo("ssh.runtime.cleanup.result", {
-              ...sshTargetLogFields(target),
-              detail: line,
-            });
+              });
+              probeOutput =
+                cleanup.stdout
+                  .split(/\r?\n/u)
+                  .find((line) => line.startsWith("GOAT_RECONNECT_PROBE="))
+                  ?.slice("GOAT_RECONNECT_PROBE=".length) ?? probeOutput;
+              for (const line of cleanup.stderr.split(/\r?\n/u)) {
+                if (line.startsWith("ssh.runtime.cleanup.")) {
+                  yield* Effect.logInfo("ssh.runtime.cleanup.result", {
+                    ...sshTargetLogFields(target),
+                    detail: line,
+                  });
+                }
+              }
+            }).pipe(
+              Effect.catch((cause) =>
+                Effect.logWarning("ssh.runtime.cleanup.failed", {
+                  ...sshTargetLogFields(target),
+                  cause,
+                }),
+              ),
+            ),
+          );
+        }
+        const reusedVersion = parsed.selectedVersion;
+        const cachedSelection: PreparedRemoteRuntime =
+          reusedVersion === selected.version || isNodeScriptRunner(selected.runner)
+            ? selected
+            : {
+                ...selected,
+                version: reusedVersion,
+                source: parsed.pending === undefined ? "live" : "retained",
+                runner: {
+                  ...selected.runner,
+                  archiveVersion: reusedVersion,
+                  refreshOwnedRuntimeOnFirstConnection: false,
+                },
+                retainedRunnerSha256: selected.expectedLiveRunnerSha256 ?? null,
+                refreshIfIdle: false,
+              };
+        const durableSelection = {
+          ...cachedSelection,
+          runner: { ...cachedSelection.runner, confirmReplacement: false },
+        };
+        delete durableSelection.refreshIfIdle;
+        delete durableSelection.expectedLiveVersion;
+        delete durableSelection.expectedLiveRunnerSha256;
+        delete durableSelection.reconnectProbe;
+        delete durableSelection.reconnectPending;
+        if (pending !== undefined) durableSelection.reconnectPending = pending;
+        if (
+          probeOutput !== undefined &&
+          selected.upgradeFailure === undefined &&
+          selected.updateBlocked === undefined &&
+          parsed.selectedVersion === cachedSelection.version
+        ) {
+          const probe = yield* decodeRemoteRuntimeProbe(probeOutput).pipe(Effect.option);
+          if (
+            Option.isSome(probe) &&
+            probe.value.reconnectKey !== undefined &&
+            probe.value.platform !== "win32" &&
+            probe.value.liveStatus === "live" &&
+            probe.value.liveOwned === true &&
+            probe.value.identityAbsent === false &&
+            probe.value.liveVersion === cachedSelection.version &&
+            probe.value.retainedVersion === cachedSelection.version &&
+            (cachedSelection.source !== "retained" ||
+              cachedSelection.retainedRunnerSha256 === null ||
+              probe.value.retainedRunnerSha256 === cachedSelection.retainedRunnerSha256) &&
+            probe.value.liveSignals !== undefined &&
+            probe.value.liveBinarySignals !== undefined &&
+            matchesSignals(probe.value.liveSignals, selected.requestedVersion ?? "") &&
+            matchesSignals(probe.value.liveBinarySignals, selected.requestedVersion ?? "")
+          ) {
+            durableSelection.reconnectProbe = probeOutput;
+            durableSelection.source = "retained";
+            durableSelection.retainedRunnerSha256 = probe.value.retainedRunnerSha256 ?? null;
           }
         }
-      }).pipe(
-        Effect.catch((cause) =>
-          Effect.logWarning("ssh.runtime.cleanup.failed", {
-            ...sshTargetLogFields(target),
-            cause,
-          }),
-        ),
-      );
-    }
-    const reusedVersion = parsed.selectedVersion;
-    const cachedSelection: PreparedRemoteRuntime =
-      reusedVersion === selected.version || isNodeScriptRunner(selected.runner)
-        ? selected
-        : {
-            ...selected,
-            version: reusedVersion,
-            source: parsed.pending === undefined ? "live" : "retained",
-            runner: {
-              ...selected.runner,
-              archiveVersion: reusedVersion,
-              refreshOwnedRuntimeOnFirstConnection: false,
-            },
-            retainedRunnerSha256: selected.expectedLiveRunnerSha256 ?? null,
-            refreshIfIdle: false,
-          };
-    const durableSelection = {
-      ...cachedSelection,
-      runner: { ...cachedSelection.runner, confirmReplacement: false },
-    };
-    delete durableSelection.refreshIfIdle;
-    delete durableSelection.expectedLiveVersion;
-    delete durableSelection.expectedLiveRunnerSha256;
-    delete durableSelection.reconnectProbe;
-    delete durableSelection.reconnectPending;
-    if (pending !== undefined) durableSelection.reconnectPending = pending;
-    if (
-      probeOutput !== undefined &&
-      selected.upgradeFailure === undefined &&
-      selected.updateBlocked === undefined &&
-      parsed.selectedVersion === cachedSelection.version
-    ) {
-      const probe = yield* decodeRemoteRuntimeProbe(probeOutput).pipe(Effect.option);
-      if (
-        Option.isSome(probe) &&
-        probe.value.reconnectKey !== undefined &&
-        probe.value.platform !== "win32" &&
-        probe.value.liveStatus === "live" &&
-        probe.value.liveOwned === true &&
-        probe.value.identityAbsent === false &&
-        probe.value.liveVersion === cachedSelection.version &&
-        probe.value.retainedVersion === cachedSelection.version &&
-        (cachedSelection.source !== "retained" ||
-          cachedSelection.retainedRunnerSha256 === null ||
-          probe.value.retainedRunnerSha256 === cachedSelection.retainedRunnerSha256) &&
-        probe.value.liveSignals !== undefined &&
-        probe.value.liveBinarySignals !== undefined &&
-        matchesSignals(probe.value.liveSignals, selected.requestedVersion ?? "") &&
-        matchesSignals(probe.value.liveBinarySignals, selected.requestedVersion ?? "")
-      ) {
-        durableSelection.reconnectProbe = probeOutput;
-        durableSelection.source = "retained";
-        durableSelection.retainedRunnerSha256 = probe.value.retainedRunnerSha256 ?? null;
-      }
-    }
-    notifyRuntimePhase(target, "starting", onPhase);
-    return {
-      status: "ready",
-      remotePort: parsed.remotePort,
-      remoteServerKind: parsed.serverKind ?? null,
-      selectedRuntime: {
-        ...durableSelection,
-        requireInstalled: !isNodeScriptRunner(selected.runner),
-      },
-      ...(parsed.refresh === undefined ? {} : { refresh: parsed.refresh }),
-      ...(pending === undefined ? {} : { pending }),
-    };
+        notifyRuntimePhase(target, "starting", onPhase);
+        return {
+          status: "ready" as const,
+          remotePort: parsed.remotePort,
+          remoteServerKind: parsed.serverKind ?? null,
+          selectedRuntime: {
+            ...durableSelection,
+            requireInstalled: !isNodeScriptRunner(selected.runner),
+          },
+          ...(parsed.refresh === undefined ? {} : { refresh: parsed.refresh }),
+          ...(pending === undefined ? {} : { pending }),
+        };
+      }),
+    );
   },
 );
 
@@ -6455,8 +6479,8 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
       Effect.gen(function* () {
         yield* ensureSshMaster(input.resolvedTarget, authOptions, managerScope);
         const currentPin = yield* readManagedPin(input.resolvedTarget);
-        // The remote may start before SSH returns. Retain cleanup ownership through the bounded response.
-        return yield* Effect.acquireRelease(
+        // Preparation is cancellable; launch registers cleanup before restoring interruption.
+        return yield* Effect.interruptible(
           launchOrReuseRemoteServer(
             input.resolvedTarget,
             authOptions,
@@ -6468,21 +6492,23 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
                 reconnectIdentity(input.resolvedTarget, input.runner, currentPin)
               ? previousSelection.runtime
               : undefined,
+            (launch) =>
+              Effect.addFinalizer(() =>
+                Effect.gen(function* () {
+                  if (
+                    launchTransferred ||
+                    launch.status !== "ready" ||
+                    launch.pending !== undefined ||
+                    options.leaveRemoteServerRunning === true ||
+                    pendingReplacements.has(input.key) ||
+                    tunnels.has(input.key)
+                  )
+                    return;
+                  yield* stopRemoteServer(input.resolvedTarget, authOptions).pipe(Effect.ignore);
+                }),
+              ).pipe(Effect.provideService(Scope.Scope, launchScope)),
           ),
-          (launch) =>
-            Effect.gen(function* () {
-              if (
-                launchTransferred ||
-                launch.status !== "ready" ||
-                launch.pending !== undefined ||
-                options.leaveRemoteServerRunning === true ||
-                pendingReplacements.has(input.key) ||
-                tunnels.has(input.key)
-              )
-                return;
-              yield* stopRemoteServer(input.resolvedTarget, authOptions).pipe(Effect.ignore);
-            }),
-        ).pipe(Effect.provideService(Scope.Scope, launchScope));
+        );
       });
     const launchStartedAt = yield* Clock.currentTimeMillis;
     const observedLaunch = yield* (
