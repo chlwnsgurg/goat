@@ -699,6 +699,9 @@ export const KEEP_RULES: readonly KeepRule[] = [
       "Bootstrap, stored conversation/credential attribution, drag/clipboard and embedded peer payload spellings remain readable across builds (D12/D17).",
   },
   {
+    // Frozen through the first stable release (ADR-0014, "Frozen legacy identities"):
+    // t3code.desktop and the deb package `t3code`. Pinned launchers and URL handlers follow the
+    // entry name, and a renamed package installs beside the old one instead of upgrading it.
     id: "installed-desktop-metadata",
     pattern:
       /t3codeCommitHash|t3codeWebAuthn|T3 Tools|LICENSE-T3CODE\.txt|t3-black-[a-z0-9-]+|t3code\.desktop|X-T3Code-Capture-Helper|\bt3code\b/g,
@@ -801,6 +804,8 @@ export const KEEP_RULES: readonly KeepRule[] = [
       "Installed native executable names require coordinated packaging and upgrade discovery (D16).",
   },
   {
+    // Frozen (ADR-0014): the Linux WM class `t3code`/`t3code-dev`. Docks match windows to the
+    // desktop entry by it, so a rename splits running windows from users' pinned launchers.
     id: "desktop-runtime-identities",
     pattern: /\bt3code(?:-dev)?\b|--t3code-(?:dev-root|preview-passkey-bridge)/g,
     scope: (path) =>
@@ -828,6 +833,7 @@ export const KEEP_RULES: readonly KeepRule[] = [
   },
 
   {
+    // Also keeps the GNOME capture extension uuid snap-shot@t3.codes, frozen by ADR-0014.
     id: "attribution",
     pattern: /pingdotgg\/t3code|t3\.codes|T3 Code|T3 Connect|T3 Chat|t3\.chat/g,
     reason: "Upstream attribution, the T3 Connect service and product names (prose is T1).",
@@ -872,6 +878,7 @@ export const KEEP_RULES: readonly KeepRule[] = [
     scope: (path) => path === "t3.json",
   },
   {
+    // Frozen (ADR-0014): `run-t3.sh`. Every client version finds the remote runner by this name.
     id: "ssh-runner",
     pattern: /\bT3(?:CODE)?_[A-Z0-9_]+\b|\bt3_[a-z_]+\b|run-t3\.(?:sh|next)|@@T3_[A-Z0-9_]+@@/g,
     reason:
@@ -880,6 +887,9 @@ export const KEEP_RULES: readonly KeepRule[] = [
       path.startsWith("packages/ssh/") || path.startsWith("apps/server/src/sshRemote/"),
   },
   {
+    // Frozen (ADR-0014): the GNOME capture D-Bus names (com.t3tools.T3Code.SnapShot,
+    // /com/t3tools/SnapShot) and the KDE helper com.t3tools.T3Code.KdeCapture. On Wayland a renamed
+    // extension loads only after the user signs in again, so capture would stop working until then.
     id: "os-identities",
     pattern:
       /com\.t3tools(?:\.[A-Za-z0-9.]+)?|\/com\/t3tools\/\w*|t3code\.service|T3SnapShot\w*|T3Code\.(?:Development\.)?SnapShot/g,
@@ -891,11 +901,15 @@ export const KEEP_RULES: readonly KeepRule[] = [
     reason: "Desktop renderer origins that key all desktop storage (plan D13).",
   },
   {
+    // Frozen by decision in #112 (ADR-0014): module, view, notification-tag and SharedPreferences
+    // names. A rename changes the native fingerprint, orphans posted notifications and turns every
+    // upstream module sync into a conflict. Revisit only with a native rebuild that migrates tags
+    // and prefs and is checked on Android and iOS devices.
     id: "mobile-native",
     pattern:
       /t3-(?:source-text|agent-alert|agent-activity|agent-notifications|composer-editor|markdown-text|native-controls|review-diff|subscription-widget|terminal|widget-expiry)|\bT3(?:SourceText|MenuDismissTouchGate|WorkspaceNavigation|PresentationSources|ComposerEditor|KeyboardCommands|NativeControls|MarkdownText|ReviewDiff|Terminal|SelectableMarkdownText|WidgetExpiry|AgentNotifications|DeviceStream|PreviewStream|Showcase|Demo|Mark|FrostedCutout|LayoutMetrics|NativeFile|NativePresentation|NativeVideo|WorkspaceOrientation|ContextChip)\w*|react-native-screens-[\d.]+-t3\.\d+|t3_terminal\w*|t3(?:agentnotifications|composereditor|markdowntext|nativecontrols|reviewdiff|terminal|widgetexpiry)/g,
     reason:
-      "Mobile native module, view and font names; renaming needs a native build host (plan D18).",
+      "Mobile native module, view and font names, frozen through the first stable release (#112, ADR-0014).",
   },
   {
     id: "external-identities",

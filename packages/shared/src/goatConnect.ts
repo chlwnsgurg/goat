@@ -10,8 +10,9 @@ export function isGoatConnectEnabled(): boolean {
   return GOAT_CONNECT_ENABLED;
 }
 
-export const GOAT_CONNECT_TAILSCALE_GUIDE_URL =
-  "https://github.com/goat-si/goat/blob/dev/docs/user/remote-access.md#tailscale-https";
+// Release artifacts must not link into the GOAT source repository (D-10), so the guide is
+// Tailscale's own; `goat pair --tailscale` covers the GOAT side.
+export const GOAT_CONNECT_TAILSCALE_GUIDE_URL = "https://tailscale.com/kb/1153/enabling-https";
 
 export const GOAT_CONNECT_COMING_SOON = {
   title: "GOAT Connect",
