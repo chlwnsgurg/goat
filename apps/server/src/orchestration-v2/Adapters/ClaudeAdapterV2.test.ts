@@ -87,6 +87,9 @@ import { HtmlToolkit } from "../../mcp/toolkits/html/tools.ts";
 import { EnvironmentToolkit } from "../../mcp/toolkits/environment/tools.ts";
 import { HostStatusToolkit } from "../../mcp/toolkits/hostStatus/tools.ts";
 import { ProviderToolkit } from "../../mcp/toolkits/provider/tools.ts";
+import { FleetToolkit } from "../../mcp/toolkits/fleet/tools.ts";
+import { FleetResourcesToolkit } from "../../mcp/toolkits/fleet/resources/tools.ts";
+import { FleetHealthToolkit } from "../../mcp/toolkits/fleet/healthTools.ts";
 import { ProjectToolkit } from "../../mcp/toolkits/project/tools.ts";
 import { WorktreeToolkit } from "../../mcp/toolkits/worktree/tools.ts";
 import { ThreadToolkit } from "../../mcp/toolkits/thread/tools.ts";
@@ -798,6 +801,9 @@ describe("ClaudeAdapterV2 MCP query overrides", () => {
       ...Object.values(EnvironmentToolkit.tools),
       ...Object.values(HostStatusToolkit.tools),
       ...Object.values(ProviderToolkit.tools),
+      ...Object.values(FleetToolkit.tools),
+      ...Object.values(FleetResourcesToolkit.tools),
+      ...Object.values(FleetHealthToolkit.tools),
       ...Object.values(PreviewControlsToolkit.tools),
       ...Object.values(HtmlToolkit.tools),
     ]
@@ -805,15 +811,68 @@ describe("ClaudeAdapterV2 MCP query overrides", () => {
       .map((tool) => `mcp__goat__${tool.name}`)
       .sort();
 
-    assert.deepEqual(
+    // Read-only metadata may grow without granting automatic approval to new tools.
+    assert.includeMembers(
       readOnlyToolNames,
-      [
-        ...ClaudeAdapterV2.CLAUDE_READ_ONLY_GOAT_MCP_ALLOWED_TOOLS.filter(
-          (name) => name !== "mcp__goat__html_render",
-        ),
-        "mcp__goat__goat_thread_read",
-      ].sort(),
+      ClaudeAdapterV2.CLAUDE_READ_ONLY_GOAT_MCP_ALLOWED_TOOLS.filter(
+        (name) => name !== "mcp__goat__html_render",
+      ),
     );
+    assert.notInclude(readOnlyToolNames, "mcp__goat__html_render");
+
+    for (const name of [
+      "goat_thread_read",
+      "goat_provider_host_matrix",
+      "goat_provider_sync_status",
+      "goat_provider_addable_list",
+      "goat_provider_login_status",
+      "goat_cloud_holders",
+      "goat_cloud_run_list",
+      "goat_goal_get",
+      "goat_goal_list",
+      "goat_scheduler_status",
+      "goat_fallback_chain_get",
+    ]) {
+      const toolName = `mcp__goat__${name}`;
+      assert.include(readOnlyToolNames, toolName);
+      assert.notInclude(ClaudeAdapterV2.CLAUDE_READ_ONLY_GOAT_MCP_ALLOWED_TOOLS, toolName);
+    }
+  });
+
+  it("never preapproves provider, cloud or fleet mutations in a read-only sandbox", () => {
+    const mutatingTools = [
+      ProviderToolkit.tools.goat_provider_home_request,
+      ProviderToolkit.tools.goat_provider_sync,
+      ProviderToolkit.tools.goat_provider_sync_cancel,
+      ProviderToolkit.tools.goat_provider_setup_open,
+      ProviderToolkit.tools.goat_provider_login_start,
+      ProviderToolkit.tools.goat_provider_login_cancel,
+      ProviderToolkit.tools.goat_cloud_launch,
+      ProviderToolkit.tools.goat_cloud_run_register,
+      ProviderToolkit.tools.goat_cloud_run_forget,
+      FleetToolkit.tools.goat_goal_apply,
+      FleetToolkit.tools.goat_goal_pause,
+      FleetToolkit.tools.goat_goal_resume,
+      FleetToolkit.tools.goat_goal_delete,
+      FleetResourcesToolkit.tools.goat_fallback_chain_set,
+      FleetHealthToolkit.tools.goat_host_cordon,
+      FleetHealthToolkit.tools.goat_host_uncordon,
+      FleetHealthToolkit.tools.goat_host_drain,
+      FleetHealthToolkit.tools.goat_thread_reschedule,
+    ];
+    const overrides = ClaudeAdapterV2.claudeMcpQueryOverrides({
+      mcpSession: mcpSessionFor(ThreadId.make("thread-claude-mcp-mutations")),
+      readOnlySandbox: true,
+      allowedTools: [
+        ClaudeAdapterV2.CLAUDE_GOAT_MCP_TOOL_WILDCARD,
+        ...mutatingTools.map((tool) => `mcp__goat__${tool.name}`),
+      ],
+    });
+    assert.notInclude(overrides.allowedTools ?? [], ClaudeAdapterV2.CLAUDE_GOAT_MCP_TOOL_WILDCARD);
+    for (const tool of mutatingTools) {
+      assert.isFalse(Context.get(tool.annotations, Tool.Readonly), tool.name);
+      assert.notInclude(overrides.allowedTools ?? [], `mcp__goat__${tool.name}`);
+    }
   });
 });
 
