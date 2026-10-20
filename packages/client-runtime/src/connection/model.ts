@@ -125,7 +125,11 @@ export class ConnectionBlockedError extends Schema.TaggedError<ConnectionBlocked
 
 export class ConnectionAttemptSuperseded extends Schema.TaggedError<ConnectionAttemptSuperseded>()(
   "ConnectionAttemptSuperseded",
-  { reason: Schema.Literal("superseded"), detail: Schema.String },
+  {
+    reason: Schema.Literal("superseded"),
+    detail: Schema.String,
+    traceId: Schema.optionalKey(Schema.String),
+  },
 ) {
   override get message(): string {
     return this.detail;
