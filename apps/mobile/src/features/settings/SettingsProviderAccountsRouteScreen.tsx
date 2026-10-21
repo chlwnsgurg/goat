@@ -6,7 +6,11 @@ import {
   squashAtomCommandFailure,
   type AtomCommandResult,
 } from "@goat/client-runtime/state/runtime";
-import type { ProviderAuthResponse, ServerProvider } from "@goat/contracts";
+import {
+  AuthProvidersManageScope,
+  type ProviderAuthResponse,
+  type ServerProvider,
+} from "@goat/contracts";
 import { useAtomValue } from "@effect/atom-react";
 import { type StaticScreenProps } from "@react-navigation/native";
 import { useRef, useState, type ReactNode } from "react";
@@ -25,6 +29,7 @@ import { ScreenScrollView } from "../../components/ui/ScreenScrollView";
 import { environmentPresentations } from "../../state/presentation";
 import { useEnvironmentQuery } from "../../state/query";
 import { serverEnvironment } from "../../state/server";
+import { useEnvironmentsWithScope } from "../../state/session";
 import { useAtomCommand } from "../../state/use-atom-command";
 import { SettingsActionRow } from "./components/SettingsActionRow";
 import {
@@ -61,6 +66,7 @@ export function SettingsProviderAccountsRouteScreen({
       : [requestedTarget, ...selectedTargets],
     selection?.environmentId,
   );
+  const permittedEnvironments = useEnvironmentsWithScope(orderedTargets, AuthProvidersManageScope);
   const environmentMissing =
     selection?.environmentId !== undefined &&
     !availableTargets.some((target) => target.environmentId === selection.environmentId);
@@ -118,35 +124,46 @@ export function SettingsProviderAccountsRouteScreen({
                   }}
                 >
                   <SettingsSection title={environment.label}>
-                    {prompt ? (
-                      <Text
-                        className={
-                          accounts.length === 0
-                            ? "p-4 text-sm text-foreground-muted"
-                            : "px-4 pt-4 text-sm text-foreground-muted"
-                        }
-                      >
-                        {prompt}
-                      </Text>
-                    ) : null}
-                    {accounts.map((provider) => (
-                      <ProviderAccountFrame
-                        key={provider.instanceId}
-                        highlighted={highlighted?.instanceId === provider.instanceId}
-                      >
-                        {provider.driver === "codex" &&
-                        provider.codexRoute?.modelRoute === "opencodex" ? (
-                          <CodexHomeRouteStatus environment={environment} provider={provider} />
-                        ) : (
-                          <ProviderAccount environment={environment} provider={provider} />
-                        )}
-                      </ProviderAccountFrame>
-                    ))}
-                    {accounts.length === 0 && !prompt ? (
-                      <Text className="p-4 text-foreground-muted">
-                        Configure a provider with in-app sign-in in web or desktop Settings.
-                      </Text>
-                    ) : null}
+                    {!permittedEnvironments.has(environment.environmentId) ? (
+                      <View className="gap-1 p-4">
+                        <Text className="text-base text-foreground">Limited permissions</Text>
+                        <Text className="text-sm text-foreground-muted">
+                          {`This session can view ${environment.label}'s providers but can't change their settings.`}
+                        </Text>
+                      </View>
+                    ) : (
+                      <>
+                        {prompt ? (
+                          <Text
+                            className={
+                              accounts.length === 0
+                                ? "p-4 text-sm text-foreground-muted"
+                                : "px-4 pt-4 text-sm text-foreground-muted"
+                            }
+                          >
+                            {prompt}
+                          </Text>
+                        ) : null}
+                        {accounts.map((provider) => (
+                          <ProviderAccountFrame
+                            key={provider.instanceId}
+                            highlighted={highlighted?.instanceId === provider.instanceId}
+                          >
+                            {provider.driver === "codex" &&
+                            provider.codexRoute?.modelRoute === "opencodex" ? (
+                              <CodexHomeRouteStatus environment={environment} provider={provider} />
+                            ) : (
+                              <ProviderAccount environment={environment} provider={provider} />
+                            )}
+                          </ProviderAccountFrame>
+                        ))}
+                        {accounts.length === 0 && !prompt ? (
+                          <Text className="p-4 text-foreground-muted">
+                            Configure a provider with in-app sign-in in web or desktop Settings.
+                          </Text>
+                        ) : null}
+                      </>
+                    )}
                   </SettingsSection>
                 </View>
               );

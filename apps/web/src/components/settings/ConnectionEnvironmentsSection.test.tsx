@@ -32,6 +32,8 @@ const state = vi.hoisted(() => ({
   canWriteSsh: true,
   connectPairing: vi.fn(),
   connectSshEnvironment: vi.fn(),
+  retryNow: vi.fn(),
+  networkOffline: false,
   sshHosts: null as unknown,
   addHubNode: vi.fn(),
   canAddHubNode: true,
@@ -55,9 +57,23 @@ vi.mock("../../connection/onboarding", () => ({
   connectPairing: state.connectPairing,
   connectSshEnvironment: state.connectSshEnvironment,
 }));
-vi.mock("../../connection/catalog", () => ({
-  environmentCatalog: { remove: vi.fn(), register: vi.fn(), setEnabled: vi.fn() },
-}));
+vi.mock("../../connection/catalog", async () => {
+  const { Atom, AsyncResult } = await import("effect/reactivity");
+  const { AVAILABLE_CONNECTION_STATE } = await import("@goat/client-runtime/connection");
+  const connectionState = Atom.make(AsyncResult.success(AVAILABLE_CONNECTION_STATE));
+  const offlineState = Atom.make(
+    AsyncResult.success({ ...AVAILABLE_CONNECTION_STATE, network: "offline" as const }),
+  );
+  return {
+    environmentCatalog: {
+      remove: vi.fn(),
+      register: vi.fn(),
+      setEnabled: vi.fn(),
+      retryNow: state.retryNow,
+      stateAtom: () => (state.networkOffline ? offlineState : connectionState),
+    },
+  };
+});
 vi.mock("../../state/server", async () => {
   const { Atom } = await import("effect/reactivity");
   const { compileResolvedKeybindingsConfig } = await import("@goat/shared/keybindings");
@@ -162,6 +178,8 @@ beforeEach(() => {
   state.toast.mockReset();
   state.connectPairing.mockReset();
   state.connectSshEnvironment.mockReset();
+  state.retryNow.mockReset();
+  state.networkOffline = false;
   container = document.createElement("div");
   document.body.append(container);
   root = createRoot(container);
@@ -989,3 +1007,69 @@ effectIt.effect("ignores local Add reports and a failed completion after unmount
     expect(state.toast).not.toHaveBeenCalled();
   }),
 );
+
+it("expands a saved machine's connection diagnosis and retries without hiding SSH controls", async () => {
+  state.networkOffline = true;
+  const environmentId = EnvironmentId.make("diagnosis-vps");
+  const environment: EnvironmentPresentation = {
+    environmentId,
+    label: "Diagnosis VPS",
+    displayUrl: null,
+    relayManaged: false,
+    serverConfig: null,
+    entry: {
+      enabled: true,
+      target: new SshConnectionTarget({
+        environmentId,
+        connectionId: "diagnosis-ssh",
+        label: "Diagnosis VPS",
+      }),
+      profile: Option.some(
+        new SshConnectionProfile({
+          environmentId,
+          connectionId: "diagnosis-ssh",
+          label: "Diagnosis VPS",
+          target: {
+            alias: "diagnosis-vps",
+            hostname: "example.invalid",
+            username: null,
+            port: null,
+          },
+        }),
+      ),
+    },
+    connection: {
+      phase: "reconnecting",
+      stage: "opening",
+      error: "Network unavailable",
+      traceId: null,
+      failure: { kind: "retrying", reason: "network", detail: "Network unavailable" },
+    },
+  };
+  const registry = AtomRegistry.make();
+  try {
+    registry.set(state.environments, [environment]);
+    await act(async () =>
+      root.render(
+        <RegistryContext value={registry}>
+          <TooltipProvider delay={0}>
+            <ConnectionEnvironmentsSection title="Connections" searchable={false} />
+          </TooltipProvider>
+        </RegistryContext>,
+      ),
+    );
+    expect(container.textContent).toContain("This device is offline");
+    expect(container.textContent).not.toContain("Reconnecting: Network unavailable");
+    expect(container.querySelector('[aria-label="Switch off Diagnosis VPS"]')).not.toBeNull();
+    expect(container.textContent).not.toContain("What to try");
+    await act(async () => button("Details").click());
+    expect(container.textContent).toContain("What to try");
+    await act(async () => button("Retry now").click());
+    expect(state.retryNow).toHaveBeenCalledWith(environmentId);
+    await act(async () => button("Details").click());
+    expect(container.textContent).not.toContain("What to try");
+  } finally {
+    await act(async () => root.render(<div />));
+    registry.dispose();
+  }
+});

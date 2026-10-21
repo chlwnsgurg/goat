@@ -1,29 +1,26 @@
-import { agentSurfaceRegistry } from "@goat/contracts/agentSurface";
-import { agentSurfaceAnnotations } from "../../agentSurface.ts";
 import {
-  OrchestratorMcpCapabilitiesResult,
   OrchestrationV2StopWorkflowInput,
+  OrchestratorMcpCapabilitiesResult,
   OrchestratorMcpCreateThreadsInput,
   OrchestratorMcpCreateThreadsResult,
   OrchestratorMcpDelegateTaskInput,
   OrchestratorMcpDelegateTaskResult,
   OrchestratorMcpDeleteScheduledTaskInput,
   OrchestratorMcpDeleteScheduledTaskResult,
-  OrchestratorMcpRequestSecretInput,
-  OrchestratorMcpRequestSecretResult,
   OrchestratorMcpFailure,
   OrchestratorMcpListScheduledTasksInput,
   OrchestratorMcpListScheduledTasksResult,
+  OrchestratorMcpRequestSecretInput,
+  OrchestratorMcpRequestSecretResult,
+  OrchestratorMcpReviewFindingsExportInput,
+  OrchestratorMcpReviewFindingsExportResult,
+  OrchestratorMcpReviewFindingsRecordInput,
+  OrchestratorMcpReviewFindingsRecordResult,
   OrchestratorMcpScheduleTaskInput,
   OrchestratorMcpScheduleTaskResult,
   OrchestratorMcpTaskCancelInput,
   OrchestratorMcpTaskCancelResult,
-  OrchestratorMcpUpdateScheduledTaskInput,
   OrchestratorMcpTaskStatusInput,
-  OrchestratorMcpReviewFindingsRecordInput,
-  OrchestratorMcpReviewFindingsRecordResult,
-  OrchestratorMcpReviewFindingsExportInput,
-  OrchestratorMcpReviewFindingsExportResult,
   OrchestratorMcpThreadInterruptInput,
   OrchestratorMcpThreadInterruptResult,
   OrchestratorMcpThreadListInput,
@@ -40,11 +37,14 @@ import {
   OrchestratorMcpThreadWatchInput,
   OrchestratorMcpThreadWatchListResult,
   OrchestratorMcpThreadWatchResult,
+  OrchestratorMcpUpdateScheduledTaskInput,
   ThreadMetadataMcpUpdateInput,
   ThreadMetadataMcpUpdateResult,
 } from "@goat/contracts";
+import { agentSurfaceRegistry } from "@goat/contracts/agentSurface";
 import { Tool, Toolkit } from "effect/ai";
 import * as Schema from "effect/Schema";
+import { agentSurfaceAnnotations } from "../../agentSurface.ts";
 
 import * as ThreadManagementService from "../../../orchestration-v2/ThreadManagementService.ts";
 import * as ThreadResultService from "../../../threadResults/ThreadResultService.ts";

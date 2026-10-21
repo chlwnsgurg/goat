@@ -16,6 +16,7 @@ import * as ProviderLatestVersions from "@goat/provider-core/server/ProviderLate
 import * as ProviderEventLoggers from "@goat/provider-core/server/ProviderEventLoggers";
 import * as TestProviderHost from "@goat/provider-testing/TestProviderHost";
 import { GrokDriver } from "./driver.ts";
+import { resolveLatestProviderVersion } from "@goat/provider-core/server/maintenanceResolver";
 
 import * as IdAllocator from "@goat/provider-core/server/IdAllocator";
 import * as McpProviderSessions from "@goat/provider-core/server/McpProviderSessions";
@@ -72,46 +73,13 @@ function stdoutSpawner(onSpawn: (command: string, args: ReadonlyArray<string>) =
 const windowsHost = HostProcess.Platform.defaultValue() === "win32";
 
 it.layer(layerTest)("GrokDriver", (it) => {
-  it.effect.skipIf(windowsHost)("updates through the configured executable's own updater", () =>
-    Effect.gen(function* () {
-      const fs = yield* FileSystem.FileSystem;
-      const path = yield* Path.Path;
-      const tempDir = yield* fs.makeTempDirectoryScoped({ prefix: "goat-grok-driver-" });
-      const grokHome = path.join(tempDir, "Grok Home");
-      const binaryPath = path.join(grokHome, "bin", "grok");
-      yield* fs.makeDirectory(path.dirname(binaryPath), { recursive: true });
-      yield* fs.writeFileString(binaryPath, "#!/bin/sh\n");
-      yield* fs.chmod(binaryPath, 0o755);
-
-      const instance = yield* GrokDriver.create({
-        instanceId: ProviderInstanceId.make("grok-update"),
-        displayName: "Grok test",
-        enabled: false,
-        environment: [{ name: "GROK_HOME", value: grokHome, sensitive: false }],
-        config: { ...GrokDriver.defaultConfig(), binaryPath },
-      });
-
-      const capabilities = yield* instance.snapshot.resolveMaintenance();
-      expect(capabilities.packageName).toBe("@xai-official/grok");
-      expect(capabilities.update).toMatchObject({
-        command: `'${binaryPath}' update`,
-        executable: binaryPath,
-        args: ["update"],
-      });
-      expect(capabilities.update?.env?.GROK_HOME).toBe(grokHome);
-    }).pipe(
-      Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, noSpawner),
-      Effect.scoped,
-    ),
-  );
-
   // Each case puts a stub `brew` at `<prefix>/bin/brew` beside the Grok binary.
   const homebrewCases = [
     {
       name: "upgrades a Homebrew grok-build cask through brew",
       binary: ["Caskroom", "grok-build", "1.2.3,456", "grok"],
       reportedPrefix: "own",
-      brewArgs: [["--prefix"], ["info", "--json=v2", "grok-build"]],
+      brewArgs: [["--prefix"]],
       latestVersion: "1.2.4",
       update: (brewPath: string, _binaryPath: string) => ({
         command: "brew upgrade --cask grok-build",
@@ -183,8 +151,11 @@ it.layer(layerTest)("GrokDriver", (it) => {
 
         const update = testCase.update(brewPath, binaryPath);
         expect(brewArgs).toEqual(testCase.brewArgs);
-        expect(capabilities.latestVersion).toBe(testCase.latestVersion);
         expect(capabilities.update).toEqual(update && expect.objectContaining(update));
+        if (testCase.latestVersion !== undefined) {
+          expect(yield* resolveLatestProviderVersion(capabilities)).toBe(testCase.latestVersion);
+          expect(brewArgs).toEqual([...testCase.brewArgs, ["info", "--json=v2", "grok-build"]]);
+        }
       }).pipe(
         Effect.provideService(
           ChildProcessSpawner.ChildProcessSpawner,

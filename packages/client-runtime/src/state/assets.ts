@@ -14,6 +14,7 @@ import {
   getProjectFaviconResourceKey,
   isProjectFaviconFallbackUrl,
 } from "@goat/shared/projectFavicon";
+import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 import * as Result from "effect/Result";
@@ -48,7 +49,7 @@ const decodeAssetCollectionKey = Schema.decodeUnknownSync(
   Schema.Tuple([EnvironmentId, Schema.Array(AssetResource)]),
 );
 
-export function parseAssetCollectionKey(
+function parseAssetCollectionKey(
   key: string,
 ): readonly [EnvironmentId, ReadonlyArray<AssetResource>] {
   try {
@@ -176,10 +177,10 @@ export function createAssetEnvironmentAtoms<R, E>(
     )
       return yield* error;
     const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
-    const asset = yield* registry.run(
-      local.environmentId,
-      request(WS_METHODS.assetsCreateUrl, input),
-    );
+    // Map the full cause so retry defects and interruption survive.
+    const asset = yield* registry
+      .run(local.environmentId, request(WS_METHODS.assetsCreateUrl, input))
+      .pipe(Effect.catchCause((cause) => Effect.failCause(Cause.map(cause, () => error))));
     return { ...asset, relativeUrl: new URL(asset.relativeUrl, local.httpBaseUrl).href };
   });
   const createUrl = createEnvironmentQueryAtomFamily(runtime, {
