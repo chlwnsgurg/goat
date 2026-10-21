@@ -9,6 +9,7 @@ vi.mock("../../state/presentation", () => ({
   useEnvironmentConnectionPhase: () => "connected",
   useEnvironmentConnectionUnreachable: () => false,
   useEnvironmentShellSync: () => sync,
+  useEnvironmentSnapshotCapturedAt: () => null,
 }));
 vi.mock("../../state/environments", () => ({
   useEnvironment: () => ({ connection: { phase: "connected", error: null, traceId: null } }),

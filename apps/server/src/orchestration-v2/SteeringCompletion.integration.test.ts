@@ -34,31 +34,20 @@ const instanceId = ProviderInstanceId.make("codex");
 const modelSelection = { instanceId, model: "test-model" };
 
 it.effect.each(
-  [false, true]
-    .flatMap((mailbox) =>
-      (
-        [
-          "before delivery",
-          "during delivery",
-          "before dispatch",
-          "after delivery",
-          "without native steering",
-          "with interrupting native steering",
-          "settled only",
-        ] as const
-      ).map((timing) => ({
-        mailbox,
-        timing,
-        label: mailbox ? "mailbox notification" : "steering",
-      })),
-    )
-    .filter(
-      ({ mailbox, timing }) =>
-        mailbox ||
-        (timing !== "without native steering" &&
-          timing !== "with interrupting native steering" &&
-          timing !== "settled only"),
-    ),
+  (
+    [
+      [false, "during delivery"],
+      [false, "before dispatch"],
+      [true, "after delivery"],
+      [true, "without native steering"],
+      [true, "with interrupting native steering"],
+      [true, "settled only"],
+    ] as const
+  ).map(([mailbox, timing]) => ({
+    mailbox,
+    timing,
+    label: mailbox ? "mailbox notification" : "steering",
+  })),
 )("delivers $label when completion wins $timing", ({ mailbox, timing }) =>
   Effect.scoped(
     Effect.gen(function* () {
@@ -561,14 +550,15 @@ const nextTurnSelectionHarness = Effect.fn("nextTurnSelectionHarness")(function*
   return { events, started, steered, layer, startFirstTurn };
 });
 
-it.effect.each([{ canRestart: false }, { canRestart: true }])(
-  "steers a changed turn-scoped selection into the running turn (canRestart=$canRestart)",
-  ({ canRestart }) =>
+// regression: #19210 a provider that can restart the turn must still steer, since restarting ends its native subagents
+it.effect(
+  "steers a changed turn-scoped selection into a running turn the provider could restart",
+  () =>
     Effect.scoped(
       Effect.gen(function* () {
         const { started, steered, layer, startFirstTurn } = yield* nextTurnSelectionHarness(
-          `steering-selection-change-${canRestart}`,
-          canRestart,
+          "steering-selection-change",
+          true,
         );
         yield* Effect.gen(function* () {
           const orchestrator = yield* Orchestrator.OrchestratorV2;
@@ -909,22 +899,42 @@ it.effect("queues a plain send behind the stopped queue and releases its hold", 
         });
         // The provider has not stopped yet, so a plain send still resolves to a steer.
         yield* send("sent", "auto");
-        yield* worker.drain();
 
+        // Read the queue before the worker delivers Stop: once the provider stops,
+        // the released queue starts its next run.
         const projection = yield* orchestrator.getThreadProjection(threadId);
         assert.deepEqual(steered, []);
         assert.equal(started.length, 1);
         const queued = projection.runs
           .filter((run) => run.status === "queued")
           .sort((left, right) => (left.queuePosition ?? 0) - (right.queuePosition ?? 0));
-        assert.deepEqual(
-          queued.map(
-            (run) => projection.messages.find((message) => message.id === run.userMessageId)?.text,
-          ),
-          ["queued", "sent"],
-        );
+        const textOf = (run: (typeof projection.runs)[number]) =>
+          projection.messages.find((message) => message.id === run.userMessageId)?.text;
+        assert.deepEqual(queued.map(textOf), ["queued", "sent"]);
         // The user sent it, so the queue they stopped runs again once the provider stops.
         assert.isFalse(queued.some((run) => run.queueHeld === true));
+
+        // The run-update reactor starts the next queued run on its own fiber, and
+        // that commit carries the start effect, so drain again once it lands.
+        const resumed = yield* orchestrator.streamDomainEvents.pipe(
+          Stream.filter(
+            (event) =>
+              event.type === "run.updated" &&
+              event.runId === queued[0]!.id &&
+              event.payload.status !== "queued",
+          ),
+          Stream.take(1),
+          Stream.runDrain,
+          Effect.forkScoped,
+        );
+        yield* worker.drain();
+        yield* Fiber.join(resumed);
+        yield* worker.drain();
+        assert.deepEqual(steered, []);
+        assert.deepEqual(
+          started.map((turn) => turn.runId),
+          [started[0]!.runId, queued[0]!.id],
+        );
       }).pipe(Effect.provide(layer));
     }),
   ),

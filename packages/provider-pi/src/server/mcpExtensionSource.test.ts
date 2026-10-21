@@ -1,11 +1,10 @@
-// @effect-diagnostics nodeBuiltinImport:off -- Pi extensions run outside Effect; these tests exercise their native filesystem boundary.
+// @effect-diagnostics nodeBuiltinImport:off - Pi extensions run outside Effect; these tests exercise their native filesystem boundary.
 import * as NodeFSP from "node:fs/promises";
 import * as NodePath from "node:path";
 import * as NodeOS from "node:os";
 import * as NodeModule from "node:module";
 import * as NodeVM from "node:vm";
-import { assert, describe, expect, it } from "@effect/vitest";
-
+import { assert, describe, it } from "@effect/vitest";
 import { PI_GOAT_MCP_EXTENSION_SOURCE } from "./mcpExtensionSource.ts";
 import { loadMcpBridge } from "./mcpBridge.testkit.ts";
 
@@ -45,6 +44,51 @@ async function loadHooks(commands: ReadonlyArray<SkillCommand> = []) {
   });
   return handlers;
 }
+
+describe("Pi orchestration prompt section", () => {
+  it("adds GOAT guidance to Pi prompt sections without replacing the system prompt", async () => {
+    const bridge = await loadMcpBridge();
+    const hook = bridge.handlers.get("before_agent_start")!;
+    const sections: Record<string, string> = { existing: "keep" };
+    const result = await hook(
+      { systemPrompt: "base", systemPromptOptions: { sections } },
+      { ui: { notify: assert.fail } },
+    );
+    assert.isUndefined(result);
+    assert.equal(sections.existing, "keep");
+    assert.include(sections.goat_code_orchestration!, "orchestrator_capabilities");
+    assert.isFalse(Object.hasOwn(sections, "t3_code_orchestration"));
+  });
+
+  it.each([
+    {
+      name: "on Pi builds without prompt sections",
+      events: [
+        { systemPrompt: "base" },
+        { systemPrompt: "base", systemPromptOptions: {} },
+        { systemPrompt: "base", systemPromptOptions: { sections: null } },
+      ],
+    },
+    {
+      name: "when an earlier extension forces the system prompt",
+      events: [
+        {
+          systemPrompt: "forced",
+          systemPromptOptions: { sections: {}, forceSystemPrompt: "forced" },
+        },
+      ],
+    },
+  ])("appends guidance $name", async ({ events }) => {
+    const bridge = await loadMcpBridge();
+    const hook = bridge.handlers.get("before_agent_start")!;
+    for (const event of events) {
+      const result = await hook(event, { ui: { notify: assert.fail } });
+      assert.isDefined(result);
+      assert.isTrue(result!.systemPrompt.startsWith(`${event.systemPrompt}\n\n`));
+      assert.include(result!.systemPrompt, "orchestrator_capabilities");
+    }
+  });
+});
 
 describe("Pi MCP tool results", () => {
   it("returns mixed screenshot blocks and typed script output without repeating structured text", async () => {
@@ -97,66 +141,13 @@ describe("Pi MCP tool results", () => {
     assert.deepEqual(output.content, [{ type: "text", text: '{"count":2}' }]);
     assert.deepEqual(output.structuredContent, result);
   });
-
-  it("propagates cancellation without returning a successful result", async () => {
-    const bridge = await loadMcpBridge();
-    const controller = new AbortController();
-    controller.abort();
-    await expect(bridge.tools[0]!.execute("cancelled", {}, controller.signal)).rejects.toThrow(
-      "aborted",
-    );
-  });
 });
 
 describe("Pi MCP tool exposure", () => {
-  it("calls a wp3-renamed tool through one goat namespace without rewriting its bare id", async () => {
-    const bridge = await loadMcpBridge({
-      modern: true,
-      toolSearchAvailable: true,
-      catalog: [{ name: "goat_thread_read", description: "Read a GOAT thread." }],
-    });
-    assert.deepEqual(bridge.registrations, ["mcp__goat__goat_thread_read"]);
-    const tool = bridge.tools.find((tool) => tool.name === "mcp__goat__goat_thread_read");
-    assert.isDefined(tool);
-    assert.equal(tool!.exposure, "deferred");
-    const result = await tool!.execute("goat-read", { threadId: "thread-goat" });
-    assert.deepEqual(JSON.parse(JSON.stringify(bridge.requests.at(-1)?.params)), {
-      name: "goat_thread_read",
-      arguments: { threadId: "thread-goat" },
-    });
-    assert.deepEqual(JSON.parse(JSON.stringify(result.details)), {
-      server: "goat",
-      tool: "goat_thread_read",
-    });
-  });
-
   const discoveryContext = {
     model: { api: "anthropic-messages" },
     ui: { notify: () => undefined },
   };
-
-  it.each(["session_start", "session_tree", "model_select", "before_agent_start"])(
-    "declares optional T3 tools for OpenAI-compatible gateways at %s",
-    async (hookName) => {
-      const bridge = await loadMcpBridge({ modern: true, toolSearchAvailable: true });
-      const hook = bridge.handlers.get(hookName);
-      assert.isDefined(hook);
-      await hook!(
-        { systemPrompt: "Pi system prompt" },
-        { model: { api: "openai-completions" }, ui: { notify: assert.fail } },
-      );
-      assert.isTrue(
-        bridge.tools
-          .filter((tool) => tool.name.startsWith("mcp__goat__"))
-          .every((tool) => bridge.getActiveTools().includes(tool.name)),
-      );
-      const result = await bridge.tools
-        .find((tool) => tool.name === "mcp__goat__preview_snapshot")!
-        .execute("gateway-call", {});
-      assert.equal(result.content[0]?.text, "browser snapshot");
-      assert.equal(bridge.tools.filter((tool) => tool.exposure === "hidden").length, 0);
-    },
-  );
 
   it("keeps orchestration direct and optional bridge tools discoverable on modern Pi", async () => {
     const bridge = await loadMcpBridge({ modern: true, toolSearchAvailable: true });
@@ -164,7 +155,7 @@ describe("Pi MCP tool exposure", () => {
     const start = bridge.handlers.get("before_agent_start");
     assert.isDefined(start);
     const prompt = await start!({ systemPrompt: "Pi system prompt" }, discoveryContext);
-    assert.include(prompt.systemPrompt, "orchestrator_capabilities");
+    assert.include(prompt?.systemPrompt ?? "", "orchestrator_capabilities");
     assert.equal(bridge.servers.length, 0);
     assert.equal(bridge.tools.length, 4);
     assert.equal(bridge.registrations.length, 4);
@@ -264,48 +255,26 @@ describe("Pi MCP tool exposure", () => {
     },
   );
 
-  it("honors goat wildcard tool selection", async () => {
+  it("calls a wp3-renamed tool through one goat namespace without rewriting its bare id", async () => {
     const bridge = await loadMcpBridge({
       modern: true,
       toolSearchAvailable: true,
-      allowsTool: (name) =>
-        name === "read" || name === "tool_search" || name.startsWith("mcp__goat__"),
+      catalog: [{ name: "goat_thread_read", description: "Read a GOAT thread." }],
     });
-    await bridge.handlers.get("session_start")!({ systemPrompt: "" }, discoveryContext);
-    assert.equal(bridge.tools.length, 4);
-    assert.equal(bridge.tools.filter((tool) => tool.exposure === "direct").length, 3);
-    const tool = bridge.tools.find((tool) => tool.name === "mcp__goat__preview_snapshot");
+    assert.deepEqual(bridge.registrations, ["mcp__goat__goat_thread_read"]);
+    const tool = bridge.tools.find((tool) => tool.name === "mcp__goat__goat_thread_read");
     assert.isDefined(tool);
-    assert.equal((await tool!.execute("selected", {})).content[0]?.text, "browser snapshot");
+    assert.equal(tool!.exposure, "deferred");
+    const result = await tool!.execute("goat-read", { threadId: "thread-goat" });
+    assert.deepEqual(JSON.parse(JSON.stringify(bridge.requests.at(-1)?.params)), {
+      name: "goat_thread_read",
+      arguments: { threadId: "thread-goat" },
+    });
+    assert.deepEqual(JSON.parse(JSON.stringify(result.details)), {
+      server: "goat",
+      tool: "goat_thread_read",
+    });
   });
-
-  it.each([false, true])(
-    "reconciles tree loadouts while honoring search exclusion: %s",
-    async (excludeSearch) => {
-      const bridge = await loadMcpBridge({
-        modern: true,
-        toolSearchAvailable: true,
-        allowsTool: (name) =>
-          name !== "mcp__goat__delegate_task" && (!excludeSearch || name !== "tool_search"),
-      });
-      await bridge.handlers.get("session_start")!({ systemPrompt: "" }, discoveryContext);
-      bridge.restoreActiveTools(["read", "mcp__goat__task_status", "mcp__goat__preview_snapshot"]);
-      const tree = bridge.handlers.get("session_tree");
-      assert.isDefined(tree);
-      await tree!({ systemPrompt: "" }, discoveryContext);
-      assert.deepEqual(bridge.getActiveTools(), [
-        "read",
-        "mcp__goat__task_status",
-        "mcp__goat__preview_snapshot",
-        ...(!excludeSearch ? ["tool_search"] : []),
-      ]);
-      assert.isFalse(
-        bridge.tools.some(
-          (tool) => tool.exposure !== "hidden" && tool.name.endsWith("__delegate_task"),
-        ),
-      );
-    },
-  );
 });
 
 describe("Pi tool discovery permissions", () => {

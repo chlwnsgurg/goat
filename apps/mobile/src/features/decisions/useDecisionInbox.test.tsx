@@ -249,6 +249,7 @@ vi.mock("../../components/ui/ControlPill", () => ({
   ControlPill: PressHost,
 }));
 vi.mock("../../components/ui/Menu", () => ({ Menu: Box }));
+vi.mock("../../components/ui/GlassSurface", () => ({ GlassSurface: Box }));
 vi.mock("../../native/SelectableMarkdownText", () => ({
   SelectableMarkdownText: (props: { readonly markdown: string }) => (
     <TextHost>{props.markdown}</TextHost>
@@ -1093,6 +1094,7 @@ const catalogState: WorkspaceState = {
   hasConnections: true,
   hasReadyEnvironment: true,
   hasConnectingEnvironment: false,
+  hasSyncingConnectedEnvironment: false,
   connectingEnvironments: [],
   connectionState: "connected",
   connectionError: null,
@@ -1172,6 +1174,7 @@ function NavigationHarness(props: { surface: "home" | "sidebar" | "direct" }) {
       onOpenSettings={noop}
       onOpenEnvironmentSettings={noop}
       onOpenThreadPullRequests={noop}
+      onOpenPendingTask={noop}
       onNewThreadOnBranch={noop}
       onNewThreadInProject={noop}
       onSearchQueryChange={noop}

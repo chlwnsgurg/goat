@@ -1,15 +1,15 @@
-import * as ThreadLaunchMcpService from "../../ThreadLaunchMcpService.ts";
 import { OrchestratorMcpFailure, ProjectId } from "@goat/contracts";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
-import * as Project from "../../../project/ProjectService.ts";
 import * as ManagedProjectFolders from "../../../project/ManagedProjectFolders.ts";
+import * as Project from "../../../project/ProjectService.ts";
 import * as Repositories from "../../../sourceControl/SourceControlRepositoryService.ts";
 import * as HostThreadsMcpService from "../../HostThreadsMcpService.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
 import * as McpToolAccess from "../../McpToolAccess.ts";
 import { newCommandId, readCaller, unavailable } from "../../threadAccess.ts";
+import * as ThreadLaunchMcpService from "../../ThreadLaunchMcpService.ts";
 import { ProjectToolkit } from "./tools.ts";
 
 function projectFailure(error: Project.ProjectServiceError) {

@@ -1,3 +1,4 @@
+import { fakeTimers } from "../../../test/render";
 import { EnvironmentId, ThreadId, COMPOSER_CONTEXT_REVIEW_DIFF_MAX_CHARS } from "@goat/contracts";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
@@ -21,7 +22,7 @@ let viewport: HTMLDivElement;
 const bounds = { left: 10, top: 10, right: 500, bottom: 400, width: 490, height: 390 };
 
 beforeEach(() => {
-  vi.useFakeTimers();
+  fakeTimers();
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
   vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) =>
     window.setTimeout(() => callback(0), 0),
