@@ -249,8 +249,18 @@ export const MemoryProviderCapabilities = struct({
 });
 export type MemoryProviderCapabilities = typeof MemoryProviderCapabilities.Type;
 
+/**
+ * Formats recorded in revision provenance. Hub protocol v1 peers and older clients decode this
+ * literal strictly, so it cannot grow without a protocol bump.
+ */
 export const MemoryImportFormat = Schema.Literals(["codex", "claude", "omo"]);
 export type MemoryImportFormat = typeof MemoryImportFormat.Type;
+/**
+ * Formats a server can discover and register. These stay local to the import RPC and the
+ * importing server; servers without `capabilities.memory.asideImport` reject `aside`.
+ */
+export const MemoryImportSourceFormat = Schema.Literals(["codex", "claude", "omo", "aside"]);
+export type MemoryImportSourceFormat = typeof MemoryImportSourceFormat.Type;
 
 /**
  * The import format named in revision provenance. Decoders accept any format token
@@ -2041,7 +2051,7 @@ export class MemoryImportRpcError extends Schema.TaggedError<MemoryImportRpcErro
 
 export const MemoryImportSource = struct({
   sourceId: MemoryImportSourceId,
-  format: MemoryImportFormat,
+  format: MemoryImportSourceFormat,
   parserVersion: canonical,
   profile: canonical,
   label: canonical,
@@ -2110,7 +2120,7 @@ const importSelector = struct({
 
 export const MemoryImportProviderInput = bounded(
   Schema.Union([
-    struct({ ...space, action: Schema.Literal("discover"), format: MemoryImportFormat }),
+    struct({ ...space, action: Schema.Literal("discover"), format: MemoryImportSourceFormat }),
     struct({
       ...space,
       action: Schema.Literal("preview"),
