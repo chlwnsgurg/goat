@@ -193,8 +193,8 @@ const DISPOSABLE_RENDER_BACKLOG: Array<string> = [
   "apps/web/src/components/chat/HandoffCard.browser.test.tsx",
   "apps/web/src/components/chat/V2ItemInspector.browser.test.tsx",
   "apps/web/src/components/chat/useAssistantCitationTarget.browser.test.tsx",
-  "apps/web/src/components/decisions/DecisionInbox.test.tsx",
-  "apps/web/src/components/decisions/DecisionUserInputForm.test.tsx",
+  "apps/web/src/components/decisions/DecisionInbox.browser.test.tsx",
+  "apps/web/src/components/decisions/DecisionUserInputForm.browser.test.tsx",
   "apps/web/src/components/decisions/useDecisionInbox.browser.test.tsx",
   "apps/web/src/components/desktop/HubNodesImportCoordinator.browser.test.tsx",
   "apps/web/src/components/files/AttachmentFilePreview.media.browser.test.tsx",
@@ -236,9 +236,9 @@ const DISPOSABLE_RENDER_BACKLOG: Array<string> = [
   "apps/web/src/components/settings/RemoteLaunchesSettings.browser.test.tsx",
   "apps/web/src/components/settings/SshRuntimeSettingsRow.browser.test.tsx",
   "apps/web/src/components/settings/settingsDrafts.browser.test.tsx",
-  "apps/web/src/components/sidebar/SidebarChrome.test.tsx",
-  "apps/web/src/components/sidebar/SidebarEnvironmentConnection.test.tsx",
-  "apps/web/src/components/sidebar/useThreadContextDrag.test.ts",
+  "apps/web/src/components/sidebar/SidebarChrome.browser.test.tsx",
+  "apps/web/src/components/sidebar/SidebarEnvironmentConnection.browser.test.tsx",
+  "apps/web/src/components/sidebar/useThreadContextDrag.browser.test.ts",
   "apps/web/src/darkModeContrast.browser.test.ts",
   "apps/web/src/fileContextMenu.browser.test.ts",
   "apps/web/src/filePathCopy.browser.test.ts",
@@ -249,6 +249,8 @@ const DISPOSABLE_RENDER_BACKLOG: Array<string> = [
   "apps/web/src/notes/NoteConflictDialog.browser.test.tsx",
   "apps/web/src/notes/NoteEditor.browser.test.tsx",
   "apps/web/src/notes/NoteLinkedThread.browser.test.tsx",
+  "apps/web/src/lib/memoryImportRecoveryStorage.browser.test.ts",
+  "apps/web/src/lib/storageMigration.integration.browser.test.ts",
 ];
 
 const RESTRICTED_IMPORT_PATHS = [
