@@ -9,6 +9,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 import { selectActiveRightPanelSurface, useRightPanelStore } from "~/rightPanelStore";
+import { fakeTimers } from "../../../test/render";
 
 const state = vi.hoisted(() => ({
   platform: "linux",
@@ -115,7 +116,7 @@ let container: HTMLDivElement;
 const setOpen = vi.fn();
 
 beforeEach(() => {
-  vi.useFakeTimers();
+  fakeTimers();
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
   vi.stubGlobal(
     "ResizeObserver",

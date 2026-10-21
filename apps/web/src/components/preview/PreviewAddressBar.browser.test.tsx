@@ -1,3 +1,4 @@
+import { fakeTimers } from "../../../test/render";
 import { EnvironmentId, ThreadId } from "@goat/contracts";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
@@ -49,7 +50,7 @@ describe("PreviewAddressBar", () => {
   };
 
   beforeEach(() => {
-    vi.useFakeTimers();
+    fakeTimers();
     vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
     Object.defineProperty(Element.prototype, "getAnimations", {
       configurable: true,
