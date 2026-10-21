@@ -3,6 +3,7 @@ import {
   MEMORY_ADMINISTRATION_MCP_TOOLS,
   AttachmentCreateUploadUrlInput,
   AttachmentCreateUploadUrlResult,
+  type AuthEnvironmentScope,
   ChatAttachmentId,
   ChatFileAttachment,
   ChatImageAttachment,
@@ -226,6 +227,12 @@ export interface SshHostToolCall {
    * to a session with fewer permissions.
    */
   readonly approvals?: boolean;
+  /**
+   * The caller holds a live `providers:manage`, so the remote session carries
+   * it too and the remote can attribute a provider write to a person allowed
+   * to make it. Like approvals, it never falls back to a narrower session.
+   */
+  readonly providersManage?: boolean;
   readonly requireReady?: true;
 }
 
@@ -288,6 +295,9 @@ export class SshRemoteDispatch extends Context.Service<
       { readonly stdout: string; readonly stderr: string },
       SshRemoteDispatchError
     >;
+    readonly identifyTarget: (
+      target: DesktopSshEnvironmentTarget,
+    ) => Effect.Effect<EnvironmentId | null, SshRemoteDispatchError>;
     readonly preflightTarget: (input: {
       readonly target: DesktopSshEnvironmentTarget;
       readonly runtimeMode: RuntimeMode;
@@ -327,8 +337,26 @@ export class SshRemoteDispatch extends Context.Service<
     ) => Effect.Effect<unknown, SshRemoteDispatchError | E, R>;
     /** Hosts this process holds an SSH tunnel to, and every linked host, sorted. */
     readonly connectedHosts: Effect.Effect<ReadonlyArray<string>>;
+    /**
+     * Forwards a node's GOAT server to a local port for the hub proxy, starting the runtime when
+     * needed. Takes the full target so a node's own user, host name and port win over the alias.
+     * Never wakes a stopped cloud machine.
+     */
+    readonly proxyEndpoint: (
+      target: DesktopSshEnvironmentTarget,
+    ) => Effect.Effect<
+      { readonly httpBaseUrl: string; readonly wsBaseUrl: string },
+      SshRemoteDispatchError
+    >;
+    /** Issues a node client session holding exactly `scopes`, for the hub proxy's own use. */
+    readonly issueProxySession: (
+      target: DesktopSshEnvironmentTarget,
+      scopes: ReadonlyArray<AuthEnvironmentScope>,
+    ) => Effect.Effect<SshTunnel.RemoteClientSession, SshRemoteDispatchError>;
   }
 >()("goat/sshRemote/SshRemoteDispatch") {}
+
+const decodeIdentityFile = Schema.decodeEffect(EnvironmentId);
 
 const decodeRemoteIdentity = Schema.decodeUnknownEffect(
   Schema.Struct({ environmentId: EnvironmentId }),
@@ -350,8 +378,9 @@ const sessionKey = (
   ceiling: RuntimeMode,
   approvals: boolean,
   memoryGrantCeiling: import("@goat/contracts").MemoryTaskGrantCeiling = "none",
+  providersManage = false,
 ) =>
-  `${targetConnectionKey(target)}\u0000${ceiling}\u0000${memoryGrantCeiling}${approvals ? "\u0000approvals" : ""}`;
+  `${targetConnectionKey(target)}\u0000${ceiling}\u0000${memoryGrantCeiling}${approvals ? "\u0000approvals" : ""}${providersManage ? "\u0000providers" : ""}`;
 const decodeRemoteCapabilities = Schema.decodeUnknownEffect(OrchestratorMcpCapabilitiesResult);
 
 const decodeRemoteProject = Schema.decodeUnknownEffect(Schema.Struct({ id: ProjectId }));
@@ -653,7 +682,8 @@ const make = Effect.gen(function* () {
           manager.disconnectEnvironment({ alias, hostname: alias, username: null, port: null }),
         ).pipe(Effect.ignore({ log: true }));
     });
-  if (Option.isSome(cloudMachines)) yield* cloudMachines.value.onAliasInvalidated(invalidateAlias);
+  if (Option.isSome(cloudMachines))
+    yield* cloudMachines.value.onAliasInvalidated((alias) => invalidateAlias(alias));
 
   // Hosts linked over HTTPS. Optional so test layers without it dial every alias as plain SSH.
   const linkedHosts = yield* Effect.serviceOption(LinkedHosts.LinkedHosts);
@@ -906,8 +936,9 @@ const make = Effect.gen(function* () {
     approvals = false,
     memoryGrantCeiling: import("@goat/contracts").MemoryTaskGrantCeiling = "none",
     requireReady?: true,
+    providersManage = false,
   ) {
-    const key = sessionKey(target, ceiling, approvals, memoryGrantCeiling);
+    const key = sessionKey(target, ceiling, approvals, memoryGrantCeiling, providersManage);
     const gate = sessionLocks.get(key) ?? Semaphore.makeUnsafe(1);
     sessionLocks.set(key, gate);
     const work = Effect.gen(function* () {
@@ -918,10 +949,11 @@ const make = Effect.gen(function* () {
       const issued = yield* withRuntime(
         manager.issueMcpClientSession(target, {
           ...(requireReady === undefined ? {} : { requireReady }),
-          label: `GOAT SSH dispatch (${ceiling}${approvals ? ", approvals" : ""})`,
+          label: `GOAT SSH dispatch (${ceiling}${approvals ? ", approvals" : ""}${providersManage ? ", providers" : ""})`,
           ttl: SESSION_TTL,
           runtimeModeCeiling: ceiling,
           ...(approvals ? { approvals: true } : {}),
+          ...(providersManage ? { providersManage: true } : {}),
           memoryScopes:
             memoryGrantCeiling === "none"
               ? []
@@ -945,7 +977,16 @@ const make = Effect.gen(function* () {
                     `${target.alias} could not issue a GOAT session that may answer approvals: ${describe(error)}. Update GOAT there, or let the user answer in that thread.`,
                   ),
             )
-          : sshFailed(target.alias),
+          : providersManage
+            ? Effect.mapError((error) =>
+                error instanceof SshRemoteDispatchError
+                  ? error
+                  : failure(
+                      "remote_refused",
+                      `${target.alias} could not issue a GOAT session that may manage providers: ${describe(error)}. Update GOAT there, or manage providers in Settings on ${target.alias}.`,
+                    ),
+              )
+            : sshFailed(target.alias),
       );
       const parsedExpiry = issued.expiresAt === null ? Number.NaN : Date.parse(issued.expiresAt);
       const session = {
@@ -1361,6 +1402,29 @@ const make = Effect.gen(function* () {
     const target = yield* resolveHost(input.host);
     return yield* runRemoteScript({ target, script: input.script, timeoutMs: input.timeoutMs });
   });
+  const identifyTarget = Effect.fn("SshRemoteDispatch.identifyTarget")(function* (
+    target: DesktopSshEnvironmentTarget,
+  ) {
+    yield* readyCloudTarget(target, false);
+    const result = yield* withRuntime(
+      manager.runRemoteScript(target, {
+        script:
+          'if [ -f "$HOME/.goat/userdata/environment-id" ]; then cat "$HOME/.goat/userdata/environment-id"; fi',
+        timeoutMs: 15_000,
+      }),
+    ).pipe(
+      Effect.mapError(() =>
+        failure("host_unavailable", `Could not read GOAT identity on ${target.alias}.`),
+      ),
+    );
+    const value = result.stdout.trim();
+    if (value === "") return null;
+    return yield* decodeIdentityFile(value).pipe(
+      Effect.mapError(() =>
+        failure("host_unavailable", `GOAT identity on ${target.alias} is invalid.`),
+      ),
+    );
+  });
   const preflightTarget = Effect.fn("SshRemoteDispatch.preflightTarget")(function* (input: {
     readonly target: DesktopSshEnvironmentTarget;
     readonly runtimeMode: RuntimeMode;
@@ -1764,6 +1828,34 @@ const make = Effect.gen(function* () {
           ),
     );
 
+  const proxyEndpoint: SshRemoteDispatch["Service"]["proxyEndpoint"] = (target) =>
+    Effect.gen(function* () {
+      yield* readyCloudTarget(target, false);
+      const bootstrap = yield* withRuntime(
+        manager.ensureEnvironment(target, { ...AGENT_CONNECTION, keyOnly: true }),
+      ).pipe(unavailable(target.alias));
+      if ("type" in bootstrap)
+        return yield* failure(
+          "host_unavailable",
+          pendingRuntimeMessage(target.alias, bootstrap.pending),
+        );
+      connected.add(target.alias);
+      return { httpBaseUrl: bootstrap.httpBaseUrl, wsBaseUrl: bootstrap.wsBaseUrl };
+    });
+
+  const issueProxySession: SshRemoteDispatch["Service"]["issueProxySession"] = (target, scopes) =>
+    Effect.gen(function* () {
+      yield* readyCloudTarget(target, false);
+      return yield* withRuntime(
+        manager.issueClientSession(target, {
+          subject: "hub-proxy",
+          label: "GOAT hub proxy",
+          ttl: SESSION_TTL,
+          scopes,
+        }),
+      ).pipe(unavailable(target.alias));
+    });
+
   /**
    * callHostTool for a linked host: the saved session instead of one issued
    * over SSH. It cannot narrow that session to the caller, so a write needs a
@@ -1892,6 +1984,7 @@ const make = Effect.gen(function* () {
           call.approvals === true,
           "none",
           call.requireReady,
+          call.providersManage === true,
         ).pipe(unavailable(target.alias));
         attemptedToken = session.token;
         if (call.writes && !session.ceilingApplied) {
@@ -1929,7 +2022,13 @@ const make = Effect.gen(function* () {
             // Revoked or expired on the remote: issue a fresh session once.
             if (attemptedToken !== undefined) {
               invalidateSession(
-                sessionKey(target, ceiling, call.approvals === true),
+                sessionKey(
+                  target,
+                  ceiling,
+                  call.approvals === true,
+                  "none",
+                  call.providersManage === true,
+                ),
                 attemptedToken,
               );
             }
@@ -2001,6 +2100,9 @@ const make = Effect.gen(function* () {
     runRemoteScript,
     runHostScript,
     preflightTarget,
+    identifyTarget,
+    proxyEndpoint,
+    issueProxySession,
   });
 });
 
@@ -2026,7 +2128,13 @@ export const resolveSshCliRunner = (baseDir: string) =>
       Config.withDefault(""),
       Effect.map((value) => value.trim() || undefined),
     );
+    const nodeScriptPath = yield* Config.String("GOAT_DEV_REMOTE_SERVER_ENTRY_PATH").pipe(
+      Config.withDefault(""),
+    );
     return {
+      ...(nodeScriptPath.trim()
+        ? { nodeScriptPath: nodeScriptPath.trim(), nodeEngineRange: packageJson.engines.node }
+        : {}),
       archiveVersion: packageJson.version,
       ...(BUILD_COMMIT_TIME === undefined ? {} : { archiveCommitTime: BUILD_COMMIT_TIME }),
       archiveDirectory,

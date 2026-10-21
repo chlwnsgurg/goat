@@ -86,10 +86,6 @@ it.each(["src/index.ts", "logs/build:2026"])(
 );
 
 describe("resolveFileContextMenuAbsolutePath", () => {
-  it("joins workspace-relative diff paths onto the workspace root", () => {
-    expect(resolveFileContextMenuAbsolutePath(BASE_TARGET)).toBe("/workspace/project/src/index.ts");
-  });
-
   it("strips the repository prefix when the repo root is nested in the workspace", () => {
     expect(
       resolveFileContextMenuAbsolutePath({

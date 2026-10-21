@@ -129,12 +129,12 @@ const GOAT_MCP_TOOLS: Readonly<Record<string, GoatMcpToolDefinition>> = {
     "pull-request",
   ),
   unwatch_pull_request: tool(
-    ["Stop watching", "Stopping watching", "Stopped watching", "a pull request"],
+    ["Stop watching", "Unwatching", "Stopped watching", "a pull request"],
     "unwatch-pr",
     "pull-request",
   ),
   write_pull_request_guides: tool(
-    ["Write", "Writing", "Started", "review guides"],
+    ["Write", "Writing", "Started writing", "review guides"],
     "write-pr-guides",
     "pull-request",
   ),
@@ -158,7 +158,7 @@ const GOAT_MCP_TOOLS: Readonly<Record<string, GoatMcpToolDefinition>> = {
     "thread-read",
   ),
   task_cancel: tool(
-    ["Cancel", "Canceling", "Requested cancellation of", "delegated task"],
+    ["Cancel", "Canceling", "Requested cancellation of", "a delegated task"],
     "task-cancel",
   ),
   schedule_task: tool(
@@ -404,6 +404,22 @@ const GOAT_MCP_TOOLS: Readonly<Record<string, GoatMcpToolDefinition>> = {
     ["Set", "Setting", "Set", "a fallback chain"],
     "environment-update",
   ),
+  goat_goal_apply: tool(["Apply", "Applying", "Applied", "a fleet goal"], "environment-update"),
+  goat_goal_get: tool(["Read", "Reading", "Read", "a fleet goal"], "host-status"),
+  goat_goal_list: tool(["List", "Listing", "Listed", "fleet goals"], "host-status"),
+  goat_goal_delete: tool(["Delete", "Deleting", "Deleted", "a fleet goal"], "environment-update"),
+  goat_goal_pause: tool(["Pause", "Pausing", "Paused", "a fleet goal"], "environment-update"),
+  goat_goal_resume: tool(["Resume", "Resuming", "Resumed", "a fleet goal"], "environment-update"),
+  goat_host_cordon: tool(["Cordon", "Cordoning", "Cordoned", "a host"], "environment-update"),
+  goat_host_uncordon: tool(
+    ["Uncordon", "Uncordoning", "Uncordoned", "a host"],
+    "environment-update",
+  ),
+  goat_host_drain: tool(["Drain", "Draining", "Drained", "a host"], "environment-update"),
+  goat_thread_reschedule: tool(
+    ["Reschedule", "Rescheduling", "Rescheduled", "a thread"],
+    "thread-update",
+  ),
   goat_provider_home_request: tool(
     ["Request", "Requesting", "Requested", "Codex Home approval"],
     "provider-diagnose",
@@ -452,7 +468,7 @@ const GOAT_MCP_TOOLS: Readonly<Record<string, GoatMcpToolDefinition>> = {
     ["Launch", "Launching", "Launched", "a project thread"],
     "thread-create",
   ),
-  goat_ssh_host_add: tool(["Add", "Adding", "Added", "an SSH host"], "ssh-host-list"),
+  goat_ssh_host_add: tool(["Add", "Adding", "Added", "an SSH device"], "connection-add"),
   goat_ssh_host_prepare: tool(
     ["Prepare", "Preparing", "Prepared", "an SSH host"],
     "environment-update",
@@ -512,7 +528,7 @@ const GOAT_MCP_TOOLS: Readonly<Record<string, GoatMcpToolDefinition>> = {
   goat_cloud_run_list: tool(["List", "Listing", "Listed", "cloud runs"], "thread-list"),
   goat_cloud_run_forget: tool(["Forget", "Forgetting", "Forgot", "a cloud run"], "thread-update"),
   goat_connection_list: tool(["List", "Listing", "Listed", "saved connections"], "connection-list"),
-  goat_connection_add_ssh: tool(["Save", "Saving", "Saved", "an SSH connection"], "connection-add"),
+  goat_connection_add_ssh: tool(["Add", "Adding", "Added", "an SSH device"], "connection-add"),
   goat_connection_remove: tool(
     ["Remove", "Removing", "Removed", "a saved connection"],
     "connection-remove",
@@ -691,10 +707,4 @@ export function resolveGoatMcpToolPresentation(
 ): GoatMcpToolPresentation | null {
   const definition = resolveGoatMcpToolDefinition(toolName);
   return definition === null ? null : { displayName: definition.displayName, logo: "t3-code" };
-}
-
-export function resolveGoatMcpToolSummaryAction(
-  toolName: string | null | undefined,
-): GoatMcpToolSummaryAction | null {
-  return resolveGoatMcpToolDefinition(toolName)?.summaryAction ?? null;
 }

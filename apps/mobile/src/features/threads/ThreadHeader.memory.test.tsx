@@ -16,7 +16,7 @@ vi.mock("../layout/AdaptiveWorkspaceLayout", () => ({
   }),
 }));
 vi.mock("../workspace/useAndroidWorkspaceNavigation", () => ({
-  useWorkspaceListNavigation: () => () => {},
+  useWorkspaceBackNavigation: () => () => {},
 }));
 vi.mock("../../native/NativeWorkspaceColumns", () => ({
   useNativeWorkspaceColumnsSupported: () => false,

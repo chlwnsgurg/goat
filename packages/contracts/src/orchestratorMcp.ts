@@ -5,7 +5,6 @@ import * as SchemaTransformation from "effect/SchemaTransformation";
 import {
   ContextTransferId,
   EnvironmentId,
-  RuntimeRequestId,
   IsoDateTime,
   MessageId,
   NodeId,
@@ -13,6 +12,7 @@ import {
   PositiveInt,
   ProjectId,
   RunId,
+  RuntimeRequestId,
   ScheduledTaskId,
   SecretRef,
   ThreadId,
@@ -167,7 +167,8 @@ export const OrchestratorMcpTarget = Schema.Struct({
   ),
   options: Schema.optional(
     OrchestratorMcpTargetOptions.annotate({
-      description: "Model option selections advertised by orchestrator_capabilities.",
+      description:
+        "Model options from orchestrator_capabilities. For the same provider instance and model, overrides individual inherited values; [] or {} clears them. Claude: {effort: 'max', fastMode: true}; Codex: {reasoningEffort: 'max', serviceTier: 'priority'}. Only use options advertised by the selected model.",
     }),
   ),
 });
@@ -229,7 +230,7 @@ export const OrchestratorMcpDelegateTaskInput = Schema.Struct({
   mode: Schema.optional(
     Schema.Literals(["async", "wait"]).annotate({
       description:
-        "Defaults to async. Use wait only when this turn needs the child's result before you can continue.",
+        "Defaults to async. Use wait only when this turn needs the child's result before you can continue. A blocking question or a pending approval in the child ends the wait early with the task still running.",
     }),
   ),
   timeoutMs: Schema.optional(Schema.Finite).annotate({
@@ -283,12 +284,24 @@ export const OrchestratorMcpDelegateTaskResult = Schema.Struct({
   modelSelection: Schema.optional(ModelSelection),
   parentModelSelection: Schema.optional(ModelSelection),
   reviewLedger: Schema.optional(Schema.Array(ReviewLedgerEntry)),
+  options: Schema.optional(
+    Schema.Array(ProviderOptionSelection).annotate({
+      description:
+        "Stored model option selections for the child run, or its thread before a run starts. Omitted selections use provider defaults.",
+    }),
+  ),
   summary: Schema.NullOr(Schema.String),
   resultContextTransferId: Schema.NullOr(ContextTransferId),
   pendingRequestIds: Schema.optional(Schema.Array(RuntimeRequestId)),
   hasPendingQuestion: Schema.Boolean.annotate({
     description:
       "Blocking question ends mode=wait. Pass threadId=childThreadId to goat_pending_request_list, goat_pending_request_read (with requestId) and goat_pending_request_respond, or ask the user; the task's completion still wakes this thread.",
+  }),
+  pendingApproval: Schema.NullOr(
+    Schema.Struct({ requestId: RuntimeRequestId, kind: ProviderRequestKind, runId: RunId }),
+  ).annotate({
+    description:
+      "Identity of the oldest pending live approval for this task's own unfinished work, or null. Ends mode=wait without cancelling the child; completion still wakes this thread. This grants no approval authority. Read the fresh full request in childThreadId before responding: the record can outlive its provider callback. Decisions remain with the child's existing approval holder; pending request tools answer questions only.",
   }),
   waitTimedOut: Schema.Boolean.annotate({
     description:
@@ -742,6 +755,7 @@ export const OrchestratorMcpThreadTimelineItem = Schema.Struct({
   messageId: Schema.NullOr(MessageId),
   createdBy: Schema.NullOr(OrchestrationV2Actor),
   creationSource: Schema.NullOr(OrchestrationV2CreationSource),
+  senderThreadId: Schema.optional(ThreadId),
   type: Schema.String,
   status: OrchestrationV2TurnItemStatus,
   title: Schema.NullOr(Schema.String),
@@ -962,6 +976,8 @@ export const OrchestratorMcpThreadInterruptInput = Schema.Struct({
   runId: Schema.optional(RunId),
   reason: Schema.optional(Schema.String.check(Schema.isMaxLength(2_000))),
   clientRequestId: Schema.optional(OrchestratorMcpClientRequestId),
+  /** Stop like GOAT's Stop: also hold the thread's queue and stop the tasks it delegated. */
+  stopCascade: Schema.optional(Schema.Boolean),
 });
 export type OrchestratorMcpThreadInterruptInput = typeof OrchestratorMcpThreadInterruptInput.Type;
 
@@ -974,6 +990,8 @@ export const OrchestratorMcpThreadInterruptResult = Schema.Struct({
     Schema.Literal("no_active_run"),
     Schema.Literals(["completed", "failed", "cancelled", "interrupted", "rolled_back"]),
   ]),
+  /** Present when the queue was held and delegated tasks were stopped. */
+  stopCascade: Schema.optional(Schema.Literal(true)),
 });
 export type OrchestratorMcpThreadInterruptResult = typeof OrchestratorMcpThreadInterruptResult.Type;
 
@@ -1006,6 +1024,7 @@ export const OrchestratorMcpCapabilitiesResult = Schema.Struct({
   parentThreadId: Schema.NullOr(ThreadId),
   inheritedProviderInstanceId: Schema.NullOr(ProviderInstanceId),
   inheritedModel: Schema.NullOr(Schema.String),
+  inheritedOptions: Schema.optional(Schema.Array(ProviderOptionSelection)),
   runtimeMode: RuntimeMode,
   interactionMode: ProviderInteractionMode,
   providers: Schema.Array(OrchestratorMcpProviderCapability),

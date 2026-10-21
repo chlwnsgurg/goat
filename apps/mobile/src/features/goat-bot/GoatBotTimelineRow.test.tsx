@@ -20,7 +20,6 @@ vi.mock("./useMobileGoatBotHomeSettings", () => ({
   useMobileGoatBotHomeSettings: () => ({ moveTarget: null, error: null }),
 }));
 vi.mock("./useMobileGoatBotSession", () => ({ useMobileGoatBotSession: () => ({}) }));
-vi.mock("./GoatBotAvatar", () => ({ GoatBotAvatar: () => null }));
 vi.mock("react-native-svg", () => ({ default: () => null, Path: () => null }));
 vi.mock("../settings/appearance/AppearancePreferencesProvider", () => ({
   useAppearancePreferences: () => ({
@@ -70,12 +69,14 @@ const user = (
 });
 
 it("shows time in a same-day pause stamp", async () => {
+  const now = Date.UTC(2026, 9, 21, 12);
+  using _date = vi.spyOn(Date, "now").mockReturnValue(now);
   h = createNativeMemoryHarness();
   view = renderNative(
     h,
     <GoatBotTimelineRow
       {...props}
-      row={{ kind: "day", id: "day", at: new Date().toISOString() }}
+      row={{ kind: "day", id: "day", at: new Date(now).toISOString() }}
     />,
   );
   await view.render();
