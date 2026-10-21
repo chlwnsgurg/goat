@@ -1,3 +1,4 @@
+import { fakeTimers } from "../../../test/render";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, it, vi } from "vite-plus/test";
@@ -15,7 +16,7 @@ const now = Date.parse("2026-10-15T00:00:00Z");
 
 beforeEach(() => {
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
-  vi.useFakeTimers();
+  fakeTimers();
   vi.setSystemTime(now);
   container = document.createElement("div");
   document.body.append(container);
@@ -80,7 +81,7 @@ it("expires a live reply and shows a new reply after the old one expires", async
   expect(container.querySelectorAll('[role="status"] .animate-typing-wave')).toHaveLength(3);
   await act(() => vi.advanceTimersByTime(1_000));
   expect(container.querySelector('[role="status"]')).toBeNull();
-  await act(() => render(Date.now()));
+  await act(() => render(now + 1_000));
   expect(container.querySelector('[role="status"]')).not.toBeNull();
 });
 

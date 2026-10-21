@@ -1,3 +1,4 @@
+import { fakeTimers } from "../../../test/render";
 import { EnvironmentId, type GoatBotHomeClaim } from "@goat/contracts";
 import { act, useSyncExternalStore } from "react";
 import { createRoot, type Root } from "react-dom/client";
@@ -95,7 +96,7 @@ async function advance(ms: number) {
 }
 beforeEach(() => {
   Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
-  vi.useFakeTimers();
+  fakeTimers();
   vi.setSystemTime(1_000);
   state.environments = [environment(a), environment(b)];
   state.permissions = new Set([a, b]);

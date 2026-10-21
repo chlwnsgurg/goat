@@ -91,6 +91,17 @@ describe("thread links", () => {
 });
 
 describe("link round trips", () => {
+  it.each(["goat", "goat-dev", "t3code", "t3code-dev"])(
+    "round-trips new-thread and existing-thread links through %s",
+    (scheme) => {
+      for (const path of ["/new?prompt=Fix+it", "/env-1/thread-1?prompt=Fix+it&panel=diff"]) {
+        const link = promptLinkDeepLink(path, scheme);
+        expect(link.startsWith(`${scheme}://`)).toBe(true);
+        expect(promptLinkAppPath(link)).toBe(path);
+      }
+    },
+  );
+
   it("builds a link that parses back to the same prompt", () => {
     const link = buildNewThreadLink({
       prompt: "Swear count & rating?",
@@ -116,12 +127,5 @@ describe("link round trips", () => {
     expect(promptLinkAppPath("https://app.t3.codes/settings/general")).toBeNull();
     expect(promptLinkAppPath("https://evil.test/new?prompt=hi")).toBeNull();
     expect(promptLinkAppPath("t3code://app/index.html")).toBeNull();
-  });
-
-  it("hands an in-app path to the installed app", () => {
-    expect(promptLinkDeepLink("/new?prompt=hi")).toBe("t3code://new?prompt=hi");
-    expect(promptLinkDeepLink("/env-1/thread-1?prompt=hi")).toBe(
-      "t3code://threads/env-1/thread-1?prompt=hi",
-    );
   });
 });

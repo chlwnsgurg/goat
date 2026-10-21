@@ -1,5 +1,5 @@
 import * as Schema from "effect/Schema";
-import { GitPreparePullRequestThreadInput } from "./git.ts";
+import { GitPreparePullRequestThreadInput, GitRunStackedActionInput } from "./git.ts";
 import {
   AuthMemoryReadScope,
   AuthMemoryWriteScope,
@@ -7,6 +7,7 @@ import {
   AuthOrchestrationReadScope,
   AuthOrchestrationOperateScope,
   AuthProvidersManageScope,
+  AuthPreviewOperateScope,
   AuthSettingsWriteScope,
   AuthEnvironmentMaintainScope,
   AuthSourceControlWriteScope,
@@ -26,6 +27,7 @@ export const CLIENT_GUARDED_RPC_SCOPES = {
   [WS_METHODS.providerHostSyncCancel]: AuthProvidersManageScope,
   [WS_METHODS.sshHostHandoffProgress]: AuthOrchestrationReadScope,
   [WS_METHODS.sshHostProbe]: AuthSettingsWriteScope,
+  [WS_METHODS.sshHostPreflight]: AuthSettingsWriteScope,
   [WS_METHODS.sshHostTrust]: AuthSettingsWriteScope,
   [WS_METHODS.sshHostPrepare]: AuthEnvironmentMaintainScope,
   [WS_METHODS.sshHostForget]: AuthSettingsWriteScope,
@@ -53,6 +55,7 @@ export const CLIENT_GUARDED_RPC_SCOPES = {
   [WS_METHODS.memoryHubSettingsUpdate]: AuthSettingsWriteScope,
   [WS_METHODS.memoryReadSource]: AuthMemoryReadScope,
 
+  [WS_METHODS.previewClose]: AuthPreviewOperateScope,
   [WS_METHODS.serverRunStorageCleanup]: AuthSettingsWriteScope,
   [WS_METHODS.serverCheckOtlpEndpoint]: AuthSettingsWriteScope,
   [WS_METHODS.pullRequestsRunAction]: AuthSourceControlWriteScope,
@@ -90,6 +93,16 @@ export const CLIENT_GUARDED_RPC_SCOPES = {
   [WS_METHODS.scheduledTasksRunNow]: AuthOrchestrationOperateScope,
   [WS_METHODS.scheduledTasksRotateWebhookToken]: AuthOrchestrationOperateScope,
 
+  [WS_METHODS.notesList]: AuthOrchestrationReadScope,
+  [WS_METHODS.notesRead]: AuthOrchestrationReadScope,
+  [WS_METHODS.notesSubscribe]: AuthOrchestrationReadScope,
+  [WS_METHODS.notesWorkTargets]: AuthOrchestrationReadScope,
+  [WS_METHODS.notesWorkTargetProjects]: AuthOrchestrationReadScope,
+  [WS_METHODS.notesWrite]: AuthOrchestrationOperateScope,
+  [WS_METHODS.notesMove]: AuthOrchestrationOperateScope,
+  [WS_METHODS.notesDelete]: AuthOrchestrationOperateScope,
+  [WS_METHODS.notesStartWork]: AuthOrchestrationOperateScope,
+
   [CHANNEL_GATEWAY_WS_METHODS.ensureBot]: AuthOrchestrationOperateScope,
   [CHANNEL_GATEWAY_WS_METHODS.ingest]: AuthOrchestrationOperateScope,
   [CHANNEL_GATEWAY_WS_METHODS.createIdentityLink]: AuthSettingsWriteScope,
@@ -106,11 +119,24 @@ export const CLIENT_GUARDED_RPC_SCOPES = {
   [WS_METHODS.cloudMachinesForget]: AuthSettingsWriteScope,
   [WS_METHODS.cloudMachinesDismissUnconfirmed]: AuthSettingsWriteScope,
   [WS_METHODS.cloudMachinesEnsureReady]: AuthSettingsWriteScope,
+  [WS_METHODS.hubNodesList]: AuthOrchestrationReadScope,
+  [WS_METHODS.hubNodesSubscribe]: AuthOrchestrationReadScope,
+  [WS_METHODS.hubNodesCheck]: AuthOrchestrationReadScope,
+  // Registering a node or a link lets this server reach another machine.
+  [WS_METHODS.hubNodesAdd]: AuthSettingsWriteScope,
+  [WS_METHODS.hubNodesRemove]: AuthSettingsWriteScope,
+  [WS_METHODS.hubNodesImport]: AuthSettingsWriteScope,
+  [WS_METHODS.hubNodesDismissNotice]: AuthSettingsWriteScope,
+  // Preparing may install GOAT on a node; enrolling lets the hub act there for every proxied client.
+  [WS_METHODS.hubProxyPrepareNode]: AuthSettingsWriteScope,
+  [WS_METHODS.hubProxyEnrollNode]: AuthSettingsWriteScope,
+  [WS_METHODS.hubProxyUnenrollNode]: AuthSettingsWriteScope,
   [ORCHESTRATION_V2_WS_METHODS.stopWorkflow]: AuthOrchestrationOperateScope,
 } as const;
 export type ClientGuardedRpcTag = keyof typeof CLIENT_GUARDED_RPC_SCOPES;
 
 const decodePrepareThread = Schema.decodeUnknownSync(GitPreparePullRequestThreadInput);
+const decodeStackedAction = Schema.decodeUnknownSync(GitRunStackedActionInput);
 
 export function clientRpcRequiredScopes(
   method: string,
@@ -126,6 +152,14 @@ export function clientRpcRequiredScopes(
     const payload = decodePrepareThread(input);
     if (payload.mode === "worktree" && payload.threadId !== undefined)
       return [AuthSourceControlWriteScope, AuthOrchestrationOperateScope];
+  }
+  if (method === WS_METHODS.gitRunStackedAction && input !== undefined) {
+    const payload = decodeStackedAction(input);
+    if (
+      payload.threadId !== undefined &&
+      (payload.action === "create_pr" || payload.action === "commit_push_pr")
+    )
+      return [AuthSourceControlWriteScope, AuthOrchestrationReadScope];
   }
   return Object.hasOwn(CLIENT_GUARDED_RPC_SCOPES, method)
     ? [CLIENT_GUARDED_RPC_SCOPES[method as ClientGuardedRpcTag]]

@@ -46,11 +46,11 @@ import * as NodeSqliteClient from "@goat/shared/nodeSqliteClient";
 import * as SqlClient from "effect/sql/SqlClient";
 import * as Coordinator from "../remoteReports/RemoteDispatchCoordinator.ts";
 import * as LaunchWatchService from "../mcp/LaunchWatchService.ts";
-import Migration0062 from "../persistence/Migrations/066_RemoteReports.ts";
-import Migration0063 from "../persistence/Migrations/067_RemoteDispatches.ts";
-import Migration0065 from "../persistence/Migrations/069_RemoteDispatchQuestions.ts";
-import Migration0068 from "../persistence/Migrations/071_RemoteReportRelay.ts";
-import Migration0073 from "../persistence/Migrations/076_MemoryTaskGrantCeiling.ts";
+import Migration0062 from "../persistence/Migrations/069_RemoteReports.ts";
+import Migration0063 from "../persistence/Migrations/070_RemoteDispatches.ts";
+import Migration0065 from "../persistence/Migrations/072_RemoteDispatchQuestions.ts";
+import Migration0068 from "../persistence/Migrations/074_RemoteReportRelay.ts";
+import Migration0073 from "../persistence/Migrations/079_MemoryTaskGrantCeiling.ts";
 
 import packageJson from "../../package.json" with { type: "json" };
 import * as ServerConfig from "../config.ts";
@@ -140,6 +140,7 @@ describe("SSH dispatch tool compatibility", () => {
         forgetEnvironment: () => Effect.die("Unexpected forget"),
         disconnectEnvironment: () => Effect.die("Unexpected SSH disconnect"),
         revalidateTunnels: () => Effect.void,
+        issueClientSession: () => Effect.die("unused"),
         issueMcpClientSession: () =>
           Effect.succeed({
             token: "fixture-session",
@@ -560,6 +561,7 @@ describe("SshRemoteDispatch.callHostTool", () => {
         sessionsIssued: 0,
         requests: 0,
         sessionRequests: [] as Array<boolean>,
+        providersManageRequests: [] as Array<boolean>,
       };
       const fetchEndpoint = vi.fn(async (_url: string, init?: RequestInit) => {
         record.requests += 1;
@@ -613,8 +615,10 @@ describe("SshRemoteDispatch.callHostTool", () => {
         forgetEnvironment: () => Effect.die("Unexpected forget"),
         disconnectEnvironment: () => Effect.die("Unexpected SSH disconnect"),
         revalidateTunnels: () => Effect.void,
+        issueClientSession: () => Effect.die("unused"),
         issueMcpClientSession: (_target, sessionOptions) => {
           record.sessionRequests.push(sessionOptions.approvals === true);
+          record.providersManageRequests.push(sessionOptions.providersManage === true);
           return sessionOptions.approvals === true && options.approvalsFail === true
             ? Effect.fail(
                 new SshCommandError({
@@ -911,6 +915,51 @@ describe("SshRemoteDispatch.callHostTool", () => {
         expect(record.sessionsIssued).toBe(2);
         expect(record.sessionRequests).toEqual([false, differentKey === "approvals"]);
       }),
+  );
+
+  it.effect("issues a providers:manage session separately from a plain session", () =>
+    Effect.gen(function* () {
+      const managed = Effect.gen(function* () {
+        const dispatch = yield* SshRemoteDispatch.SshRemoteDispatch;
+        return yield* dispatch.callHostTool(
+          {
+            host,
+            tool: "goat_provider_sync",
+            arguments: { driver: "opencode" },
+            timeoutMs: 5_000,
+            writes: true,
+            providersManage: true,
+          },
+          Effect.succeed("full-access"),
+        );
+      });
+      const { result, record } = yield* withRemote(
+        {
+          answer: (request) =>
+            initialize(request) ?? { result: { structuredContent: { ok: true } } },
+        },
+        Effect.gen(function* () {
+          const dispatch = yield* SshRemoteDispatch.SshRemoteDispatch;
+          const first = yield* managed;
+          const plain = yield* dispatch.callHostTool(
+            {
+              host,
+              tool: "goat_thread_read",
+              arguments: { threadId: "thread-1" },
+              timeoutMs: 5_000,
+              writes: false,
+            },
+            Effect.succeed("full-access"),
+          );
+          const again = yield* managed;
+          return { first, plain, again };
+        }),
+      );
+      expect(result._tag).toBe("Success");
+      expect(record.providersManageRequests).toEqual([true, false]);
+      expect(record.sessionRequests).toEqual([false, false]);
+      expect(record.sessionsIssued).toBe(2);
+    }),
   );
 
   it.effect("retries session issuance after a failed in-flight attempt", () =>
@@ -1247,6 +1296,7 @@ const withLaunchRemote = <A, E>(
       forgetEnvironment: () => Effect.die("Unexpected forget"),
       disconnectEnvironment: () => Effect.void,
       revalidateTunnels: () => Effect.void,
+      issueClientSession: () => Effect.die("unused"),
       issueMcpClientSession: (target, opts) =>
         Effect.gen(function* () {
           yield* options.beforeSessionIssue?.(opts.memoryScopes ?? []) ?? Effect.void;
@@ -1933,6 +1983,7 @@ describe("SSH dispatch launch lineage", () => {
         forgetEnvironment: () => Effect.die("Unexpected forget"),
         disconnectEnvironment: () => Effect.die("Unexpected SSH disconnect"),
         revalidateTunnels: () => Effect.void,
+        issueClientSession: () => Effect.die("unused"),
         issueMcpClientSession: (_target, options) =>
           Effect.sync(() => {
             memorySessions.push(options.memoryScopes ?? []);
@@ -2644,6 +2695,7 @@ it.effect.each(["matching", "missing", "wrong"] as const)(
         forgetEnvironment: () => Effect.die("Unexpected forget"),
         disconnectEnvironment: () => Effect.void,
         revalidateTunnels: () => Effect.void,
+        issueClientSession: () => Effect.die("unused"),
         issueMcpClientSession: () =>
           Effect.succeed({ token: "fixture", expiresAt: null, runtimeModeCeilingApplied: true }),
         runRemoteScript: () =>
@@ -3053,6 +3105,7 @@ describe("SshRemoteDispatch SSH attachments", () => {
           forgetEnvironment: () => Effect.die("Unexpected forget"),
           disconnectEnvironment: () => Effect.die("Unexpected disconnect"),
           revalidateTunnels: () => Effect.void,
+          issueClientSession: () => Effect.die("unused"),
           issueMcpClientSession: () =>
             Effect.sync(() => {
               record.sessions += 1;
@@ -3852,6 +3905,7 @@ describe("SSH launcher transport", () => {
         forgetEnvironment: () => Effect.die("Unexpected forget"),
         disconnectEnvironment: () => Effect.die("Unexpected disconnect"),
         revalidateTunnels: () => Effect.void,
+        issueClientSession: () => Effect.die("unused"),
         issueMcpClientSession: () =>
           Effect.succeed({ token: "fixture", expiresAt: null, runtimeModeCeilingApplied: true }),
         runRemoteScript: () =>
@@ -3951,6 +4005,7 @@ it.effect("ready-only host tools never bootstrap or issue a session on a stopped
           ensures++;
           return Effect.die("must not bootstrap");
         },
+        issueClientSession: () => Effect.die("unused"),
         issueMcpClientSession: () => {
           sessions++;
           return Effect.die("must not issue");

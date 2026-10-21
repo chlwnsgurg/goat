@@ -42,6 +42,7 @@ describe("SSH dispatch pending runtime", () => {
           forgetEnvironment: () => Effect.die("Unexpected forget"),
           disconnectEnvironment: () => Effect.die("Unexpected disconnect"),
           revalidateTunnels: () => Effect.void,
+          issueClientSession: () => Effect.die("unused"),
           issueMcpClientSession: () => {
             sessions++;
             return Effect.die("Unexpected session");
@@ -156,6 +157,7 @@ describe("SSH dispatch memory session refusal", () => {
         forgetEnvironment: () => Effect.die("Unexpected forget"),
         disconnectEnvironment: () => Effect.die("Unexpected disconnect"),
         revalidateTunnels: () => Effect.void,
+        issueClientSession: () => Effect.die("unused"),
         issueMcpClientSession: () => Effect.fail(refusal),
         runRemoteScript: () =>
           Effect.succeed({

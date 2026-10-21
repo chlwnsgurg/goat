@@ -501,9 +501,30 @@ it.effect("declined and failed outcomes are durable and terminal", () =>
   ),
 );
 
-it.effect(
-  "SSH approvals retain their encrypted approver and progress binding across ack and restart",
-  () =>
+it.effect.each([
+  undefined,
+  {
+    result: {
+      kind: "ok" as const,
+      status: {
+        host: "box",
+        state: "stopped" as const,
+        runtimeVersion: null,
+        requestedVersion: "1.0",
+      },
+    },
+    aliasRevision: "pinned-revision",
+  },
+  {
+    result: {
+      kind: "error" as const,
+      code: "operation_failed" as const,
+      message: "The SSH host key changed.",
+    },
+  },
+])(
+  "SSH approvals retain encrypted completion %s across ack and restart",
+  (completion: Handoffs.SshProgressBinding["completion"]) =>
     withHarness(({ orchestrator, worker }) =>
       Effect.gen(function* () {
         const fs = yield* FileSystem.FileSystem;
@@ -596,9 +617,13 @@ it.effect(
           assert.equal(continuations[0]?.approvedBySessionId, sessionId);
           assert.deepEqual(continuations[0]?.sshProgress, binding);
           assert.deepEqual(yield* service.readSshProgressBinding(input, sessionId), binding);
-          yield* service.finishSshContinuation(input);
+          yield* service.finishSshContinuation(input, completion);
+          const retainedBinding = { ...binding, ...(completion ? { completion } : {}) };
           assert.lengthOf(yield* service.completedSshContinuations, 0);
-          assert.deepEqual(yield* service.readSshProgressBinding(input, sessionId), binding);
+          assert.deepEqual(
+            yield* service.readSshProgressBinding(input, sessionId),
+            retainedBinding,
+          );
           assert.isNull((yield* service.open(input, sessionId)).human);
           assert.isDefined(store.directory);
           for (const file of yield* fs.readDirectory(store.directory!)) {
@@ -608,7 +633,10 @@ it.effect(
           }
           yield* Effect.gen(function* () {
             const restarted = yield* Handoffs.Handoffs;
-            assert.deepEqual(yield* restarted.readSshProgressBinding(input, sessionId), binding);
+            assert.deepEqual(
+              yield* restarted.readSshProgressBinding(input, sessionId),
+              retainedBinding,
+            );
             assert.lengthOf(yield* restarted.completedSshContinuations, 0);
           }).pipe(Effect.provide(Handoffs.layer.pipe(Layer.provide(domainDependencies))));
           const expired = yield* service.create({

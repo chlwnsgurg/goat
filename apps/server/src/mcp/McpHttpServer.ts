@@ -1,9 +1,10 @@
-import { MemoryToolkit } from "./toolkits/memory/tools.ts";
-import * as MemoryHandlers from "./toolkits/memory/handlers.ts";
-import { MemoryAdministrationToolkit } from "./toolkits/memoryAdministration/tools.ts";
-import * as MemoryAdministrationHandlers from "./toolkits/memoryAdministration/handlers.ts";
-import * as ConnectionHandlers from "./toolkits/connection/handlers.ts";
-import { ConnectionToolkit } from "./toolkits/connection/tools.ts";
+import {
+  OrchestratorMcpFailure,
+  PreviewAutomationError,
+  type PreviewAutomationSnapshot,
+  type RunId,
+  ThreadId,
+} from "@goat/contracts";
 import * as Cause from "effect/Cause";
 import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
@@ -19,13 +20,14 @@ import * as Stream from "effect/Stream";
 import type * as Types from "effect/Types";
 import { AiError, McpProtocol, McpSchema, McpServer, Tool, Toolkit } from "effect/ai";
 import { HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/http";
-import {
-  OrchestratorMcpFailure,
-  PreviewAutomationError,
-  type PreviewAutomationSnapshot,
-  type RunId,
-  ThreadId,
-} from "@goat/contracts";
+import * as ConnectionHandlers from "./toolkits/connection/handlers.ts";
+import { ConnectionToolkit } from "./toolkits/connection/tools.ts";
+import * as MemoryHandlers from "./toolkits/memory/handlers.ts";
+import { MemoryToolkit } from "./toolkits/memory/tools.ts";
+import * as MemoryAdministrationHandlers from "./toolkits/memoryAdministration/handlers.ts";
+import { MemoryAdministrationToolkit } from "./toolkits/memoryAdministration/tools.ts";
+import * as NoteHandlers from "./toolkits/note/handlers.ts";
+import { NoteToolkit } from "./toolkits/note/tools.ts";
 
 import packageJson from "../../package.json" with { type: "json" };
 import * as ServerConfig from "../config.ts";
@@ -34,6 +36,7 @@ import * as HtmlRender from "../htmlRender/HtmlRender.ts";
 import * as ThreadCommandExecutor from "../orchestration-v2/ThreadCommandExecutor.ts";
 import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
 import * as ProviderRegistry from "../provider/ProviderRegistry.ts";
+import * as RemoteReportService from "../remoteReports/RemoteReportService.ts";
 import * as AnalyticsService from "../telemetry/AnalyticsService.ts";
 import {
   type AgentThread,
@@ -42,44 +45,43 @@ import {
   MAX_REPORTED_DEPTH,
   toolOutcome,
 } from "../telemetry/ProviderDimensions.ts";
+import * as ThreadResultService from "../threadResults/ThreadResultService.ts";
+import * as HostStatusMcpService from "./HostStatusMcpService.ts";
+import * as HostThreadsMcpService from "./HostThreadsMcpService.ts";
 import * as McpInvocationContext from "./McpInvocationContext.ts";
+import * as McpSessionRegistry from "./McpSessionRegistry.ts";
 import * as McpToolAccess from "./McpToolAccess.ts";
 import * as OrchestratorMcpService from "./OrchestratorMcpService.ts";
-import { PreviewControlsToolkit } from "./toolkits/previewControls/tools.ts";
-import * as PreviewControlsHandlers from "./toolkits/previewControls/handlers.ts";
-import { EnvironmentToolkit } from "./toolkits/environment/tools.ts";
-import * as EnvironmentHandlers from "./toolkits/environment/handlers.ts";
-import { HostStatusToolkit } from "./toolkits/hostStatus/tools.ts";
-import * as HostStatusHandlers from "./toolkits/hostStatus/handlers.ts";
-import { FleetHealthToolkit } from "./toolkits/fleet/healthTools.ts";
-import * as FleetHealthHandlers from "./toolkits/fleet/healthHandlers.ts";
-import { FleetToolkit } from "./toolkits/fleet/tools.ts";
-import * as FleetHandlers from "./toolkits/fleet/handlers.ts";
-import { FleetResourcesToolkit } from "./toolkits/fleet/resources/tools.ts";
-import * as FleetResourcesHandlers from "./toolkits/fleet/resources/handlers.ts";
-import { ProviderToolkit } from "./toolkits/provider/tools.ts";
-import * as ProviderHandlers from "./toolkits/provider/handlers.ts";
-import { ProjectToolkit } from "./toolkits/project/tools.ts";
-import * as ProjectHandlers from "./toolkits/project/handlers.ts";
-import { RemoteReportToolkit } from "./toolkits/remoteReport/tools.ts";
-import * as RemoteReportHandlers from "./toolkits/remoteReport/handlers.ts";
-import * as RemoteReportService from "../remoteReports/RemoteReportService.ts";
-import * as ThreadLaunchMcpService from "./ThreadLaunchMcpService.ts";
-import * as ThreadResultService from "../threadResults/ThreadResultService.ts";
-import { AttachmentToolkit } from "./toolkits/attachment/tools.ts";
-import { ChannelToolkit } from "./toolkits/channel/tools.ts";
-import * as ChannelHandlers from "./toolkits/channel/handlers.ts";
-import * as AttachmentHandlers from "./toolkits/attachment/handlers.ts";
-import { ThreadToolkit } from "./toolkits/thread/tools.ts";
-import * as ThreadHandlers from "./toolkits/thread/handlers.ts";
-import * as ThreadMetadataMcpService from "./ThreadMetadataMcpService.ts";
-import * as McpSessionRegistry from "./McpSessionRegistry.ts";
-import * as PreviewAutomationBroker from "./PreviewAutomationBroker.ts";
-import * as OrchestratorHandlers from "./toolkits/orchestrator/handlers.ts";
 import * as PendingQuestionsMcpService from "./PendingQuestionsMcpService.ts";
+import * as PreviewAutomationBroker from "./PreviewAutomationBroker.ts";
+import * as ThreadLaunchMcpService from "./ThreadLaunchMcpService.ts";
+import * as ThreadMetadataMcpService from "./ThreadMetadataMcpService.ts";
 import * as ThreadSearchMcpService from "./ThreadSearchMcpService.ts";
-import * as HostThreadsMcpService from "./HostThreadsMcpService.ts";
-import * as HostStatusMcpService from "./HostStatusMcpService.ts";
+import * as WorktreeInventoryService from "./WorktreeInventoryService.ts";
+import * as WorktreeMcpService from "./WorktreeMcpService.ts";
+import * as AttachmentHandlers from "./toolkits/attachment/handlers.ts";
+import { AttachmentToolkit } from "./toolkits/attachment/tools.ts";
+import * as ChannelHandlers from "./toolkits/channel/handlers.ts";
+import { ChannelToolkit } from "./toolkits/channel/tools.ts";
+import * as DeviceHandlers from "./toolkits/device/handlers.ts";
+import {
+  DeviceScreenshotTool,
+  DeviceScreenshotToolkit,
+  DeviceStandardToolkit,
+} from "./toolkits/device/tools.ts";
+import * as EnvironmentHandlers from "./toolkits/environment/handlers.ts";
+import { EnvironmentToolkit } from "./toolkits/environment/tools.ts";
+import * as FleetHandlers from "./toolkits/fleet/handlers.ts";
+import * as FleetHealthHandlers from "./toolkits/fleet/healthHandlers.ts";
+import { FleetHealthToolkit } from "./toolkits/fleet/healthTools.ts";
+import * as FleetResourcesHandlers from "./toolkits/fleet/resources/handlers.ts";
+import { FleetResourcesToolkit } from "./toolkits/fleet/resources/tools.ts";
+import { FleetToolkit } from "./toolkits/fleet/tools.ts";
+import * as HostStatusHandlers from "./toolkits/hostStatus/handlers.ts";
+import { HostStatusToolkit } from "./toolkits/hostStatus/tools.ts";
+import * as HtmlHandlers from "./toolkits/html/handlers.ts";
+import { HtmlPreviewTool, HtmlPreviewToolkit, HtmlRenderToolkit } from "./toolkits/html/tools.ts";
+import * as OrchestratorHandlers from "./toolkits/orchestrator/handlers.ts";
 import { OrchestratorToolkit } from "./toolkits/orchestrator/tools.ts";
 import * as PreviewHandlers from "./toolkits/preview/handlers.ts";
 import {
@@ -87,22 +89,22 @@ import {
   PreviewSnapshotToolkit,
   PreviewStandardToolkit,
 } from "./toolkits/preview/tools.ts";
-import * as WorktreeHandlers from "./toolkits/worktree/handlers.ts";
-import { WorktreeToolkit } from "./toolkits/worktree/tools.ts";
-import * as WorktreeMcpService from "./WorktreeMcpService.ts";
-import * as WorktreeInventoryService from "./WorktreeInventoryService.ts";
+import * as PreviewControlsHandlers from "./toolkits/previewControls/handlers.ts";
+import { PreviewControlsToolkit } from "./toolkits/previewControls/tools.ts";
+import * as ProjectHandlers from "./toolkits/project/handlers.ts";
+import { ProjectToolkit } from "./toolkits/project/tools.ts";
+import * as ProviderHandlers from "./toolkits/provider/handlers.ts";
+import { ProviderToolkit } from "./toolkits/provider/tools.ts";
 import * as PullRequestsHandlers from "./toolkits/pullRequests/handlers.ts";
 import { PullRequestsToolkit } from "./toolkits/pullRequests/tools.ts";
-import * as DeviceHandlers from "./toolkits/device/handlers.ts";
-import {
-  DeviceScreenshotTool,
-  DeviceScreenshotToolkit,
-  DeviceStandardToolkit,
-} from "./toolkits/device/tools.ts";
-import * as HtmlHandlers from "./toolkits/html/handlers.ts";
+import * as RemoteReportHandlers from "./toolkits/remoteReport/handlers.ts";
+import { RemoteReportToolkit } from "./toolkits/remoteReport/tools.ts";
 import * as SshHandlers from "./toolkits/ssh/handlers.ts";
 import { SshToolkit } from "./toolkits/ssh/tools.ts";
-import { HtmlPreviewTool, HtmlPreviewToolkit, HtmlRenderToolkit } from "./toolkits/html/tools.ts";
+import * as ThreadHandlers from "./toolkits/thread/handlers.ts";
+import { ThreadToolkit } from "./toolkits/thread/tools.ts";
+import * as WorktreeHandlers from "./toolkits/worktree/handlers.ts";
+import { WorktreeToolkit } from "./toolkits/worktree/tools.ts";
 
 const mcpResourceMetadataUrl = (request: HttpServerRequest.HttpServerRequest) =>
   HttpServerRequest.toURL(request).pipe(
@@ -170,7 +172,7 @@ type McpAuthMiddleware = (
   HttpServerRequest.HttpServerRequest
 >;
 
-export const normalizeMcpHttpResponse = (
+const normalizeMcpHttpResponse = (
   response: HttpServerResponse.HttpServerResponse,
 ): HttpServerResponse.HttpServerResponse => {
   const bodyIsEmpty =
@@ -765,7 +767,11 @@ const imageToolFailure =
  * `McpServer.toolkit` serializes every result as JSON text, which is the wrong
  * shape for a screenshot: the model needs image content.
  */
-const registerImageTool = <T extends Tool.Any, E, R>(
+const registerImageTool = Effect.fn("McpHttpServer.registerImageTool")(function* <
+  T extends Tool.Any,
+  E,
+  R,
+>(
   tool: T,
   handle: (payload: Tool.Parameters<T>) => Effect.Effect<{ readonly encodedResult: unknown }, E, R>,
   provide: (
@@ -777,73 +783,72 @@ const registerImageTool = <T extends Tool.Any, E, R>(
   >,
   operation: string,
   failureText: string | ((error: E) => string),
-) =>
-  Effect.gen(function* () {
-    const server = yield* McpServer.McpServer;
-    yield* server.addTool({
-      tool: new McpSchema.Tool({
-        name: tool.name,
-        description: Tool.getDescription(tool),
-        inputSchema: Tool.getJsonSchema(tool),
-        annotations: {
-          ...Context.getOption(tool.annotations, Tool.Title).pipe(
-            Option.map((title) => ({ title })),
-            Option.getOrUndefined,
-          ),
-          readOnlyHint: Context.get(tool.annotations, Tool.Readonly),
-          destructiveHint: Context.get(tool.annotations, Tool.Destructive),
-          idempotentHint: Context.get(tool.annotations, Tool.Idempotent),
-          openWorldHint: Context.get(tool.annotations, Tool.OpenWorld),
-        },
+) {
+  const server = yield* McpServer.McpServer;
+  yield* server.addTool({
+    tool: new McpSchema.Tool({
+      name: tool.name,
+      description: Tool.getDescription(tool),
+      inputSchema: Tool.getJsonSchema(tool),
+      annotations: {
+        ...Context.getOption(tool.annotations, Tool.Title).pipe(
+          Option.map((title) => ({ title })),
+          Option.getOrUndefined,
+        ),
+        readOnlyHint: Context.get(tool.annotations, Tool.Readonly),
+        destructiveHint: Context.get(tool.annotations, Tool.Destructive),
+        idempotentHint: Context.get(tool.annotations, Tool.Idempotent),
+        openWorldHint: Context.get(tool.annotations, Tool.OpenWorld),
+      },
+    }),
+    annotations: tool.annotations,
+    handle: (payload) =>
+      Effect.withFiber((fiber) => {
+        const invocation = Context.getUnsafe(
+          fiber.context,
+          McpInvocationContext.McpInvocationContext,
+        );
+        return provide(handle(payload as Tool.Parameters<T>)).pipe(
+          Effect.provideService(McpInvocationContext.McpInvocationContext, invocation),
+          Effect.matchCauseEffect({
+            onFailure: imageToolFailure(tool.name, operation, failureText),
+            onSuccess: ({ encodedResult }) => {
+              const { screenshot, ...rest } = encodedResult as ImageToolResult;
+              const includeImage =
+                (payload as { readonly includeImage?: boolean } | undefined)?.includeImage !==
+                false;
+              const metadata = {
+                ...rest,
+                screenshot: {
+                  mimeType: screenshot.mimeType,
+                  width: screenshot.width,
+                  height: screenshot.height,
+                },
+              };
+              return Effect.succeed(
+                new McpSchema.CallToolResult({
+                  isError: false,
+                  structuredContent: metadata,
+                  content: [
+                    { type: "text", text: JSON.stringify(metadata) },
+                    ...(includeImage
+                      ? [
+                          {
+                            type: "image" as const,
+                            data: new Uint8Array(Buffer.from(screenshot.data, "base64")),
+                            mimeType: screenshot.mimeType,
+                          },
+                        ]
+                      : []),
+                  ],
+                }),
+              );
+            },
+          }),
+        );
       }),
-      annotations: tool.annotations,
-      handle: (payload) =>
-        Effect.withFiber((fiber) => {
-          const invocation = Context.getUnsafe(
-            fiber.context,
-            McpInvocationContext.McpInvocationContext,
-          );
-          return provide(handle(payload as Tool.Parameters<T>)).pipe(
-            Effect.provideService(McpInvocationContext.McpInvocationContext, invocation),
-            Effect.matchCauseEffect({
-              onFailure: imageToolFailure(tool.name, operation, failureText),
-              onSuccess: ({ encodedResult }) => {
-                const { screenshot, ...rest } = encodedResult as ImageToolResult;
-                const includeImage =
-                  (payload as { readonly includeImage?: boolean } | undefined)?.includeImage !==
-                  false;
-                const metadata = {
-                  ...rest,
-                  screenshot: {
-                    mimeType: screenshot.mimeType,
-                    width: screenshot.width,
-                    height: screenshot.height,
-                  },
-                };
-                return Effect.succeed(
-                  new McpSchema.CallToolResult({
-                    isError: false,
-                    structuredContent: metadata,
-                    content: [
-                      { type: "text", text: JSON.stringify(metadata) },
-                      ...(includeImage
-                        ? [
-                            {
-                              type: "image" as const,
-                              data: new Uint8Array(Buffer.from(screenshot.data, "base64")),
-                              mimeType: screenshot.mimeType,
-                            },
-                          ]
-                        : []),
-                    ],
-                  }),
-                );
-              },
-            }),
-          );
-        }),
-    });
   });
+});
 
 const registerDeviceScreenshot = Effect.fn("McpHttpServer.registerDeviceScreenshot")(function* () {
   const devices = yield* DeviceService.DeviceService;
@@ -1049,8 +1054,9 @@ const handoffTargetIds = (
  * agent chose, and the provider, model, and modes of each thread that received
  * the work. Ids, prompts, and free text are never recorded.
  */
-const withToolAnalytics = <A, E, R>(registration: Effect.Effect<A, E, R>) =>
-  Effect.gen(function* () {
+const withToolAnalytics =
+  /* Request instrumentation already owns the span; keep this helper in that context. */
+  Effect.fnUntraced(function* <A, E, R>(registration: Effect.Effect<A, E, R>) {
     const server = yield* McpServer.McpServer;
     const analytics = yield* Effect.serviceOption(AnalyticsService.AnalyticsService);
     if (Option.isNone(analytics)) return yield* registration;
@@ -1063,8 +1069,9 @@ const withToolAnalytics = <A, E, R>(registration: Effect.Effect<A, E, R>) =>
             .getThreadShell(ThreadId.make(threadId))
             .pipe(Effect.orElseSucceed(() => null));
     // Delegation depth: parents walked from the caller, capped.
-    const depthOf = (thread: AgentThread) =>
-      Effect.gen(function* () {
+    const depthOf =
+      /* Request instrumentation already owns the span; keep this helper in that context. */
+      Effect.fnUntraced(function* (thread: AgentThread) {
         let depth = 0;
         let parentId =
           thread.lineage.relationshipToParent === "subagent" ? thread.lineage.parentThreadId : null;
@@ -1097,64 +1104,70 @@ const withToolAnalytics = <A, E, R>(registration: Effect.Effect<A, E, R>) =>
               }),
               Effect.orElseSucceed(() => false),
             );
-    const record = (
-      tool: string,
-      args: unknown,
-      result: McpSchema.CallToolResult | undefined,
-      durationMs: number,
-    ) =>
-      Effect.gen(function* () {
-        const toolName = tool.replace(/^t3_/, "goat_");
-        // Client credentials (no calling thread) report an unknown caller.
-        const invocation = Option.getOrUndefined(
-          yield* Effect.serviceOption(McpInvocationContext.McpInvocationContext),
-        )?.thread;
-        const providers = Option.isSome(registry) ? yield* registry.value.getProviders : [];
-        // Only handoff tools pay for thread lookups; the rest report the
-        // caller's provider from the credential.
-        const handoff = HANDOFF_TOOLS.has(toolName);
-        const caller =
-          handoff && invocation !== undefined
-            ? ((yield* shellOf(invocation.threadId)) ?? undefined)
-            : undefined;
-        const targetIds = handoff
-          ? [...new Set(handoffTargetIds(toolName, args, result))].filter(
-              (threadId) => threadId !== invocation?.threadId,
-            )
-          : [];
-        const targets = yield* Effect.forEach(targetIds, shellOf);
-        for (const properties of agentToolProperties({
-          tool: toolName,
-          providers,
-          caller,
-          ...(invocation === undefined
-            ? {}
-            : { callerProviderInstanceId: invocation.providerInstanceId }),
-          ...(caller === undefined || invocation === undefined
-            ? {}
-            : {
-                callerDepth: yield* depthOf(caller),
-                callerScheduledRun: yield* scheduledRunOf(invocation.threadId, caller.activeRunId),
-              }),
-          targets: targets.filter((thread) => thread !== null),
-          outcome: toolOutcome(result),
-          ...(handoff
-            ? {
-                settings: handoffSettings(toolName, args, result?.structuredContent),
-              }
-            : {}),
-          durationMs,
-        })) {
-          yield* analytics.value.record("mcp.tool.invoked", properties);
-        }
-      }).pipe(Effect.ignoreCause);
+    const record =
+      /* Request instrumentation already owns the span; keep this helper in that context. */
+      Effect.fnUntraced(
+        function* (
+          tool: string,
+          args: unknown,
+          result: McpSchema.CallToolResult | undefined,
+          durationMs: number,
+        ) {
+          const toolName = tool.replace(/^t3_/, "goat_");
+          // Client credentials (no calling thread) report an unknown caller.
+          const invocation = Option.getOrUndefined(
+            yield* Effect.serviceOption(McpInvocationContext.McpInvocationContext),
+          )?.thread;
+          const providers = Option.isSome(registry) ? yield* registry.value.getProviders : [];
+          // Only handoff tools pay for thread lookups; the rest report the
+          // caller's provider from the credential.
+          const handoff = HANDOFF_TOOLS.has(toolName);
+          const caller =
+            handoff && invocation !== undefined
+              ? ((yield* shellOf(invocation.threadId)) ?? undefined)
+              : undefined;
+          const targetIds = handoff
+            ? [...new Set(handoffTargetIds(toolName, args, result))].filter(
+                (threadId) => threadId !== invocation?.threadId,
+              )
+            : [];
+          const targets = yield* Effect.forEach(targetIds, shellOf);
+          for (const properties of agentToolProperties({
+            tool: toolName,
+            providers,
+            caller,
+            ...(invocation === undefined
+              ? {}
+              : { callerProviderInstanceId: invocation.providerInstanceId }),
+            ...(caller === undefined || invocation === undefined
+              ? {}
+              : {
+                  callerDepth: yield* depthOf(caller),
+                  callerScheduledRun: yield* scheduledRunOf(
+                    invocation.threadId,
+                    caller.activeRunId,
+                  ),
+                }),
+            targets: targets.filter((thread) => thread !== null),
+            outcome: toolOutcome(result),
+            ...(handoff
+              ? { settings: handoffSettings(toolName, args, result?.structuredContent) }
+              : {}),
+            durationMs,
+          })) {
+            yield* analytics.value.record("mcp.tool.invoked", properties);
+          }
+        },
+        (effect, _tool, _args, _result, _durationMs) => effect.pipe(Effect.ignoreCause),
+      );
     const recordingServer = McpServer.McpServer.of({
       ...server,
       addTool: (options) =>
         server.addTool({
           ...options,
-          handle: (payload) =>
-            Effect.gen(function* () {
+          handle:
+            /* Request instrumentation already owns the span; keep this helper in that context. */
+            Effect.fnUntraced(function* (payload) {
               const startedAt = yield* Clock.currentTimeMillis;
               return yield* options.handle(payload).pipe(
                 Effect.onExit((exit) => {
@@ -1229,6 +1242,7 @@ export const catalogRegistrations = {
   remoteReport: toolkitRegistration(RemoteReportToolkit, RemoteReportHandlers.layer),
   ssh: toolkitRegistration(SshToolkit, SshHandlers.layer),
   attachment: toolkitRegistration(AttachmentToolkit, AttachmentHandlers.layer),
+  note: toolkitRegistration(NoteToolkit, NoteHandlers.layer),
   channel: toolkitRegistration(ChannelToolkit, ChannelHandlers.layer),
   pullRequests: toolkitRegistration(PullRequestsToolkit, PullRequestsHandlers.layer),
   deviceStandard: toolkitRegistration(DeviceStandardToolkit, DeviceHandlers.layerStandard),
@@ -1352,6 +1366,7 @@ export const layer = Layer.mergeAll(
   layerThreadToolkit,
   layerAttachmentToolkit,
   layerChannelToolkit,
+  catalogRegistrations.note,
   layerProjectRegistration,
   layerEnvironmentToolkit,
   layerHostStatusToolkit,
