@@ -1,3 +1,4 @@
+import { gateThreadReads, ThreadArchiveGate } from "./ThreadArchiveGate.ts";
 import { MAX_CONTINUATION_CHAIN } from "./ContinuationChain.ts";
 import { LEGACY_MCP_APP_OUTPUT_KEY } from "@goat/contracts/legacyT3Names";
 import { applyThreadPullRequestLinkUpdate } from "@goat/shared/threadPullRequests";
@@ -1682,6 +1683,9 @@ export function threadShellFromProjection(
     ...(projection.thread.externalLauncher === undefined
       ? {}
       : { externalLauncher: projection.thread.externalLauncher }),
+    ...(projection.thread.historyArchive === undefined
+      ? {}
+      : { historyArchive: projection.thread.historyArchive }),
     ...(projection.thread.sideChatOf == null ? {} : { sideChatOf: projection.thread.sideChatOf }),
     ...(projection.thread.linkedPullRequest === undefined
       ? {}
@@ -1947,6 +1951,9 @@ function shellFromState(input: {
     ...(input.state.thread.externalLauncher === undefined
       ? {}
       : { externalLauncher: input.state.thread.externalLauncher }),
+    ...(input.state.thread.historyArchive === undefined
+      ? {}
+      : { historyArchive: input.state.thread.historyArchive }),
     ...(input.state.thread.sideChatOf == null ? {} : { sideChatOf: input.state.thread.sideChatOf }),
     ...(input.state.thread.linkedPullRequest === undefined
       ? {}
@@ -2009,6 +2016,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
   ProjectionStoreV2,
   Effect.gen(function* () {
     const sql = yield* SqlClient.SqlClient;
+    const archiveGate = yield* ThreadArchiveGate;
 
     // For run upserts: a snapshot without `path` keeps the value another event recorded there.
     const keepRecordedRunField = (payload: Statement.Fragment, path: string) => sql`
@@ -6833,7 +6841,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
         );
       }).pipe(Effect.mapError((cause) => new ProjectionStoreReadError({ cause })));
 
-    return {
+    return gateThreadReads(archiveGate, {
       apply,
       getReviewLedgerEntries,
       getShellSnapshot,
@@ -6928,7 +6936,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
       searchThread,
       searchThreadStream,
       getThreadAttachmentIds,
-    } satisfies ProjectionStoreV2Shape;
+    } satisfies ProjectionStoreV2Shape);
   }),
 );
 
