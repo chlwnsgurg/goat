@@ -262,7 +262,6 @@ read -r release < "$HOME/.test/wait-release"
           assert.equal(f.remoteCommands.length - before, commands);
           assert.isString(attached.selectedRuntime.reconnectProbe);
         }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
-      180_000,
     );
 
     it.live("cancelled legacy drain rolls back identity while holding the replacement lock", () =>

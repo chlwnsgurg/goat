@@ -1878,56 +1878,49 @@ describe("archive runner script", () => {
         assert.isFalse(yield* fs.exists(lock));
         assert.equal((yield* fs.readFileString(`${bin}/sleep-calls`)).trim().split("\n").length, 4);
       }).pipe(Effect.provide(NodeServices.layer)),
-    60_000,
   );
 
   describe.skipIf(windowsHost)("lock waits", () => {
     it.effect.each([
       "a dead owner's lock it cannot empty",
       "a candidate it cannot publish",
-    ] as const)(
-      "waits out %s instead of spinning",
-      (blocker) =>
-        Effect.gen(function* () {
-          const fs = yield* FileSystem.FileSystem;
-          const root = yield* fs.makeTempDirectoryScoped({ prefix: "goat-lock-stuck-" });
-          const releaseBaseUrl = yield* makeMirror(root);
-          const home = `${root}/home`;
-          const lock = `${home}/.goat/runtime/goat/versions/.${archiveVersion}.install.lock`;
-          const bin = `${root}/bin`;
-          const runner = `${root}/runner.sh`;
-          yield* fs.makeDirectory(bin);
-          if (blocker === "a candidate it cannot publish") {
-            // No lock exists, but every publication fails.
-            yield* fs.makeDirectory(`${home}/.goat/runtime/goat/versions`, { recursive: true });
-            yield* fs.writeFileString(`${bin}/mv`, "#!/bin/sh\nexit 1\n", { mode: 0o700 });
-          } else {
-            // A find that cannot delete leaves the stale lock in place, whatever
-            // the test user's permissions.
-            yield* fs.makeDirectory(lock, { recursive: true });
-            yield* fs.writeFileString(`${lock}/pid`, "999999\n");
-            yield* fs.writeFileString(`${bin}/find`, "#!/bin/sh\nexit 1\n", { mode: 0o700 });
-          }
-          yield* fs.writeFileString(
-            `${bin}/sleep`,
-            '#!/bin/sh\necho x >> "$(dirname "$0")/sleep-calls"\n',
-            { mode: 0o700 },
-          );
-          const script = SshTunnel.buildRemoteGoatRunnerScript({ archiveVersion, releaseBaseUrl });
-          assert.include(script, 'if [ "$GOAT_LOCK_WAITED" -ge 360 ]; then');
-          yield* fs.writeFileString(runner, script.replace("-ge 360 ]", "-ge 3 ]"));
-          const result = yield* runRunner(home, runner, bin);
-          assert.equal(result.exitCode, 1);
-          assert.include(result.stderr, "has held");
-          // Each failed attempt still sleeps and counts toward the timeout.
-          assert.equal(
-            (yield* fs.readFileString(`${bin}/sleep-calls`)).trim().split("\n").length,
-            3,
-          );
-          if (blocker === "a candidate it cannot publish") assert.isFalse(yield* fs.exists(lock));
-          else assert.equal((yield* fs.readFileString(`${lock}/pid`)).trim(), "999999");
-        }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
-      60_000,
+    ] as const)("waits out %s instead of spinning", (blocker) =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const root = yield* fs.makeTempDirectoryScoped({ prefix: "goat-lock-stuck-" });
+        const releaseBaseUrl = yield* makeMirror(root);
+        const home = `${root}/home`;
+        const lock = `${home}/.goat/runtime/goat/versions/.${archiveVersion}.install.lock`;
+        const bin = `${root}/bin`;
+        const runner = `${root}/runner.sh`;
+        yield* fs.makeDirectory(bin);
+        if (blocker === "a candidate it cannot publish") {
+          // No lock exists, but every publication fails.
+          yield* fs.makeDirectory(`${home}/.goat/runtime/goat/versions`, { recursive: true });
+          yield* fs.writeFileString(`${bin}/mv`, "#!/bin/sh\nexit 1\n", { mode: 0o700 });
+        } else {
+          // A find that cannot delete leaves the stale lock in place, whatever
+          // the test user's permissions.
+          yield* fs.makeDirectory(lock, { recursive: true });
+          yield* fs.writeFileString(`${lock}/pid`, "999999\n");
+          yield* fs.writeFileString(`${bin}/find`, "#!/bin/sh\nexit 1\n", { mode: 0o700 });
+        }
+        yield* fs.writeFileString(
+          `${bin}/sleep`,
+          '#!/bin/sh\necho x >> "$(dirname "$0")/sleep-calls"\n',
+          { mode: 0o700 },
+        );
+        const script = SshTunnel.buildRemoteGoatRunnerScript({ archiveVersion, releaseBaseUrl });
+        assert.include(script, 'if [ "$GOAT_LOCK_WAITED" -ge 360 ]; then');
+        yield* fs.writeFileString(runner, script.replace("-ge 360 ]", "-ge 3 ]"));
+        const result = yield* runRunner(home, runner, bin);
+        assert.equal(result.exitCode, 1);
+        assert.include(result.stderr, "has held");
+        // Each failed attempt still sleeps and counts toward the timeout.
+        assert.equal((yield* fs.readFileString(`${bin}/sleep-calls`)).trim().split("\n").length, 3);
+        if (blocker === "a candidate it cannot publish") assert.isFalse(yield* fs.exists(lock));
+        else assert.equal((yield* fs.readFileString(`${lock}/pid`)).trim(), "999999");
+      }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
     );
   });
 
