@@ -6,7 +6,7 @@ import * as NodePath from "node:path";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { createPackageWithOptions, extractFile, listPackage, statFile } from "@electron/asar";
 import { vi } from "vite-plus/test";
-import * as CuaRelease from "@t3tools/shared/cuaDriverRelease";
+import * as CuaRelease from "@goat/shared/cuaDriverRelease";
 import { assert, it } from "@effect/vitest";
 import * as ConfigProvider from "effect/ConfigProvider";
 import * as FileSystem from "effect/FileSystem";
@@ -210,7 +210,7 @@ const makeCuaStageFixture = Effect.fn("test.makeCuaStageFixture")(function* (
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
-  const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-cua-package-" });
+  const root = yield* fs.makeTempDirectoryScoped({ prefix: "goat-cua-package-" });
   const resolveRelease = CuaRelease.cuaDriverRelease;
   const pinned = resolveRelease(
     platform === "mac" ? "darwin" : platform === "win" ? "win32" : "linux",
@@ -234,7 +234,7 @@ const makeCuaStageFixture = Effect.fn("test.makeCuaStageFixture")(function* (
     ),
     (spy) => Effect.sync(() => spy.mockRestore()),
   );
-  const cacheDir = path.join(root, "node_modules/.cache/t3code/cua-driver");
+  const cacheDir = path.join(root, "node_modules/.cache/goat/cua-driver");
   const archivePath = path.join(cacheDir, release.archiveName);
   yield* fs.makeDirectory(cacheDir, { recursive: true });
   let download = archive;
@@ -631,7 +631,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
-      const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-cua-asar-" });
+      const root = yield* fs.makeTempDirectoryScoped({ prefix: "goat-cua-asar-" });
       for (const [platform, nativePackage, library] of [
         ["mac", "darwin-arm64", "libcua_driver_sdk.dylib"],
         ["linux", "linux-x64-gnu", "libcua_driver_sdk.so"],
@@ -1462,6 +1462,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
           overrides: {},
           asarPath,
           verbose: false,
+          vp: "vp",
         }).pipe(Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, installSpawner));
         const unpackedRoot = `${asarPath}.unpacked`;
         assert.deepStrictEqual(

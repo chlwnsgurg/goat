@@ -2643,7 +2643,7 @@ export const stageCuaDriverExecutable = Effect.fn("stageCuaDriverExecutable")(fu
   if (!release) {
     return yield* new CuaDriverArtifactError({ message: "Unsupported Cua Driver build target." });
   }
-  const cacheDir = path.join(input.repoRoot, "node_modules/.cache/t3code/cua-driver");
+  const cacheDir = path.join(input.repoRoot, "node_modules/.cache/goat/cua-driver");
   const archivePath = path.join(cacheDir, release.archiveName);
   const verified = Effect.fn("verifyCuaDriverArchive")(function* (file: string) {
     if (!(yield* fs.exists(file))) return false;

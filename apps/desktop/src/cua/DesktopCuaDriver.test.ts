@@ -1,6 +1,6 @@
 import * as NodePath from "@effect/platform-node/NodePath";
 import { assert, describe, it } from "@effect/vitest";
-import type { DesktopCuaDriverReport, DesktopCuaDriverRequest } from "@t3tools/contracts";
+import type { DesktopCuaDriverReport, DesktopCuaDriverRequest } from "@goat/contracts";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
@@ -16,6 +16,13 @@ import * as DesktopConfig from "../app/DesktopConfig.ts";
 import * as DesktopEnvironment from "../app/DesktopEnvironment.ts";
 import { DesktopTelemetryPublisher } from "../telemetry/DesktopTelemetryPublisher.ts";
 import { make, type DesktopCuaDriverDependencies } from "./DesktopCuaDriver.ts";
+
+// The embedded allowlist forwards only these opt-outs; DO_NOT_TRACK would fail construction.
+const privacyEnvironment = [
+  { name: "CUA_DRIVER_RS_TELEMETRY_ENABLED", value: "false" },
+  { name: "CUA_TELEMETRY_ENABLED", value: "false" },
+  { name: "CUA_DRIVER_RS_UPDATE_CHECK", value: "false" },
+];
 
 const descriptor = {
   command: "/native/driver",
@@ -39,7 +46,11 @@ const fixture = Effect.fn(function* (
   const stopping = yield* Deferred.make<void>();
   const destroyed = yield* Queue.unbounded<void>();
   const gate = Promise.withResolvers<void>();
-  const constructors: Array<{ path: string; bundleId: string }> = [];
+  const constructors: Array<{
+    path: string;
+    bundleId: string;
+    environment: ReadonlyArray<{ name: string; value: string }>;
+  }> = [];
   const exits: Array<() => void> = [];
   const holdMonitor = options.hold === "monitor";
   let allowed = !options.denyPermissions;
@@ -54,12 +65,20 @@ const fixture = Effect.fn(function* (
     }),
     loadEmbedded: async () => ({
       EmbeddedCuaDriverHost: class {
-        readonly exit = Promise.withResolvers<{ generation: string; success: boolean }>();
-        readonly first = constructors.length === 0;
-
-        constructor(path: string, bundleId: string) {
-          constructors.push({ path, bundleId });
+        static withOptions(options: {
+          binaryPath: string;
+          hostBundleId: string;
+          environment: ReadonlyArray<{ name: string; value: string }>;
+        }) {
+          constructors.push({
+            path: options.binaryPath,
+            bundleId: options.hostBundleId,
+            environment: options.environment,
+          });
+          return new this();
         }
+        readonly exit = Promise.withResolvers<{ generation: string; success: boolean }>();
+        readonly first = constructors.length === 1;
         async start() {
           starts++;
           Deferred.doneUnsafe(starting, Exit.void);
@@ -127,7 +146,7 @@ const fixture = Effect.fn(function* (
     Layer.provide(
       Layer.mergeAll(
         NodePath.layerPosix,
-        DesktopConfig.layerTest({ T3CODE_DESKTOP_APP_USER_MODEL_ID: "codes.t3.host-test" }),
+        DesktopConfig.layerTest({ GOAT_DESKTOP_APP_USER_MODEL_ID: "codes.t3.host-test" }),
       ),
     ),
   );
@@ -160,7 +179,7 @@ afterEach(() => vi.unstubAllEnvs());
 describe("DesktopCuaDriver", () => {
   it.effect("hosts with the app identity, preserves the descriptor, reuses and releases once", () =>
     Effect.gen(function* () {
-      vi.stubEnv("T3CODE_CUA_DRIVER_PATH", "/ignored-in-packaged-app");
+      vi.stubEnv("GOAT_CUA_DRIVER_PATH", "/ignored-in-packaged-app");
       const test = yield* Effect.scoped(
         Effect.gen(function* () {
           const test = yield* fixture();
@@ -173,7 +192,11 @@ describe("DesktopCuaDriver", () => {
             mcp: descriptor,
           });
           assert.deepEqual(test.constructors, [
-            { path: "/resources/cua-driver/cua-driver", bundleId: "codes.t3.host-test" },
+            {
+              path: "/resources/cua-driver/cua-driver",
+              bundleId: "codes.t3.host-test",
+              environment: privacyEnvironment,
+            },
           ]);
           yield* test.request("reuse");
           assert.deepEqual(yield* test.next, {
@@ -200,18 +223,22 @@ describe("DesktopCuaDriver", () => {
   it.effect("requires a development override and uses it to host without a bundled driver", () =>
     Effect.scoped(
       Effect.gen(function* () {
-        vi.stubEnv("T3CODE_CUA_DRIVER_PATH", " ");
+        vi.stubEnv("GOAT_CUA_DRIVER_PATH", " ");
         const missing = yield* fixture({ isPackaged: false });
         yield* missing.request("unconfigured");
         assert.equal((yield* missing.next).status, "unavailable");
         assert.isEmpty(missing.constructors);
 
-        vi.stubEnv("T3CODE_CUA_DRIVER_PATH", " /dev/cua-driver ");
+        vi.stubEnv("GOAT_CUA_DRIVER_PATH", " /dev/cua-driver ");
         const configured = yield* fixture({ isPackaged: false });
         yield* configured.request("configured");
         assert.equal((yield* configured.next).status, "ready");
         assert.deepEqual(configured.constructors, [
-          { path: "/dev/cua-driver", bundleId: "codes.t3.host-test" },
+          {
+            path: "/dev/cua-driver",
+            bundleId: "codes.t3.host-test",
+            environment: privacyEnvironment,
+          },
         ]);
       }),
     ),

@@ -1,4 +1,5 @@
-import { CuaDriverMcpConfiguration, type DesktopCuaDriverRequest } from "@t3tools/contracts";
+import { CuaDriverMcpConfiguration, type DesktopCuaDriverRequest } from "@goat/contracts";
+import { cuaDriverHostOptions } from "@goat/shared/cuaDriverRelease";
 import type { EmbeddedCuaDriverHost, EmbeddedDriverConnection } from "@trycua/cua-driver/embedded";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
@@ -16,7 +17,9 @@ type NativeHost = Pick<EmbeddedCuaDriverHost, "start" | "stop" | "waitForExit" |
 
 export interface DesktopCuaDriverDependencies {
   readonly loadEmbedded: () => Promise<{
-    readonly EmbeddedCuaDriverHost: new (path: string, bundleId: string) => NativeHost;
+    readonly EmbeddedCuaDriverHost: {
+      readonly withOptions: (options: ReturnType<typeof cuaDriverHostOptions>) => NativeHost;
+    };
   }>;
   readonly loadElectron: () => Promise<
     Pick<
@@ -27,7 +30,16 @@ export interface DesktopCuaDriverDependencies {
 }
 
 const dependencies: DesktopCuaDriverDependencies = {
-  loadEmbedded: () => import("@trycua/cua-driver/embedded"),
+  loadEmbedded: async () => {
+    const sdk = await import("@trycua/cua-driver/embedded");
+    return {
+      EmbeddedCuaDriverHost: {
+        // A UniFFI constructor: it returns the concrete host, typed as its interface.
+        withOptions: (options) =>
+          sdk.EmbeddedCuaDriverHost.withOptions(options) as EmbeddedCuaDriverHost,
+      },
+    };
+  },
   loadElectron: () => import("@trycua/cua-driver/electron"),
 };
 
@@ -45,7 +57,7 @@ export class DesktopCuaDriver extends Context.Service<
     readonly listen: Effect.Effect<void, never, import("effect/Scope").Scope>;
     readonly restart: Effect.Effect<void>;
   }
->()("@t3tools/desktop/cua/DesktopCuaDriver") {}
+>()("@goat/desktop/cua/DesktopCuaDriver") {}
 
 const decodeMcp = Schema.decodeEffect(CuaDriverMcpConfiguration);
 const settle = (promise: Promise<unknown>) =>
@@ -139,12 +151,12 @@ export const make = Effect.fn("desktop.cua.make")(function* (
             "cua-driver",
             environment.platform === "win32" ? "cua-driver.exe" : "cua-driver",
           )
-      : process.env.T3CODE_CUA_DRIVER_PATH?.trim();
+      : process.env.GOAT_CUA_DRIVER_PATH?.trim();
     if (!path) {
       yield* report(
         request.requestId,
         "unavailable",
-        "Set T3CODE_CUA_DRIVER_PATH for development computer use.",
+        "Set GOAT_CUA_DRIVER_PATH for development computer use.",
       );
       return;
     }
@@ -168,8 +180,10 @@ export const make = Effect.fn("desktop.cua.make")(function* (
         const sdk = yield* Effect.tryPromise(() => native.loadEmbedded());
         // Scope closure may have happened while the lazy module was loading.
         if (closed) return;
-        const host = yield* Effect.try(
-          () => new sdk.EmbeddedCuaDriverHost(path, environment.appUserModelId),
+        const host = yield* Effect.try(() =>
+          sdk.EmbeddedCuaDriverHost.withOptions(
+            cuaDriverHostOptions(path, environment.appUserModelId),
+          ),
         );
         const entry: OwnedHost = {
           host,
