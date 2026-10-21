@@ -271,7 +271,6 @@ describe("migrateRendererOrigin", () => {
         assert.isAbove(blobCount * blobBytes, 100 * MiB);
         assert.isBelow(browser.stats.largestString, (ORIGIN_CHUNK_LIMITS.bytes * 4) / 3 + MiB);
       }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
-    120_000,
   );
 
   it.effect("marks an attempt that never finished as aborted and loads no page", () =>

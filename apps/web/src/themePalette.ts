@@ -70,6 +70,28 @@ type CustomThemeLibrarySnapshot =
   | Readonly<{ status: "unavailable"; reason: "storage-unavailable"; cause: unknown }>;
 
 let customThemeLibrarySnapshot: CustomThemeLibrarySnapshot | null = null;
+const themePreviewListeners = new Set<() => void>();
+let themePreviewAppearance: ThemeAppearance | null = null;
+
+export function getThemePreviewAppearance(): ThemeAppearance | null {
+  return themePreviewAppearance;
+}
+
+export function getThemePreviewSidebarArtwork(): boolean | null {
+  return themePreviewAppearance === null ? null : false;
+}
+
+export function subscribeToThemePreview(listener: () => void): () => void {
+  themePreviewListeners.add(listener);
+  return () => themePreviewListeners.delete(listener);
+}
+
+function setThemePreviewAppearance(appearance: ThemeAppearance | null): void {
+  if (themePreviewAppearance === appearance) return;
+  themePreviewAppearance = appearance;
+  for (const listener of themePreviewListeners) listener();
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -1406,6 +1428,7 @@ export function applyThemeColorPreview(colors: ThemeColors, appearance: ThemeApp
   for (const [role, value] of Object.entries(colors) as Array<[ThemeColorRole, string]>) {
     if (isThemeColor(value)) root.style.setProperty(APP_THEME_VARIABLES[role], value);
   }
+  setThemePreviewAppearance(appearance);
 }
 
 export function applyThemePalette(theme: ThemePreference, appearance?: ThemeAppearance): void {
@@ -1414,6 +1437,7 @@ export function applyThemePalette(theme: ThemePreference, appearance?: ThemeAppe
   const root = document.documentElement;
   if (!root?.style) return;
 
+  setThemePreviewAppearance(null);
   const palette = getThemeDefinition(theme);
 
   if (palette) {

@@ -77,6 +77,7 @@ export * from "./device.ts";
 export * from "./preview.ts";
 export * from "./previewAutomation.ts";
 export * from "./connectionCatalog.ts";
+export * from "./previewCapture.ts";
 export * from "./resourceTelemetry.ts";
 export * from "./hostStatus.ts";
 export * from "./fleetHealth.ts";

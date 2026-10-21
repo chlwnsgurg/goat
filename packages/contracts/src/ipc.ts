@@ -1,5 +1,6 @@
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
+import type { PreviewCaptureFailureEncoded } from "./previewCapture.ts";
 
 import { SnapShotSource } from "./chatAttachment.ts";
 import { EnvironmentId, NonNegativeInt, TrimmedNonEmptyString } from "./baseSchemas.ts";
@@ -1196,11 +1197,17 @@ export interface DesktopSystemWakeEvent {
 
 export interface DesktopBridge {
   getAppBranding: () => DesktopAppBranding | null;
+  getRelayTelemetryEnabled?: () => boolean;
   getPathForFile?: (file: File) => string;
   getClientPlatform?: () => string;
   setNotificationBadge?: (badge: { count: number; image: string | null }) => Promise<void>;
   onNotificationBadgeClear?: (listener: () => void) => () => void;
   onTrackpadScrollEnd?: (listener: () => void) => () => void;
+  /**
+   * Renderer `window.focus()` cannot raise an Electron window, and on Wayland
+   * only the main process can spend a notification click's activation token.
+   */
+  revealWindow?: () => Promise<void>;
   /**
    * The OS locale as a BCP-47 tag, which the renderer cannot read for itself:
    * the packaged app ships only the `en-US` Chromium locale pak, so
@@ -1387,7 +1394,9 @@ export interface DesktopPreviewBridge {
    */
   pickElement: (tabId: string) => Promise<PreviewAnnotationSubmissionResult | null>;
   cancelPickElement: (tabId: string) => Promise<void>;
-  captureScreenshot: (tabId: string) => Promise<DesktopPreviewScreenshotArtifact>;
+  captureScreenshot: (
+    tabId: string,
+  ) => Promise<DesktopPreviewScreenshotArtifact | PreviewCaptureFailureEncoded>;
   revealArtifact: (path: string) => Promise<void>;
   copyArtifactToClipboard: (path: string) => Promise<void>;
   pictureInPicture: {
@@ -1396,7 +1405,7 @@ export interface DesktopPreviewBridge {
   };
   recording: {
     onInput: (listener: (event: DesktopPreviewRecordingInputEvent) => void) => () => void;
-    startScreencast: (tabId: string) => Promise<void>;
+    startScreencast: (tabId: string) => Promise<void | PreviewCaptureFailureEncoded>;
     stopScreencast: (tabId: string) => Promise<void>;
     save: (
       tabId: string,

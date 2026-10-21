@@ -33,7 +33,7 @@ export type ServiceReconcileResult =
       readonly plan: BootService.BootServicePlan;
     };
 
-export const reconcileService = Effect.fn("cli.service.reconcile")(function* (options?: {
+const reconcileService = Effect.fn("cli.service.reconcile")(function* (options?: {
   readonly allowDowngrade?: boolean;
   readonly start?: boolean;
 }) {
@@ -59,6 +59,15 @@ export const reconcileService = Effect.fn("cli.service.reconcile")(function* (op
     plan,
   } satisfies ServiceReconcileResult;
 });
+
+function formatServiceChange(
+  result: Extract<ServiceReconcileResult, { readonly changed: true }>,
+): string {
+  if (result.plan.handedOff === true) {
+    return `Handed the GOAT service switch to goat@${packageJson.version} to a separate systemd unit, since this session runs inside the service and disconnects when it restarts.\nResult: ${result.plan.logPath}`;
+  }
+  return `${result.previouslyInstalled ? "Updated" : "Installed"} GOAT service with goat@${packageJson.version}.\nLogs: ${result.plan.logPath}`;
+}
 
 export function formatServiceStatus(
   status: BootService.BootServiceStatus,
@@ -144,9 +153,7 @@ const serviceInstallCommand = Command.make("install", {
           yield* Console.log(`GOAT service is already installed with goat@${packageJson.version}.`);
           return;
         }
-        yield* Console.log(
-          `${result.previouslyInstalled ? "Updated" : "Installed"} GOAT service with goat@${packageJson.version}.\nLogs: ${result.plan.logPath}`,
-        );
+        yield* Console.log(formatServiceChange(result));
       }),
     ),
   ),
@@ -167,9 +174,7 @@ const serviceUpdateCommand = Command.make("update", serviceReconcileFlags).pipe(
           yield* Console.log(`GOAT service is already using goat@${packageJson.version}.`);
           return;
         }
-        yield* Console.log(
-          `${result.previouslyInstalled ? "Updated" : "Installed"} GOAT service with goat@${packageJson.version}.\nLogs: ${result.plan.logPath}`,
-        );
+        yield* Console.log(formatServiceChange(result));
       }),
     ),
   ),
@@ -185,11 +190,15 @@ const serviceRestartCommand = Command.make("restart", projectLocationFlags).pipe
       Effect.gen(function* () {
         const service = yield* BootService.BootService;
         const status = yield* service.status;
-        const restarted = yield* service.restart;
+        const outcome = yield* service.restart;
+        const onVersion =
+          status.installedVersion === undefined ? "" : ` on goat@${status.installedVersion}`;
         yield* Console.log(
-          restarted
-            ? `Restarted the GOAT service${status.installedVersion === undefined ? "" : ` on goat@${status.installedVersion}`}.`
-            : "GOAT service is not installed.",
+          outcome === "restarted"
+            ? `Restarted the GOAT service${onVersion}.`
+            : outcome === "queued"
+              ? `Queued a restart of the GOAT service${onVersion}. This session runs inside the service and disconnects when it goes down.\nLogs: ${status.logPath}`
+              : "GOAT service is not installed.",
         );
       }),
     ),
@@ -235,16 +244,18 @@ const serviceStatusCommand = Command.make("status", projectLocationFlags).pipe(
   ),
 );
 
+export type ServiceOnboardingOutcome = "ready" | "pending" | "skipped";
+
 export const offerServiceDuringOnboarding = Effect.gen(function* () {
   const service = yield* BootService.BootService;
   const status = yield* service.status;
   const { supported, installed, current } = status;
   if (!supported) {
-    return false;
+    return "skipped" as const;
   }
   if (installed && current) {
     yield* Console.log("GOAT is already set up to run in the background on this machine.");
-    return true;
+    return "ready" as const;
   }
   for (const problem of status.problems ?? []) {
     yield* Console.warn(`[${problem}] ${BootService.formatBootServiceProblem(problem)}`);
@@ -257,7 +268,7 @@ export const offerServiceDuringOnboarding = Effect.gen(function* () {
     yield* Console.log(
       `A newer goat@${status.installedVersion} background service is installed. Leaving it unchanged.`,
     );
-    return false;
+    return "skipped" as const;
   }
   const platform = yield* HostProcess.Platform;
   const reachability = isGoatConnectEnabled() ? "T3 Connect" : "your network and Tailscale";
@@ -274,35 +285,45 @@ export const offerServiceDuringOnboarding = Effect.gen(function* () {
     }),
   );
   if (!wanted) {
-    return false;
+    return "skipped" as const;
   }
   const result = yield* reconcileService();
   if (result.changed) {
     yield* Console.log(
-      `Background service ${result.previouslyInstalled ? "updated" : "installed"}. Logs: ${result.plan.logPath}`,
+      result.plan.handedOff === true
+        ? formatServiceChange(result)
+        : `Background service ${result.previouslyInstalled ? "updated" : "installed"}. Logs: ${result.plan.logPath}`,
     );
   }
-  return true;
+  return result.changed && result.plan.handedOff === true
+    ? ("pending" as const)
+    : ("ready" as const);
 });
 
+const reportServiceSetupFailure = (error: BootService.BootServiceError) =>
+  Console.warn(`Background setup did not finish: ${error.message}`).pipe(
+    Effect.as("skipped" as const),
+  );
+
 export const recoverServiceOnboardingOffer = <R>(
-  offer: Effect.Effect<boolean, BootService.BootServiceError | Terminal.QuitError, R>,
+  offer: Effect.Effect<
+    ServiceOnboardingOutcome,
+    BootService.BootServiceError | Terminal.QuitError,
+    R
+  >,
 ) =>
   offer.pipe(
     Effect.catchTags({
-      QuitError: () => Effect.succeed(false),
+      QuitError: () => Effect.succeed("skipped" as const),
       BootServiceUnsupportedError: (error) =>
-        Console.log(`Skipping background setup: ${error.message}`).pipe(Effect.as(false)),
-      BootServiceCommandError: (error) =>
-        Console.warn(`Background setup did not finish: ${error.message}`).pipe(Effect.as(false)),
-      BootServiceInstallError: (error) =>
-        Console.warn(`Background setup did not finish: ${error.message}`).pipe(Effect.as(false)),
-      BootServicePrerequisiteError: (error) =>
-        Console.warn(`Background setup did not finish: ${error.message}`).pipe(Effect.as(false)),
-      BootServiceUpdatePendingError: (error) =>
-        Console.warn(`Background setup did not finish: ${error.message}`).pipe(Effect.as(false)),
-      BootServiceDowngradeRefusedError: (error) =>
-        Console.warn(`Background setup did not finish: ${error.message}`).pipe(Effect.as(false)),
+        Console.log(`Skipping background setup: ${error.message}`).pipe(
+          Effect.as("skipped" as const),
+        ),
+      BootServiceCommandError: reportServiceSetupFailure,
+      BootServiceInstallError: reportServiceSetupFailure,
+      BootServicePrerequisiteError: reportServiceSetupFailure,
+      BootServiceUpdatePendingError: reportServiceSetupFailure,
+      BootServiceDowngradeRefusedError: reportServiceSetupFailure,
     }),
   );
 
