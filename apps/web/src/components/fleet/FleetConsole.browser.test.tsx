@@ -90,6 +90,11 @@ const console_ = () =>
   container.querySelector<HTMLElement>('section[aria-label="Fleet telemetry"]');
 /** The idle callback and the lazy chunk settle outside React; let each step flush inside act. */
 async function mounted() {
+  // Load the lazy chunk first, so a cold transform on a busy runner is not counted against the
+  // idle callback's window below.
+  await act(async () => {
+    await import("./FleetConsole");
+  });
   for (let attempt = 0; attempt < 100 && console_() === null; attempt++) {
     await act(() => new Promise((resolve) => setTimeout(resolve, 20)));
   }
