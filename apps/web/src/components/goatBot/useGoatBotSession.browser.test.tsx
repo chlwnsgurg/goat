@@ -1,5 +1,3 @@
-// @vitest-environment jsdom
-
 import {
   ChannelBindingId,
   ChannelConversationId,
@@ -20,6 +18,7 @@ import * as Schema from "effect/Schema";
 import { act, useState, useSyncExternalStore, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, it, vi } from "vite-plus/test";
+import { fakeTimers } from "../../../test/render";
 
 const state = vi.hoisted(() => ({
   environments: [] as Array<{
@@ -82,7 +81,8 @@ vi.mock("./goatBotHooks", () => ({
   },
   useLegacyGlobalAgentRoute: () => null,
 }));
-vi.mock("~/state/entities", () => ({
+vi.mock("~/state/entities", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("~/state/entities")>()),
   useThreadShell: (ref: { threadId: string } | null) => {
     useTick();
     state.shellReads(ref);
@@ -131,7 +131,8 @@ vi.mock("~/lib/archivedThreadsState", () => ({
 vi.mock("~/state/use-orchestration-command", () => ({
   useOrchestrationCommand: () => state.unarchive,
 }));
-vi.mock("~/state/environments", () => ({
+vi.mock("~/state/environments", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("~/state/environments")>()),
   useConnectedEnvironmentIds: () => {
     useTick();
     return state.environments
@@ -140,15 +141,22 @@ vi.mock("~/state/environments", () => ({
   },
 }));
 vi.mock("~/hooks/useMediaQuery", () => ({ useIsMobile: () => false }));
-vi.mock("~/hooks/useSettings", () => ({
-  usePrimarySettings: (select: (settings: { timestampFormat: "24-hour" }) => unknown) =>
-    select({ timestampFormat: "24-hour" }),
-}));
+vi.mock("~/hooks/useSettings", async (importOriginal) => {
+  const { DEFAULT_CLIENT_SETTINGS } = await import("@goat/contracts/settings");
+  return {
+    ...(await importOriginal<typeof import("~/hooks/useSettings")>()),
+    usePrimarySettings: (select: (settings: { timestampFormat: "24-hour" }) => unknown) =>
+      select({ timestampFormat: "24-hour" }),
+    useClientSettings: (select: (settings: typeof DEFAULT_CLIENT_SETTINGS) => unknown) =>
+      select(DEFAULT_CLIENT_SETTINGS),
+  };
+});
 vi.mock("../WorkspacePageHeader", () => ({
   WorkspacePageHeader: ({ children }: { children: ReactNode }) => <header>{children}</header>,
 }));
 // Link target assertions are paired with the real ThreadRouteView worker-branch test.
-vi.mock("@tanstack/react-router", () => ({
+vi.mock("@tanstack/react-router", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@tanstack/react-router")>()),
   useLocation: () => {
     state.locationReads();
     return "/";
@@ -413,7 +421,6 @@ beforeEach(() => {
 afterEach(async () => {
   await act(() => root.unmount());
   container.remove();
-  vi.useRealTimers();
 });
 
 it("sends a second message while a running chip has no reply, with independent keys and an enabled composer", async () => {
@@ -757,7 +764,7 @@ it("counts 102 waiting tasks from every channel across pages, dedupes, shares ob
 });
 
 it("hides a badge until the first successful count and refreshes every 60 seconds only while enabled", async () => {
-  vi.useFakeTimers();
+  using _timers = fakeTimers();
   vi.mocked(port.listTasks).mockRejectedValueOnce(new Error("offline"));
   await render(true);
   expect(container.querySelector("output")?.textContent).toBe("unknown");

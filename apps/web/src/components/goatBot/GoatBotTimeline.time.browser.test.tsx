@@ -1,4 +1,3 @@
-// @vitest-environment jsdom
 import type { GoatBotRow } from "@goat/client-runtime/goatBot";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
@@ -102,9 +101,12 @@ it("updates edge fade flags as the reader scrolls", async () => {
   await act(() => root.render(<GoatBotTimeline rows={[user("sent")]} onRetry={() => {}} />));
   const wrapper = container.querySelector(".goat-timeline") as HTMLDivElement;
   const scroll = wrapper.querySelector(".overflow-y-auto") as HTMLDivElement;
-  Object.defineProperties(scroll, {
-    scrollHeight: { configurable: true, value: 300 },
-    clientHeight: { configurable: true, value: 100 },
+  // Chromium clamps scrollTop to the real layout, regardless of mocked height getters.
+  Object.assign(scroll.style, { height: "100px", flex: "none", overflowY: "auto" });
+  Object.assign(scroll.querySelector("ol")!.style, {
+    height: "300px",
+    boxSizing: "border-box",
+    margin: "0",
   });
   scroll.scrollTop = 0;
   await act(() => scroll.dispatchEvent(new Event("scroll", { bubbles: true })));

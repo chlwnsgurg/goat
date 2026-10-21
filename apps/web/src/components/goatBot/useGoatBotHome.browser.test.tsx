@@ -1,4 +1,4 @@
-// @vitest-environment jsdom
+import { fakeTimers } from "../../../test/render";
 import { EnvironmentId, type GoatBotHomeClaim } from "@goat/contracts";
 import { act, useSyncExternalStore } from "react";
 import { createRoot, type Root } from "react-dom/client";
@@ -76,6 +76,7 @@ function environment(id: EnvironmentId, home: GoatBotHomeClaim | null = null): R
 }
 let root: Root;
 let container: HTMLDivElement;
+let timers: Disposable;
 function Observer() {
   useGoatBotHome();
   return null;
@@ -96,7 +97,7 @@ async function advance(ms: number) {
 }
 beforeEach(() => {
   Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
-  vi.useFakeTimers();
+  timers = fakeTimers();
   vi.setSystemTime(1_000);
   state.environments = [environment(a), environment(b)];
   state.permissions = new Set([a, b]);
@@ -110,7 +111,7 @@ beforeEach(() => {
 afterEach(async () => {
   await act(() => root.unmount());
   container.remove();
-  vi.useRealTimers();
+  timers[Symbol.dispose]();
 });
 
 it("creates one shared claim and waits for raw snapshot readback without duplicate writes", async () => {

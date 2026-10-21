@@ -1,4 +1,4 @@
-// @vitest-environment jsdom
+import { fakeTimers } from "../../../test/render";
 import { EnvironmentId, type GoatBotHomeClaim } from "@goat/contracts";
 import { act, StrictMode, useEffect } from "react";
 import { createRoot } from "react-dom/client";
@@ -40,7 +40,7 @@ import { useGoatBotHome } from "./useGoatBotHome";
 
 it("keeps deferred writes across StrictMode cleanup/setup, wakes retries and cleans timers", async () => {
   Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
-  vi.useFakeTimers();
+  using _timers = fakeTimers();
   vi.setSystemTime(1_000);
   const a = EnvironmentId.make("a");
   const b = EnvironmentId.make("b");
@@ -109,6 +109,5 @@ it("keeps deferred writes across StrictMode cleanup/setup, wakes retries and cle
   } finally {
     await act(() => root.unmount());
     container.remove();
-    vi.useRealTimers();
   }
 });

@@ -1,4 +1,4 @@
-// @vitest-environment jsdom
+import { fakeTimers } from "../../../test/render";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, it, vi } from "vite-plus/test";
@@ -12,11 +12,12 @@ import { GoatBotTimeline } from "./GoatBotTimeline";
 
 let root: Root;
 let container: HTMLDivElement;
+let timers: Disposable;
 const now = Date.parse("2026-10-15T00:00:00Z");
 
 beforeEach(() => {
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
-  vi.useFakeTimers();
+  timers = fakeTimers();
   vi.setSystemTime(now);
   container = document.createElement("div");
   document.body.append(container);
@@ -26,7 +27,7 @@ beforeEach(() => {
 afterEach(async () => {
   await act(() => root.unmount());
   container.remove();
-  vi.useRealTimers();
+  timers[Symbol.dispose]();
   vi.unstubAllGlobals();
 });
 

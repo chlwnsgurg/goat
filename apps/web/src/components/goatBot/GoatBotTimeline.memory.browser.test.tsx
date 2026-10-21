@@ -1,4 +1,3 @@
-// @vitest-environment jsdom
 import { act } from "react";
 import { createRoot } from "react-dom/client";
 import { EnvironmentId, MemoryId, MemorySpaceId } from "@goat/contracts";
@@ -9,7 +8,8 @@ const state = vi.hoisted(() => ({
   allowed: true,
   destination: null as Record<string, unknown> | null,
 }));
-vi.mock("../../state/environments", () => ({
+vi.mock("../../state/environments", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../state/environments")>()),
   useEnvironment: (environmentId: string) => ({
     environmentId,
     serverConfig: {
@@ -21,12 +21,21 @@ vi.mock("../../state/session", async (original) => ({
   ...(await original<typeof import("../../state/session")>()),
   useEnvironmentScope: () => state.allowed,
 }));
-vi.mock("@tanstack/react-router", () => ({
+vi.mock("@tanstack/react-router", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@tanstack/react-router")>()),
   useNavigate: () => async (input: { search: Record<string, unknown> }) => {
     state.destination = input.search;
   },
 }));
-vi.mock("~/hooks/useSettings", () => ({ usePrimarySettings: () => "system" }));
+vi.mock("~/hooks/useSettings", async (importOriginal) => {
+  const { DEFAULT_CLIENT_SETTINGS } = await import("@goat/contracts/settings");
+  return {
+    ...(await importOriginal<typeof import("~/hooks/useSettings")>()),
+    usePrimarySettings: () => "system",
+    useClientSettings: (select: (settings: typeof DEFAULT_CLIENT_SETTINGS) => unknown) =>
+      select(DEFAULT_CLIENT_SETTINGS),
+  };
+});
 vi.mock("./GoatBotAvatar", () => ({ GoatBotAvatar: () => null }));
 import { GoatBotTimeline } from "./GoatBotTimeline";
 const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
