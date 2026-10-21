@@ -70,6 +70,11 @@ import { SettingsSection } from "./settingsLayout";
 import { searchableSetting } from "./settingsSearch";
 import { EnvironmentIconMenu } from "./EnvironmentIconPicker";
 import { EnvironmentRoutesList } from "./EnvironmentRoutesList";
+import {
+  ConnectionDiagnosisPanel,
+  ConnectionDiagnosisSummary,
+  useConnectionDiagnosis,
+} from "./ConnectionDiagnosisDetails";
 import { usePreparedConnection } from "~/state/session";
 import {
   EnvironmentRow,
@@ -291,6 +296,7 @@ function SavedBackendListRow({
 }: SavedBackendListRowProps) {
   const [routesOpen, setRoutesOpen] = useState(false);
   const [permissionsOpen, setPermissionsOpen] = useState(false);
+  const [diagnosisOpen, setDiagnosisOpen] = useState(false);
   const environmentId = environment.environmentId;
   const unsupported = environment.connection.phase === "unsupported";
   const blocked = unsupported && !hasSavedBearerRoute(environment.entry);
@@ -352,6 +358,20 @@ function SavedBackendListRow({
   const resumingServerUpdate =
     serverUpdateState.status === "running" && serverUpdateState.stage === "resuming";
   const status = savedConnectionPresentation({ environment, runtimeStatus });
+  const retryNow = useAtomCommand(environmentCatalog.retryNow);
+  const {
+    diagnosis: currentDiagnosis,
+    state: connectionState,
+    relayOnly,
+  } = useConnectionDiagnosis(environment);
+  // The native SSH owner can supersede a stale supervisor failure while preparing or opening.
+  const diagnosis =
+    resumingServerUpdate ||
+    isGoatConnectUnavailable(environment.entry) ||
+    status.preparationPhase !== undefined ||
+    (runtimeStatus?.state === "preparing" && status.tone !== "error")
+      ? null
+      : currentDiagnosis;
   const serverVersion = environment.serverConfig?.environment.serverVersion ?? null;
   // A saved T3 Connect machine this device has never reached (unsupported,
   // or not yet connected) still has a descriptor from relay discovery, so
@@ -396,7 +416,7 @@ function SavedBackendListRow({
   const routeCount = connectionRoutes(environment.entry).length;
   const subtitleText = [
     environmentTransportLabel(environment, connectedTarget),
-    resumingServerUpdate ? "Restarting" : status.text,
+    diagnosis ? null : resumingServerUpdate ? "Restarting" : status.text,
     snapshotAge,
     enabled && versionMismatch ? serverVersion : null,
     status.runtimeText,
@@ -439,6 +459,7 @@ function SavedBackendListRow({
                     enabled &&
                       status.tone === "error" &&
                       !resumingServerUpdate &&
+                      !diagnosis &&
                       "text-destructive",
                   )}
                 />
@@ -490,28 +511,47 @@ function SavedBackendListRow({
         </span>
       }
       below={
-        savedSshTarget ? (
-          <SshRuntimeSettingsRow
-            environmentId={environmentId}
-            target={savedSshTarget}
-            enabled={environment.entry.enabled && !isRemoving}
-            preparationInSubtitle={
-              (!resumingServerUpdate && status.preparationPhase !== undefined) ||
-              (runtimeStatus?.state === "preparing" && status.runtimeText !== null)
-            }
-            {...(status.preparationPhase !== undefined
-              ? { preparationProgress: { phase: status.preparationPhase } }
-              : {})}
-            onReviewTrust={() => onReviewTrust(environment)}
-          />
-        ) : serverUpdateState.status !== "idle" ? (
-          <div className="mt-1 max-w-md">
-            <ServerUpdateProgress state={serverUpdateState} />
-          </div>
-        ) : null
+        <>
+          {diagnosis ? (
+            <ConnectionDiagnosisSummary
+              diagnosis={diagnosis}
+              retryAt={connectionState.phase === "backoff" ? connectionState.retryAt : null}
+              attempt={connectionState.attempt}
+              expanded={diagnosisOpen}
+              onToggle={() => setDiagnosisOpen((open) => !open)}
+            />
+          ) : null}
+          {savedSshTarget ? (
+            <SshRuntimeSettingsRow
+              environmentId={environmentId}
+              target={savedSshTarget}
+              enabled={environment.entry.enabled && !isRemoving}
+              preparationInSubtitle={
+                (!resumingServerUpdate && status.preparationPhase !== undefined) ||
+                (runtimeStatus?.state === "preparing" && status.runtimeText !== null)
+              }
+              {...(status.preparationPhase !== undefined
+                ? { preparationProgress: { phase: status.preparationPhase } }
+                : {})}
+              onReviewTrust={() => onReviewTrust(environment)}
+            />
+          ) : serverUpdateState.status !== "idle" ? (
+            <div className="mt-1 max-w-md">
+              <ServerUpdateProgress state={serverUpdateState} />
+            </div>
+          ) : null}
+        </>
       }
       detail={
         <>
+          {diagnosis && diagnosisOpen ? (
+            <ConnectionDiagnosisPanel
+              hostLabel={environment.label}
+              diagnosis={diagnosis}
+              onRetry={() => void retryNow(environmentId)}
+              onAddRoute={relayOnly ? () => onAddRoute(environment) : null}
+            />
+          ) : null}
           {routesOpen && (
             <EnvironmentRoutesList
               environment={environment}
@@ -869,7 +909,7 @@ export function ConnectionEnvironmentsSection({
     const address = formatDesktopSshTarget(target);
     return (
       !savedDesktopSshEnvironmentKeys.has(target.alias) &&
-      !savedDesktopSshEnvironmentKeys.has(address)
+      (target.source === "ssh-config" || !savedDesktopSshEnvironmentKeys.has(address))
     );
   });
   const filteredDiscoveredSshHosts = filterDiscoveredSshHosts(

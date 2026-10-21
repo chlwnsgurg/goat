@@ -81,7 +81,7 @@ it("expires a live reply and shows a new reply after the old one expires", async
   expect(container.querySelectorAll('[role="status"] .animate-typing-wave')).toHaveLength(3);
   await act(() => vi.advanceTimersByTime(1_000));
   expect(container.querySelector('[role="status"]')).toBeNull();
-  await act(() => render(Date.now()));
+  await act(() => render(now + 1_000));
   expect(container.querySelector('[role="status"]')).not.toBeNull();
 });
 

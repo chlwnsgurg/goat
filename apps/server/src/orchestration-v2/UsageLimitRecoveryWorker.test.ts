@@ -8,6 +8,7 @@ import * as TestClock from "effect/testing/TestClock";
 import * as Fallback from "../fleet/resources/Fallback.ts";
 import * as Scheduler from "../scheduling/Scheduler.ts";
 import * as ServerSettings from "../serverSettings.ts";
+import * as Orchestrator from "./Orchestrator.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
 import * as ThreadManagement from "./ThreadManagementService.ts";
 import * as UsageLimitRecoveryWorker from "./UsageLimitRecoveryWorker.ts";
@@ -63,6 +64,15 @@ const sweep = (options: {
                     (input.withoutReset === true),
                 );
                 return [candidate("a"), candidate("b"), candidate("goal")];
+              }),
+          }),
+        ),
+        Layer.provide(
+          Layer.mock(Orchestrator.OrchestratorV2)({
+            autoArmLimitRecovery: (input) =>
+              Effect.sync(() => {
+                commands.push({ type: "thread.metadata.update", ...input });
+                return { sequence: commands.length } as never;
               }),
           }),
         ),

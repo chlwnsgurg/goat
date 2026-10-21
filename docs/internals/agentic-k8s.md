@@ -800,7 +800,7 @@ types above are the agreement.
 ## Persistence
 
 **Now.** SQLite migrations live in `apps/server/src/persistence/Migrations/` and are registered in
-`apps/server/src/persistence/Migrations.ts`; the latest is `084_MemoryCheckpointLifecycle`. Launch
+`apps/server/src/persistence/Migrations.ts`. Launch
 watches persist in `thread-launch-watches.json`.
 
 **Proposed.** Goals are control-plane rows outside the orchestration event stream. A goal is not

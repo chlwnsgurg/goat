@@ -9,6 +9,7 @@ import * as NodeURL from "node:url";
 import { ORCHESTRATION_PROTOCOL_VERSION } from "@goat/contracts";
 import { SSH_RUNTIME_PROTOCOL_VERSION } from "@goat/shared/sshRuntimeProtocol";
 import { afterEach, assert, it } from "@effect/vitest";
+import { vi } from "vite-plus/test";
 
 import {
   isLinuxZombie,
@@ -143,6 +144,7 @@ const answersSignal0 = (pid: number) => {
 const firstLine = (stream: NodeJS.ReadableStream) =>
   new Promise<string>((resolve, reject) => {
     let data = "";
+    // oxlint-disable-next-line goat/no-real-time-wait-in-tests -- Watchdog rejects a real child stdout read if the owned subprocess fails to report its PID.
     const timer = setTimeout(() => reject(new Error("timed out waiting for a child pid")), 5_000);
     stream.setEncoding("utf8");
     stream.on("data", (chunk: string) => {
@@ -166,9 +168,12 @@ it.runIf(NodeFS.existsSync("/proc/self/stat"))(
       const zombiePid = Number((await firstLine(parent.stdout!)).trim());
       assert.isAbove(zombiePid, 0);
       process.kill(zombiePid, "SIGKILL");
-      const deadline = Date.now() + 2_000;
-      while (!isLinuxZombie(zombiePid) && Date.now() < deadline)
-        await new Promise((resolve) => setTimeout(resolve, 10));
+      await vi.waitFor(
+        () => {
+          assert.isTrue(isLinuxZombie(zombiePid), "the killed child must stay an unreaped zombie");
+        },
+        { timeout: 2_000 },
+      );
       assert.isTrue(isLinuxZombie(zombiePid), "the killed child must stay an unreaped zombie");
       assert.isTrue(answersSignal0(zombiePid), "a zombie still answers signal 0");
       const { result, ran } = await superviseFailedReplacement("trial", {
