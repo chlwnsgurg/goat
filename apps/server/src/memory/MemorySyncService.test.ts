@@ -2171,15 +2171,15 @@ it.effect.each([
               yield* sql`SELECT name FROM sqlite_master WHERE name='memory_last_ready_space'`,
             );
             assert.deepStrictEqual(yield* runMigrations(), [
-              [83, "MemoryLastReadySpace"],
-              [84, "MemoryHubAdministered"],
-              [85, "MemoryCheckpointLifecycle"],
-              [86, "FleetGoals"],
-              [87, "FleetHealth"],
-              [88, "ThreadRunObservedChecks"],
-              [89, "RemoteDispatchObservation"],
-              [90, "MemoryRevisionCheckpointSize"],
-              [91, "HubNodes"],
+              [86, "MemoryLastReadySpace"],
+              [87, "MemoryHubAdministered"],
+              [88, "MemoryCheckpointLifecycle"],
+              [89, "FleetGoals"],
+              [90, "FleetHealth"],
+              [91, "ThreadRunObservedChecks"],
+              [92, "RemoteDispatchObservation"],
+              [93, "MemoryRevisionCheckpointSize"],
+              [94, "HubNodes"],
             ]);
             const adapter = yield* statusRuntime;
             const result = yield* Effect.scoped(
@@ -2196,7 +2196,7 @@ it.effect.each([
             );
             assert.strictEqual(result.state, "disabled");
             assert.strictEqual(result.retainedLocalSpaceId, space);
-          }).pipe(Effect.provide(fixture(peer(), undefined, true, false, local, database(82)))),
+          }).pipe(Effect.provide(fixture(peer(), undefined, true, false, local, database(85)))),
         );
         // Close the SQLite connection and rebuild the service, preserving only the upgraded file.
         yield* Effect.scoped(
@@ -2237,7 +2237,7 @@ it.effect.each([
             const item = listed.items[0];
             if (item?.status !== "active") throw new Error("retained memory missing");
             assert.strictEqual(item.payload.text, "synthetic fact 98010");
-          }).pipe(Effect.provide(fixture(peer(), undefined, true, false, local, database(83)))),
+          }).pipe(Effect.provide(fixture(peer(), undefined, true, false, local, database(86)))),
         );
       }).pipe(Effect.provide(NodeServices.layer)),
     ),

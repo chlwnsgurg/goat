@@ -1,7 +1,9 @@
-import { afterEach, describe, expect, it, vi } from "@effect/vitest";
+import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 import { withRelayClientTracing } from "@goat/shared/relayTracing";
 import * as Effect from "effect/Effect";
 import * as Tracer from "effect/Tracer";
+
+vi.mock("@goat/shared/goatConnect", () => ({ isGoatConnectEnabled: () => true }));
 
 afterEach(() => {
   vi.unstubAllEnvs();

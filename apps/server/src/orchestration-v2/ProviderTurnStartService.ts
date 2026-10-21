@@ -727,7 +727,7 @@ export const layer: Layer.Layer<
         thread: projection.thread,
         modelSelection: run.modelSelection,
       });
-      if (!(yield* isCurrentAttemptInStatus("starting"))) return;
+      if (!(yield* isCurrentAttemptInStatus(expectedStartStatus))) return;
       const existingSessionProjection = projection.providerSessions.find(
         (candidate) => candidate.id === providerSessionId,
       );
@@ -796,7 +796,7 @@ export const layer: Layer.Layer<
         return;
       }
       const session = sessionResult.success;
-      if (!(yield* isCurrentAttemptInStatus("starting"))) return;
+      if (!(yield* isCurrentAttemptInStatus(expectedStartStatus))) return;
       const loadFromProvider = Effect.fn("ProviderTurnStartService.loadFromProvider")(function* (
         load: Effect.Effect<OrchestrationV2ProviderThread, ProviderAdapter.ProviderAdapterV2Error>,
       ) {

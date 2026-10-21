@@ -1937,8 +1937,21 @@ export const layer: Layer.Layer<
               Effect.forkDetach,
             ),
           ),
-          Effect.catchCause((cause) =>
-            Effect.logError("orchestration V2 provider turn start failed", {
+          Effect.catchCause((cause) => {
+            // The start service owns attachment failure settlement and its retry budget.
+            if (input.reattach === true)
+              return interruptProviderEvents.pipe(
+                Effect.andThen(
+                  Effect.fail(
+                    new RunExecutionStartError({
+                      commandId: input.commandId,
+                      runId: input.run.id,
+                      cause,
+                    }),
+                  ),
+                ),
+              );
+            return Effect.logError("orchestration V2 provider turn start failed", {
               runId: input.run.id,
               cause,
             }).pipe(
@@ -2018,8 +2031,8 @@ export const layer: Layer.Layer<
                     cause: { start: cause, write: writeCause },
                   }),
               ),
-            ),
-          ),
+            );
+          }),
         );
       }),
     } satisfies RunExecutionServiceV2Shape);

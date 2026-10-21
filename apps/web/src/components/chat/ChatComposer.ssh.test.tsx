@@ -40,6 +40,7 @@ vi.mock("../ui/toast", () => ({
   stackedThreadToast: (v: unknown) => v,
 }));
 vi.mock("@tanstack/react-router", () => ({
+  useRouter: () => ({ latestLocation: { pathname: "/", state: {} } }),
   useNavigate: () => state.navigate,
   useLocation: ({ select }: { select: (v: unknown) => unknown }) =>
     select({ href: "/", state: {} }),
