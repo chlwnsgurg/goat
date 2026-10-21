@@ -199,12 +199,21 @@ function setup() {
       _registry: unknown,
       target: {
         environmentId: EnvironmentId;
-        input: { patch: { hub: Partial<ServerSettings["hub"]> } };
+        input: {
+          patch: {
+            hub?: Partial<ServerSettings["hub"]>;
+            goatclaw?: Partial<ServerSettings["goatclaw"]>;
+          };
+        };
       },
     ) => {
       const atom = settings.get(target.environmentId)!;
       const next = registry.get(atom);
-      registry.set(atom, { ...next, hub: { ...next.hub, ...target.input.patch.hub } });
+      registry.set(atom, {
+        ...next,
+        hub: { ...next.hub, ...target.input.patch.hub },
+        goatclaw: { ...next.goatclaw, ...target.input.patch.goatclaw },
+      });
       return { _tag: "Success", value: undefined };
     },
   );
@@ -481,4 +490,29 @@ it("Add device to hub joins a typed alias and shows why it failed", async () => 
     .element(screen.getByText("does not resolve to a direct SSH host", { exact: false }).first())
     .toBeVisible();
   expect(state.join.mock.calls[0]?.[1].input).toEqual({ deviceAlias: "new-mini" });
+});
+
+it("turns permission profiles on with a default profile, and back off", async () => {
+  using fixture = setup();
+  await using screen = await render(
+    <RegistryContext value={fixture.registry}>
+      <HubSettings />
+    </RegistryContext>,
+  );
+  const profiles = screen.getByRole("switch", { name: "Permission profiles" });
+  const defaultProfile = screen.getByRole("combobox", { name: "Default profile" });
+  await expect.element(profiles).not.toBeChecked();
+  await expect.element(defaultProfile).toBeDisabled();
+  await userEvent.click(profiles);
+  await expect.element(profiles).toBeChecked();
+  await userEvent.click(defaultProfile);
+  await userEvent.click(screen.getByRole("option", { name: "Manager", exact: true }));
+  await expect.element(defaultProfile).toHaveTextContent("Manager");
+  await userEvent.click(profiles);
+  await expect.element(profiles).not.toBeChecked();
+  expect(state.update.mock.calls.map((call) => call[1].input.patch)).toEqual([
+    { goatclaw: { enabled: true } },
+    { goatclaw: { defaultProfile: "manager" } },
+    { goatclaw: { enabled: false } },
+  ]);
 });
