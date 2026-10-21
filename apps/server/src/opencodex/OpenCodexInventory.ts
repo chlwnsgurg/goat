@@ -160,6 +160,7 @@ const make = Effect.gen(function* () {
   const environment = yield* HostProcess.Environment;
   const platform = yield* HostProcess.Platform;
   const cwd = yield* HostProcess.WorkingDirectory;
+  const hostname = yield* HostProcess.Hostname;
   const managed = yield* ManagedInstall;
   const runner = yield* ProcessRunner.ProcessRunner;
   const http = HttpClient.withScope(yield* HttpClient.HttpClient);
@@ -361,6 +362,30 @@ const make = Effect.gen(function* () {
         ? undefined
         : status?.fallback?.devices.find(({ id }) => id === ownDeviceId);
     const installed = binaries.length > 0 || health !== undefined || ready !== undefined;
+    const childLinkId = config?.client?.link?.linkId ?? status?.remoteHub?.link?.linkId;
+    const recordText =
+      linkRole === "child"
+        ? yield* readFile(path.join(ocxHome, "link", "home-codex-settings.json"))
+        : undefined;
+    const record =
+      recordText === undefined
+        ? undefined
+        : Option.getOrUndefined(decodeSettingsRecord(recordText));
+    // A Home publishes its host name with its settings; a Child repeats it only for its own link.
+    const homeName = Array.from(
+      linkRole === "home"
+        ? hostname
+        : record !== undefined && record.linkId === childLinkId
+          ? record.document.home.name
+          : "",
+    )
+      .filter((character) => {
+        const code = character.codePointAt(0)!;
+        return code > 0x1f && (code < 0x7f || code > 0x9f);
+      })
+      .join("")
+      .trim()
+      .slice(0, 255);
     let parityEvidence: OpenCodexInventorySnapshot["parityEvidence"];
     if (parity) {
       const observedAt = yield* Clock.currentTimeMillis;
@@ -381,14 +406,6 @@ const make = Effect.gen(function* () {
         : undefined;
       const models =
         modelsResponse?.status === 200 ? decodeJson(Models, modelsResponse.text) : undefined;
-      const recordText =
-        linkRole === "child"
-          ? yield* readFile(path.join(ocxHome, "link", "home-codex-settings.json"))
-          : undefined;
-      const record =
-        recordText === undefined
-          ? undefined
-          : Option.getOrUndefined(decodeSettingsRecord(recordText));
       // Project only Home policy, matching OpenCodex's version-1 settings document. Home labels
       // and release numbers describe the publisher and must not manufacture settings drift.
       const settings =
@@ -467,6 +484,7 @@ const make = Effect.gen(function* () {
         available: link !== undefined,
         links: linkRole === "home" ? (link?.links ?? []) : [],
         childSettingsApplied,
+        ...(homeName ? { homeName } : {}),
       },
       ...(hubClient ? { hubClient } : {}),
       ...(parityEvidence ? { parityEvidence } : {}),

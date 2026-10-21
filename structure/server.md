@@ -136,8 +136,8 @@ Child link records remain Home-owned, so a missing Child link directory is norma
 `apps/server/src/hub/HubParity.ts` verifies a device against this machine's Home through
 the host-status SSH read path. Explicit verification gathers fresh, non-billed evidence;
 ordinary host polling returns the last verdict. Missing evidence remains unproven, except
-unavailable apply timing, which is skipped. The shared Scheduler checks Home links every
-30 minutes; verification never repairs a device.
+unavailable apply timing, which is skipped. While `hub.enabled` is on, the shared Scheduler
+checks Home links every 30 minutes; verification never repairs a device.
 
 `apps/server/src/hub/HubDown.ts` is the hub-down policy for goal work on this machine. When this
 device's OpenCodex is linked to a Home that does not answer the relayed models request, the goal
