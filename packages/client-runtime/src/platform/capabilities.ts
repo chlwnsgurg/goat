@@ -8,7 +8,7 @@ import {
   type ExecutionEnvironmentDescriptor,
 } from "@goat/contracts";
 import * as Context from "effect/Context";
-import type * as Effect from "effect/Effect";
+import * as Effect from "effect/Effect";
 import type * as Option from "effect/Option";
 
 import type { ConnectionAttemptError } from "../connection/model.ts";
@@ -48,6 +48,17 @@ export class RelayDeviceIdentity extends Context.Service<
     readonly deviceId: Effect.Effect<Option.Option<string>, ConnectionAttemptError>;
   }
 >()("@goat/client-runtime/platform/capabilities/RelayDeviceIdentity") {}
+
+/**
+ * A random id this client keeps across launches. Environments it connects to
+ * record its hash, so two environments opened from one device share an owner
+ * in analytics even when nobody is signed in.
+ */
+export class AnalyticsDevice extends Context.Reference<{
+  readonly id: Effect.Effect<Option.Option<string>>;
+}>("@goat/client-runtime/platform/capabilities/AnalyticsDevice", {
+  defaultValue: () => ({ id: Effect.succeedNone }),
+}) {}
 
 export class ClientPresentation extends Context.Service<
   ClientPresentation,

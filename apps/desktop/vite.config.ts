@@ -1,7 +1,7 @@
 import "vite-plus/test/config";
 // Adopts legacy T3 env names before anything reads the environment.
 import "@goat/contracts/adoptLegacyEnv";
-import { defineConfig } from "vite-plus";
+import { defaultInclude, defineConfig } from "vite-plus";
 
 import { isDesktopRuntimeExternalDependency } from "../../scripts/lib/desktop-external-packages.ts";
 import { resolveBuildCommitTime } from "../../scripts/lib/build-commit-time.ts";
@@ -157,6 +157,7 @@ export default defineConfig({
     },
   ],
   test: {
+    include: [...defaultInclude, "../../native/kde-snap-shot/src/*.test.ts"],
     // The Windows lane runs workspace suites concurrently; filesystem-heavy
     // desktop integration tests can exceed Vitest's 5 second default there.
     testTimeout: 15_000,

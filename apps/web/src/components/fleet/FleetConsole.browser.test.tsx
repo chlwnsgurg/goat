@@ -88,12 +88,15 @@ function render() {
 const placeholder = () => container.querySelector<HTMLElement>("[data-fleet-console-placeholder]");
 const console_ = () =>
   container.querySelector<HTMLElement>('section[aria-label="Fleet telemetry"]');
-/** The idle callback and the lazy chunk settle outside React; let each step flush inside act. */
 async function mounted() {
-  for (let attempt = 0; attempt < 100 && console_() === null; attempt++) {
-    await act(() => new Promise((resolve) => setTimeout(resolve, 20)));
-  }
-  expect(console_()).not.toBeNull();
+  await vi.waitFor(
+    async () => {
+      await act(() => vi.dynamicImportSettled());
+      expect(console_()).not.toBeNull();
+    },
+    // A ceiling, not a wait: the first lazy-chunk transform is slow on a loaded CI runner.
+    { timeout: 15_000 },
+  );
 }
 const toggle = () => container.querySelector<HTMLButtonElement>("button[aria-expanded]")!;
 

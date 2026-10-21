@@ -22,6 +22,13 @@ beforeEach(() => {
   });
   vi.spyOn(HTMLElement.prototype, "clientHeight", "get").mockReturnValue(224);
   vi.spyOn(HTMLElement.prototype, "clientWidth", "get").mockReturnValue(320);
+  // LegendList measures layout sizes so popup transforms do not distort row heights.
+  vi.spyOn(HTMLElement.prototype, "offsetHeight", "get").mockImplementation(function (
+    this: HTMLElement,
+  ) {
+    return this.dataset.slot === "combobox-item" ? 32 : 224;
+  });
+  vi.spyOn(HTMLElement.prototype, "offsetWidth", "get").mockReturnValue(320);
   HTMLElement.prototype.scrollTo = vi.fn();
   host = document.createElement("div");
   document.body.append(host);

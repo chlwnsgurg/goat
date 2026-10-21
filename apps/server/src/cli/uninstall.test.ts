@@ -25,7 +25,7 @@ const absentService = BootService.BootService.of({
     logPath: "",
   }),
   withStopped: (operation) => operation,
-  restart: Effect.succeed(false),
+  restart: Effect.succeed("skipped" as const),
   install: () => Effect.die("uninstall test must not install"),
   uninstall: Effect.succeed(false),
 });
