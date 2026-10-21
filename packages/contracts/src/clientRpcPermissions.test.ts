@@ -30,6 +30,21 @@ describe("memory client guards", () => {
     for (const method of [WS_METHODS.memoryHubSettingsGet, WS_METHODS.memoryHubSettingsUpdate])
       expect(clientRpcRequiredScopes(method, {})).toEqual(["settings:write"]);
   });
+  it("lets readers list and check hub nodes but needs settings write to change them", () => {
+    for (const method of [
+      WS_METHODS.hubNodesList,
+      WS_METHODS.hubNodesSubscribe,
+      WS_METHODS.hubNodesCheck,
+    ])
+      expect(clientRpcRequiredScopes(method, {}), method).toEqual(["orchestration:read"]);
+    for (const method of [
+      WS_METHODS.hubNodesAdd,
+      WS_METHODS.hubNodesRemove,
+      WS_METHODS.hubNodesImport,
+      WS_METHODS.hubNodesDismissNotice,
+    ])
+      expect(clientRpcRequiredScopes(method, {}), method).toEqual(["settings:write"]);
+  });
   it("leaves existing compound guards unchanged", () => {
     expect(clientRpcRequiredScopes(WS_METHODS.sshWorkspaceLaunch, {})).toEqual([
       "source-control:write",
@@ -111,7 +126,12 @@ it("hub reconcile requires Settings authority", () => {
 });
 
 it("SSH setup separates read, settings and runtime-maintenance authority", () => {
-  for (const method of [WS_METHODS.sshHostProbe, WS_METHODS.sshHostTrust, WS_METHODS.sshHostForget])
+  for (const method of [
+    WS_METHODS.sshHostProbe,
+    WS_METHODS.sshHostPreflight,
+    WS_METHODS.sshHostTrust,
+    WS_METHODS.sshHostForget,
+  ])
     expect(clientRpcRequiredScopes(method, {})).toEqual(["settings:write"]);
   expect(clientRpcRequiredScopes(WS_METHODS.sshHostPrepare, {})).toEqual(["environment:maintain"]);
   for (const method of [WS_METHODS.sshHostStatus, WS_METHODS.sshHostHandoffProgress])

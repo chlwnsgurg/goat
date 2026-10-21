@@ -32,6 +32,7 @@ import {
   WS_METHODS,
   WsRpcGroup as WsBaseRpcGroup,
   WsMemoryCoreRpcGroup,
+  WsHubNodesRpcGroup,
   WsMemoryAdministrationRpcGroup,
   WsMemoryImportRpcGroup,
 } from "@goat/contracts";
@@ -46,7 +47,8 @@ import { DESKTOP_BOOTSTRAP_SUBJECT } from "./PairingGrantStore.ts";
 
 export const AuthorizedWsRpcGroup = WsBaseRpcGroup.merge(WsMemoryCoreRpcGroup)
   .merge(WsMemoryAdministrationRpcGroup)
-  .merge(WsMemoryImportRpcGroup);
+  .merge(WsMemoryImportRpcGroup)
+  .merge(WsHubNodesRpcGroup);
 
 const WsRpcGroup = WsBaseRpcGroup;
 
@@ -183,6 +185,7 @@ export const RPC_REQUIRED_SCOPES = {
   [WS_METHODS.pullRequestsThreadComments]: AuthOrchestrationReadScope,
   [WS_METHODS.pullRequestsDiffFileContents]: AuthOrchestrationReadScope,
   [WS_METHODS.pullRequestsFilesViewed]: AuthOrchestrationReadScope,
+  [WS_METHODS.pullRequestsChangeBreakdown]: AuthOrchestrationReadScope,
   [WS_METHODS.pullRequestsInvalidate]: AuthOrchestrationReadScope,
   [WS_METHODS.pullRequestsReportState]: AuthOrchestrationReadScope,
   [WS_METHODS.pullRequestsSubscribeRefreshes]: AuthOrchestrationReadScope,
@@ -191,6 +194,7 @@ export const RPC_REQUIRED_SCOPES = {
   [WS_METHODS.sourceControlLookupRepository]: AuthOrchestrationReadScope,
   [WS_METHODS.subscribeProjectClones]: AuthOrchestrationReadScope,
   [WS_METHODS.projectsListEntries]: AuthFilesystemReadScope,
+  [WS_METHODS.projectsListIgnoredFiles]: AuthFilesystemReadScope,
   [WS_METHODS.projectsReadFile]: AuthFilesystemReadScope,
   [WS_METHODS.projectsSearchContents]: AuthFilesystemReadScope,
   [WS_METHODS.projectsSearchEntries]: AuthFilesystemReadScope,
@@ -244,6 +248,7 @@ export const RPC_REQUIRED_SCOPES = {
   [WS_METHODS.subscribeDiscoveredLocalServers]: AuthOrchestrationReadScope,
   [WS_METHODS.deviceConfigure]: AuthSettingsWriteScope,
   [WS_METHODS.deviceTestHost]: AuthSettingsWriteScope,
+  [WS_METHODS.deviceEasAccount]: AuthSettingsWriteScope,
   [WS_METHODS.deviceList]: AuthOrchestrationReadScope,
   [WS_METHODS.deviceOpen]: AuthOrchestrationOperateScope,
   [WS_METHODS.deviceClose]: AuthOrchestrationOperateScope,
@@ -288,7 +293,21 @@ export const MEMORY_RPC_REQUIRED_SCOPES = {
     AuthEnvironmentScope
   >
 >;
-const installedScopes = { ...RPC_REQUIRED_SCOPES, ...MEMORY_RPC_REQUIRED_SCOPES };
+export const HUB_NODES_RPC_REQUIRED_SCOPES = {
+  [WS_METHODS.hubNodesList]: "orchestration:read",
+  [WS_METHODS.hubNodesSubscribe]: "orchestration:read",
+  [WS_METHODS.hubNodesCheck]: "orchestration:read",
+  [WS_METHODS.hubNodesAdd]: "settings:write",
+  [WS_METHODS.hubNodesRemove]: "settings:write",
+  [WS_METHODS.hubNodesImport]: "settings:write",
+  [WS_METHODS.hubNodesDismissNotice]: "settings:write",
+} as const satisfies Record<RpcGroup.Rpcs<typeof WsHubNodesRpcGroup>["_tag"], AuthEnvironmentScope>;
+
+const installedScopes = {
+  ...RPC_REQUIRED_SCOPES,
+  ...MEMORY_RPC_REQUIRED_SCOPES,
+  ...HUB_NODES_RPC_REQUIRED_SCOPES,
+};
 
 export function requiredScopeForRpcMethod(method: string): AuthEnvironmentScope {
   if (!Object.hasOwn(installedScopes, method)) {
@@ -324,7 +343,8 @@ const requiredScopesForSettingsUpdate = (payload: unknown) => {
 
 const decodeProjectMutation = Schema.decodeUnknownSync(ProjectMutation);
 
-const requiredScopesForRpcCall = (
+/** Throws for a method this server does not declare; callers outside the middleware must catch. */
+export const requiredScopesForRpcCall = (
   method: string,
   payload: unknown,
 ): ReadonlyArray<AuthEnvironmentScope> => {

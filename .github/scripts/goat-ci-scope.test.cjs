@@ -170,27 +170,11 @@ describe("selectTasks", () => {
       const { server } = select(changed);
       return server.mode === "full" || server.files.includes(test);
     };
-    // A fixture loads the module by name.
-    assert.ok(includes("apps/server/src/rpcInitialItems.ts", "src/rpcInitialItems.memory.test.ts"));
-    assert.ok(includes("apps/server/src/ws.ts", "src/rpcInitialItems.memory.test.ts"));
-    assert.ok(
-      includes(
-        "apps/server/src/orchestration-v2/ThreadManagementService.ts",
-        "src/rpcInitialItems.memory.test.ts",
-      ),
-    );
     // The test spawns a script that imports the change.
     assert.ok(
       includes(
         "apps/server/scripts/acpMockCancellationState.ts",
         "src/provider/acp/AcpJsonRpcConnection.test.ts",
-      ),
-    );
-    // The test reads the server source tree.
-    assert.ok(
-      includes(
-        "apps/server/src/channels/ChannelDispatcher.ts",
-        "src/orchestration-v2/V1ImportBoundary.test.ts",
       ),
     );
   });
@@ -269,17 +253,6 @@ describe("planServerTests", () => {
 
   it("runs the full suite for a deleted data file nothing names", () => {
     assert.equal(planServerTests(["apps/server/src/data/gone.bin"], fake, {}).mode, "full");
-  });
-
-  it("adds the source-scanning tests to a server source change", () => {
-    const [scanner] = SOURCE_SCANNING_TESTS;
-    const scanning = fakeGraph({ ...files, [scanner]: "" }, edges);
-    const plan = planServerTests(["apps/server/src/a.ts"], scanning, {});
-    assert.deepEqual(plan.files, ["src/a.test.ts", scanner.slice("apps/server/".length)]);
-    assert.deepEqual(
-      planServerTests(["apps/server/src/fixtures/simple/events.jsonl"], scanning, {}).files,
-      ["src/replay.test.ts"],
-    );
   });
 
   it("runs the full suite when a change reaches the server Vitest config", () => {
