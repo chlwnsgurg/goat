@@ -27,6 +27,7 @@ import * as OpenCodexInventory from "../opencodex/OpenCodexInventory.ts";
 import * as HubParity from "../hub/HubParity.ts";
 import * as ProviderRegistry from "../provider/ProviderRegistry.ts";
 import * as HostResources from "../resourceTelemetry/HostResources.ts";
+import * as UsageLimitSources from "../usage/UsageLimitSources.ts";
 import * as SshRemoteDispatch from "../sshRemote/SshRemoteDispatch.ts";
 import * as HostThreadsMcpService from "./HostThreadsMcpService.ts";
 import type { McpInvocationScope } from "./McpInvocationContext.ts";
@@ -96,6 +97,7 @@ export class HostStatusMcpService extends Context.Service<
 const make = Effect.gen(function* () {
   const resources = yield* HostResources.HostResources;
   const registry = yield* ProviderRegistry.ProviderRegistry;
+  const usageSources = yield* UsageLimitSources.UsageLimitSources;
   const threads = yield* ThreadManagementService.ThreadManagementService;
   const hosts = yield* HostThreadsMcpService.HostThreadsMcpService;
   const dispatch = yield* SshRemoteDispatch.SshRemoteDispatch;
@@ -136,9 +138,12 @@ const make = Effect.gen(function* () {
       );
       providers = yield* registry.getProviders;
     }
+    const projected = yield* usageSources.projectProviders(providers);
+    const quotaPool = yield* usageSources.quotaPool;
     return {
-      quotas: hostStatusQuotas(providers, refreshed),
+      quotas: hostStatusQuotas(projected, refreshed),
       providers: hostStatusProviders(providers),
+      ...(quotaPool === undefined ? {} : { quotaPool }),
     };
   });
 
