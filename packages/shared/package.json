@@ -11,6 +11,10 @@
       "types": "./src/sshDestination.ts",
       "import": "./src/sshDestination.ts"
     },
+    "./cuaDriverRelease": {
+      "types": "./src/cuaDriverRelease.ts",
+      "import": "./src/cuaDriverRelease.ts"
+    },
     "./githubMarkdownLinks": {
       "types": "./src/githubMarkdownLinks.ts",
       "import": "./src/githubMarkdownLinks.ts"
