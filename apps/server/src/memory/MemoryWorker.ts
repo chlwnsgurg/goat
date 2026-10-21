@@ -22,6 +22,7 @@ import * as Events from "../orchestration-v2/EventSink.ts";
 import * as Store from "./MemoryStore.ts";
 import * as Service from "./MemoryService.ts";
 import * as Maintenance from "./MemoryFtsMaintenance.ts";
+import * as Hold from "./MemoryGenerationHold.ts";
 import { MEMORY_SCANNER_POLICY_VERSION, scanMemoryValue } from "./MemorySecretScanner.ts";
 
 export class MemoryWorkerError extends Schema.TaggedError<MemoryWorkerError>()(
@@ -92,6 +93,7 @@ const safeCode = (error: unknown): M.MemoryFailureCode => {
   return "storage_failed";
 };
 const isWorkerError = Schema.is(MemoryWorkerError);
+const isHeld = Schema.is(Hold.MemoryGenerationHeld);
 const workerError = (cause: unknown) =>
   isWorkerError(cause) ? cause : new MemoryWorkerError({ code: safeCode(cause), cause });
 const sweepStage = <A, E>(
@@ -114,6 +116,9 @@ const make = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
   const environmentId = yield* identity.getEnvironmentId;
   const sweepLock = yield* Semaphore.make(1);
+  const hold = yield* Hold.shared;
+  // The model key of the previous sweep, so a model or provider change can rearm held work.
+  let lastHoldKey: string | undefined;
   // Restarting starts a new bounded pass; no durable cursor/index is needed for this
   // idempotent cleanup. Finish one pass before revisiting unprovable retained rows.
   let reportCursor: string | null = null;
@@ -625,10 +630,15 @@ const make = Effect.gen(function* () {
             if (!generation.generateMemorySummary)
               return yield* new MemoryWorkerError({ code: "unsupported_operation" });
             yield* renewClaim;
-            const output = yield* generation
-              .generateMemorySummary(input)
+            const generate = generation.generateMemorySummary;
+            const output = yield* hold
+              .guard(yield* hold.keyFor(meta.modelSelection), generate(input))
               .pipe(
-                Effect.mapError((cause) => new MemoryWorkerError({ code: safeCode(cause), cause })),
+                Effect.mapError((cause) =>
+                  cause._tag === "MemoryGenerationHeld"
+                    ? new MemoryWorkerError({ code: "unavailable", cause })
+                    : new MemoryWorkerError({ code: safeCode(cause), cause }),
+                ),
               );
             if (!M.validateMemoryGenerationResult(input, output.result))
               return yield* new MemoryWorkerError({ code: "invalid_output" });
@@ -743,6 +753,11 @@ const make = Effect.gen(function* () {
               return;
             }
             const now = yield* Clock.currentTimeMillis;
+            // Another call opened the hold after this row was claimed: put it back untouched.
+            if (isWorkerError(error) && isHeld(error.cause)) {
+              yield* store.retryWork(owned, now);
+              return;
+            }
             if (work.metadata.kind === "summary") {
               const recorded = yield* store.failGenerationAttempt({
                 work: owned,
@@ -858,11 +873,25 @@ const make = Effect.gen(function* () {
       yield* sweepStage("catch-up", catchUp());
       yield* sweepStage("deferred", deferred());
       const now = yield* Clock.currentTimeMillis;
-      const enabled = (yield* sweepStage("due-work", settings.getSettings)).memoryEnabled;
-      // Off leaves queued summaries untouched so they resume when memory is turned back on.
-      const kinds = enabled ? undefined : (["rebuild"] as const);
+      const snapshot = yield* sweepStage("due-work", settings.getSettings);
+      const enabled = snapshot.memoryEnabled;
+      const selection = yield* sweepStage("due-work", memoryModel(snapshot));
+      const holdKey = selection === null ? undefined : yield* hold.keyFor(selection);
+      // A new model or provider version starts clean, and work held under the old one is due now.
+      if (
+        lastHoldKey !== undefined &&
+        lastHoldKey !== holdKey &&
+        (yield* hold.release(lastHoldKey))
+      )
+        yield* sweepStage("due-work", store.rearmGenerationWork(now));
+      lastHoldKey = holdKey;
+      const held = () => (holdKey === undefined ? Effect.succeed(false) : hold.isHeld(holdKey));
+      // Off leaves queued summaries untouched so they resume when memory is turned back on; a
+      // held model leaves them unclaimed so they spend no attempts and fill no page.
+      const kinds = !enabled || (yield* held()) ? (["rebuild"] as const) : undefined;
       for (const candidate of yield* sweepStage("due-work", store.dueWork(now, 100, kinds))) {
         if (!["summary", "consolidate", "rebuild"].includes(candidate.kind)) continue;
+        if (candidate.kind !== "rebuild" && (yield* held())) continue;
         if (
           !(yield* sweepStage(
             "claim-work",

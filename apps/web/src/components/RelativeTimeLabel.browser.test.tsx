@@ -1,3 +1,4 @@
+import { fakeTimers } from "../../test/render";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, it, vi } from "vite-plus/test";
@@ -9,7 +10,7 @@ let container: HTMLDivElement;
 
 beforeEach(() => {
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
-  vi.useFakeTimers();
+  fakeTimers();
   vi.setSystemTime(new Date("2026-10-12T12:00:59.000Z"));
   container = document.createElement("div");
   document.body.append(container);

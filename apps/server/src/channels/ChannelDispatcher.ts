@@ -137,7 +137,7 @@ export const BOT_TURN_RUNTIME_CEILING = "auto-accept-edits" as const;
 const turnInstruction = (task: ChannelTask, files: ChannelBotFiles) =>
   [
     ...workerHeader(task),
-    "You are GOAT Bot handling this message yourself. Your summary is your answer to the person: write it for them, in the language they wrote in, short and outcome first.",
+    "You are GOAT Bot handling this message yourself. Your summary is your answer to the person: write it in the language of their request, not your default language, short and outcome first.",
     "Look things up directly: read and search files, read GOAT Bot's notes (" +
       files.notes +
       "), use GOAT memory, and use the channel_task_* and goat_thread_* tools to check the work GOAT Bot started and its threads. Hand research, long investigations, or anything that needs several steps to subagents with delegate_task, wait for them, and summarize what they found; do not paste their output.",

@@ -18,6 +18,7 @@ import * as Schema from "effect/Schema";
 import { act, useState, useSyncExternalStore, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, it, vi } from "vite-plus/test";
+import { fakeTimers } from "../../../test/render";
 
 const state = vi.hoisted(() => ({
   environments: [] as Array<{
@@ -764,7 +765,7 @@ it("counts 102 waiting tasks from every channel across pages, dedupes, shares ob
 });
 
 it("hides a badge until the first successful count and refreshes every 60 seconds only while enabled", async () => {
-  vi.useFakeTimers();
+  fakeTimers();
   vi.mocked(port.listTasks).mockRejectedValueOnce(new Error("offline"));
   await render(true);
   expect(container.querySelector("output")?.textContent).toBe("unknown");

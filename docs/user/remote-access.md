@@ -180,9 +180,27 @@ On mobile, an IP address entered without a scheme uses HTTP, so include
 ## Desktop-managed SSH
 
 In the desktop app, open **Settings → Connections → Add device**, choose
-**SSH**, and enter a host or SSH alias such as `user@example.com`. GOAT starts
-or reuses a server there and opens the port forward for you. Projects, provider
-credentials, and agent work stay on the remote machine.
+**SSH**, and pick a host from your SSH config or type an address such as
+`user@example.com`. GOAT starts or reuses a server there and opens the port
+forward for you. Projects, provider credentials, and agent work stay on the
+remote machine.
+
+Before it installs anything, GOAT checks the host and shows one line per check:
+whether it answers (including Tailscale), its host key, sign-in with your SSH key,
+the operating system, free disk space, and whether a GOAT runtime is available for
+that platform. On a host that has never run GOAT, the runtime check also considers
+the newest compatible published release, using the same rule as installation.
+A check that fails says what to change, often with a command to copy, and
+**Check again** runs them again. **Connect** turns on once nothing is left to fix. A host GOAT has not seen before shows its fingerprint for you to
+approve first. If you approved a host but its checks still fail, **Forget host** in the
+same dialog removes the SSH entry and pinned key GOAT added. Agents run the same
+checks and get the same results.
+
+GOAT signs in only with SSH keys or your ssh-agent. If a host turns your key down
+and would ask for a password, the sign-in check says so and offers an
+`ssh-copy-id` command: run it once in a terminal on this computer, enter the
+password there, then choose **Check again**. For a host from your SSH config, the
+user, port and key come from that file; change them there.
 
 The remote host must be Linux, an Apple Silicon Mac, or a Windows machine set up
 as described below, with `tar`, `sha256sum` or `shasum`, and
@@ -205,7 +223,8 @@ bundled or cached archive when available. Otherwise it uses your configured
 release mirror, or downloads the matching published GOAT release and checks its
 checksums. If a public download fails, GOAT can try the GitHub CLI when signed in
 (`gh auth login`). It refuses a checksum mismatch and names the expected release
-when it cannot obtain an archive.
+when it cannot obtain an archive. Connections shows the current setup step. The first
+installation can take a few minutes; reconnecting while it runs joins that setup.
 
 When the host is asleep or off the network, its connection shows **Unreachable**
 and GOAT keeps retrying, sooner when this computer wakes or joins a network.
@@ -296,7 +315,8 @@ verified yet.
 Open **Settings → Connections → Add device → SSH**, or tell an agent to
 “connect a new SSH host” and give it the address and SSH user. Check the displayed
 host-key fingerprint against your server provider's record before approving.
-The first approval also lets GOAT add its Include line to your SSH config.
+The first approval also lets GOAT add its Include line to your SSH config. Approving
+only pins the key; the checks run again before GOAT installs anything.
 
 GOAT uses SSH keys or your ssh-agent. If it creates a key, register the displayed
 public key with your server provider or add it to the host. If the host only
@@ -380,15 +400,21 @@ machine running an older GOAT
 only accepts approval-required threads in folders that are already projects
 there.
 
-An agent can also list, add, and remove the connections saved in
-**Settings → Connections**, so another machine's threads show up in the
-sidebar without a trip to Settings. This works while the desktop app is open on
-the machine the agent runs on; web and mobile clients keep their own saved
-connections. Adding uses only SSH keys or ssh-agent, never a password, and
-adding a host that is already saved returns the saved one. Adding and removing
-need a full-access thread or a full-access outside agent. Settings shows the
-change right away, and the agent's connection list shows which agent added each
-connection.
+An agent can also list, add, and remove the devices on this hub (see
+[Devices on this hub](#devices-on-this-hub)), including on a headless
+`goat serve` with no desktop app. Adding uses only SSH keys or ssh-agent, never a
+password, and needs a host where GOAT has run before; prepare a new host first.
+Adding a device that is already listed returns it. Adding and removing need a
+full-access thread or a full-access outside agent. While the desktop app runs on
+the same machine, the agent's change is also saved in its
+**Settings → Connections**, so the device's threads show up in the sidebar.
+
+Adding a host and saving its connection are one step for an agent: it runs the
+same checks as **Add device → SSH**, asks you to approve a new fingerprint, and
+saves the connection once the checks pass. A new fingerprint needs approval in a
+GOAT thread; an outside agent can save an already-trusted host. Without a desktop
+app on that machine, or from an agent without full access, it prepares the host
+and tells you the connection was not saved.
 
 The agent that started the thread can follow it from here: it waits for the
 thread to finish, reads its messages and the result its agent recorded (outcome,
@@ -436,6 +462,58 @@ A link lasts 30 days; link again with a new code to renew it. Removing a link
 forgets it here. To end it on the other machine at once, revoke **GOAT on …** in
 that machine's **Settings → Connections**. To watch its threads yourself, add
 the machine under **Settings → Connections** with a pairing URL from `goat pair`.
+
+### Devices on this hub
+
+The GOAT server your phone or browser pairs with keeps one list of the machines it
+reaches: SSH hosts you add, GOAT servers you link, and its cloud machines. Every
+client paired with that server sees the same list, and a device added on the
+desktop appears on the phone right away. It works the same on a headless
+`goat serve`.
+
+Find it under **Settings → Connections → Devices on this hub** on desktop and
+web, and under **Settings → Devices on this hub** in the mobile app. Add an SSH
+host by its alias from this machine's `~/.ssh/config`, or add another GOAT server
+with a pairing URL from `goat pair`. A machine reached two ways, for example
+over SSH and as a linked server, is one device with two routes.
+
+**Check** asks each route whether it answers. It never starts or extends a cloud
+machine: a stopped one shows as offline. Cloud machines are removed from
+**Cloud machines** below, not from this list. Removing a saved connection in the
+desktop sidebar does not remove the device from the hub.
+
+The first time the desktop app runs as a hub, it copies the SSH connections saved
+in its **Settings → Connections** into this list. If those saved connections
+can't be unlocked, nothing is copied and the list asks you to add your devices
+again; **Saved on this desktop** offers the desktop's SSH connections that are
+not on the hub yet.
+
+### Reach every machine through one hub
+
+Pair your phone, or any other client, with one GOAT server you keep running, such as a Mac
+mini or a small VPS. That server is the hub. Every machine the hub lists as a node then shows
+up on the phone with its own threads, and the phone reaches it through the hub. The phone never
+needs SSH, Tailscale access to the node, or a pairing of its own with that machine.
+
+1. On the hub, pair the phone with hub access: `goat pair --tailscale --hub-proxy`. A pairing
+   made without `--hub-proxy` reaches only the hub itself; pair again to add it.
+2. Add the machines to the hub's [device list](#devices-on-this-hub). An SSH host needs nothing
+   more. If GOAT never ran on it, choose **Set up** once, so the hub installs GOAT there and
+   learns which machine it is.
+3. For a machine linked over HTTPS, choose **Allow phone access** and paste a pairing link
+   created on that machine with `goat pair`. Links made for agents cannot open your threads.
+
+Through the hub you can open a node's threads, watch them live, send follow-ups with images or
+files, stop a running turn, answer approval requests, and start a new thread on any node in a
+folder you pick there. Archiving, deleting and other changes to a thread, editing project
+scripts, and creating a folder that does not exist yet stay with the machine's own GOAT. A
+thread started in a new worktree runs that machine's own setup script. A machine that is off or
+asleep stays in the list as **Unreachable**, with its threads as last seen and how old that copy
+is, for example "last state 5 min ago". It reconnects on its own when the machine comes back.
+Stopped cloud machines are never started by opening them.
+
+The hub holds the keys and sessions for every node, so keep its disk encrypted and its screen
+locked.
 
 ### Cloud machines
 

@@ -46,8 +46,12 @@ interface SiblingDecryption {
 }
 
 const STAGE_LABELS: readonly DesktopAppStageLabel[] = ["Nightly", "Alpha", "Dev"];
-/** Package names that keyed safeStorage in builds that set the runtime name too late. */
-const PRODUCT_NAMES = ["GOAT", "GOAT (Nightly)"];
+/**
+ * Initial runtime names that keyed safeStorage in builds that set the runtime name too late.
+ * Packaged builds take it from the staged package.json `name`, which is `t3code` on every
+ * channel (scripts/build-desktop-artifact.ts).
+ */
+const PRODUCT_NAMES = ["t3code", "GOAT", "GOAT (Nightly)"];
 
 /**
  * Runtime names that may hold a sibling channel's key, most likely first. Each existing item a

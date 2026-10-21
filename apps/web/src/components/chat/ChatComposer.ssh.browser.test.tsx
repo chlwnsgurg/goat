@@ -41,6 +41,7 @@ vi.mock("../ui/toast", () => ({
 }));
 vi.mock("@tanstack/react-router", async (original) => ({
   ...(await original<typeof import("@tanstack/react-router")>()),
+  useRouter: () => ({ latestLocation: { pathname: "/", state: {} } }),
   useNavigate: () => state.navigate,
   useLocation: ({ select }: { select: (v: unknown) => unknown }) =>
     select({ href: "/", state: {} }),
@@ -59,7 +60,10 @@ vi.mock("../../hooks/useSettings", async (original) => ({
   useEnvironmentIdentificationMode: () => "none",
 }));
 vi.mock("../../hooks/useMediaQuery", () => ({ useMediaQuery: () => false }));
-vi.mock("../../hooks/useTheme", () => ({ useTheme: () => ({ resolvedTheme: "light" }) }));
+vi.mock("../../hooks/useTheme", () => ({
+  useTheme: () => ({ resolvedTheme: "light" }),
+  useRenderedAppearance: () => "light",
+}));
 vi.mock("../../hooks/useRemoveClonedProject", () => ({ useRemoveClonedProject: () => vi.fn() }));
 vi.mock("../../hooks/useHandleNewThread", () => ({ useNewThreadHandler: () => vi.fn() }));
 vi.mock("../../hooks/useThreadActions", async (original) => ({
@@ -128,15 +132,13 @@ vi.mock("../../state/entities", async (original) => ({
   useThreadStatus: () => null,
   useThreadHistory: () => ({ hasMoreHistory: false }),
   useThreadVisibleTurnItems: () => state.empty,
+  useThreadCheckpointSummaries: () => state.empty,
   useThreadRefs: () => state.empty,
   useEnvironmentThreadRefs: () => state.empty,
   useChildThreadInputs: () => state.empty,
   useEnvironmentSupportsServerBrowser: () => false,
   resolveThreadDetailRef: () => null,
   waitForThreadShell: state.shell,
-}));
-vi.mock("../../hooks/useTurnDiffSummaries", () => ({
-  useTurnDiffSummaries: () => ({ turnDiffSummaries: [], setTurnDiffSummaries: () => {} }),
 }));
 vi.mock("../../hooks/useLoadBalancedEnvironment", () => ({
   useLoadBalancedEnvironment: () => ({ refresh: () => {}, pending: false, environmentId: null }),

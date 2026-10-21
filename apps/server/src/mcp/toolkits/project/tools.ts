@@ -1,39 +1,39 @@
-import { agentSurfaceRegistry } from "@goat/contracts/agentSurface";
-import { agentSurfaceAnnotations } from "../../agentSurface.ts";
-import { McpAttachmentInput } from "../attachment/input.ts";
-import { NotifyTargetInput } from "../../completionWebhook.ts";
 import {
   MemoryTaskGrantCeiling,
-  NonNegativeInt,
   ModelSelection,
-  TrimmedNonEmptyString,
-  ThreadId,
-  RunId,
+  NonNegativeInt,
   OrchestrationV2RunStatus,
   OrchestrationV2ThreadLaunchWorkspaceStrategy,
   OrchestrationV2ThreadLauncher,
-  RuntimeMode,
-  ProviderInteractionMode,
-  Project,
-  ProjectCreatePayload,
-  ProjectUpdatePayload,
-  ProjectId,
   OrchestratorMcpFailure,
   OrchestratorMcpHost,
+  Project,
+  ProjectCreatePayload,
+  ProjectId,
+  ProjectUpdatePayload,
+  ProviderInteractionMode,
   RemoteReportBindingInput,
+  RunId,
+  RuntimeMode,
   SourceControlCloneRepositoryInput,
   SourceControlCloneRepositoryResult,
+  ThreadId,
+  TrimmedNonEmptyString,
 } from "@goat/contracts";
-import * as ThreadLaunchMcpService from "../../ThreadLaunchMcpService.ts";
+import { agentSurfaceRegistry } from "@goat/contracts/agentSurface";
 import * as Crypto from "effect/Crypto";
 import * as Schema from "effect/Schema";
 import { Tool, Toolkit } from "effect/ai";
-import * as ProjectService from "../../../project/ProjectService.ts";
-import * as ManagedProjectFolders from "../../../project/ManagedProjectFolders.ts";
 import * as ThreadManagementService from "../../../orchestration-v2/ThreadManagementService.ts";
+import * as ManagedProjectFolders from "../../../project/ManagedProjectFolders.ts";
+import * as ProjectService from "../../../project/ProjectService.ts";
 import * as SourceControlRepositoryService from "../../../sourceControl/SourceControlRepositoryService.ts";
 import * as HostThreadsMcpService from "../../HostThreadsMcpService.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
+import * as ThreadLaunchMcpService from "../../ThreadLaunchMcpService.ts";
+import { agentSurfaceAnnotations } from "../../agentSurface.ts";
+import { NotifyTargetInput } from "../../completionWebhook.ts";
+import { McpAttachmentInput } from "../attachment/input.ts";
 
 const shared = {
   success: Project,

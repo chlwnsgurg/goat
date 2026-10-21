@@ -1,5 +1,6 @@
 import { scopeThreadRef } from "@goat/client-runtime/environment";
 import type { EnvironmentShellSync } from "@goat/client-runtime/state/presentation";
+import type { EnvironmentThreadState } from "@goat/client-runtime/state/threads";
 import { EnvironmentId, ProjectId, ThreadId } from "@goat/contracts";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
@@ -10,6 +11,18 @@ const refreshShell = vi.fn();
 let sync: EnvironmentShellSync = "live";
 
 vi.mock("../state/presentation", () => ({ useEnvironmentShellSync: () => sync }));
+vi.mock("../state/threads", async () => {
+  const { EMPTY_ENVIRONMENT_THREAD_STATE } = await import("@goat/client-runtime/state/threads");
+  return {
+    useEnvironmentThread: (
+      _environmentId: EnvironmentId | null,
+      threadId: ThreadId | null,
+    ): EnvironmentThreadState => ({
+      ...EMPTY_ENVIRONMENT_THREAD_STATE,
+      status: threadId === "gone" ? "deleted" : "synchronizing",
+    }),
+  };
+});
 
 vi.mock("@tanstack/react-router", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@tanstack/react-router")>()),
