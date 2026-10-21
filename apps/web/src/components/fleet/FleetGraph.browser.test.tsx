@@ -1,6 +1,6 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
+import { afterEach, beforeEach, describe, expect, it } from "vite-plus/test";
 import { cdp } from "vite-plus/test/browser";
 
 import "../../index.css";
@@ -25,6 +25,17 @@ afterEach(async () => {
   await cdp().send("Emulation.setEmulatedMedia", { features: [] });
 });
 
+/** Resize observers report in creation order, so once this one has, the graph has measured its width. */
+function measured() {
+  return new Promise<void>((resolve) => {
+    const observer = new ResizeObserver(() => {
+      observer.disconnect();
+      resolve();
+    });
+    observer.observe(container);
+  });
+}
+
 async function renderDemo() {
   const demo = fleetHeatDemo();
   await act(async () => {
@@ -39,7 +50,8 @@ async function renderDemo() {
       />,
     );
   });
-  await vi.waitFor(() => expect(container.querySelector("svg g[data-heat]")).not.toBeNull());
+  await act(measured);
+  expect(container.querySelector("svg g[data-heat]")).not.toBeNull();
   const node = (label: string) =>
     [...container.querySelectorAll<SVGGElement>("g[data-heat]")].find((element) =>
       element.getAttribute("aria-label")!.startsWith(label + ","),

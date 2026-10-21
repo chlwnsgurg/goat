@@ -52,7 +52,7 @@ vi.mock(import("./fleetConsoleTelemetry"), async () => {
   };
 });
 
-import { FleetConsoleSlot } from "./FleetConsoleSlot";
+import { FleetConsoleSlot, loadFleetConsole } from "./FleetConsoleSlot";
 
 const snapshot = {
   machines: [
@@ -78,6 +78,9 @@ const snapshot = {
 
 let container: HTMLDivElement;
 let root: Root;
+/** Idle callbacks the slot has requested; the test decides when the browser goes idle. */
+let idleCallbacks: Map<number, IdleRequestCallback>;
+let nextIdleHandle = 0;
 
 function render() {
   return act(async () => {
@@ -88,15 +91,15 @@ function render() {
 const placeholder = () => container.querySelector<HTMLElement>("[data-fleet-console-placeholder]");
 const console_ = () =>
   container.querySelector<HTMLElement>('section[aria-label="Fleet telemetry"]');
+/** Let the browser go idle after first paint, then settle the same chunk import `lazy` awaits. */
 async function mounted() {
-  await vi.waitFor(
-    async () => {
-      await act(() => vi.dynamicImportSettled());
-      expect(console_()).not.toBeNull();
-    },
-    // A ceiling, not a wait: the first lazy-chunk transform is slow on a loaded CI runner.
-    { timeout: 15_000 },
-  );
+  await act(async () => {
+    const pending = [...idleCallbacks.values()];
+    idleCallbacks.clear();
+    for (const callback of pending) callback({ didTimeout: false, timeRemaining: () => 50 });
+  });
+  await act(() => loadFleetConsole());
+  expect(console_()).not.toBeNull();
 }
 const toggle = () => container.querySelector<HTMLButtonElement>("button[aria-expanded]")!;
 
@@ -116,6 +119,12 @@ function stubReducedMotion(reduced: boolean) {
 
 beforeEach(() => {
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+  idleCallbacks = new Map();
+  vi.stubGlobal("requestIdleCallback", (callback: IdleRequestCallback) => {
+    idleCallbacks.set(++nextIdleHandle, callback);
+    return nextIdleHandle;
+  });
+  vi.stubGlobal("cancelIdleCallback", (handle: number) => idleCallbacks.delete(handle));
   hostStatus.reads = 0;
   useUiStateStore.setState({ fleetConsoleCollapsed: false });
   container = document.createElement("div");
@@ -153,13 +162,9 @@ describe("FleetConsoleSlot", () => {
     expect(toggle().getAttribute("aria-expanded")).toBe("false");
     expect(console_()!.getBoundingClientRect().height).toBe(40);
     expect(console_()!.textContent).toContain("9 running");
-    await vi.waitFor(
-      () =>
-        expect(JSON.parse(localStorage.getItem(PERSISTED_STATE_KEY)!).fleetConsoleCollapsed).toBe(
-          true,
-        ),
-      { timeout: 2000 },
-    );
+    // The store debounces its writes and flushes them when the page unloads.
+    window.dispatchEvent(new Event("beforeunload"));
+    expect(JSON.parse(localStorage.getItem(PERSISTED_STATE_KEY)!).fleetConsoleCollapsed).toBe(true);
 
     await act(async () => root.unmount());
     hostStatus.reads = 0;
