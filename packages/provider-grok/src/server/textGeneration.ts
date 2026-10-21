@@ -50,9 +50,9 @@ export const makeGrokTextGeneration = Effect.fn("makeGrokTextGeneration")(functi
   const crypto = yield* Crypto.Crypto;
   const commandSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
 
-  const runGrokSelected = <S extends Schema.Top>(request: TextGenerationOperations.Request<S>) => {
-    const { operation, cwd, prompt, modelSelection } = request;
-    return Effect.gen(function* () {
+  const runGrokSelected = Effect.fn("GrokTextGeneration.runGrokJson")(
+    function* <S extends Schema.Top>(request: TextGenerationOperations.Request<S>) {
+      const { operation, cwd, prompt, modelSelection } = request;
       const memory = TextGenerationOperations.isMemoryOperation(operation);
       const environment = options.resolveEnvironment
         ? yield* options.resolveEnvironment
@@ -269,20 +269,24 @@ export const makeGrokTextGeneration = Effect.fn("makeGrokTextGeneration")(functi
         trimmed,
       );
       return { result, effectiveModel: effectiveModel ?? modelSelection.model };
-    }).pipe(
-      Effect.mapError((cause) =>
-        isTextGenerationError(cause)
-          ? cause
-          : new TextGenerationError({
-              operation,
-              detail: "Grok ACP text generation failed.",
-              cause,
-            }),
-      ),
-      Effect.scoped,
-      Effect.provideService(FileSystem.FileSystem, fs),
-    );
-  };
+    },
+    (effect, request) => {
+      const { operation } = request;
+      return effect.pipe(
+        Effect.mapError((cause) =>
+          isTextGenerationError(cause)
+            ? cause
+            : new TextGenerationError({
+                operation,
+                detail: "Grok ACP text generation failed.",
+                cause,
+              }),
+        ),
+        Effect.scoped,
+        Effect.provideService(FileSystem.FileSystem, fs),
+      );
+    },
+  );
 
   return TextGenerationOperations.fromRunner(
     "GrokTextGeneration",

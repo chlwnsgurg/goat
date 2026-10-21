@@ -1,51 +1,50 @@
-import * as RemoteDispatchCoordinator from "../../../remoteReports/RemoteDispatchCoordinator.ts";
+import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
+import * as NodeServices from "@effect/platform-node/NodeServices";
 import { expect, it } from "@effect/vitest";
 import {
   EnvironmentId,
   ProjectId,
-  ProviderInstanceId,
   ProviderDriverKind,
+  ProviderInstanceId,
   ThreadId,
   type OrchestrationV2ThreadShell,
   type Project as ProjectRecord,
 } from "@goat/contracts";
-import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
-import * as NodeServices from "@effect/platform-node/NodeServices";
-import * as Effect from "effect/Effect";
-import * as Exit from "effect/Exit";
-import * as FileSystem from "effect/FileSystem";
-import * as Path from "effect/Path";
-import * as Layer from "effect/Layer";
-import * as Option from "effect/Option";
-import * as Stream from "effect/Stream";
+import type * as ProviderAdapter from "@goat/provider-core/server/ProviderAdapter";
 import {
   splitStandingInstructions,
   standingInstructionsVersion,
 } from "@goat/shared/standingInstructions";
-
+import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
+import * as FileSystem from "effect/FileSystem";
+import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
+import * as Path from "effect/Path";
+import * as Stream from "effect/Stream";
+import * as ServerConfig from "../../../config.ts";
+import { CodexProviderCapabilitiesV2 } from "../../../orchestration-v2/Adapters/CodexAdapterV2.ts";
+import * as CloudSource from "../../../orchestration-v2/CloudTaskSourceService.ts";
+import * as ProviderAdapters from "../../../orchestration-v2/ProviderAdapterRegistry.ts";
 import * as ThreadLaunch from "../../../orchestration-v2/ThreadLaunchService.ts";
 import * as ThreadManagement from "../../../orchestration-v2/ThreadManagementService.ts";
-import * as ServerConfig from "../../../config.ts";
-import * as ServerSettings from "../../../serverSettings.ts";
-import * as Project from "../../../project/ProjectService.ts";
 import * as ManagedProjectFolders from "../../../project/ManagedProjectFolders.ts";
+import * as Project from "../../../project/ProjectService.ts";
+import * as RemoteDispatchCoordinator from "../../../remoteReports/RemoteDispatchCoordinator.ts";
+import * as RemoteReportService from "../../../remoteReports/RemoteReportService.ts";
+import * as ServerSettings from "../../../serverSettings.ts";
+import * as SshRemoteDispatch from "../../../sshRemote/SshRemoteDispatch.ts";
+import * as ThreadResults from "../../../threadResults/ThreadResultService.ts";
 import * as GitVcsDriver from "../../../vcs/GitVcsDriver.ts";
 import * as VcsProcess from "../../../vcs/VcsProcess.ts";
-import * as SshRemoteDispatch from "../../../sshRemote/SshRemoteDispatch.ts";
+import * as CompletionWebhook from "../../completionWebhook.ts";
 import * as HostThreadsMcpService from "../../HostThreadsMcpService.ts";
 import * as LaunchWatchService from "../../LaunchWatchService.ts";
-import * as CompletionWebhook from "../../completionWebhook.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
 import * as McpToolAccess from "../../McpToolAccess.ts";
 import * as OrchestratorMcpService from "../../OrchestratorMcpService.ts";
-import * as RemoteReportService from "../../../remoteReports/RemoteReportService.ts";
-import type * as ProviderAdapter from "@goat/provider-core/server/ProviderAdapter";
-import * as ThreadResults from "../../../threadResults/ThreadResultService.ts";
-import * as ProjectHandlers from "./handlers.ts";
 import * as ThreadLaunchMcpService from "../../ThreadLaunchMcpService.ts";
-import * as ProviderAdapters from "../../../orchestration-v2/ProviderAdapterRegistry.ts";
-import * as CloudSource from "../../../orchestration-v2/CloudTaskSourceService.ts";
-import { CodexProviderCapabilitiesV2 } from "../../../orchestration-v2/Adapters/CodexAdapterV2.ts";
+import * as ProjectHandlers from "./handlers.ts";
 import { ProjectToolkit } from "./tools.ts";
 
 const localAdapter: ProviderAdapter.ProviderAdapterV2["Service"] = {

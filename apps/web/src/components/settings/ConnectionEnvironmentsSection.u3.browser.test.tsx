@@ -14,10 +14,9 @@ import {
   type EnvironmentConnectionPresentation,
 } from "@goat/client-runtime/connection";
 import * as Option from "effect/Option";
-import { Atom, AtomRegistry } from "effect/reactivity";
-import { act } from "react";
-import { createRoot, type Root } from "react-dom/client";
-import { afterEach, beforeEach, expect, it, vi } from "vite-plus/test";
+import { AsyncResult, Atom, AtomRegistry } from "effect/reactivity";
+import { expect, it, vi } from "vite-plus/test";
+import { act, render, stubGlobal } from "../../../test/render";
 import { page, userEvent } from "vite-plus/test/browser";
 import type { EnvironmentPresentation } from "~/state/environments";
 import "~/index.css";
@@ -31,6 +30,7 @@ const state = vi.hoisted(() => {
     | "resolveSshHost"
     | "getSshHostStatus"
     | "updateSshRuntime"
+    | "getLocalEnvironmentBootstraps"
   > = {
     supportsSshEnvironmentProgress: true,
     supportsSshPreparationPhases: true,
@@ -38,8 +38,8 @@ const state = vi.hoisted(() => {
     resolveSshHost: vi.fn(),
     getSshHostStatus: vi.fn(),
     updateSshRuntime: vi.fn(),
+    getLocalEnvironmentBootstraps: () => [],
   };
-  Object.defineProperty(window, "desktopBridge", { configurable: true, value: bridge });
   return {
     bridge,
     environments: null as unknown as Atom.Writable<ReadonlyArray<EnvironmentPresentation>>,
@@ -67,10 +67,19 @@ vi.mock("../../connection/onboarding", async (original) => ({
   connectPairing: vi.fn(),
   connectSshEnvironment: state.connect,
 }));
-vi.mock("../../connection/catalog", async (original) => ({
-  ...(await original<typeof import("../../connection/catalog")>()),
-  environmentCatalog: { remove: vi.fn(), register: vi.fn(), setEnabled: vi.fn() },
-}));
+vi.mock("../../connection/catalog", async (original) => {
+  const actual = await original<typeof import("../../connection/catalog")>();
+  const stateAtom = Atom.make(AsyncResult.initial());
+  return {
+    ...actual,
+    environmentCatalog: {
+      remove: vi.fn(),
+      register: vi.fn(),
+      setEnabled: vi.fn(),
+      stateAtom: () => stateAtom,
+    },
+  };
+});
 vi.mock("../../state/server", async (original) => {
   const actual = await original<typeof import("../../state/server")>();
   const { Atom } = await import("effect/reactivity");
@@ -180,9 +189,6 @@ type Scene =
   | "connected"
   | "fresh-timeout-old-ready"
   | "superseded";
-let registry: AtomRegistry.AtomRegistry;
-let root: Root;
-let container: HTMLDivElement;
 
 /**
  * Coordinator capture only: VITE_U3_CAPTURE_DIRECTORY=/absolute/outside/worktree and
@@ -190,7 +196,7 @@ let container: HTMLDivElement;
  * Use this same overlay on baseline/changed sources. The bridge gate counts calls only;
  * manager single-flight and actual SSH acceptance are separate verifiers.
  */
-export function createU3Fixture() {
+export function createU3Fixture(registry: AtomRegistry.AtomRegistry, container: HTMLElement) {
   let enter!: () => void;
   let release!: () => void;
   const entered = new Promise<void>((resolve) => {
@@ -303,42 +309,40 @@ export function createU3Fixture() {
   return fixture;
 }
 
-beforeEach(async () => {
-  vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
-  await page.viewport(1280, 900);
-  registry = AtomRegistry.make();
+function setup() {
+  vi.clearAllMocks();
   state.environments = Atom.make<ReadonlyArray<EnvironmentPresentation>>([]);
   state.runtime = {
     kind: "ok",
     status: { ...readyStatus, state: "preparing", runtimeVersion: null, phase: "checking" },
   };
-  container = document.createElement("div");
-  container.className = "mx-auto mt-24 w-3xl bg-background text-foreground";
-  document.body.append(container);
-  root = createRoot(container);
-});
-afterEach(async () => {
-  await act(async () => root.unmount());
-  registry.dispose();
-  container.remove();
-  document.documentElement.classList.remove("dark", "light");
-  vi.unstubAllGlobals();
-});
+}
+
+function themeScope(theme: "light" | "dark"): Disposable {
+  document.documentElement.classList.add(theme);
+  return { [Symbol.dispose]: () => document.documentElement.classList.remove(theme) };
+}
 
 it.each(["light", "dark"] as const)(
   "holds and releases the actual saved row and tooltip (%s)",
   async (theme) => {
-    document.documentElement.classList.add(theme);
-    const fixture = createU3Fixture();
+    setup();
+    using _bridge = stubGlobal("desktopBridge", state.bridge);
+    using _theme = themeScope(theme);
+    await page.viewport(1280, 900);
+    const registry = AtomRegistry.make();
+    using _registry = { [Symbol.dispose]: () => registry.dispose() };
+    const container = document.createElement("div");
+    container.className = "mx-auto mt-24 w-3xl bg-background text-foreground";
+    const fixture = createU3Fixture(registry, container);
     await fixture.setScene("preparing");
-    await act(async () =>
-      root.render(
-        <RegistryContext value={registry}>
-          <TooltipProvider delay={0}>
-            <ConnectionEnvironmentsSection title="Connections" searchable={false} />
-          </TooltipProvider>
-        </RegistryContext>,
-      ),
+    await using screen = await render(
+      <RegistryContext value={registry}>
+        <TooltipProvider delay={0}>
+          <ConnectionEnvironmentsSection title="Connections" searchable={false} />
+        </TooltipProvider>
+      </RegistryContext>,
+      { container },
     );
     let hostAnswered = false;
     const preparation = state.bridge.ensureSshEnvironment(target, {
@@ -353,18 +357,15 @@ it.each(["light", "dark"] as const)(
     expect(hostAnswered).toBe(true);
     expect(fixture.progress?.phase).toBe("uploading");
     await fixture.setScene("preparing");
-    const label = container.querySelector("p.truncate");
+    const label = screen.container.querySelector("p.truncate");
     const status = label?.parentElement?.querySelector<HTMLElement>(
       '[data-slot="tooltip-trigger"]',
     );
     if (!status) throw new Error("Saved row status trigger missing");
     await act(() => userEvent.hover(page.elementLocator(status)));
-    const popup = () => {
-      const node = document.querySelector<HTMLElement>('[data-slot="tooltip-popup"]');
-      if (!node) throw new Error("Status tooltip did not open");
-      return page.elementLocator(node);
-    };
-    await expect.element(popup()).toBeVisible();
+    const popup = () => document.querySelector<HTMLElement>('[data-slot="tooltip-popup"]');
+    await vi.waitFor(() => expect(popup()).not.toBeNull());
+    await expect.element(page.elementLocator(popup()!)).toBeVisible();
     expect(fixture.snapshot().ensureStarts).toBe(1);
     expect(container.textContent).toContain("Fixture VPS");
     const baselineCapture =
