@@ -53,6 +53,7 @@ it.effect(
         [94, "HubNodes"],
         [95, "MemorySummaryWorkThreadIndex"],
         [96, "ThreadHistoryArchives"],
+        [97, "PermissionProfiles"],
       ]);
       yield* ProjectionTurnItemRequestIndex;
       assert.deepStrictEqual(yield* runMigrations(), []);

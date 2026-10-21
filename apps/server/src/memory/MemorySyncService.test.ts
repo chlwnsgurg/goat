@@ -2182,6 +2182,7 @@ it.effect.each([
               [94, "HubNodes"],
               [95, "MemorySummaryWorkThreadIndex"],
               [96, "ThreadHistoryArchives"],
+              [97, "PermissionProfiles"],
             ]);
             const adapter = yield* statusRuntime;
             const result = yield* Effect.scoped(

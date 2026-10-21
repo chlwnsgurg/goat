@@ -36,6 +36,7 @@ export const GOAT_MIGRATION_NAMES: ReadonlySet<string> = new Set([
   "HubNodes",
   "MemorySummaryWorkThreadIndex",
   "ThreadHistoryArchives",
+  "PermissionProfiles",
 ]);
 
 type MigrationEntry<E> = readonly [

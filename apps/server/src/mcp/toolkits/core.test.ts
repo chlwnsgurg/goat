@@ -1,3 +1,5 @@
+import * as Profiles from "../../goatclaw/PermissionProfiles.ts";
+import * as PermissionSettings from "../../serverSettings.ts";
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { expect, it } from "@effect/vitest";
@@ -212,6 +214,7 @@ it("publishes unique tool names with reference-free object-root inputs", () => {
     "goat_pending_request_list",
     "goat_pending_request_read",
     "goat_pending_request_respond",
+    "goat_permission_profile_get",
     "goat_preview_close",
     "goat_preview_list",
     "goat_project_clone",
@@ -1515,6 +1518,7 @@ it.effect.each([false, true])(
         notes: [],
       };
       const dependencies = Layer.mergeAll(
+        Profiles.layer.pipe(Layer.provide(PermissionSettings.layerTest())),
         NodeCrypto.layer,
         Layer.mock(ServerEnvironment.ServerEnvironment)({
           getDescriptor: Effect.succeed({
