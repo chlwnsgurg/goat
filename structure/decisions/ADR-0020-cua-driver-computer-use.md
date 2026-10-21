@@ -1,9 +1,9 @@
 # ADR-0020 — decision recorded under "Computer use"
 
 - Contract owner: [server.md](../server.md#computer-use)
-- Commit: pending on branch feat/cua-driver-server (ports pingdotgg/t3code#21694 at `b8569ac92`
-  and #21695 at `dc307c8a7`; desktop hosting and packaging follow on feat/cua-driver-desktop from
-  #21696 at `6b627499b` and #21697 at `25852df14`)
+- Commit: `ba39b38a3` in #665 (pin, telemetry opt-outs, identity), on top of the ports of
+  pingdotgg/t3code#21694 at `b8569ac92` and #21695 at `dc307c8a7`. The commit messages do not
+  record the alternatives below; they come from the lane plan and research for this program.
 - Related: [ADR-0003](ADR-0003-effect-services.md), [ADR-0014](ADR-0014-desktop-runtime-identity.md)
 
 ## Decision record
@@ -47,10 +47,11 @@
     MCP descriptor agents spawn (`cua-driver mcp`) is a separate process outside the allowlist,
     so the server adds all five opt-outs to it (`withCuaDriverPrivacyEnvironment`).
   - **Off by default.** The server setting `enableCua` starts false. Standalone servers
-    honor `GOAT_CUA_DRIVER_PATH` before downloading; desktop servers ask the Electron main
-    process for a host over the private control pipe.
-  - **Identity.** The standalone host identifies as `si.goat.server`; the desktop host uses the
-    app's `appUserModelId` (`si.goat.desktop` and its nightly and dev variants).
+    honor `GOAT_CUA_DRIVER_PATH` before downloading. Desktop servers ask the Electron main
+    process for a host over the private control pipe; the Electron host itself is ported
+    separately (#21696, #21697 on feat/cua-driver-desktop).
+  - **Identity.** The standalone host identifies as `si.goat.server`. The Electron host is to
+    use the app's `appUserModelId` (`si.goat.desktop` and its nightly and dev variants).
   - Pending in later records: which providers get the driver as an MCP server, the permission
     mode and capability ceiling (including removal of the driver's on-demand
     `check_for_update` tool), approval for unattended threads, and enabling it on remote hosts.
@@ -63,7 +64,7 @@
     the one way an opt-out reaches the daemon.
 - **Tradeoffs.**
   - This combined port and 0.37.0 pin is a new integration that upstream has not reviewed.
-  - Standalone servers download about 37-53 MB on first enable. Packaged desktop builds carry the
-    driver whether or not the user enables it.
+  - Standalone servers download about 37-53 MB on first enable. Once desktop packaging lands,
+    packaged desktop builds carry the driver whether or not the user enables it.
   - Native macOS TCC attribution, Windows hosting and packaged Linux capture still need human
     qualification, as upstream's PRs state.

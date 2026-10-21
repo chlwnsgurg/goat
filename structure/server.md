@@ -189,8 +189,9 @@ host is retired and replaced on the next acquisition, and disabling stops the ho
 servers start `GOAT_CUA_DRIVER_PATH` when set, otherwise the pinned release that
 `apps/server/src/cua/CuaDriverInstallation.ts` downloads, checks against the size and SHA-256 in
 `packages/shared/src/cuaDriverRelease.ts`, and publishes under `<base>/tools/cua-driver/<version>`.
-Desktop servers ask the Electron main process for a host with `cuaDriverRequest` on the desktop
-telemetry control pipe and receive `cuaDriverReport` (`packages/contracts/src/cua.ts`).
+Desktop servers send `cuaDriverRequest` on the desktop telemetry control pipe and wait for a
+`cuaDriverReport` (`packages/contracts/src/cua.ts`). The Electron shell ignores the request and
+hosts no driver, so a desktop acquisition fails after the 30-second startup bound.
 
 Every host passes the driver's telemetry and update-check opt-outs through its environment
 allowlist, and every MCP descriptor the service returns carries all of them. Nothing attaches the
