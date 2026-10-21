@@ -177,9 +177,7 @@ describe("goat pair", () => {
             }),
           );
 
-          const baseDir = NodeFS.mkdtempSync(
-            NodePath.join(NodeOS.tmpdir(), "goat-pair-ipv6-test-"),
-          );
+          const baseDir = makeTempDir("goat-pair-ipv6-test-");
           yield* persistServerRuntimeState({
             path: NodePath.join(baseDir, "userdata", "server-runtime.json"),
             state: yield* makePersistedServerRuntimeState({
@@ -329,7 +327,7 @@ describe("goat pair", () => {
   it.effect("explains a tailnet without HTTPS serve instead of running tailscale serve", () =>
     withDescriptorServer((origin) =>
       Effect.gen(function* () {
-        const baseDir = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "goat-pair-ts-test-"));
+        const baseDir = makeTempDir("goat-pair-ts-test-");
         yield* persistServerRuntimeState({
           path: NodePath.join(baseDir, "userdata", "server-runtime.json"),
           state: yield* makePersistedServerRuntimeState({

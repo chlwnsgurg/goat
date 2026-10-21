@@ -98,11 +98,19 @@ function makeSession(frame?: ReturnType<typeof makeFrame>) {
       // Snapshots read password fields from their own isolated world in each frame.
       if (method === "Page.createIsolatedWorld") {
         return {
-          executionContextId: (input as { worldName?: string }).worldName === "t3-preview" ? 1 : 7,
+          executionContextId:
+            (input as { worldName?: string }).worldName === "t3-preview"
+              ? 1
+              : (input as { worldName?: string }).worldName === "t3-preview-metrics"
+                ? 8
+                : 7,
         };
       }
       if (method === "Runtime.evaluate" && (input as { contextId?: number }).contextId === 1) {
         return { result: { value: [] } };
+      }
+      if (method === "Runtime.evaluate" && (input as { contextId?: number }).contextId === 8) {
+        return { result: { value: { ratio: 1, width: 1280, height: 800 } } };
       }
       if (method === "Page.addScriptToEvaluateOnNewDocument") frame?.recording.resolve();
       if (method === "Input.dispatchKeyEvent" && (input as { commands?: unknown }).commands) {
@@ -134,6 +142,8 @@ function makeContext(onClose?: (context: BrowserContext) => void) {
     once: (name: string, callback: (...args: unknown[]) => void) => events.once(name, callback),
     off: (name: string, callback: (...args: unknown[]) => void) => events.off(name, callback),
     emit: (name: string, ...args: unknown[]) => events.emit(name, ...args),
+    emitConsole: (text: string, level = "log", args: unknown[] = [text]) =>
+      events.emit("console", { type: () => level, text: () => text, args: () => args }),
     nativeFileChooser,
     setChooserFiles,
     openFileChooser: () => {
@@ -364,7 +374,10 @@ it.live.each([
         png.writeUInt32BE(4000, 20);
         cdp.send.mockImplementation(async (method, input) => {
           if (method === "Page.getLayoutMetrics")
-            return { cssContentSize: { width: 1280, height: 4000 } };
+            return {
+              ...(await original(method, input)),
+              cssContentSize: { width: 1280, height: 4000 },
+            };
           if (method === "Page.captureScreenshot") {
             started.resolve();
             return captured.promise;
@@ -435,8 +448,8 @@ it.live("logs read filtered diagnostics without page capture or invalidating sna
         input: {},
       });
       const ref = /\[ref=([^\]]+)\]/.exec(String(snapshot.accessibilityTree))![1]!;
-      page.emit("console", { type: () => "warning", text: () => "fixture warning" });
-      page.emit("console", { type: () => "log", text: () => "unrelated" });
+      page.emitConsole("fixture warning", "warning");
+      page.emitConsole("unrelated");
       const error = new Error("fixture uncaught");
       error.stack =
         "Error: fixture uncaught\n at https://user:pass@example.test/app.js?token=secret:4:2";
@@ -818,10 +831,7 @@ it.live("enforces provider ownership and explicit targets when a session has mul
         operation: "snapshot",
         input: {},
       });
-      contexts[0]!.page.emit("console", {
-        type: () => "log",
-        text: () => "another agent's evidence",
-      });
+      contexts[0]!.page.emitConsole("another agent's evidence");
       const diagnostics = yield* broker.invoke<PreviewAutomationLogs>({
         scope: asSession("agent-b"),
         tabId,
@@ -1480,7 +1490,7 @@ it.live("agents read a human's tab with no arguments and act on it only while no
         operation: "snapshot",
         input: {},
       });
-      contexts[0]!.page.emit("console", { type: () => "log", text: () => "human tab evidence" });
+      contexts[0]!.page.emitConsole("human tab evidence");
       const diagnostics = yield* broker.invoke<PreviewAutomationLogs>({
         scope,
         operation: "logs",

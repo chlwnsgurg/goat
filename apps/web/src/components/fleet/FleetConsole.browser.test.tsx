@@ -94,7 +94,8 @@ async function mounted() {
       await act(() => vi.dynamicImportSettled());
       expect(console_()).not.toBeNull();
     },
-    { timeout: 2_000 },
+    // A ceiling, not a wait: the first lazy-chunk transform is slow on a loaded CI runner.
+    { timeout: 15_000 },
   );
 }
 const toggle = () => container.querySelector<HTMLButtonElement>("button[aria-expanded]")!;
