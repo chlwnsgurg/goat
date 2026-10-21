@@ -1,7 +1,7 @@
 // @effect-diagnostics nodeBuiltinImport:off -- Effect has no incremental digest.
 import * as NodeStream from "@effect/platform-node/NodeStream";
-import { cuaDriverRelease, type CuaDriverRelease } from "@t3tools/shared/cuaDriverRelease";
-import * as HostProcess from "@t3tools/shared/HostProcess";
+import { cuaDriverRelease, type CuaDriverRelease } from "@goat/shared/cuaDriverRelease";
+import * as HostProcess from "@goat/shared/HostProcess";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -36,7 +36,7 @@ const isInstallError = Schema.is(CuaDriverInstallError);
 class CuaDriverInstallation extends Context.Service<
   CuaDriverInstallation,
   { readonly executable: Effect.Effect<string, CuaDriverInstallError> }
->()("t3/cua/CuaDriverInstallation") {}
+>()("goat/cua/CuaDriverInstallation") {}
 
 export const makeCuaDriverInstallation = Effect.fn("CuaDriverInstallation.make")(
   function* (options: { readonly baseDir: string; readonly release?: CuaDriverRelease | null }) {

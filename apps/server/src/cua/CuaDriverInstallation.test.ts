@@ -1,6 +1,6 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { expect, it } from "@effect/vitest";
-import * as HostProcess from "@t3tools/shared/HostProcess";
+import * as HostProcess from "@goat/shared/HostProcess";
 import * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
 import * as Hex from "effect/encoding/Hex";
@@ -79,7 +79,7 @@ const makeHarness = Effect.fn("test.makeCuaDriverInstallation")(function* (
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const crypto = yield* Crypto.Crypto;
-  const baseDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-cua-install-test-" });
+  const baseDir = yield* fs.makeTempDirectoryScoped({ prefix: "goat-cua-install-test-" });
   const installRoot = path.join(baseDir, "tools", "cua-driver");
   const destination = path.join(installRoot, "0.34.1");
   const outside = path.join(baseDir, "tools", "outside");

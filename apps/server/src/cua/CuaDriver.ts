@@ -1,8 +1,12 @@
 import * as NodeModule from "node:module";
 
-import { CuaDriverMcpConfiguration } from "@t3tools/contracts";
+import { CuaDriverMcpConfiguration } from "@goat/contracts";
 import type { EmbeddedCuaDriverHost, EmbeddedDriverConnection } from "@trycua/cua-driver/embedded";
-import * as HostProcess from "@t3tools/shared/HostProcess";
+import {
+  cuaDriverHostOptions,
+  withCuaDriverPrivacyEnvironment,
+} from "@goat/shared/cuaDriverRelease";
+import * as HostProcess from "@goat/shared/HostProcess";
 import * as Cause from "effect/Cause";
 import * as Context from "effect/Context";
 import * as Crypto from "effect/Crypto";
@@ -62,7 +66,7 @@ export class CuaDriver extends Context.Service<
     readonly enabled: Effect.Effect<boolean>;
     readonly lastFailure: Effect.Effect<Option.Option<CuaDriverError>>;
   }
->()("t3/cua/CuaDriver") {}
+>()("goat/cua/CuaDriver") {}
 
 interface Acquisition {
   readonly result: Deferred.Deferred<Option.Option<CuaDriverMcpConfiguration>>;
@@ -135,7 +139,7 @@ export const make = Effect.fn("CuaDriver.make")(function* (
       );
       if (entry.revoked) return;
       failure = Option.none();
-      yield* Deferred.succeed(entry.result, Option.some(mcp));
+      yield* Deferred.succeed(entry.result, Option.some(withCuaDriverPrivacyEnvironment(mcp)));
       entry.watcher = yield* entry.host.waitForExit.pipe(
         Effect.match({
           onFailure: (error) => error,
@@ -200,11 +204,16 @@ export const make = Effect.fn("CuaDriver.make")(function* (
 });
 
 type NativeModule = {
-  readonly EmbeddedCuaDriverHost: new (
-    binaryPath: string,
-    bundleId: string,
-  ) => Pick<EmbeddedCuaDriverHost, "start" | "stop" | "waitForExit" | "uniffiDestroy">;
+  readonly EmbeddedCuaDriverHost: {
+    readonly withOptions: (
+      options: ReturnType<typeof cuaDriverHostOptions>,
+    ) => Pick<EmbeddedCuaDriverHost, "start" | "stop" | "waitForExit" | "uniffiDestroy">;
+  };
 };
+
+// Standalone servers have no application bundle. The driver echoes this id in its daemon
+// metadata, and the SDK refuses a daemon that reports a different one.
+const STANDALONE_HOST_BUNDLE_ID = "si.goat.server";
 
 // SEA can load file-backed SDKs through require. This SDK only exports import
 // conditions, so resolve its package directory and require the entry file directly.
@@ -219,7 +228,7 @@ export const makeStandaloneHostFactory = Effect.fn("CuaDriver.makeStandaloneHost
     return Effect.gen(function* () {
       if (owned) return yield* new CuaDriverHostError({ operation: "busy" });
       const binaryPath =
-        environment.T3CODE_CUA_DRIVER_PATH?.trim() ||
+        environment.GOAT_CUA_DRIVER_PATH?.trim() ||
         (yield* executable.pipe(
           Effect.mapError((cause) => new CuaDriverHostError({ operation: "start", cause })),
         ));
@@ -250,7 +259,10 @@ export const makeStandaloneHostFactory = Effect.fn("CuaDriver.makeStandaloneHost
       // Acquisition can suspend during installation/loading, so check ownership again.
       if (owned) return yield* new CuaDriverHostError({ operation: "busy" });
       const native = yield* Effect.try({
-        try: () => new sdk.EmbeddedCuaDriverHost(binaryPath, "com.t3tools.t3code.server"),
+        try: () =>
+          sdk.EmbeddedCuaDriverHost.withOptions(
+            cuaDriverHostOptions(binaryPath, STANDALONE_HOST_BUNDLE_ID),
+          ),
         catch: (cause) => new CuaDriverStartError({ binaryPath, cause }),
       });
       owned = true;

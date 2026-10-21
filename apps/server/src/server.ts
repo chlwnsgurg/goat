@@ -1173,8 +1173,8 @@ const layerRuntimeCoreDependenciesBase = Layer.mergeAll(
     ),
   ),
   Layer.provideMerge(RuntimeLayer.layerEventInfrastructure),
-  Layer.provideMerge(Layer.merge(ProjectStore.layer, ThreadSearch.layer)),
-  Layer.provideMerge(layerCuaDriver),
+  // `pipe` takes at most 20 steps, so the Cua Driver joins this merge.
+  Layer.provideMerge(Layer.mergeAll(ProjectStore.layer, ThreadSearch.layer, layerCuaDriver)),
   Layer.provideMerge(layerServerSettings),
   Layer.provideMerge(layerSourceControlProviderRegistry),
   Layer.provideMerge(layerGit),

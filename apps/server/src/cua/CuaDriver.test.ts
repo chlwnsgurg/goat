@@ -5,9 +5,9 @@ import {
   DEFAULT_SERVER_SETTINGS,
   type CuaDriverMcpConfiguration,
   type DesktopCuaDriverReport,
-} from "@t3tools/contracts";
+} from "@goat/contracts";
 import type { EmbeddedDriverConnection } from "@trycua/cua-driver/embedded";
-import * as HostProcess from "@t3tools/shared/HostProcess";
+import * as HostProcess from "@goat/shared/HostProcess";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
@@ -24,7 +24,28 @@ import * as DesktopTelemetryReceiver from "../resourceTelemetry/DesktopTelemetry
 import * as ServerSettings from "../serverSettings.ts";
 import * as CuaDriver from "./CuaDriver.ts";
 
-const mcp: CuaDriverMcpConfiguration = { command: "/driver", args: ["mcp"], environment: [] };
+const mcp: CuaDriverMcpConfiguration = {
+  command: "/driver",
+  args: ["mcp"],
+  environment: [
+    { name: "PATH", value: "/bin" },
+    { name: "CUA_TELEMETRY", value: "1" },
+  ],
+};
+
+// Agents spawn the MCP proxy from this descriptor, so it always carries every driver opt-out.
+const served = (config: CuaDriverMcpConfiguration) =>
+  Option.some({
+    ...config,
+    environment: [
+      { name: "PATH", value: "/bin" },
+      { name: "CUA_DRIVER_RS_TELEMETRY_ENABLED", value: "false" },
+      { name: "CUA_TELEMETRY_ENABLED", value: "false" },
+      { name: "CUA_DRIVER_RS_UPDATE_CHECK", value: "false" },
+      { name: "DO_NOT_TRACK", value: "1" },
+      { name: "CUA_TELEMETRY", value: "0" },
+    ],
+  });
 
 const makeHost = Effect.fnUntraced(function* () {
   const started = yield* Deferred.make<void>();
@@ -104,8 +125,8 @@ it.layer(ServerSettings.layerTest())("CuaDriver lifecycle", (it) => {
         yield* TestClock.adjust("31 seconds");
         yield* Deferred.succeed(prepared, undefined);
         yield* Deferred.succeed(h.ready, mcp);
-        expect(yield* Fiber.join(second)).toEqual(Option.some(mcp));
-        expect(yield* service.acquire).toEqual(Option.some(mcp));
+        expect(yield* Fiber.join(second)).toEqual(served(mcp));
+        expect(yield* service.acquire).toEqual(served(mcp));
         expect(creates).toBe(1);
         expect(h.stops()).toBe(0);
       }).pipe(Effect.scoped);
@@ -132,7 +153,7 @@ it.layer(ServerSettings.layerTest())("CuaDriver lifecycle", (it) => {
       expect(failed.stops()).toBe(1);
       expect(Option.isSome(yield* service.lastFailure)).toBe(true);
       yield* Deferred.succeed(crashed.ready, mcp);
-      expect(yield* service.acquire).toEqual(Option.some(mcp));
+      expect(yield* service.acquire).toEqual(served(mcp));
       expect(yield* service.lastFailure).toEqual(Option.none());
       yield* Deferred.await(crashed.watching);
       const waitError = new CuaDriver.CuaDriverHostError({
@@ -144,7 +165,7 @@ it.layer(ServerSettings.layerTest())("CuaDriver lifecycle", (it) => {
       expect(Option.getOrThrow(yield* service.lastFailure)).toBe(waitError);
       const next = { ...mcp, args: ["mcp", "--generation=next"] };
       yield* Deferred.succeed(replacement.ready, next);
-      expect(yield* service.acquire).toEqual(Option.some(next));
+      expect(yield* service.acquire).toEqual(served(next));
       expect(creates).toBe(3);
     }).pipe(Effect.scoped),
   );
@@ -156,14 +177,14 @@ it.layer(ServerSettings.layerTest())("CuaDriver lifecycle", (it) => {
       let creates = 0;
       const h = yield* makeService(Effect.sync(() => (creates++ === 0 ? first.host : second.host)));
       yield* Deferred.succeed(first.ready, mcp);
-      expect(yield* h.service.acquire).toEqual(Option.some(mcp));
+      expect(yield* h.service.acquire).toEqual(served(mcp));
       yield* h.setEnabled(false);
       yield* Deferred.await(first.stopped);
       expect(yield* h.service.acquire).toEqual(Option.none());
       expect(creates).toBe(1);
       yield* h.setEnabled(true);
       yield* Deferred.succeed(second.ready, mcp);
-      expect(yield* h.service.acquire).toEqual(Option.some(mcp));
+      expect(yield* h.service.acquire).toEqual(served(mcp));
       expect(creates).toBe(2);
       expect(first.stops()).toBe(1);
     }).pipe(Effect.scoped),
@@ -196,10 +217,10 @@ it.layer(ServerSettings.layerTest())("CuaDriver lifecycle", (it) => {
       yield* h.setEnabled(true);
       const next = { ...mcp, command: "/replacement" };
       yield* Deferred.succeed(second.ready, next);
-      expect(yield* h.service.acquire).toEqual(Option.some(next));
+      expect(yield* h.service.acquire).toEqual(served(next));
       yield* Deferred.succeed(first.ready, mcp);
       yield* Deferred.await(lateFinished);
-      expect(yield* h.service.acquire).toEqual(Option.some(next));
+      expect(yield* h.service.acquire).toEqual(served(next));
       expect(first.stops()).toBe(1);
       expect(second.stops()).toBe(0);
     }).pipe(Effect.scoped),
@@ -227,6 +248,9 @@ const nativeFixture = Effect.fnUntraced(function* () {
     Effect.succeed("/driver"),
     Effect.succeed({
       EmbeddedCuaDriverHost: class {
+        static withOptions() {
+          return new this();
+        }
         constructor() {
           creates++;
         }
@@ -303,9 +327,7 @@ it.layer(ServerSettings.layerTest())("CuaDriver native ownership", (it) => {
         yield* Deferred.await(f.started);
         if (pending === "stop") {
           f.start.resolve(f.connection);
-          expect(yield* Fiber.join(acquiring)).toEqual(
-            Option.some({ ...mcp, socketPath: "/socket" }),
-          );
+          expect(yield* Fiber.join(acquiring)).toEqual(served({ ...mcp, socketPath: "/socket" }));
         }
         const closing = yield* Scope.close(scope, Exit.void).pipe(Effect.forkChild);
         if (pending === "stop") yield* Deferred.await(f.stopping);
@@ -414,8 +436,8 @@ it.effect.each([false, true])(
           status: "ready",
           mcp,
         });
-        expect(yield* Fiber.join(acquiring)).toEqual(Option.some(mcp));
-        expect(yield* service.acquire).toEqual(Option.some(mcp));
+        expect(yield* Fiber.join(acquiring)).toEqual(served(mcp));
+        expect(yield* service.acquire).toEqual(served(mcp));
       }).pipe(Effect.scoped);
       expect(requests).toEqual([true, false]);
     }).pipe(Effect.provide([ServerSettings.layerTest(), NodeCrypto.layer]), Effect.scoped),
@@ -462,7 +484,7 @@ it.effect("preserves the desktop driver through degraded telemetry until the rec
     const f = yield* desktopFixture(true, Stream.fromQueue(streamQueue).pipe(Stream.flatten));
     const { service } = yield* makeService(f.factory);
     const descriptor = yield* service.acquire;
-    expect(descriptor).toEqual(Option.some(mcp));
+    expect(descriptor).toEqual(served(mcp));
     // Acquisition resolves before the exit watcher starts; wait so a false exit cannot go unnoticed.
     yield* Deferred.await(f.watching);
     yield* Queue.offer(
@@ -486,36 +508,38 @@ it.effect("preserves the desktop driver through degraded telemetry until the rec
   }).pipe(Effect.provide([ServerSettings.layerTest(), NodeCrypto.layer]), Effect.scoped),
 );
 
-it.effect("uses an explicit driver path without consulting the installer", () =>
+it.effect("starts an explicit driver path with telemetry and update checks off", () =>
   Effect.gen(function* () {
-    let binaryPath = "";
+    let options: { readonly binaryPath: string; readonly environment: unknown } | undefined;
     const factory = yield* CuaDriver.makeStandaloneHostFactory(
       Effect.die("installer must not run"),
       Effect.succeed({
-        EmbeddedCuaDriverHost: class {
-          constructor(path: string) {
-            binaryPath = path;
-          }
-          start() {
-            return Promise.reject(new Error("unused"));
-          }
-          stop() {
-            return Promise.resolve();
-          }
-          waitForExit() {
-            return Promise.reject(new Error("unused"));
-          }
-          uniffiDestroy() {}
+        EmbeddedCuaDriverHost: {
+          withOptions: (received) => {
+            options = received;
+            return {
+              start: () => Promise.reject(new Error("unused")),
+              stop: () => Promise.resolve(),
+              waitForExit: () => Promise.reject(new Error("unused")),
+              uniffiDestroy: () => {},
+            };
+          },
         },
       }),
     ).pipe(
       Effect.provide(NodeServices.layer),
       Effect.provideService(HostProcess.Environment, {
-        T3CODE_CUA_DRIVER_PATH: "/explicit/driver",
+        GOAT_CUA_DRIVER_PATH: "/explicit/driver",
       }),
     );
     const host = yield* factory;
-    expect(binaryPath).toBe("/explicit/driver");
+    expect(options?.binaryPath).toBe("/explicit/driver");
+    // The driver reads these after DO_NOT_TRACK, which its embedded allowlist cannot forward.
+    expect(options?.environment).toEqual([
+      { name: "CUA_DRIVER_RS_TELEMETRY_ENABLED", value: "false" },
+      { name: "CUA_TELEMETRY_ENABLED", value: "false" },
+      { name: "CUA_DRIVER_RS_UPDATE_CHECK", value: "false" },
+    ]);
     yield* host.stop;
   }),
 );
