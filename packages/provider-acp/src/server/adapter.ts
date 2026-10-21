@@ -611,6 +611,8 @@ interface AcpMcpContext {
   readonly processEnvironment?: NodeJS.ProcessEnv;
   readonly endpoint?: string;
   readonly authorization?: string;
+  /** The session's activation lists the managed `cua-driver` server. */
+  readonly computerUse?: boolean;
 }
 
 function acpMcpContext(
@@ -623,7 +625,10 @@ function acpMcpContext(
   // Agents that advertise optional http support still routinely fail to wire
   // injected http servers through to their backend (codex-acp 1.2.0 and pi-acp
   // both drop them), so every ACP session gets the `goat acp-mcp-bridge` stdio
-  // server, which forwards JSON-RPC to T3's authenticated MCP endpoint.
+  // server, which forwards JSON-RPC to T3's authenticated MCP endpoint. The
+  // managed Cua Driver is already a stdio server, so it is listed in both
+  // forms: an agent with MCP-over-ACP receives only `acpServers`.
+  const cua = McpProviderSession.cuaAcpMcpServers(session);
   return {
     servers: [
       {
@@ -636,10 +641,12 @@ function acpMcpContext(
           { name: "GOAT_ACP_MCP_AUTHORIZATION", value: session.authorizationHeader },
         ],
       },
+      ...cua,
     ],
-    acpServers: [{ type: "acp", name: "goat", serverId: "goat" }],
+    acpServers: [{ type: "acp", name: "goat", serverId: "goat" }, ...cua],
     endpoint: session.endpoint,
     authorization: session.authorizationHeader,
+    computerUse: cua.length > 0,
     // Agent instructions and terminal fallbacks written for older builds read the legacy names.
     processEnvironment: withLegacyEnvNames({
       GOAT_ACP_MCP_ENDPOINT: session.endpoint,
@@ -1434,6 +1441,8 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
           itemIdentityVersion = thread.nativeMetadata?.itemIdentityVersion;
         };
         const terminalEnvironmentBySessionId = new Map<string, NodeJS.ProcessEnv>();
+        /** Native sessions whose activation listed the managed Cua Driver. */
+        const computerUseSessionIds = new Set<string>();
         interface PendingTerminalEnvironment {
           readonly environment: NodeJS.ProcessEnv | undefined;
           readonly claimUnknownSession: boolean;
@@ -1467,6 +1476,8 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
         ): void => {
           const environment = mcpContext.processEnvironment;
           pendingTerminalEnvironment = null;
+          if (mcpContext.computerUse === true) computerUseSessionIds.add(sessionId);
+          else computerUseSessionIds.delete(sessionId);
           if (environment === undefined) {
             terminalEnvironmentBySessionId.delete(sessionId);
           } else {
@@ -7261,6 +7272,9 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
               text: buildRuntimeInstructions({
                 harness: flavor.runtimeHarness ?? driver,
                 model: turnInput.modelSelection.model,
+                // The server list is fixed when a session is activated, so a
+                // driver enabled later reaches the agent on its next activation.
+                computerUse: computerUseSessionIds.has(sessionId),
               }),
             });
           }

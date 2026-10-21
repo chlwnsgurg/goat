@@ -532,3 +532,66 @@ describe("Pi skill references", () => {
     }
   });
 });
+const FAKE_CUA_DRIVER = `import * as NodeReadline from "node:readline";
+NodeReadline.createInterface({ input: process.stdin }).on("line", (line) => {
+  const message = JSON.parse(line);
+  if (message.id === undefined) return;
+  const result =
+    message.method === "initialize"
+      ? { protocolVersion: "2025-06-18", capabilities: { tools: {} }, serverInfo: { name: "fake", version: "0" } }
+      : message.method === "tools/list"
+        ? { tools: [{ name: "get_window_state", description: "Capture a window.\\nWithout raising it.", inputSchema: { type: "object", properties: { window_id: { type: "number" } } } }] }
+        : { content: [{ type: "text", text: "window " + message.params.arguments.window_id }, { type: "image", data: "AAAA", mimeType: "image/png" }] };
+  process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: message.id, result }) + "\\n");
+});
+`;
+
+describe("Pi Cua Driver bridge", () => {
+  it("bridges a stdio driver's tools with screenshots and adds the computer use instructions", async () => {
+    const directory = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "goat-pi-cua-"));
+    try {
+      const script = NodePath.join(directory, "fake-cua-driver.mjs");
+      await NodeFSP.writeFile(script, FAKE_CUA_DRIVER);
+      const bridge = await loadMcpBridge({ cua: { command: process.execPath, args: [script] } });
+      try {
+        const tool = bridge.tools.find(
+          (entry) => entry.name === "mcp__cua-driver__get_window_state",
+        );
+        assert.equal(tool?.promptSnippet, "Capture a window.");
+        const output = await tool!.execute("capture", { window_id: 7 });
+        assert.deepEqual(output.content, [
+          { type: "text", text: "window 7" },
+          { type: "image", data: "AAAA", mimeType: "image/png" },
+        ]);
+        assert.deepEqual(output.details, { server: "cua-driver", tool: "get_window_state" });
+        const start = bridge.handlers.get("before_agent_start")!;
+        const ctx = { ui: { notify: () => undefined } };
+        // Pi renders named sections; a full prompt override falls back to appending.
+        const sections: Record<string, string> = {};
+        assert.isUndefined(
+          await start({ systemPrompt: "base", systemPromptOptions: { sections } }, ctx),
+        );
+        assert.include(sections.goat_computer_use, "<computer_use>");
+        assert.include(
+          (await start({ systemPrompt: "base" }, ctx))?.systemPrompt,
+          "<computer_use>",
+        );
+      } finally {
+        await (bridge.handlers.get("session_shutdown") as unknown as () => void)();
+      }
+    } finally {
+      await NodeFSP.rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("leaves the instructions out of a session without the driver", async () => {
+    const bridge = await loadMcpBridge();
+    assert.isFalse(bridge.tools.some((entry) => entry.name.startsWith("mcp__cua-driver__")));
+    const start = bridge.handlers.get("before_agent_start")!;
+    const ctx = { ui: { notify: () => undefined } };
+    const sections: Record<string, string> = {};
+    await start({ systemPrompt: "base", systemPromptOptions: { sections } }, ctx);
+    assert.isUndefined(sections.goat_computer_use);
+    assert.notInclude((await start({ systemPrompt: "base" }, ctx))?.systemPrompt, "<computer_use>");
+  });
+});

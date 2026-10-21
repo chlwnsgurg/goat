@@ -458,6 +458,109 @@ describe("AcpAdapterV2", () => {
       }).pipe(Effect.provide(layerTest), Effect.scoped),
   );
 
+  it.live.each([true, false])(
+    "lists the managed Cua Driver in both server forms and describes it only when attached (%s)",
+    (attached) =>
+      Effect.gen(function* () {
+        const childProcessSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+        const path = yield* Path.Path;
+        const selfInvocation = yield* resolveSelfInvocation();
+        const mockAgentPath = yield* path.fromFileUrl(
+          new URL("../../../scripts/acp-mock-agent.ts", import.meta.url),
+        );
+        const protocolEvents = yield* Queue.unbounded<EffectAcpProtocol.AcpProtocolLogEvent>();
+        const instanceId = ProviderInstanceId.make(`acp-test-cua-${attached}`);
+        const threadId = ThreadId.make(`thread-acp-cua-${attached}`);
+        const cuaDriver = {
+          command: "/resources/cua-driver",
+          args: ["mcp"],
+          environment: [{ name: "CUA_DRIVER_RS_TELEMETRY_ENABLED", value: "false" }],
+        };
+        yield* (yield* McpProviderSessions.McpProviderSessions).set({
+          environmentId: EnvironmentId.make("environment-acp-cua"),
+          threadId,
+          providerSessionId: "mcp-session-acp-cua",
+          providerInstanceId: instanceId,
+          endpoint: "http://127.0.0.1:43123/mcp",
+          authorizationHeader: "Bearer acp-cua-token",
+          browserToolsAvailable: false,
+          ...(attached ? { cuaDriver } : {}),
+        });
+        let runtimeInput: AcpAdapterV2RuntimeInput | undefined;
+        const makeRuntime = makeMockRuntime({ childProcessSpawner, mockAgentPath, protocolEvents });
+        const adapter = yield* makeAcpAdapterV2({
+          instanceId,
+          flavor: {
+            driver: ACP_TEST_DRIVER,
+            capabilities: AcpProviderCapabilitiesV2,
+            makeRuntime: (input) =>
+              Effect.sync(() => {
+                runtimeInput = input;
+              }).pipe(Effect.andThen(makeRuntime(input))),
+          },
+          selfInvocation,
+        });
+        const runtimePolicy = ProviderAdapter.ProviderAdapterV2RuntimePolicy.make({
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          cwd: process.cwd(),
+        });
+        const modelSelection = { instanceId, model: "default" } as const;
+        const runtime = yield* adapter.openSession({
+          threadId,
+          providerSessionId: ProviderSessionId.make(`provider-session-acp-cua-${attached}`),
+          modelSelection,
+          runtimePolicy,
+        });
+        const expected = {
+          name: "cua-driver",
+          command: "/resources/cua-driver",
+          args: ["mcp"],
+          env: [{ name: "CUA_DRIVER_RS_TELEMETRY_ENABLED", value: "false" }],
+        };
+        const find = (servers: ReadonlyArray<unknown> | undefined) =>
+          servers?.find(
+            (server) =>
+              typeof server === "object" &&
+              server !== null &&
+              "name" in server &&
+              server.name === "cua-driver",
+          );
+        assert.deepEqual(find(runtimeInput?.mcpServers), attached ? expected : undefined);
+        assert.deepEqual(find(runtimeInput?.acpMcpServers), attached ? expected : undefined);
+        const providerThread = yield* runtime.ensureThread({
+          threadId,
+          modelSelection,
+          runtimePolicy,
+        });
+        yield* runtime.startTurn(
+          makeTurnInput({
+            threadId,
+            providerThread,
+            instanceId,
+            runtimePolicy,
+            now: yield* DateTime.now,
+            ordinal: 0,
+            messageText: "Open the settings window.",
+          }),
+        );
+        yield* runtime.events.pipe(
+          Stream.takeUntil((event) => event.type === "turn.terminal"),
+          Stream.runDrain,
+        );
+        while (true) {
+          const event = yield* Queue.take(protocolEvents);
+          if (event.direction !== "outgoing" || rawProtocolMethod(event) !== "session/prompt")
+            continue;
+          const prompt = rawProtocolPromptTextBlocks(event)
+            .map((block) => block.text)
+            .join("\n");
+          assert.equal(prompt.includes("<computer_use>"), attached);
+          break;
+        }
+      }).pipe(Effect.provide(layerTest), Effect.scoped),
+  );
+
   it.live("refreshes ACP prompt instructions when the interaction mode changes", () =>
     Effect.gen(function* () {
       const childProcessSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;

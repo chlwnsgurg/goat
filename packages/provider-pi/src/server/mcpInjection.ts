@@ -7,6 +7,7 @@ import { legacyEnvName, withLegacyEnvNames } from "@goat/contracts/legacyT3Names
 import {
   PI_GOAT_MCP_EXTENSION_FILENAME,
   PI_GOAT_MCP_EXTENSION_SOURCE,
+  GOAT_CUA_MCP_ENV,
   GOAT_MCP_BEARER_ENV,
   GOAT_MCP_URL_ENV,
   GOAT_PI_RUNTIME_MODE_ENV,
@@ -292,6 +293,9 @@ export function buildPiRpcLaunch(input: {
     delete environment[name];
     delete environment[legacyEnvName(name) ?? name];
   }
+  delete environment[GOAT_CUA_MCP_ENV];
+  // The driver reaches Pi only through GOAT's extension bridge, fixed at launch.
+  const cuaDriver = hasGoatMcp ? input.mcpSession?.cuaDriver : undefined;
 
   return {
     args,
@@ -317,6 +321,17 @@ export function buildPiRpcLaunch(input: {
             }
           : {}),
       }),
+      ...(cuaDriver === undefined
+        ? {}
+        : {
+            [GOAT_CUA_MCP_ENV]: JSON.stringify({
+              command: cuaDriver.command,
+              args: cuaDriver.args,
+              env: Object.fromEntries(
+                cuaDriver.environment.map(({ name, value }) => [name, value]),
+              ),
+            }),
+          }),
     },
     hasGoatMcp,
   };
