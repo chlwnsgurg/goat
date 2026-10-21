@@ -75,3 +75,8 @@ it("explains question decisions and question-aware waits", () => {
     assert.include(GOAT_ORCHESTRATION_INSTRUCTIONS, text);
   }
 });
+
+it("asks agents to check host pressure before heavy lanes", () => {
+  assert.include(GOAT_ORCHESTRATION_INSTRUCTIONS, "`goat_host_status` with `placement:{}`");
+  assert.include(GOAT_ORCHESTRATION_INSTRUCTIONS, '"Resource pressure:"');
+});
