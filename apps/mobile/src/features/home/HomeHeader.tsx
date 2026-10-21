@@ -13,7 +13,10 @@ import { createNativeMailSearchToolbarItem } from "../layout/native-mail-search-
 import { useNativeMailSearchToolbar } from "../../native/use-native-mail-search-toolbar";
 import { useDeviceType } from "../../native/native-layout-metrics";
 import { buildHomeListFilterMenu } from "./home-list-filter-menu";
-import { createSidebarHeaderItems } from "../threads/sidebar-native-header-items";
+import {
+  createSidebarFilterHeaderItem,
+  createSidebarHeaderItems,
+} from "../threads/sidebar-native-header-items";
 import type { HomeHeaderProps } from "./HomeHeader.types";
 import { useAdaptiveWorkspaceLayout } from "../layout/AdaptiveWorkspaceLayout";
 import { useMobileGoatBotModeButton } from "../goat-bot/useMobileGoatBotHomeMode";
@@ -65,28 +68,44 @@ export function HomeHeader(props: HomeHeaderProps) {
 
   if (props.usesWorkspaceToolbar) {
     return (
-      <Toolbar placement="left">
-        <Toolbar.Button
-          accessibilityLabel="Open notes"
-          icon="doc.text"
-          onPress={() => navigation.navigate("Notes")}
-        />
-        {botKnown ? (
+      <>
+        <Toolbar placement="left">
           <Toolbar.Button
-            accessibilityLabel={
-              mode === "bot" && primaryColumn?.selectedThreadKey == null
-                ? "Show threads"
-                : "Show GOAT Bot"
-            }
-            icon={
-              mode === "bot" && primaryColumn?.selectedThreadKey == null
-                ? "list.bullet"
-                : "bubble.left.and.bubble.right"
-            }
-            onPress={toggleMode}
+            accessibilityLabel="Open notes"
+            icon="doc.text"
+            onPress={() => navigation.navigate("Notes")}
+          />
+          {botKnown ? (
+            <Toolbar.Button
+              accessibilityLabel={
+                mode === "bot" && primaryColumn?.selectedThreadKey == null
+                  ? "Show threads"
+                  : "Show GOAT Bot"
+              }
+              icon={
+                mode === "bot" && primaryColumn?.selectedThreadKey == null
+                  ? "list.bullet"
+                  : "bubble.left.and.bubble.right"
+              }
+              onPress={toggleMode}
+            />
+          ) : null}
+        </Toolbar>
+
+        {deviceType === "duo-unfolded" ? (
+          <NativeStackScreenOptions
+            optionsVersion={filterMenu.items}
+            options={{
+              nativeSidebarFilter: createSidebarFilterHeaderItem({
+                filterIcon: hasCustomListOptions
+                  ? "line.3.horizontal.decrease.circle.fill"
+                  : "line.3.horizontal.decrease.circle",
+                filterMenu,
+              }),
+            }}
           />
         ) : null}
-      </Toolbar>
+      </>
     );
   }
 

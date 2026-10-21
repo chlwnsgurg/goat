@@ -32,6 +32,7 @@ import * as ProviderContinuationRequests from "@goat/provider-core/server/Provid
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import { CodexProviderCapabilitiesV2 } from "./Adapters/CodexAdapterV2.ts";
 import * as DelegatedTaskQuestionReactor from "./DelegatedTaskQuestionReactor.ts";
+import * as EffectOutbox from "./EffectOutbox.ts";
 import * as EventSink from "./EventSink.ts";
 import * as Orchestrator from "./Orchestrator.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
@@ -55,6 +56,7 @@ const layerDatabase = SqlitePersistence.layerMemory;
 const layerTest = Layer.mergeAll(
   layerDatabase,
   ProjectionStore.layer.pipe(Layer.provide(layerDatabase)),
+  EffectOutbox.layer.pipe(Layer.provide(layerDatabase)),
   ProviderReplayHarness.layerWithRegistry(
     { name: "control-reads" },
     ProviderAdapterRegistry.layerFromAdapters([adapter]),
@@ -131,6 +133,7 @@ it.effect(
       const orchestrator = yield* Orchestrator.OrchestratorV2;
       const projections = yield* ProjectionStore.ProjectionStoreV2;
       const sql = yield* SqlClient.SqlClient;
+      const outbox = yield* EffectOutbox.EffectOutboxV2;
       const threadId = ThreadId.make("thread:control-dispatch");
       const now = yield* DateTime.now;
       yield* orchestrator.dispatch({
@@ -277,6 +280,37 @@ it.effect(
             questions: [],
           },
         });
+        const answers = { text: "Blue", list: ["Red"], codex: { answers: ["Green"] } };
+        const normalizedAnswers = { ...answers, codex: ["Green"] };
+        if (mode === "live") {
+          const pending = yield* projections.getRuntimeResponseContext(threadId, requestId);
+          const sequence = yield* orchestrator.getThreadEventSequence(threadId);
+          for (const [index, value] of [
+            null,
+            42,
+            { choice: "Blue" },
+            ["Blue", 42],
+            { answers: [42] },
+          ].entries()) {
+            const commandId = CommandId.make(`invalid-answer:${index}`);
+            const result = yield* orchestrator
+              .dispatch({
+                type: "runtime-request.respond",
+                commandId,
+                threadId,
+                requestId,
+                answers: { ...answers, invalid: value },
+              })
+              .pipe(Effect.result);
+            assert.isTrue(Result.isFailure(result));
+            assert.deepEqual(
+              yield* projections.getRuntimeResponseContext(threadId, requestId),
+              pending,
+            );
+            assert.equal(yield* orchestrator.getThreadEventSequence(threadId), sequence);
+            assert.deepEqual(yield* outbox.listByCommandId(commandId), []);
+          }
+        }
         yield* orchestrator.dispatch(
           mode === "live"
             ? {
@@ -284,7 +318,7 @@ it.effect(
                 commandId: CommandId.make(`respond:${mode}`),
                 threadId,
                 requestId,
-                decision: "accept",
+                answers,
               }
             : {
                 type: "thread.user-input.dismiss",
@@ -300,6 +334,25 @@ it.effect(
         const response = yield* projections.getRuntimeResponseContext(threadId, requestId);
         assert.equal(response.node?.status, mode === "live" ? "completed" : "cancelled");
         assert.equal(response.item?.status, mode === "live" ? "completed" : "cancelled");
+        if (mode === "live") {
+          assert.deepEqual(response.request?.answers, normalizedAnswers);
+          assert.equal(response.item?.type, "user_input_request");
+          if (response.item?.type === "user_input_request") {
+            assert.deepEqual(response.item.questionAnswer?.answers, normalizedAnswers);
+          }
+          const effects = yield* outbox.listByCommandId(CommandId.make(`respond:${mode}`));
+          assert.deepEqual(
+            effects.map((effect) => effect.request),
+            [
+              {
+                type: "runtime-request.respond",
+                providerSessionId: sessionId,
+                requestId,
+                answers: normalizedAnswers,
+              },
+            ],
+          );
+        }
       }
       yield* orchestrator.dispatch({
         type: "thread.metadata.update",

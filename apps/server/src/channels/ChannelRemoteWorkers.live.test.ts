@@ -93,6 +93,7 @@ const waitFor = (label: string, check: (task: ChannelTask) => boolean, minutes: 
   Effect.gen(function* () {
     const runtime = yield* ChannelRuntime.ChannelRuntime;
     const deadline = (yield* Clock.currentTimeMillis) + minutes * 60_000;
+    // oxlint-disable-next-line goat/no-polling-loop-in-tests -- Opt-in real remote host exposes persisted task snapshots across origin restarts, with no local completion event.
     while ((yield* Clock.currentTimeMillis) < deadline) {
       yield* runtime.drain;
       const page = yield* (yield* ChannelLedger.ChannelLedger).listTasks({
@@ -110,6 +111,7 @@ const waitFor = (label: string, check: (task: ChannelTask) => boolean, minutes: 
           new Error(label + ": the task ended " + task.status + ": " + task.resultSummary),
         );
       }
+      // oxlint-disable-next-line goat/no-real-time-wait-in-tests -- Opt-in real SSH agent reports arrive asynchronously from a second host; pace external state reads.
       yield* Effect.sleep(Duration.seconds(2));
     }
     const task = yield* onlyTask;
@@ -145,6 +147,7 @@ describe.skipIf(HOST === "" || PROJECT_ID === "")("a task on a real second machi
           // Let the narration and its delivery reach the GOAT bot.
           for (let pass = 0; pass < 10; pass += 1) {
             yield* (yield* ChannelRuntime.ChannelRuntime).drain;
+            // oxlint-disable-next-line goat/no-real-time-wait-in-tests -- Opt-in real remote agent delivery crosses SSH and persisted outboxes; allow remote narration to arrive before the next drain.
             yield* Effect.sleep(Duration.seconds(1));
           }
           const records = yield* botMessages;
