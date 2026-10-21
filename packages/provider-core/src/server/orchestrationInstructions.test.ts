@@ -26,6 +26,11 @@ describe("T3 orchestration provider instructions", () => {
       "for work that owns a goal, runs a loop (HOTL, `cxc-loop`, repeated PABCD), or spans several cycles",
     );
   });
+
+  it("asks agents to check host pressure before heavy lanes", () => {
+    assert.include(GOAT_ORCHESTRATION_INSTRUCTIONS, "`goat_host_status` with `placement:{}`");
+    assert.include(GOAT_ORCHESTRATION_INSTRUCTIONS, '"Resource pressure:"');
+  });
 });
 
 it("explains question decisions and question-aware waits", () => {

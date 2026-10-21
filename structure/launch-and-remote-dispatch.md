@@ -127,3 +127,17 @@ placement limits and fallback chains do not exist yet; the controller reaches th
 > Decision record: [ADR-0017](decisions/ADR-0017-agentic-self-healing.md)
 
 > Decision record: [ADR-0018](decisions/ADR-0018-agentic-resources-fallback.md)
+
+## Resource pressure
+
+Each server classifies its own load, CPU, memory, disk and event-loop stalls into `ok`,
+`elevated` or `critical` with hysteresis (`apps/server/src/fleet/pressure/HostPressureMonitor.ts`)
+and reports it as `pressure` in its own `goat_host_status` entry, so remote pressure arrives with
+the fan-out. `PressureNudger` tells the threads that started work on a pressured host, and their
+launchers, through the launch-report channel: critical wakes, other changes are notices, each host
+and level at most once per cooldown. It reads remote hosts only while a launch watch there still
+has runs to report. Launch tools return `pressure` advice from readings already held, and goal
+placement refuses a critical host. Settings: `fleet.pressure` in
+`packages/contracts/src/hostPressure.ts`.
+
+> Decision record: [ADR-0020](decisions/ADR-0020-host-pressure.md)

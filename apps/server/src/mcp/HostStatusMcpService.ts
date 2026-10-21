@@ -19,6 +19,7 @@ import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
 
 import packageJson from "../../package.json" with { type: "json" };
+import * as HostPressureMonitor from "../fleet/pressure/HostPressureMonitor.ts";
 import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
 import * as ProviderRegistry from "../provider/ProviderRegistry.ts";
 import * as HostResources from "../resourceTelemetry/HostResources.ts";
@@ -93,6 +94,7 @@ const make = Effect.gen(function* () {
   const threads = yield* ThreadManagementService.ThreadManagementService;
   const hosts = yield* HostThreadsMcpService.HostThreadsMcpService;
   const dispatch = yield* SshRemoteDispatch.SshRemoteDispatch;
+  const pressureMonitor = yield* Effect.serviceOption(HostPressureMonitor.HostPressureMonitor);
   const clock = yield* Clock.Clock;
   const lastRefreshAt = yield* Ref.make(Number.NEGATIVE_INFINITY);
   const known = yield* Ref.make(new Map<string | null, HostStatusEntry>());
@@ -142,6 +144,8 @@ const make = Effect.gen(function* () {
           failure("orchestration_error", "Could not count threads on this machine."),
         ),
       );
+    const pressure =
+      pressureMonitor._tag === "Some" ? yield* pressureMonitor.value.current : undefined;
     const entry = {
       host: null,
       reachability: "ok" as const,
@@ -153,6 +157,7 @@ const make = Effect.gen(function* () {
         threads: countHostThreads(shells),
         ...(yield* readQuotas()),
       },
+      ...(pressure === undefined ? {} : { pressure }),
     } satisfies HostStatusEntry;
     yield* remember(null, entry);
     return entry;

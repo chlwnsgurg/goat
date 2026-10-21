@@ -3,6 +3,7 @@ import * as Schema from "effect/Schema";
 import { ForwardCompatibleOptional, NonNegativeInt, TrimmedNonEmptyString } from "./baseSchemas.ts";
 import { RuntimeProtocolRanges } from "./environment.ts";
 import { HostCondition } from "./fleetHealth.ts";
+import { HostPlacementRanking, HostPlacementRequirements, HostPressure } from "./hostPressure.ts";
 import { ProviderDriverKind, ProviderInstanceId } from "./providerInstance.ts";
 import { ServerProviderUsageLimits } from "./providerUsageLimits.ts";
 import { HostResourcesSnapshot } from "./resourceTelemetry.ts";
@@ -125,11 +126,15 @@ export const HostStatusEntry = Schema.Struct({
   message: Schema.optional(Schema.String),
   /** Self-healing conditions this machine derived for the host. Older servers omit it. */
   conditions: Schema.optional(Schema.Array(HostCondition)),
+  /** Resource pressure that machine reports for itself. Older hosts omit it. */
+  pressure: Schema.optional(HostPressure),
 });
 export type HostStatusEntry = typeof HostStatusEntry.Type;
 
 export const GoatHostStatusResult = Schema.Struct({
   hosts: Schema.Array(HostStatusEntry),
+  /** Present when the call passed `placement`. */
+  placement: Schema.optional(HostPlacementRanking),
 });
 export type GoatHostStatusResult = typeof GoatHostStatusResult.Type;
 
@@ -145,6 +150,12 @@ export const GoatHostStatusInput = Schema.Struct({
     description:
       "When true, report only this machine. A fan-out calls each SSH host with local:true so that machine does not fan out again. Cannot be combined with host.",
   }),
+  placement: Schema.optional(
+    HostPlacementRequirements.annotate({
+      description:
+        "Rank the reported hosts for one new lane: pass {} or the provider instance, driver or platform it needs. The result's placement lists eligible hosts best first (lowest load and pressure, fewest running threads, most quota), then skipped hosts with why.",
+    }),
+  ),
 });
 export type GoatHostStatusInput = typeof GoatHostStatusInput.Type;
 

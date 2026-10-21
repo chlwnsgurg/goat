@@ -47,6 +47,7 @@ import {
 } from "../telemetry/ProviderDimensions.ts";
 import * as ThreadResultService from "../threadResults/ThreadResultService.ts";
 import * as HostStatusMcpService from "./HostStatusMcpService.ts";
+import * as HostPressureMonitor from "../fleet/pressure/HostPressureMonitor.ts";
 import * as HostThreadsMcpService from "./HostThreadsMcpService.ts";
 import * as McpInvocationContext from "./McpInvocationContext.ts";
 import * as McpSessionRegistry from "./McpSessionRegistry.ts";
@@ -1308,6 +1309,8 @@ export const layerHostStatusService = HostStatusMcpService.layer.pipe(
   Layer.provide(OrchestratorMcpService.layer),
   Layer.provide(RemoteReportService.layer),
   Layer.provide(ThreadResultService.layer),
+  // Its own pressure rides on this machine's entry; the nudger reads the same monitor.
+  Layer.provideMerge(HostPressureMonitor.layer),
 );
 
 /** Reads HostStatusMcpService from the server's context; see `layerHostStatusService`. */
