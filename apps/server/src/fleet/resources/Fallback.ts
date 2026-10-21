@@ -29,7 +29,6 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
-import * as Semaphore from "effect/Semaphore";
 
 import { isExhausted } from "../../channels/channelPlacement.ts";
 import * as ProviderSwitch from "../../orchestration-v2/ProviderSwitchService.ts";
@@ -299,9 +298,9 @@ export const make = Effect.gen(function* () {
       /** Re-checks the thread, then the notice and the continuation, both fixed per run. */
       const announce = (target: ModelSelection, hop: number) =>
         Effect.gen(function* () {
-          // The user may have settled, snoozed, stopped, or redirected the thread meanwhile. A
-          // small window remains between this read and the dispatch; the orchestrator has no
-          // conditional continuation to close it (#538).
+          // The user may have settled, snoozed, stopped, or redirected the thread meanwhile.
+          // This read skips the notice; automatedContinuationOfRunId makes the orchestrator
+          // refuse a continuation that loses the race after it.
           const latest = yield* threads.getThreadShell(threadId);
           if (
             latest === null ||
@@ -343,6 +342,7 @@ export const make = Effect.gen(function* () {
             commandId: CommandId.make(continuation),
             messageId: MessageId.make(continuation),
             threadId,
+            automatedContinuationOfRunId: runId,
             text: "Continue where you left off.",
             attachments: [],
             dispatchMode: { type: "start_immediately" },
@@ -457,20 +457,6 @@ export const make = Effect.gen(function* () {
 
 export const layer = Layer.effect(Fallback, make);
 
-const MAX_CHAIN_WRITE_ATTEMPTS = 3;
-/** settingsPath of the commit-time error raised when the chains changed under an edit. */
-const CHAINS_CHANGED = "fleet:chains-changed";
-
-const ChainView = Schema.Struct({
-  fallbackChains: Schema.Record(Schema.String, FallbackChain),
-  defaultFallbackChain: Schema.NullOr(Schema.String),
-});
-const sameChains = Schema.toEquivalence(ChainView);
-const chainView = (fleet: FleetSettings): typeof ChainView.Type => ({
-  fallbackChains: fleet.fallbackChains ?? {},
-  defaultFallbackChain: fleet.defaultFallbackChain ?? null,
-});
-
 /** The fleet keys one goat_fallback_chain_set writes, computed from \`fleet\`. */
 export function chainPatch(fleet: FleetSettings, input: GoatFallbackChainSetInput) {
   const chains = { ...fleet.fallbackChains };
@@ -515,8 +501,6 @@ export const layerChains = Layer.effect(
   Effect.gen(function* () {
     const settingsService = yield* ServerSettings.ServerSettingsService;
     const registry = yield* ProviderRegistry.ProviderRegistry;
-    // goat_fallback_chain_set calls are serialized so two edits cannot drop each other's chain.
-    const lock = yield* Semaphore.make(1);
     const read = settingsService.getSettings.pipe(
       Effect.map((settings) => settings.fleet),
       Effect.orElseSucceed((): FleetSettings => ({})),
@@ -528,75 +512,46 @@ export const layerChains = Layer.effect(
     return FallbackChains.of({
       get: Effect.map(read, view),
       set: (input, authorizeAtCommit) =>
-        lock.withPermits(1)(
-          Effect.gen(function* () {
-            const fleet = yield* read;
-            const warnings: Array<string> = [];
-            if (input.chain !== null) {
-              const providers = yield* registry.getProviders;
-              for (const step of input.chain.steps) {
-                const provider = providers.find((item) => item.instanceId === step.instanceId);
-                if (provider === undefined)
-                  return yield* new FallbackChainsError({
+        Effect.gen(function* () {
+          const fleet = yield* read;
+          const warnings: Array<string> = [];
+          if (input.chain !== null) {
+            const providers = yield* registry.getProviders;
+            for (const step of input.chain.steps) {
+              const provider = providers.find((item) => item.instanceId === step.instanceId);
+              if (provider === undefined)
+                return yield* new FallbackChainsError({
+                  message:
+                    "Provider instance " +
+                    step.instanceId +
+                    " is not configured here; orchestrator_capabilities lists the instances.",
+                });
+              if (
+                !provider.models.some(
+                  (model) => model.slug === step.model || model.aliases?.includes(step.model),
+                )
+              )
+                warnings.push(step.instanceId + " does not list model " + step.model + ".");
+            }
+          }
+          const saved = yield* settingsService
+            .updateSettingsWith(
+              (current) => Effect.succeed({ fleet: chainPatch(current.fleet, input) }),
+              authorizeAtCommit,
+            )
+            .pipe(
+              Effect.mapError(
+                (error) =>
+                  new FallbackChainsError({
                     message:
-                      "Provider instance " +
-                      step.instanceId +
-                      " is not configured here; orchestrator_capabilities lists the instances.",
-                  });
-                if (
-                  !provider.models.some(
-                    (model) => model.slug === step.model || model.aliases?.includes(step.model),
-                  )
-                )
-                  warnings.push(step.instanceId + " does not list model " + step.model + ".");
-              }
-            }
-            // Optimistic write: inside the settings write lock, the chains must still be the
-            // ones this edit was computed from, or it starts over from the newer ones. Any
-            // settings writer takes that lock, so a concurrent edit is never overwritten.
-            for (let attempt = 0; attempt < MAX_CHAIN_WRITE_ATTEMPTS; attempt++) {
-              const base = attempt === 0 ? fleet : yield* read;
-              const patch = chainPatch(base, input);
-              const unchanged = read.pipe(
-                Effect.flatMap((latest) =>
-                  sameChains(chainView(latest), chainView(base))
-                    ? Effect.void
-                    : Effect.fail(
-                        new ServerSettingsError({
-                          settingsPath: CHAINS_CHANGED,
-                          operation: "normalize",
-                        }),
-                      ),
-                ),
-              );
-              const saved = yield* settingsService
-                .updateSettings(
-                  { fleet: patch },
-                  (authorizeAtCommit ?? Effect.void).pipe(Effect.andThen(unchanged)),
-                )
-                .pipe(
-                  Effect.map((settings) => settings.fleet),
-                  Effect.catchIf(
-                    (error) => error.settingsPath === CHAINS_CHANGED,
-                    () => Effect.succeed(null),
-                  ),
-                  Effect.mapError(
-                    (error) =>
-                      new FallbackChainsError({
-                        message:
-                          error.settingsPath === CALLER_REVOKED
-                            ? "The caller lost full access before the chain was saved."
-                            : "Server settings could not be saved.",
-                      }),
-                  ),
-                );
-              if (saved !== null) return { ...view(saved), warnings };
-            }
-            return yield* new FallbackChainsError({
-              message: "Fallback chains kept changing while this edit was saved; try again.",
-            });
-          }),
-        ),
+                      error.settingsPath === CALLER_REVOKED
+                        ? "The caller lost full access before the chain was saved."
+                        : "Server settings could not be saved.",
+                  }),
+              ),
+            );
+          return { ...view(saved.fleet), warnings };
+        }),
     });
   }),
 );

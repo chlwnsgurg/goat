@@ -3,7 +3,7 @@ import { act, type ComponentProps } from "react";
 import { flushSync } from "react-dom";
 import { createRoot } from "react-dom/client";
 import { beforeEach, afterEach, describe, expect, it, vi } from "vite-plus/test";
-import { Atom } from "effect/reactivity";
+import { AsyncResult, Atom, AtomRegistry } from "effect/reactivity";
 import * as Option from "effect/Option";
 import * as Cause from "effect/Cause";
 import {
@@ -15,17 +15,27 @@ import {
   ComposerContextId,
   SshWorkspaceError,
   type SshWorkspaceLaunchResult,
+  type SshHostStatus,
 } from "@goat/contracts";
 import { DEFAULT_CLIENT_SETTINGS } from "@goat/contracts/settings";
 import { DEFAULT_RESOLVED_KEYBINDINGS } from "@goat/shared/keybindings";
 import { createModelSelection } from "@goat/shared/model";
 import { scopeProjectRef } from "@goat/client-runtime/environment";
-import { SshConnectionProfile, SshConnectionTarget } from "@goat/client-runtime/connection";
+import {
+  AVAILABLE_CONNECTION_STATE,
+  ConnectionTransientError,
+  SshConnectionProfile,
+  SshConnectionTarget,
+  type EnvironmentConnectionPresentation,
+} from "@goat/client-runtime/connection";
+import { createEnvironmentPresentationAtoms } from "@goat/client-runtime/state/presentation";
+import * as chatViewLogic from "./ChatView.logic";
 import { DraftId, useComposerDraftStore } from "../composerDraftStore";
 import type { LegendListRef } from "@legendapp/list/react";
 import type { MessagesTimeline } from "./chat/MessagesTimeline";
 import type { ChatComposer, ChatComposerHandle } from "./chat/ChatComposer";
 const state = vi.hoisted(() => ({
+  primaryConnection: null as EnvironmentConnectionPresentation | null,
   launch: vi.fn(),
   navigate: vi.fn(),
   retry: vi.fn(),
@@ -49,6 +59,7 @@ vi.mock("./ui/toast", () => ({
   stackedThreadToast: (v: unknown) => v,
 }));
 vi.mock("@tanstack/react-router", () => ({
+  useRouter: () => ({ latestLocation: { pathname: "/", state: {} } }),
   useNavigate: () => state.navigate,
   useLocation: ({ select }: { select: (v: unknown) => unknown }) =>
     select({ href: "/", state: {} }),
@@ -114,7 +125,11 @@ vi.mock("../state/device", async (original) => ({
 }));
 vi.mock("../state/environments", async (original) => ({
   ...(await original<typeof import("../state/environments")>()),
-  useEnvironments: () => ({ environments: [primary] }),
+  useEnvironments: () => ({
+    environments: [
+      state.primaryConnection ? { ...primary, connection: state.primaryConnection } : primary,
+    ],
+  }),
   usePrimaryEnvironment: () => primary,
 }));
 vi.mock("../state/entities", async (original) => ({
@@ -126,15 +141,13 @@ vi.mock("../state/entities", async (original) => ({
   useThreadStatus: () => null,
   useThreadHistory: () => ({ hasMoreHistory: false }),
   useThreadVisibleTurnItems: () => state.empty,
+  useThreadCheckpointSummaries: () => state.empty,
   useThreadRefs: () => state.empty,
   useEnvironmentThreadRefs: () => state.empty,
   useChildThreadInputs: () => state.empty,
   useEnvironmentSupportsServerBrowser: () => false,
   resolveThreadDetailRef: () => null,
   waitForThreadShell: state.shell,
-}));
-vi.mock("../hooks/useTurnDiffSummaries", () => ({
-  useTurnDiffSummaries: () => ({ turnDiffSummaries: [], setTurnDiffSummaries: () => {} }),
 }));
 vi.mock("../hooks/useLoadBalancedEnvironment", () => ({
   useLoadBalancedEnvironment: () => ({ refresh: () => {}, pending: false, environmentId: null }),
@@ -244,6 +257,13 @@ vi.mock("./chat/ChatComposer", async () => {
       );
       return (
         <div data-editor="editable">
+          {props.bannerItems.map((item) => (
+            <div key={item.id} data-banner={item.id}>
+              {item.title}
+              {item.description}
+              {item.actions}
+            </div>
+          ))}
           <button onClick={() => void props.onSend()}>Send</button>
         </div>
       );
@@ -290,6 +310,7 @@ const project = {
 const primary = {
   environmentId: local,
   label: "Local",
+  entry: { target: { _tag: "PrimaryConnectionTarget" } },
   connection: { phase: "connected" },
   serverConfig: null,
 };
@@ -340,6 +361,7 @@ async function mount(draftId = id) {
   );
 }
 beforeEach(() => {
+  state.primaryConnection = null;
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
   vi.stubGlobal("matchMedia", () => ({
     matches: false,
@@ -991,4 +1013,127 @@ describe("timeline follow navigation", () => {
     expect(state.scrollToEnd).toHaveBeenCalledTimes(1);
     expect(state.scrollNode!.scrollTop).toBe(600);
   });
+});
+
+it("uses reconciled SSH presentation in the chat banner while keeping fresh failures visible", async () => {
+  vi.spyOn(chatViewLogic, "scheduleEnvironmentReconnectWarning").mockImplementation((show) => {
+    show();
+    return () => {};
+  });
+  const identity = { supervisorId: "chat-fixture", attemptId: 2, routeId: "ssh-fixture-route" };
+  const connection: EnvironmentConnectionPresentation = {
+    phase: "reconnecting",
+    stage: "opening",
+    error: "OLD SETUP TIMEOUT",
+    traceId: null,
+    failure: { kind: "retrying", reason: "timeout", detail: "OLD SETUP TIMEOUT" },
+    failureOrigin: { ...identity, attemptId: 1, stage: "preparing", setupTimeout: true },
+    sshRuntimeReady: {
+      ...identity,
+      operationId: "fixture-op",
+      attachmentId: "fixture-attachment",
+      runtimeStatus: {
+        host: "fixture-vps",
+        state: "ready",
+        runtimeVersion: "0.4.3",
+        requestedVersion: "0.4.3",
+      },
+    },
+  };
+  state.primaryConnection = connection;
+  await mount();
+  const banner = () => container.querySelector('[data-banner^="environment-unavailable:"]');
+  expect(banner()?.textContent).toContain("Runtime ready · Opening connection");
+  expect(banner()?.textContent).not.toContain("OLD SETUP TIMEOUT");
+  for (const reason of ["timeout", "authentication", "transport"] as const) {
+    state.primaryConnection = {
+      ...connection,
+      error: "FRESH FAILURE",
+      failure: { kind: "retrying", reason, detail: "FRESH FAILURE" },
+      failureOrigin: {
+        ...identity,
+        attemptId: 3,
+        stage: "opening",
+        setupTimeout: reason === "timeout",
+      },
+    };
+    await act(async () => root.render(<div />));
+    await mount();
+    expect(banner()?.textContent).toContain("FRESH FAILURE");
+  }
+  state.primaryConnection = {
+    ...connection,
+    sshPreparation: {
+      ...identity,
+      operationId: "fixture-op",
+      phase: "uploading",
+      hostAnswered: true,
+    },
+  };
+  await act(async () => root.render(<div />));
+  await mount();
+  expect(banner()?.textContent).toContain(
+    "Installing GOAT runtime — first setup can take a few minutes",
+  );
+  expect(banner()?.textContent).not.toContain("OLD SETUP TIMEOUT");
+});
+
+it("removes runtime ready from chat after a shared owner invalidation", async () => {
+  vi.spyOn(chatViewLogic, "scheduleEnvironmentReconnectWarning").mockImplementation((show) => {
+    show();
+    return () => {};
+  });
+  const registry = AtomRegistry.make();
+  const identity = { supervisorId: "chat-owner", attemptId: 2, routeId: "ssh:fixture" };
+  const status = {
+    host: "fixture",
+    state: "ready",
+    runtimeVersion: null,
+    requestedVersion: "1.0.0",
+  } as const;
+  const runtimeStatus = Atom.make<SshHostStatus | undefined>(undefined);
+  const snapshot = {
+    ...AVAILABLE_CONNECTION_STATE,
+    phase: "connecting",
+    stage: "opening",
+    attempt: 2,
+    lastFailure: new ConnectionTransientError({ reason: "timeout", detail: "SETUP TIMEOUT" }),
+    failureOrigin: { ...identity, attemptId: 1, stage: "preparing", setupTimeout: true },
+    sshRuntimeReady: {
+      ...identity,
+      operationId: "op",
+      attachmentId: "attachment",
+      runtimeStatus: status,
+    },
+  } as const;
+  const projections = createEnvironmentPresentationAtoms({
+    catalogValueAtom: Atom.make({
+      isReady: true,
+      entries: new Map([[local, { ...entry, enabled: true }]]),
+    }),
+    stateAtom: () => Atom.make(AsyncResult.success(snapshot)),
+    serverConfigValueAtom: () => Atom.make(null),
+    sshRuntimeStatusAtom: () => runtimeStatus,
+  });
+  const atom = projections.presentationAtom(local);
+  const stop = registry.subscribe(atom, () => {});
+  const draw = async () => {
+    state.primaryConnection = registry.get(atom)!.connection;
+    await act(async () => root.render(<div />));
+    await mount();
+  };
+  const banner = () => container.querySelector('[data-banner^="environment-unavailable:"]');
+  try {
+    await draw();
+    expect(banner()?.textContent).toContain("Runtime ready · Opening connection");
+    for (const state of ["failed", "stopped", "untrusted"] as const) {
+      registry.set(runtimeStatus, { ...status, state });
+      await draw();
+      expect(banner()?.textContent).not.toContain("Runtime ready");
+      expect(banner()?.textContent).toContain("SETUP TIMEOUT");
+    }
+  } finally {
+    stop();
+    registry.dispose();
+  }
 });

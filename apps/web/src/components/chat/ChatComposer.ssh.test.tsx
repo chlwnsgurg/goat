@@ -40,6 +40,7 @@ vi.mock("../ui/toast", () => ({
   stackedThreadToast: (v: unknown) => v,
 }));
 vi.mock("@tanstack/react-router", () => ({
+  useRouter: () => ({ latestLocation: { pathname: "/", state: {} } }),
   useNavigate: () => state.navigate,
   useLocation: ({ select }: { select: (v: unknown) => unknown }) =>
     select({ href: "/", state: {} }),
@@ -125,15 +126,13 @@ vi.mock("../../state/entities", async (original) => ({
   useThreadStatus: () => null,
   useThreadHistory: () => ({ hasMoreHistory: false }),
   useThreadVisibleTurnItems: () => state.empty,
+  useThreadCheckpointSummaries: () => state.empty,
   useThreadRefs: () => state.empty,
   useEnvironmentThreadRefs: () => state.empty,
   useChildThreadInputs: () => state.empty,
   useEnvironmentSupportsServerBrowser: () => false,
   resolveThreadDetailRef: () => null,
   waitForThreadShell: state.shell,
-}));
-vi.mock("../../hooks/useTurnDiffSummaries", () => ({
-  useTurnDiffSummaries: () => ({ turnDiffSummaries: [], setTurnDiffSummaries: () => {} }),
 }));
 vi.mock("../../hooks/useLoadBalancedEnvironment", () => ({
   useLoadBalancedEnvironment: () => ({ refresh: () => {}, pending: false, environmentId: null }),

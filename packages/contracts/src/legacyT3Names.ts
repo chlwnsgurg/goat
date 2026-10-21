@@ -208,7 +208,11 @@ export const GOAT_PRE_REFRESH_REF = "refs/goat/pre-refresh";
 export const LEGACY_REFS_ROOT = "refs/t3";
 export const GOAT_REFS_ROOT = "refs/goat";
 
-/** Preview cookies stay in their original Electron partitions until a verified migration exists. */
+/**
+ * Preview cookies stay in their original Electron partitions: Electron cannot copy a partition, so
+ * a rename would sign users out of every previewed site. Frozen through the first stable release
+ * (ADR-0014, "Frozen legacy identities").
+ */
 export const LEGACY_PREVIEW_PARTITION_PREFIX = "persist:t3code-preview-";
 
 /** Local IPC addresses accepted across independently updated CLI and desktop builds. */

@@ -455,7 +455,7 @@ const racingSettings = (fleet: FleetSettings) =>
       let raced = false;
       return ServerSettings.ServerSettingsService.of({
         ...base,
-        updateSettings: (patch, authorizeAtCommit) =>
+        updateSettingsWith: (patchFor, authorizeAtCommit) =>
           Effect.gen(function* () {
             if (!raced) {
               raced = true;
@@ -467,7 +467,7 @@ const racingSettings = (fleet: FleetSettings) =>
                 },
               });
             }
-            return yield* base.updateSettings(patch, authorizeAtCommit);
+            return yield* base.updateSettingsWith(patchFor, authorizeAtCommit);
           }),
       });
     }),

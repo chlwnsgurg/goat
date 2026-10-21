@@ -1588,6 +1588,8 @@ export class MemoryStore extends Context.Service<
       limit: number,
     ) => Effect.Effect<ReadonlyArray<M.MemoryOperation>, MemoryStorageError>;
     readonly enqueueWork: (work: MemoryWork) => Effect.Effect<void, MemoryStorageError>;
+    /** Makes summary and consolidation retries due now, after the model they waited on changed. */
+    readonly rearmGenerationWork: (now: number) => Effect.Effect<number, MemoryStorageError>;
     readonly claimWork: (
       id: string,
       owner: string,
@@ -3323,7 +3325,7 @@ const make = Effect.gen(function* () {
             yield* stored(
               "revisions",
               sql<HistoryRevisionRow>`
-      SELECT r.*,p.body_json FROM memory_revisions r LEFT JOIN memory_payloads p ON p.space=r.space AND p.payload_ref=r.payload_ref WHERE r.space=${space} AND r.memory_id=${id}`,
+      SELECT r.space,r.revision_id,r.memory_id,r.operation_id,r.parents_json,r.scope_json,r.assertion_kind,r.provenance_json,r.payload_ref,r.created_at,p.body_json FROM memory_revisions r LEFT JOIN memory_payloads p ON p.space=r.space AND p.payload_ref=r.payload_ref WHERE r.space=${space} AND r.memory_id=${id}`,
             ),
             (row) => decodeHistoryRevision(row, space, id, visible),
           )
@@ -4507,6 +4509,13 @@ const make = Effect.gen(function* () {
       sql`UPDATE memory_outbox SET status='retry',next_attempt_at=${nextAttemptAt},claimed_by=NULL,claimed_until=NULL WHERE id=${work.id} AND kind NOT IN ('claim','resolve','revert_intent') AND status='running' AND claimed_by=${work.claimedBy} AND claimed_until=${work.claimedUntil} AND attempt=${work.attempt} RETURNING id`,
     );
     return rows.length === 1;
+  });
+  const rearmGenerationWork = Effect.fn("MemoryStore.rearmGenerationWork")(function* (now: number) {
+    const rows = yield* stored(
+      "rearm-generation-work",
+      sql`UPDATE memory_outbox SET next_attempt_at=${now} WHERE kind IN ('summary','consolidate') AND status='retry' AND next_attempt_at>${now} RETURNING id`,
+    );
+    return rows.length;
   });
   const renewWork = Effect.fn("MemoryStore.renewWork")(function* (
     work: MemoryWork,
@@ -12195,6 +12204,7 @@ const make = Effect.gen(function* () {
     dueWork,
     readWork,
     retryWork,
+    rearmGenerationWork,
     renewWork,
     rebindWorkModel,
     readThreadHookWatermark,

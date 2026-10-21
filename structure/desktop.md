@@ -21,12 +21,19 @@ for a rolled-back build:
   (or `T3 Code <stage>`) to the new name before anything reads safeStorage (macOS Keychain, Linux
   Secret Service; Windows keeps its key in the profile). A differing key already under the new
   name is logged as a conflict and left alone. Marker: `safe-storage-key-migrated` in the profile.
+  On macOS Electron's item is service `<name> Safe Storage` with account `<name> Key`, and a
+  packaged build's initial name is the staged package name `t3code` on every channel.
 - `apps/desktop/src/app/DesktopRendererOriginMigration.ts` copies localStorage and every IndexedDB
-  database from the legacy origin before the first window, never replacing existing data. Marker:
-  `renderer-origin-migrated`.
+  database from the legacy origin before the first window, never replacing existing data. Main
+  relays bounded chunks between a page on each origin; it must never hold the whole origin, which
+  can be 100+ MB of blobs and aborts main with a V8 OOM. Marker: `renderer-origin-migrated`; an
+  attempt that died leaves `renderer-origin-migration-attempt`, and the next launch marks it
+  aborted instead of retrying.
 
 The OS hands both `goat` and `t3code` links to the app (`getDesktopLinkSchemes`), and the server
 accepts both renderer origins (`DESKTOP_RENDERER_ORIGINS` in `apps/server/src/httpCors.ts`).
+The Linux desktop entry and WM class, the preview partitions and the Linux capture extensions keep
+their T3 names through the first stable release (ADR-0014, "Frozen legacy identities").
 
 > Decision record: [ADR-0014](decisions/ADR-0014-desktop-runtime-identity.md)
 

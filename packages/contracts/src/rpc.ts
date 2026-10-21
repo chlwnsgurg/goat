@@ -8,6 +8,8 @@ import {
 import * as Memory from "./memory.ts";
 import {
   SshHostAddInput,
+  SshPreflightInput,
+  SshPreflightReport,
   SshHostProbeResult,
   SshHostProbeError,
   SshHostTrustInput,
@@ -126,6 +128,26 @@ import {
 } from "./slackChannel.ts";
 import { ExternalLauncherError, LaunchEditorInput } from "./editor.ts";
 import {
+  NoteConflictError,
+  NoteDocument,
+  NoteError,
+  NotesDeleteInput,
+  NotesDeleteResult,
+  NotesEvent,
+  NotesListInput,
+  NotesListResult,
+  NotesMoveInput,
+  NotesReadInput,
+  NotesStartWorkInput,
+  NotesStartWorkResult,
+  NotesSubscribeInput,
+  NotesWorkTargetProjectsInput,
+  NotesWorkTargetProjectsResult,
+  NotesWorkTargetsInput,
+  NotesWorkTargetsResult,
+  NotesWriteInput,
+} from "./notes.ts";
+import {
   AuthAccessStreamError,
   AuthAccessStreamEvent,
   EnvironmentAuthorizationError,
@@ -224,6 +246,7 @@ import { PullRequestReviewGuideResult } from "./pullRequestReviewGuide.ts";
 import {
   PullRequestActionInput,
   PullRequestActivity,
+  PullRequestChangeBreakdown,
   PullRequestCommentInput,
   PullRequestCommentUpdateInput,
   PullRequestDetail,
@@ -283,6 +306,8 @@ import {
   ProjectListEntriesError,
   ProjectListEntriesInput,
   ProjectListEntriesResult,
+  ProjectListIgnoredFilesInput,
+  ProjectListIgnoredFilesResult,
   ProjectReadFileError,
   ProjectReadFileInput,
   ProjectReadFileResult,
@@ -339,6 +364,9 @@ import {
   DeviceError,
   DeviceListInput,
   SshDeviceHostConfig,
+  DeviceEasAccount,
+  DeviceEasAccountError,
+  DeviceEasAccountInput,
   DeviceHostSummary,
   DeviceOpenInput,
   DeviceServiceState,
@@ -382,7 +410,7 @@ import {
   ResourceTelemetryRetryResult,
   ResourceTelemetrySnapshot,
 } from "./resourceTelemetry.ts";
-import { GoatHostStatusResult } from "./hostStatus.ts";
+import { GoatHostStatusResult, ServerGetHostStatusInput } from "./hostStatus.ts";
 import { OrchestratorMcpFailure } from "./orchestratorMcp.ts";
 import {
   UsageLimitSourceError,
@@ -464,7 +492,29 @@ import {
   CloudMachinesListInput,
   CloudMachinesListResult,
 } from "./cloudMachines.ts";
+import {
+  HubNodesAddInput,
+  HubNodesAddResult,
+  HubNodesCheckInput,
+  HubNodesDismissNoticeInput,
+  HubNodesDismissNoticeResult,
+  HubNodesError,
+  HubNodesImportInput,
+  HubNodesImportResult,
+  HubNodesListInput,
+  HubNodesRemoveInput,
+  HubNodesRemoveResult,
+  HubNodesSnapshot,
+  HubNodesSubscribeInput,
+} from "./hubNodes.ts";
 import { CloudRunListInput, CloudRunListResult } from "./cloudAgents.ts";
+import {
+  HubProxyEnrollInput,
+  HubProxyEnrollResult,
+  HubProxyNodeInput,
+  HubProxyRpcError,
+  HubProxyUnenrollResult,
+} from "./hubProxy.ts";
 
 export const WS_METHODS = {
   memoryProjectBindingGet: "memory.projectBinding.get",
@@ -492,6 +542,7 @@ export const WS_METHODS = {
   projectsAdd: "projects.add",
   projectsRemove: "projects.remove",
   projectsListEntries: "projects.listEntries",
+  projectsListIgnoredFiles: "projects.listIgnoredFiles",
   projectsReadFile: "projects.readFile",
   projectsSearchContents: "projects.searchContents",
   projectsSearchEntries: "projects.searchEntries",
@@ -548,6 +599,7 @@ export const WS_METHODS = {
   sshWorkspaceLaunch: "sshWorkspace.launch",
   sshWorkspaceFetchBack: "sshWorkspace.fetchBack",
   sshHostProbe: "sshHost.probe",
+  sshHostPreflight: "sshHost.preflight",
   sshHostTrust: "sshHost.trust",
   sshHostPrepare: "sshHost.prepare",
   sshHostForget: "sshHost.forget",
@@ -584,6 +636,7 @@ export const WS_METHODS = {
   deviceConfigure: "device.configure",
   deviceList: "device.list",
   deviceTestHost: "device.testHost",
+  deviceEasAccount: "device.easAccount",
   deviceOpen: "device.open",
   deviceClose: "device.close",
   deviceShutdown: "device.shutdown",
@@ -645,6 +698,17 @@ export const WS_METHODS = {
   scheduledTasksListWebhookDeliveries: "scheduledTasks.listWebhookDeliveries",
   scheduledTasksGetWebhookDelivery: "scheduledTasks.getWebhookDelivery",
 
+  // Markdown notes on this environment
+  notesList: "notes.list",
+  notesRead: "notes.read",
+  notesWrite: "notes.write",
+  notesMove: "notes.move",
+  notesDelete: "notes.delete",
+  notesSubscribe: "notes.subscribe",
+  notesStartWork: "notes.startWork",
+  notesWorkTargets: "notes.workTargets",
+  notesWorkTargetProjects: "notes.workTargetProjects",
+
   // Threads this environment launched or watches on other machines
   remoteLaunchesList: "remoteLaunches.list",
 
@@ -660,6 +724,16 @@ export const WS_METHODS = {
   cloudMachinesForget: "cloudMachines.forget",
   cloudMachinesDismissUnconfirmed: "cloudMachines.dismissUnconfirmed",
   cloudMachinesEnsureReady: "cloudMachines.ensureReady",
+  hubNodesList: "hub.nodes.list",
+  hubNodesSubscribe: "hub.nodes.subscribe",
+  hubNodesAdd: "hub.nodes.add",
+  hubNodesRemove: "hub.nodes.remove",
+  hubNodesCheck: "hub.nodes.check",
+  hubNodesImport: "hub.nodes.import",
+  hubNodesDismissNotice: "hub.nodes.dismissNotice",
+  hubProxyPrepareNode: "hubProxy.prepareNode",
+  hubProxyEnrollNode: "hubProxy.enrollNode",
+  hubProxyUnenrollNode: "hubProxy.unenrollNode",
 
   cloudGetRelayClientStatus: "cloud.getRelayClientStatus",
   cloudInstallRelayClient: "cloud.installRelayClient",
@@ -680,6 +754,7 @@ export const WS_METHODS = {
   pullRequestsThreadComments: "pullRequests.threadComments",
   pullRequestsDiffFileContents: "pullRequests.diffFileContents",
   pullRequestsFilesViewed: "pullRequests.filesViewed",
+  pullRequestsChangeBreakdown: "pullRequests.changeBreakdown",
   pullRequestsSetFilesViewed: "pullRequests.setFilesViewed",
   pullRequestsRunAction: "pullRequests.runAction",
   pullRequestsUpdate: "pullRequests.update",
@@ -1042,9 +1117,9 @@ const WsServerGetHostResourcesRpc = Rpc.make(WS_METHODS.serverGetHostResources, 
   error: EnvironmentAuthorizationError,
 });
 
-/** The `goat_host_status` payload: this machine, plus connected SSH hosts for sessions that may operate threads. */
+/** The `goat_host_status` payload: this machine, plus connected SSH hosts for sessions that may operate threads unless `local`. */
 const WsServerGetHostStatusRpc = Rpc.make(WS_METHODS.serverGetHostStatus, {
-  payload: Schema.Struct({}),
+  payload: ServerGetHostStatusInput,
   success: GoatHostStatusResult,
   error: Schema.Union([OrchestratorMcpFailure, EnvironmentAuthorizationError]),
 });
@@ -1230,6 +1305,12 @@ const WsPullRequestsFilesViewedRpc = Rpc.make(WS_METHODS.pullRequestsFilesViewed
   error: PullRequestRpcError,
 });
 
+const WsPullRequestsChangeBreakdownRpc = Rpc.make(WS_METHODS.pullRequestsChangeBreakdown, {
+  payload: PullRequestRef,
+  success: PullRequestChangeBreakdown,
+  error: PullRequestRpcError,
+});
+
 const WsPullRequestsSetFilesViewedRpc = Rpc.make(WS_METHODS.pullRequestsSetFilesViewed, {
   payload: PullRequestSetFilesViewedInput,
   success: Schema.Void,
@@ -1396,6 +1477,12 @@ const WsProjectsSearchContentsRpc = Rpc.make(WS_METHODS.projectsSearchContents, 
 const WsProjectsListEntriesRpc = Rpc.make(WS_METHODS.projectsListEntries, {
   payload: ProjectListEntriesInput,
   success: ProjectListEntriesResult,
+  error: Schema.Union([ProjectListEntriesError, EnvironmentAuthorizationError]),
+});
+
+const WsProjectsListIgnoredFilesRpc = Rpc.make(WS_METHODS.projectsListIgnoredFiles, {
+  payload: ProjectListIgnoredFilesInput,
+  success: ProjectListIgnoredFilesResult,
   error: Schema.Union([ProjectListEntriesError, EnvironmentAuthorizationError]),
 });
 
@@ -1604,6 +1691,11 @@ export const WsSshHostProbeRpc = Rpc.make(WS_METHODS.sshHostProbe, {
   success: SshHostProbeResult,
   error: Schema.Union([SshHostProbeError, HandoffError, EnvironmentAuthorizationError]),
 });
+export const WsSshHostPreflightRpc = Rpc.make(WS_METHODS.sshHostPreflight, {
+  payload: SshPreflightInput,
+  success: SshPreflightReport,
+  error: Schema.Union([SshHostProbeError, EnvironmentAuthorizationError]),
+});
 export const WsSshHostTrustRpc = Rpc.make(WS_METHODS.sshHostTrust, {
   payload: SshHostTrustInput,
   success: SshHostResult,
@@ -1791,6 +1883,12 @@ const WsDeviceTestHostRpc = Rpc.make(WS_METHODS.deviceTestHost, {
   payload: SshDeviceHostConfig,
   success: DeviceHostSummary,
   error: Schema.Union([DeviceError, EnvironmentAuthorizationError]),
+});
+
+const WsDeviceEasAccountRpc = Rpc.make(WS_METHODS.deviceEasAccount, {
+  payload: DeviceEasAccountInput,
+  success: DeviceEasAccount,
+  error: Schema.Union([DeviceEasAccountError, EnvironmentAuthorizationError]),
 });
 
 const WsDeviceListRpc = Rpc.make(WS_METHODS.deviceList, {
@@ -2135,6 +2233,63 @@ const WsCloudMachinesEnsureReadyRpc = Rpc.make(WS_METHODS.cloudMachinesEnsureRea
   success: CloudMachinesEnsureReadyResult,
   error: CloudMachineRpcError,
 });
+const HubProxyRpcErrors = Schema.Union([HubProxyRpcError, EnvironmentAuthorizationError]);
+/** Starts an SSH node's GOAT runtime so the hub learns its identity; may install GOAT there. */
+const WsHubProxyPrepareNodeRpc = Rpc.make(WS_METHODS.hubProxyPrepareNode, {
+  payload: HubProxyNodeInput,
+  success: Schema.Struct({}),
+  error: HubProxyRpcErrors,
+});
+const WsHubProxyEnrollNodeRpc = Rpc.make(WS_METHODS.hubProxyEnrollNode, {
+  payload: HubProxyEnrollInput,
+  success: HubProxyEnrollResult,
+  error: HubProxyRpcErrors,
+});
+const WsHubProxyUnenrollNodeRpc = Rpc.make(WS_METHODS.hubProxyUnenrollNode, {
+  payload: HubProxyNodeInput,
+  success: HubProxyUnenrollResult,
+  error: HubProxyRpcErrors,
+});
+
+const HubNodesRpcError = Schema.Union([HubNodesError, EnvironmentAuthorizationError]);
+const WsHubNodesListRpc = Rpc.make(WS_METHODS.hubNodesList, {
+  payload: HubNodesListInput,
+  success: HubNodesSnapshot,
+  error: HubNodesRpcError,
+});
+/** The current node list, then a new one after every change. */
+const WsHubNodesSubscribeRpc = Rpc.make(WS_METHODS.hubNodesSubscribe, {
+  payload: HubNodesSubscribeInput,
+  success: HubNodesSnapshot,
+  error: HubNodesRpcError,
+  stream: true,
+});
+const WsHubNodesAddRpc = Rpc.make(WS_METHODS.hubNodesAdd, {
+  payload: HubNodesAddInput,
+  success: HubNodesAddResult,
+  error: HubNodesRpcError,
+});
+const WsHubNodesRemoveRpc = Rpc.make(WS_METHODS.hubNodesRemove, {
+  payload: HubNodesRemoveInput,
+  success: HubNodesRemoveResult,
+  error: HubNodesRpcError,
+});
+/** Never wakes or extends a cloud machine. */
+const WsHubNodesCheckRpc = Rpc.make(WS_METHODS.hubNodesCheck, {
+  payload: HubNodesCheckInput,
+  success: HubNodesSnapshot,
+  error: HubNodesRpcError,
+});
+const WsHubNodesImportRpc = Rpc.make(WS_METHODS.hubNodesImport, {
+  payload: HubNodesImportInput,
+  success: HubNodesImportResult,
+  error: HubNodesRpcError,
+});
+const WsHubNodesDismissNoticeRpc = Rpc.make(WS_METHODS.hubNodesDismissNotice, {
+  payload: HubNodesDismissNoticeInput,
+  success: HubNodesDismissNoticeResult,
+  error: HubNodesRpcError,
+});
 
 const WsScheduledTasksListWebhookDeliveriesRpc = Rpc.make(
   WS_METHODS.scheduledTasksListWebhookDeliveries,
@@ -2345,6 +2500,9 @@ export const WsCoreServerRpcGroup = RpcGroup.make(
   WsCloudMachinesForgetRpc,
   WsCloudMachinesDismissUnconfirmedRpc,
   WsCloudMachinesEnsureReadyRpc,
+  WsHubProxyPrepareNodeRpc,
+  WsHubProxyEnrollNodeRpc,
+  WsHubProxyUnenrollNodeRpc,
   WsServerReportClientActivityRpc,
   WsServerReportHostPowerStateRpc,
   WsServerGetBackgroundPolicyRpc,
@@ -2366,6 +2524,7 @@ export const WsCoreServerRpcGroup = RpcGroup.make(
   WsPullRequestsThreadCommentsRpc,
   WsPullRequestsDiffFileContentsRpc,
   WsPullRequestsFilesViewedRpc,
+  WsPullRequestsChangeBreakdownRpc,
   WsPullRequestsSetFilesViewedRpc,
   WsPullRequestsRunActionRpc,
   WsPullRequestsUpdateRpc,
@@ -2393,6 +2552,7 @@ export const WsCoreWorkspaceRpcGroup = RpcGroup.make(
   WsProjectCloneRetryRpc,
   WsSubscribeProjectClonesRpc,
   WsProjectsListEntriesRpc,
+  WsProjectsListIgnoredFilesRpc,
   WsProjectsReadFileRpc,
   WsProjectsSearchContentsRpc,
   WsProjectsSearchEntriesRpc,
@@ -2431,6 +2591,7 @@ export const WsCoreWorkspaceRpcGroup = RpcGroup.make(
   WsSshHostStatusRpc,
   WsSshHostHandoffProgressRpc,
   WsSshHostProbeRpc,
+  WsSshHostPreflightRpc,
   WsSshHostTrustRpc,
   WsSshHostPrepareRpc,
   WsSshHostForgetRpc,
@@ -2465,6 +2626,7 @@ export const WsCoreWorkspaceRpcGroup = RpcGroup.make(
   WsDeviceConfigureRpc,
   WsDeviceListRpc,
   WsDeviceTestHostRpc,
+  WsDeviceEasAccountRpc,
   WsDeviceOpenRpc,
   WsDeviceCloseRpc,
   WsDeviceShutdownRpc,
@@ -2515,7 +2677,69 @@ export const WsChannelRpcGroup = RpcGroup.make(
   SlackChannelSubscribeStatusRpc,
 ).middleware(RpcScopeAuthorization);
 
-export const WsRpcGroup = WsCoreRpcGroup.merge(WsChannelRpcGroup);
+const NoteRpcErrors = Schema.Union([NoteError, NoteConflictError, EnvironmentAuthorizationError]);
+
+const WsNotesListRpc = Rpc.make(WS_METHODS.notesList, {
+  payload: NotesListInput,
+  success: NotesListResult,
+  error: NoteRpcErrors,
+});
+const WsNotesReadRpc = Rpc.make(WS_METHODS.notesRead, {
+  payload: NotesReadInput,
+  success: NoteDocument,
+  error: NoteRpcErrors,
+});
+const WsNotesWriteRpc = Rpc.make(WS_METHODS.notesWrite, {
+  payload: NotesWriteInput,
+  success: NoteDocument,
+  error: NoteRpcErrors,
+});
+const WsNotesMoveRpc = Rpc.make(WS_METHODS.notesMove, {
+  payload: NotesMoveInput,
+  success: NoteDocument,
+  error: NoteRpcErrors,
+});
+const WsNotesDeleteRpc = Rpc.make(WS_METHODS.notesDelete, {
+  payload: NotesDeleteInput,
+  success: NotesDeleteResult,
+  error: NoteRpcErrors,
+});
+const WsNotesSubscribeRpc = Rpc.make(WS_METHODS.notesSubscribe, {
+  payload: NotesSubscribeInput,
+  success: NotesEvent,
+  error: NoteRpcErrors,
+  stream: true,
+});
+const WsNotesStartWorkRpc = Rpc.make(WS_METHODS.notesStartWork, {
+  payload: NotesStartWorkInput,
+  success: NotesStartWorkResult,
+  error: NoteRpcErrors,
+});
+const WsNotesWorkTargetsRpc = Rpc.make(WS_METHODS.notesWorkTargets, {
+  payload: NotesWorkTargetsInput,
+  success: NotesWorkTargetsResult,
+  error: NoteRpcErrors,
+});
+const WsNotesWorkTargetProjectsRpc = Rpc.make(WS_METHODS.notesWorkTargetProjects, {
+  payload: NotesWorkTargetProjectsInput,
+  success: NotesWorkTargetProjectsResult,
+  error: NoteRpcErrors,
+});
+
+/** Notes RPCs, registered by the server in a handler layer of their own like the channel group. */
+export const WsNotesRpcGroup = RpcGroup.make(
+  WsNotesListRpc,
+  WsNotesReadRpc,
+  WsNotesWriteRpc,
+  WsNotesMoveRpc,
+  WsNotesDeleteRpc,
+  WsNotesSubscribeRpc,
+  WsNotesStartWorkRpc,
+  WsNotesWorkTargetsRpc,
+  WsNotesWorkTargetProjectsRpc,
+).middleware(RpcScopeAuthorization);
+
+export const WsRpcGroup = WsCoreRpcGroup.merge(WsChannelRpcGroup).merge(WsNotesRpcGroup);
 
 const MemoryRpcErrors = Schema.Union([Memory.MemoryRpcError, EnvironmentAuthorizationError]);
 const MemoryImportRpcErrors = Schema.Union([
@@ -2658,3 +2882,14 @@ export const WsMemoryImportRpcGroup =
 export const WsMemoryRpcGroup = WsMemoryCoreRpcGroup.merge(WsMemoryImportRpcGroup).merge(
   WsMemoryAdministrationRpcGroup,
 );
+
+/** The hub's node list. A group of its own so servers and clients install it together. */
+export const WsHubNodesRpcGroup = RpcGroup.make(
+  WsHubNodesListRpc,
+  WsHubNodesSubscribeRpc,
+  WsHubNodesAddRpc,
+  WsHubNodesRemoveRpc,
+  WsHubNodesCheckRpc,
+  WsHubNodesImportRpc,
+  WsHubNodesDismissNoticeRpc,
+).middleware(RpcScopeAuthorization);

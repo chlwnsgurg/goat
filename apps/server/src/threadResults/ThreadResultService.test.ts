@@ -1,3 +1,5 @@
+import * as Fiber from "effect/Fiber";
+import * as Stream from "effect/Stream";
 import { assert, it } from "@effect/vitest";
 import { RunId, ThreadId, type OrchestrationV2Run } from "@goat/contracts";
 import * as Effect from "effect/Effect";
@@ -146,4 +148,15 @@ it.effect("refuses a report from a thread without runs", () =>
     assert.strictEqual(error.reason, "run_not_found");
     assert.isNull(yield* results.forRun(threadId));
   }).pipe(Effect.provide(layerWithRuns([]))),
+);
+
+it.effect("publishes a result report only after it is durable", () =>
+  Effect.gen(function* () {
+    const results = yield* ThreadResultService.ThreadResultService;
+    const changes = yield* results.subscribeReports;
+    const received = yield* changes.pipe(Stream.take(1), Stream.runCollect, Effect.forkScoped);
+    yield* results.report(threadId, { outcome: "succeeded" });
+    assert.deepStrictEqual(yield* Fiber.join(received), [threadId]);
+    assert.strictEqual((yield* results.forRun(threadId))?.outcome, "succeeded");
+  }).pipe(Effect.provide(layerWithRuns([run(firstRun, 1, "completed")]))),
 );
