@@ -52,9 +52,14 @@
     separately (#21696, #21697 on feat/cua-driver-desktop).
   - **Identity.** The standalone host identifies as `si.goat.server`. The Electron host is to
     use the app's `appUserModelId` (`si.goat.desktop` and its nightly and dev variants).
-  - Pending in later records: which providers get the driver as an MCP server, the permission
-    mode and capability ceiling (including removal of the driver's on-demand
-    `check_for_update` tool), approval for unattended threads, and enabling it on remote hosts.
+  - **Provider attachment.** Ported from pingdotgg/t3code#16528 at `7418a6084`: every provider
+    that runs on the GOAT host gets the driver as a stdio MCP server named `cua-driver`, with no
+    GOAT HTTP proxy, plus a short `<computer_use>` block that keeps input in the background. One
+    server function (`computerUseAttachment`) decides it for every session; see "Per-adapter
+    decision" below.
+  - Pending in later records: the permission mode and capability ceiling (including removal of
+    the driver's on-demand `check_for_update` tool), approval for unattended threads, and
+    enabling it on remote hosts.
 - **Reasons.**
   - Upstream's design already went through six adversarial review rounds. Carrying it unchanged
     keeps the chase small and the review history meaningful.
@@ -68,3 +73,29 @@
     packaged desktop builds carry the driver whether or not the user enables it.
   - Native macOS TCC attribution, Windows hosting and packaged Linux capture still need human
     qualification, as upstream's PRs state.
+
+## Per-adapter decision
+
+`computerUseAttachment` returns `none` (with a reason) or `direct`. It attaches only when
+`enableCua` is on, the driver is running, the provider runs on this host, and the turn is neither
+Plan nor a read-only sandbox. Unattended origins are gated later by adding a branch to that
+function, which hands adapters a different stdio descriptor through the same session field and can
+set `cuaDriverOverridesUserConfig`.
+
+| Provider (driver kind)                                | Decision                                    | How                                                                                                                                                                       | A change reaches a live session                                                                             |
+| ----------------------------------------------------- | ------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------- |
+| Claude (`claudeAgent`)                                | Attach                                      | SDK `mcpServers` beside `goat`; `mcp__cua-driver__*` preapproved, never in a read-only sandbox                                                                            | Next turn, through `setMcpServers` without replacing the process; the block rides the next prompt if needed |
+| Codex (`codex`)                                       | Attach unless the user defines `cua-driver` | Thread config path `mcp_servers.cua-driver` beside `mcp_servers.goat`; the user's merged config is read once per directory (`config/read`), theirs wins unless overridden | Next turn, through the `thread/resume` reconfigure; a dropped driver is sent with `enabled: false`          |
+| Cursor (`cursor`)                                     | Attach                                      | SDK `mcpServers` when the agent opens                                                                                                                                     | Next turn reopens the same agent                                                                            |
+| Grok, Antigravity, ACP registry including Devin local | Attach                                      | ACP stdio `mcpServers`, also in the MCP-over-ACP list                                                                                                                     | Next session activation; the block follows what the session was activated with                              |
+| OpenCode 1.x (`opencode`)                             | Attach on a server GOAT owns                | `mcp.add` named `cua-driver`, disconnected when dropped                                                                                                                   | Next turn                                                                                                   |
+| OpenCode 2 (`opencode`)                               | Attach on a server GOAT owns                | Per thread and directory as `cua-driver-<digest>`, with deny and allow rules like the `goat` server                                                                       | Next turn                                                                                                   |
+| Pi (`pi`)                                             | Attach                                      | Pi has no MCP client; GOAT's Pi extension bridges the stdio server and passes screenshots through as images                                                               | Next Pi process start                                                                                       |
+| Muse (`muse`)                                         | Not supported                               | GOAT gives Muse session MCP servers over streamable HTTP only; the driver is a stdio server                                                                               | -                                                                                                           |
+| Claude cloud, Cursor cloud, Devin cloud (cloud tasks) | Not supported                               | The driver operates the GOAT host's desktop, not the cloud runner's                                                                                                       | -                                                                                                           |
+
+- **Alternatives.** Upstream #15006's per-thread proxy that ends the driver session at every turn
+  end (dropped upstream too: Stop ends the provider turn and the driver's idle timeout hides its
+  cursor). Reopening Claude's query when the server set changes, as #16528 does: GOAT refuses to
+  replace a Claude process that runs background work, so a live `setMcpServers` keeps the turn
+  from failing.

@@ -194,8 +194,16 @@ Desktop servers send `cuaDriverRequest` on the desktop telemetry control pipe an
 ([desktop.md](desktop.md#computer-use-host)).
 
 Every host passes the driver's telemetry and update-check opt-outs through its environment
-allowlist, and every MCP descriptor the service returns carries all of them. Nothing attaches the
-driver to provider sessions yet.
+allowlist, and every MCP descriptor the service returns carries all of them.
+
+`apps/server/src/cua/ComputerUseAttachment.ts` is the one decision for whether a provider session
+gets the driver. `ProviderSessionManager` asks it on every MCP prepare, so every turn, and stores
+the answer as `cuaDriver` on the thread's `McpProviderSessionConfig`. Plan turns, read-only
+sandboxes and providers that do not run on this host get nothing, and those threads never start the
+driver. Adapters attach `cuaDriver` as a stdio MCP server named `cua-driver` and add the
+`<computer_use>` instructions (`packages/provider-core/src/server/runtimeInstructions.ts`) only
+when the provider actually has it. Which adapters attach, and when a change reaches a live session,
+is in ADR-0020.
 
 > Decision record: [ADR-0020](decisions/ADR-0020-cua-driver-computer-use.md)
 
