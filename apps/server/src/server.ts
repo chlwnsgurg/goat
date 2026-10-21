@@ -240,6 +240,7 @@ import * as MaintenanceAudit from "./maintenance/MaintenanceAudit.ts";
 import * as ServerSelfUpdate from "./cloud/selfUpdate.ts";
 import * as ServerAutoUpdate from "./cloud/autoUpdate.ts";
 import * as DesktopAppUpdate from "./desktopUpdate/DesktopAppUpdate.ts";
+import * as CuaDriver from "./cua/CuaDriver.ts";
 import * as ServiceLauncherClient from "./cloud/serviceLauncherClient.ts";
 import * as ProcessDiagnostics from "./diagnostics/ProcessDiagnostics.ts";
 import * as HostResources from "./resourceTelemetry/HostResources.ts";
@@ -344,6 +345,11 @@ const layerFleetHealth = FleetHealth.layer.pipe(Layer.provide(layerHostPowerMoni
 // would open a second reader on the desktop telemetry fd.
 const layerDesktopAppUpdate = DesktopAppUpdate.layer.pipe(
   Layer.provide(layerDesktopTelemetryReceiver),
+);
+
+const layerCuaDriver = CuaDriver.layer.pipe(
+  Layer.provide(layerDesktopTelemetryReceiver),
+  Layer.provide(layerServerSettings),
 );
 
 const layerBackground = BackgroundPolicy.layer.pipe(
@@ -1168,6 +1174,7 @@ const layerRuntimeCoreDependenciesBase = Layer.mergeAll(
   ),
   Layer.provideMerge(RuntimeLayer.layerEventInfrastructure),
   Layer.provideMerge(Layer.merge(ProjectStore.layer, ThreadSearch.layer)),
+  Layer.provideMerge(layerCuaDriver),
   Layer.provideMerge(layerServerSettings),
   Layer.provideMerge(layerSourceControlProviderRegistry),
   Layer.provideMerge(layerGit),
