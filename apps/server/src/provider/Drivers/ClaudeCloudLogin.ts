@@ -41,7 +41,7 @@ export const CLAUDE_CLOUD_FORBIDDEN_ENVIRONMENT = [
 ] as const;
 
 /** Names of the forbidden variables set in `environment`. An empty value counts as unset. */
-export const forbiddenClaudeCloudVariables = (environment: NodeJS.ProcessEnv): string[] =>
+const forbiddenClaudeCloudVariables = (environment: NodeJS.ProcessEnv): string[] =>
   Object.keys(environment)
     .filter((key) =>
       key.startsWith("GIT_")
