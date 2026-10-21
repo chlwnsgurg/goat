@@ -197,6 +197,11 @@ Every host passes the driver's telemetry and update-check opt-outs through its e
 allowlist, and every MCP descriptor the service returns carries all of them. Nothing attaches the
 driver to provider sessions yet.
 
+`server.checkComputerUse` reports the host's platform, whether a driver is running, why the last
+start failed, and whether a Linux host runs Wayland. Settings on any client and the desktop's
+one-time prompt read it. A desktop that stops its driver on its own (`cuaDriverReport` with
+`stopped`) is restarting it, such as after new macOS grants, so that stop is not a failure.
+
 > Decision record: [ADR-0020](decisions/ADR-0020-cua-driver-computer-use.md)
 
 ## Services
