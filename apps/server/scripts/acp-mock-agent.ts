@@ -50,7 +50,8 @@ const emitPlanThenHang = process.env.GOAT_ACP_EMIT_PLAN_THEN_HANG === "1";
 const grokKillTaskShape = process.env.GOAT_ACP_GROK_KILL_TASK_SHAPE;
 const emitActiveToolThenHang = process.env.GOAT_ACP_EMIT_ACTIVE_TOOL_THEN_HANG === "1";
 const emitGrokMonitorPostTurnPoll = process.env.GOAT_ACP_EMIT_GROK_MONITOR_POST_TURN_POLL === "1";
-const emitGrokBackgroundTaskStarted = process.env.GOAT_ACP_EMIT_GROK_BACKGROUND_TASK_STARTED === "1";
+const emitGrokBackgroundTaskStarted =
+  process.env.GOAT_ACP_EMIT_GROK_BACKGROUND_TASK_STARTED === "1";
 const emitGrokBackgroundTaskPoll = process.env.GOAT_ACP_GROK_BACKGROUND_TASK_COMPLETION === "poll";
 const emitForeignSessionUpdates = process.env.GOAT_ACP_EMIT_FOREIGN_SESSION_UPDATES === "1";
 const waitForResumeRelease = process.env.GOAT_ACP_WAIT_FOR_RESUME_RELEASE === "1";
