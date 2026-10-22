@@ -33,6 +33,8 @@ import {
   ResponseStreamingMode,
   ServerSettingsError,
   type ServerSettingsPatch,
+  globalIdleCompaction,
+  withIdleCompaction,
 } from "@goat/contracts";
 import { deepMerge, type DeepPartial } from "@goat/shared/Struct";
 import { writeFileStringAtomically } from "@goat/shared/atomicWrite";
@@ -177,6 +179,7 @@ const normalizeServerSettings = (
     Effect.flatMap(decodeServerSettings),
     Effect.map(foldProviderInstanceEnabledFlags),
     Effect.map((next) => ({ ...next, defaultTheme: normalizeThemePreference(next.defaultTheme) })),
+    Effect.map((next) => withIdleCompaction(next, globalIdleCompaction(next))),
     Effect.map((next) => ({ ...next, ...deriveLegacyProjectOverrides(next) })),
     Effect.mapError(
       (cause) =>
@@ -1752,6 +1755,10 @@ const make = Effect.gen(function* () {
         };
       }
     }
+    // Settings saved by a server that kept the mode in `compactIdleThreads` move
+    // it to `idleCompaction`, so that switch goes to clients as a boolean. The
+    // defaults gain the field too, which tells clients this server reads modes.
+    settings = withIdleCompaction(settings, globalIdleCompaction(settings));
 
     if (!settingsExists) {
       const current = yield* Ref.get(committedHubRef);

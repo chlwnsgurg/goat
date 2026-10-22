@@ -12,7 +12,7 @@ import {
   ProviderInteractionMode,
   RuntimeMode,
 } from "@goat/contracts";
-import { deriveThreadRuntime } from "@goat/client-runtime/state/thread-execution";
+import type { deriveThreadStructureRuntime } from "@goat/client-runtime/state/thread-execution";
 import { scopeThreadRef } from "@goat/client-runtime/environment";
 import { type SetStateAction } from "react";
 import { useNavigate } from "@tanstack/react-router";
@@ -33,7 +33,7 @@ interface ComposerSelectionInput {
   readonly composerDraftTarget: ComposerThreadTarget;
   readonly draftThread: DraftSessionState | null;
   readonly activeThread: EnvironmentThreadShell | undefined;
-  readonly activeRuntime: ReturnType<typeof deriveThreadRuntime>;
+  readonly activeRuntime: ReturnType<typeof deriveThreadStructureRuntime>;
   readonly activeProjectSettings: {
     readonly settings: { readonly newWorktreesStartFromOrigin: boolean };
   };

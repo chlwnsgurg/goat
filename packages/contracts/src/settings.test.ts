@@ -24,6 +24,8 @@ import {
   PROJECT_SCOPED_SERVER_SETTING_KEYS,
   implicitDefaultInstance,
   isDevinAcpRegistryInstance,
+  globalIdleCompaction,
+  idleCompactionPatch,
   requiredScopesForProjectMutation,
   requiredScopesForServerSettingsPatch,
   resolveIdleCompaction,
@@ -31,6 +33,7 @@ import {
   resolveProviderInstanceEnabled,
   ServerSettings,
   ServerSettingsPatch,
+  withIdleCompaction,
 } from "./settings.ts";
 
 const decodeClientSettings = Schema.decodeUnknownSync(ClientSettingsSchema);
@@ -158,7 +161,7 @@ describe("custom model settings", () => {
 describe("resolveIdleCompaction", () => {
   it("lets a Claude instance override the global default", () => {
     const settings = decodeServerSettings({
-      compactIdleThreads: "off",
+      idleCompaction: "off",
       providerInstances: {
         claude_work: { driver: "claudeAgent", config: { idleCompaction: "onReturn" } },
         claude_personal: { driver: "claudeAgent" },
@@ -171,11 +174,38 @@ describe("resolveIdleCompaction", () => {
     expect(resolveIdleCompaction(settings, ProviderInstanceId.make("claudeAgent"))).toBe("off");
   });
 
-  it("keeps the legacy beta switch's behavior", () => {
-    expect(decodeServerSettings({ compactIdleThreads: true }).compactIdleThreads).toBe(
+  it("reads the mode from the legacy switch, in either form servers saved it", () => {
+    expect(globalIdleCompaction(decodeServerSettings({ compactIdleThreads: true }))).toBe(
       "beforeCacheExpires",
     );
-    expect(decodeServerSettings({}).compactIdleThreads).toBe("onReturn");
+    expect(globalIdleCompaction(decodeServerSettings({ compactIdleThreads: "off" }))).toBe("off");
+    expect(globalIdleCompaction(decodeServerSettings({}))).toBe("onReturn");
+  });
+
+  it("keeps the legacy switch a boolean, as shipped clients decode it", () => {
+    const encode = Schema.encodeSync(Schema.toCodecJson(ServerSettings));
+    for (const mode of ["onReturn", "beforeCacheExpires", "off"] as const) {
+      const encoded = encode(withIdleCompaction(DEFAULT_SERVER_SETTINGS, mode)) as {
+        readonly compactIdleThreads: unknown;
+        readonly idleCompaction: unknown;
+      };
+      expect(encoded.compactIdleThreads).toBe(mode === "beforeCacheExpires");
+      expect(encoded.idleCompaction).toBe(mode);
+    }
+  });
+
+  it("patches the field the server reads", () => {
+    expect(
+      idleCompactionPatch({ compactIdleThreads: false, idleCompaction: "onReturn" }, "off"),
+    ).toEqual({
+      idleCompaction: "off",
+    });
+    expect(idleCompactionPatch({ compactIdleThreads: "onReturn" }, "off")).toEqual({
+      compactIdleThreads: "off",
+    });
+    expect(idleCompactionPatch({ compactIdleThreads: false }, "beforeCacheExpires")).toEqual({
+      compactIdleThreads: true,
+    });
   });
 });
 
