@@ -88,6 +88,16 @@ const MODE_ARGS = {
   "dev:desktop": ["run", "--filter=@goat/desktop", "--filter=@goat/web", "dev"],
 } as const satisfies Record<string, ReadonlyArray<string>>;
 
+// `--built`: the web package rebuilds into apps/web/dist and the backend serves
+// it, so no Vite dev server runs.
+const BUILT_DEV_ARGS = [
+  "run",
+  "--filter=@goat/web",
+  "--filter=t3",
+  "--parallel",
+  "dev:built",
+] as const;
+
 type DevMode = keyof typeof MODE_ARGS;
 /**
  * `role` matters because only the backend honours `--host`/`GOAT_HOST`; the
@@ -185,6 +195,17 @@ export class DevRunnerHostNotProxiableError extends Schema.TaggedError<DevRunner
 ) {
   override get message(): string {
     return `--host ${this.host} cannot be combined with ${this.mode}: single-origin browser dev proxies the backend at localhost, and a backend bound only to ${this.host} leaves localhost unanswered, so every proxied request fails. Use a wildcard (0.0.0.0 or ::) to serve that interface and loopback together, or --share for remote access.`;
+  }
+}
+
+export class DevRunnerBuiltNeedsShareError extends Schema.TaggedError<DevRunnerBuiltNeedsShareError>()(
+  "DevRunnerBuiltNeedsShareError",
+  {
+    mode: Schema.Literals(["dev", "dev:server", "dev:web", "dev:desktop"]),
+  },
+) {
+  override get message(): string {
+    return `--built only works with \`dev --share\` (got ${this.mode}${this.mode === "dev" ? " without --share" : ""}): the backend serves the built client on the tailnet URL.`;
   }
 }
 
@@ -676,6 +697,7 @@ interface DevRunnerCliInput {
   readonly dryRun: boolean;
   readonly share: boolean;
   readonly seed?: boolean | undefined;
+  readonly built: boolean;
   readonly runArgs: ReadonlyArray<string>;
 }
 
@@ -698,6 +720,10 @@ export const runDevRunnerWithInput = Effect.fn("dev-runner.runDevRunnerWithInput
     !isProxiableBindHost(input.host)
   ) {
     return yield* new DevRunnerHostNotProxiableError({ mode: input.mode, host: input.host });
+  }
+
+  if (input.built && (input.mode !== "dev" || !input.share)) {
+    return yield* new DevRunnerBuiltNeedsShareError({ mode: input.mode });
   }
 
   const worktreePath = yield* resolveGitWorktreePath(yield* HostProcess.WorkingDirectory);
@@ -760,6 +786,7 @@ export const runDevRunnerWithInput = Effect.fn("dev-runner.runDevRunnerWithInput
   }
 
   const sharedWebPort = BASE_WEB_PORT + webOffset;
+  let built = false;
   if (input.share) {
     if (input.mode === "dev:server") {
       yield* Effect.logInfo("[dev-runner] --share has no effect for dev:server (no web server).");
@@ -772,18 +799,32 @@ export const runDevRunnerWithInput = Effect.fn("dev-runner.runDevRunnerWithInput
       // process (and reboots), so the cleanup has to be registered atomically
       // with creating it. An interrupt landing in between would otherwise
       // leave a mapping pointing at a port nothing is listening on.
-      const shared = yield* Effect.acquireRelease(shareDevServer({ webPort: sharedWebPort }), () =>
-        unshareDevServer(sharedWebPort).pipe(
-          Effect.flatMap((result) =>
-            result.cleared
-              ? Effect.void
-              : Effect.logWarning(
-                  `[dev-runner] could not remove the tailnet mapping for port ${String(sharedWebPort)}${
-                    result.explanation ? `: ${result.explanation}` : ""
-                  }. Remove it with \`tailscale serve --https=${String(sharedWebPort)} off\`.`,
-                ),
+      const shared = yield* Effect.acquireRelease(
+        shareDevServer({
+          webPort: sharedWebPort,
+          // The backend binds 127.0.0.1 unless --host changes it. A wildcard
+          // still answers there; `--host ::1` binds only the IPv6 loopback.
+          ...(input.built
+            ? {
+                localTarget: {
+                  port: Number(env.GOAT_PORT),
+                  host: ["::1", "[::1]"].includes(input.host?.trim() ?? "") ? "[::1]" : "127.0.0.1",
+                },
+              }
+            : {}),
+        }),
+        () =>
+          unshareDevServer(sharedWebPort).pipe(
+            Effect.flatMap((result) =>
+              result.cleared
+                ? Effect.void
+                : Effect.logWarning(
+                    `[dev-runner] could not remove the tailnet mapping for port ${String(sharedWebPort)}${
+                      result.explanation ? `: ${result.explanation}` : ""
+                    }. Remove it with \`tailscale serve --https=${String(sharedWebPort)} off\`.`,
+                  ),
+            ),
           ),
-        ),
       ).pipe(
         Effect.tapError((error: DevShareError) =>
           Effect.logWarning(
@@ -806,14 +847,21 @@ export const runDevRunnerWithInput = Effect.fn("dev-runner.runDevRunnerWithInput
         if (input.devUrl === undefined) {
           env.VITE_DEV_SERVER_URL = shared.url;
         }
-        // A shared origin serves a remote browser, where unbundled dev's
-        // per-module requests each pay a tailnet round trip — a cold module
-        // graph takes minutes to first paint. Bundled dev collapses that to a
-        // few chunk requests.
-        if (env.GOAT_BUNDLED_DEV === undefined) {
+        if (input.built) {
+          built = true;
+          env.GOAT_BUILT_DEV = "1";
+        } else if (env.GOAT_BUNDLED_DEV === undefined) {
+          // A shared origin serves a remote browser, where unbundled dev's
+          // per-module requests each pay a tailnet round trip — a cold module
+          // graph takes minutes to first paint. Bundled dev collapses that to a
+          // few chunk requests.
           env.GOAT_BUNDLED_DEV = "1";
         }
         yield* Effect.logInfo(`[dev-runner] shared on tailnet: ${shared.url}`);
+      } else if (input.built) {
+        yield* Effect.logWarning(
+          "[dev-runner] --built needs the tailnet share; running the Vite dev server instead.",
+        );
       }
     }
   }
@@ -826,7 +874,7 @@ export const runDevRunnerWithInput = Effect.fn("dev-runner.runDevRunnerWithInput
     env,
   });
 
-  const args = [...MODE_ARGS[input.mode], ...input.runArgs];
+  const args = [...(built ? BUILT_DEV_ARGS : MODE_ARGS[input.mode]), ...input.runArgs];
   const spawnCommand = yield* resolveSpawnCommand("vp", args, { env });
   const processContext = {
     mode: input.mode,
@@ -933,6 +981,12 @@ const devRunnerCli = Command.make("dev-runner", {
       "Seed an empty worktree database from ~/.goat (or ~/.t3) on first start (read-only, via migrate-dev-db). On by default; --no-seed or GOAT_DEV_SEED=0 skips it.",
     ),
     Flag.withFallbackConfig(optionalBooleanConfig("GOAT_DEV_SEED")),
+  ),
+  built: Flag.Boolean("built").pipe(
+    Flag.withDescription(
+      "With --share: serve a production web build from the backend instead of the Vite dev server. Rebuilds on change, no HMR, much smaller remote loads.",
+    ),
+    Flag.withDefault(false),
   ),
   runArgs: Argument.String("run-arg").pipe(
     Argument.withDescription("Additional Vite+ run args (pass after `--`)."),
