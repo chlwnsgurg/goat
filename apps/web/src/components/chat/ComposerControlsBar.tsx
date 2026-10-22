@@ -20,7 +20,7 @@ import {
   type ServerProvider,
 } from "@goat/contracts";
 import { cn } from "~/lib/utils";
-import { memo, type ReactNode } from "react";
+import { type ReactNode } from "react";
 import {
   renderProviderTraitsMenuContent,
   renderProviderTraitsPicker,
@@ -31,7 +31,7 @@ import type { useComposerProviderModel } from "./useComposerProviderModel";
  * The composer footer controls: model picker, traits, mode controls and the overflow menu for
  * blocks that do not fit. Rendered in the expanded footer or the resting controls host.
  */
-export const ComposerControlsBar = memo(function ComposerControlsBar(props: {
+export function ComposerControlsBar(props: {
   environmentId: EnvironmentId;
   /** GOAT layout: the collapsed row carries the attach button itself. */
   attachAction: ReactNode;
@@ -350,4 +350,4 @@ export const ComposerControlsBar = memo(function ComposerControlsBar(props: {
       </>
     </>
   );
-});
+}
