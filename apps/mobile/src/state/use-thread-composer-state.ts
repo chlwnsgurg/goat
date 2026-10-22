@@ -1,4 +1,8 @@
-import { deriveCloudTaskState } from "@goat/client-runtime/state/cloud-task";
+import {
+  cloudRetryAllowed,
+  deriveCloudTaskState,
+  presentCloudRun,
+} from "@goat/client-runtime/state/cloud-task";
 import { useComposerAttachmentActions } from "./use-composer-attachment-actions";
 import * as Dialog from "../components/ui/Dialog";
 import { AuthOrchestrationOperateScope } from "@goat/contracts";
@@ -250,13 +254,19 @@ export function useThreadComposerState() {
   // cannot be an either/or with the loaded messages.
   const pendingCreationMessage = selectedThreadCreation?.message ?? null;
   const [feedCache] = useState(createThreadFeedCache);
+  const cloudRun = presentCloudRun(selectedThreadProjection?.projection);
   const selectedThreadFeed = (() => {
     const pendingCreation =
       pendingCreationMessage !== null &&
       !selectedThreadMessages?.some((message) => message.id === pendingCreationMessage.messageId)
         ? [pendingThreadCreationMessage(pendingCreationMessage)]
         : [];
-    const feed = buildThreadFeed(selectedThreadVisibleTurnItems, {
+    // The cloud run card above the composer already says what these rows repeat.
+    const visibleTurnItems =
+      cloudRun === null
+        ? selectedThreadVisibleTurnItems
+        : selectedThreadVisibleTurnItems.filter((row) => !cloudRun.hiddenItemIds.has(row.item.id));
+    const feed = buildThreadFeed(visibleTurnItems, {
       anchoredMessages: pendingCreation,
       attempts: selectedThreadAttempts,
       nodes: selectedThreadNodes,
@@ -318,6 +328,11 @@ export function useThreadComposerState() {
     (provider) => provider.instanceId === modelSelection?.instanceId,
   );
   const cloudState = deriveCloudTaskState(selectedThreadProjection?.projection, selectedProvider);
+  const cloudRunRetryAllowed = cloudRetryAllowed(
+    cloudRun,
+    selectedThreadProjection?.projection,
+    serverConfig?.providers ?? [],
+  );
   const interactionMode = selectedThread
     ? resolveProviderInteractionMode(
         selectedProvider,
@@ -881,6 +896,8 @@ export function useThreadComposerState() {
 
   return {
     cloudState,
+    cloudRun,
+    cloudRunRetryAllowed,
     feedbackSubmissions,
     dismissFeedback,
     selectedThreadFeed,

@@ -260,7 +260,7 @@ import { ThreadTimeline } from "./chat/ThreadTimeline";
 import { ProviderSubagentBar } from "./chat/ProviderSubagentBar";
 import { getTriggerDisplayModelName } from "./chat/providerIconUtils";
 import { deriveCloudTaskState } from "@goat/client-runtime/state/cloud-task";
-import { CloudTaskStatus } from "./chat/CloudTaskStatus";
+import { useCloudRun } from "./chat/useCloudRun";
 import {
   overlayComposerIsResting,
   resolveComposerTimelineInset,
@@ -1521,6 +1521,23 @@ export default function ChatView(props: ChatViewProps) {
     activePendingUserInput: activePendingUserInput?.requestId ?? null,
     threadError,
   });
+  const { cloudRun, onRetryCloudRun } = useCloudRun({
+    environmentId,
+    threadId: activeThread?.id ?? null,
+    projection: serverProjection,
+    canOperate: canOperateThread && !isSendBusy,
+    providers: providerStatuses,
+    runtimeMode,
+    interactionMode,
+    setThreadError,
+  });
+  // A finished cloud run's card already states its failure; the runtime error banner repeats it.
+  const cloudRunShowsThreadError =
+    cloudRun !== null &&
+    cloudRun.phase !== "running" &&
+    threadErrorIsServerRuntimeError &&
+    timelineThreadError !== null;
+  const timelineBannerError = cloudRunShowsThreadError ? null : timelineThreadError;
   const optimisticCompactionMessage = optimisticUserMessages.at(-1);
   const latestServerUserItem = serverVisibleTurnItems.findLast(
     (row) => row.item.type === "user_message",
@@ -1807,7 +1824,7 @@ export default function ChatView(props: ChatViewProps) {
   )
     ? activeProviderStatus
     : null;
-  const hasTimelineTopBanner = Boolean(timelineThreadError) || visibleProviderStatus !== null;
+  const hasTimelineTopBanner = Boolean(timelineBannerError) || visibleProviderStatus !== null;
   const activeProjectCwd = activeProject?.workspaceRoot ?? null;
   const activeThreadWorktreePath = activeThread?.worktreePath ?? null;
   const activeWorkspaceRoot = activeThreadWorktreePath ?? activeProjectCwd ?? undefined;
@@ -3577,7 +3594,7 @@ export default function ChatView(props: ChatViewProps) {
               setDismissedProviderStatusBannerKey={setDismissedProviderStatusBannerKey}
               onOpenProviderSetup={openProviderSetupStable}
               threadId={activeThread.id}
-              threadError={timelineThreadError}
+              threadError={timelineBannerError}
               threadErrorClass={
                 threadErrorIsServerRuntimeError ? (serverRuntime?.lastErrorClass ?? null) : null
               }
@@ -3611,6 +3628,10 @@ export default function ChatView(props: ChatViewProps) {
                 {...((paintOnlyDisplayedTimeline ? heldPaintContext?.activity : null) ??
                   timelineActivity)}
                 worktreeSetup={paintOnlyDisplayedTimeline ? null : worktreeSetup}
+                cloudRun={paintOnlyDisplayedTimeline ? null : cloudRun}
+                {...(paintOnlyDisplayedTimeline || onRetryCloudRun === null
+                  ? {}
+                  : { onRetryCloudRun })}
                 onCancelWorktreeSetup={onCancelWorktreeSetupStable}
                 {...(paintOnlyDisplayedTimeline
                   ? {}
@@ -3812,9 +3833,6 @@ export default function ChatView(props: ChatViewProps) {
                                 <p role="status" className="px-4 text-sm">
                                   {cloudState.launchSourceNotice}
                                 </p>
-                              ) : null}
-                              {cloudState.cloudTask ? (
-                                <CloudTaskStatus task={cloudState.cloudTask} />
                               ) : null}
                               {cloudState.composerBlockReason ? (
                                 <p role="status" className="px-4 text-sm">
