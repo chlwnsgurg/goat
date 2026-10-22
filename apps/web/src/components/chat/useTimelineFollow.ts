@@ -31,7 +31,7 @@ import { resolveTimelineIsAtEnd } from "./MessagesTimeline.logic";
 import { shouldReleaseTimelineAnchorForToolActivity } from "../ChatView.logic";
 import { releaseChatTimelineAnchor } from "../ChatView.logic";
 import type { Dispatch, RefObject } from "react";
-import type { EnvironmentThread } from "@goat/client-runtime/state/shell";
+import type { ThreadStructure } from "@goat/client-runtime/state/shell";
 import type { deriveThreadActivityRun } from "@goat/client-runtime/state/thread-execution";
 import type { EnvironmentThreadStatus } from "@goat/client-runtime/state/threads";
 import type { TimelineEntry } from "../../session-logic";
@@ -54,7 +54,7 @@ interface TimelineFollowInput {
   readonly activeThreadKey: string | null;
   readonly activeThreadId: ThreadId | undefined;
   readonly isServerThread: boolean;
-  readonly serverProjection: EnvironmentThread["projection"] | null;
+  readonly serverProjection: ThreadStructure | null;
   readonly threadStatus: EnvironmentThreadStatus;
   readonly activeActivityRun: ReturnType<typeof deriveThreadActivityRun>;
   readonly activeRunningTurnId: RunId | null;
@@ -598,9 +598,17 @@ export function useTimelineFollow(input: TimelineFollowInput) {
   };
   const onIsAtEndChangeStable = useStableCallback(onIsAtEndChange);
 
+  // timelineEntries leave out reasoning rows (their text is not in the
+  // structure), and reasoning counts as tool activity, like any work row.
+  const runningTurnHasReasoning =
+    activeRunningTurnId !== null &&
+    serverProjection?.visibleTurnItems.some(
+      (row) => row.item.type === "reasoning" && row.item.runId === activeRunningTurnId,
+    ) === true;
   useLayoutEffect(() => {
     if (timelineScrollModeRef.current !== "anchoring-new-turn") return;
     if (
+      (runningTurnHasReasoning && timelineAnchorMessageId !== null && timelineLiveFollowEnabled) ||
       shouldReleaseTimelineAnchorForToolActivity({
         anchorMessageId: timelineAnchorMessageId,
         liveFollowEnabled: timelineLiveFollowEnabled,
@@ -612,6 +620,7 @@ export function useTimelineFollow(input: TimelineFollowInput) {
     }
   }, [
     activeRunningTurnId,
+    runningTurnHasReasoning,
     scrollToEndStable,
     timelineAnchorMessageId,
     timelineEntries,
