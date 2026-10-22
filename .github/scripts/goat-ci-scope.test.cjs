@@ -49,6 +49,10 @@ describe("selectTasks", () => {
     );
   });
 
+  it("runs the test task for docs/llms.txt, which a build script test compares with the registry", () => {
+    assert.deepEqual(tasksFor("docs/llms.txt"), ["check", "test"]);
+  });
+
   it("runs everything for files it cannot place", () => {
     for (const file of [
       ".github/workflows/goat-ci.yml",

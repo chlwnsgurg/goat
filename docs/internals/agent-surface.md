@@ -499,17 +499,21 @@ URLs are never written to events.
 
 ## Documentation from the registry
 
-**Now.** Agent-facing docs are hand-written: per-tool sections in
+**Now.** `vp run agent-surface:gen` writes [docs/llms.txt](../llms.txt) from the
+registry: one line per path, grouped by resource, with its summary, effect, MCP
+tool name, and host-routable or thread-only flags. A test in
+`scripts/agent-surface-gen.test.ts` fails CI when the committed file differs from
+a fresh render, and `--check` lists the stale lines locally. The rest of the
+agent-facing docs are hand-written: per-tool sections in
 [orchestrator-mcp-server.md](../orchestration-v2/orchestrator-mcp-server.md), the
 prefix table in [structure/mcp-toolkits.md](../../structure/mcp-toolkits.md), and
-CLI help strings in each `apps/server/src/cli/*.ts`. Nothing checks them against
+CLI help strings in each `apps/server/src/cli/*.ts`. Nothing checks those against
 the code.
 
-**Proposed.** `vp run agent-surface:gen` writes, from the registry and the
+**Proposed.** `vp run agent-surface:gen` also writes, from the registry and the
 contract schemas:
 
 - `docs/reference/agent-surface/<resource>.md`, one page per resource;
-- `docs/llms.txt`, a compact index (path, one line, effect class) with links;
 - the CLI's help text and a `goat.1` man page bundled with the app.
 
 The server also serves `/llms.txt` filtered to what the calling credential can

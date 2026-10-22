@@ -113,6 +113,9 @@ function isDocument(file) {
   return !file.includes("/") && /\.md$/i.test(file);
 }
 
+/** Generated documents whose drift test runs in the test task's build scripts step. */
+const GENERATED_DOCUMENTS = new Set(["docs/llms.txt"]);
+
 /** Reads apps/* and packages/* package.json files into a map of directory to workspace dependencies. */
 function readWorkspace(root) {
   const manifests = new Map();
@@ -303,6 +306,10 @@ function selectTasks(files, workspace, { graph, weights = {} } = {}) {
   };
   const changed = new Map();
   for (const file of files) {
+    if (GENERATED_DOCUMENTS.has(file)) {
+      choose("test", file);
+      continue;
+    }
     if (isDocument(file)) continue;
     // A dependency change can move any task, and the release version check reads every manifest.
     if (path.posix.basename(file) === "package.json") return everything(file);

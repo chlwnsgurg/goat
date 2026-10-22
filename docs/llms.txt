@@ -1,0 +1,308 @@
+# GOAT agent surface
+
+> Every capability an agent can reach in GOAT, listed by `resource.verb` path. Generated from packages/contracts/src/agentSurface/registry.ts by scripts/agent-surface-gen.ts; run `vp run agent-surface:gen` instead of editing this file.
+
+Each line reads `path — summary (effect; MCP tool name; flags)`. The effect is read, write, or destructive. host-routable means the tool accepts `host` to act on another connected machine. thread only means the caller must be an agent running inside a GOAT thread, and client only means it needs a signed-in client session.
+
+When the goat_describe and goat_call tools are available, use goat_describe to read a path's arguments and goat_call to run it by path. Otherwise call the MCP tool named on the line.
+
+The design and rollout of these paths are in [docs/internals/agent-surface.md](internals/agent-surface.md).
+
+## attachment
+
+- attachment.discard — Discard a pending upload (destructive; goat_attachment_discard)
+- attachment.prepare_upload — Create the app's signed upload URL (destructive; goat_attachment_prepare_upload)
+
+## channel
+
+- channel.bot_home_claim — Make this machine GOAT Bot's home (write; channel_bot_home_claim)
+- channel.bot_home_read — See where GOAT Bot lives (read; channel_bot_home)
+- channel.ingest — Message GOAT's front desk (write; channel_ingest)
+- channel.input_read — Read a front desk reply (read; channel_input_get)
+- channel.task_export — Export GOAT brief/outcome pairs (read; channel_task_export)
+- channel.task_list — List GOAT ledger tasks (read; channel_task_list)
+- channel.task_move — Continue a GOAT task on another machine (write; channel_task_move)
+- channel.task_read — Read a GOAT ledger task (read; channel_task_get)
+- channel.task_report — Report on a GOAT ledger task (write; channel_task_report)
+
+## cloud_agent
+
+- cloud_agent.holders — List cloud agent credential holders (read; goat_cloud_holders)
+- cloud_agent.launch — Launch a cloud agent on a credential holder (write; goat_cloud_launch)
+- cloud_agent.run_forget — Stop tracking a registered cloud run (destructive; goat_cloud_run_forget)
+- cloud_agent.run_list — List cloud runs in this environment (read; goat_cloud_run_list)
+- cloud_agent.run_register — Track a cloud run launched outside GOAT (write; goat_cloud_run_register)
+
+## cloud_machine
+
+- cloud_machine.create — Create a cloud machine (write; goat_cloud_machine_create)
+- cloud_machine.list — List cloud machines (read; goat_cloud_machine_list)
+- cloud_machine.resume — Resume a cloud machine (write; goat_cloud_machine_resume)
+- cloud_machine.stop — Stop a cloud machine (write; goat_cloud_machine_stop)
+
+## computer_use
+
+- computer_use.request — Ask a person to admit this thread to computer use on this host until a set time (write; goat_computer_use_request; thread only)
+
+## connection
+
+- connection.add_ssh — Add an SSH device (write; goat_connection_add_ssh)
+- connection.list — List saved connections (read; goat_connection_list)
+- connection.remove — Remove a saved connection (destructive; goat_connection_remove)
+
+## decision
+
+- decision.answer — Answer an open decision using optionId, or a projected pending question using answers or decision plus reason (destructive; goat_decision_answer)
+- decision.get — Read one durable decision or projected pending question by id (read; goat_decision_get)
+- decision.list — List durable decisions and read-only projections of pending GOAT questions in this environment (read; goat_decision_list)
+- decision.request — Request a durable decision with distinct option ids, an optional recommendation and expiry, and a required permission profile (write; goat_decision_request)
+
+## device
+
+- device.close — Close device (destructive; device_close; thread only)
+- device.list — List devices (read; device_list; thread only)
+- device.open — Open device (write; device_open; thread only)
+- device.screenshot — Screenshot device (read; device_screenshot; thread only)
+
+## environment
+
+- environment.preferences_update — Update selected environment-wide preferences through normal settings persistence and notifications (destructive; goat_environment_preferences_update)
+- environment.read — Read this server's identity and selected environment preferences (read; goat_environment_read)
+
+## fallback_chain
+
+- fallback_chain.get — Read the configured model fallback chains and the default chain for goals (read; goat_fallback_chain_get)
+- fallback_chain.set — Create, replace, or delete one model fallback chain (destructive; goat_fallback_chain_set)
+
+## goal
+
+- goal.apply — Declare or update a fleet goal (write; goat_goal_apply; thread only)
+- goal.delete — Delete a fleet goal (destructive; goat_goal_delete; thread only)
+- goal.get — Read one of your fleet goals (read; goat_goal_get; thread only)
+- goal.list — List your fleet goals (read; goat_goal_list; thread only)
+- goal.pause — Pause a fleet goal (write; goat_goal_pause; thread only)
+- goal.resume — Resume a paused fleet goal (write; goat_goal_resume; thread only)
+
+## handoff
+
+- handoff.create — Request a secret from the user (write; request_secret; thread only)
+
+## host
+
+- host.cordon — Stop placing new goal work on a host (write; goat_host_cordon)
+- host.drain — Cordon a host and move its goal attempts away between runs (write; goat_host_drain)
+- host.status — Read host status for this machine and every SSH host this process is connected to and every linked host: GOAT version, CPU, memory, load average, disk free space, running/waiting/queued thread counts, every configured provider instance (providers), and cached provider quota for those that report it (quotas) (read; goat_host_status; host-routable)
+- host.uncordon — Allow placements on a cordoned host again (write; goat_host_uncordon)
+
+## host_link
+
+- host_link.create — Link a GOAT host over HTTPS (write; goat_host_link_create)
+- host_link.list — List linked GOAT hosts (read; goat_host_link_list)
+- host_link.remove — Remove a linked GOAT host (destructive; goat_host_link_remove)
+
+## html
+
+- html.preview — Preview HTML (read; html_preview; thread only)
+- html.render — Render HTML (write; html_render; thread only)
+
+## hub
+
+- hub.device_join — Join a device to this OpenCodex Home as a Remote Link Child or Hub client (write; goat_hub_device_join)
+- hub.device_leave — Remove a Remote Link Child or Hub client from this OpenCodex Home (destructive; goat_hub_device_leave)
+- hub.device_repair — Repair a device's parity with this OpenCodex Home (write; goat_hub_device_repair)
+- hub.device_verify — Verify that one device is served by this OpenCodex Home (read; goat_hub_device_verify)
+
+## memory
+
+- memory.forget — Forget memory (destructive; memory_forget)
+- memory.history — Read one bounded memory history page (read; memory_history)
+- memory.hub_disable — Disable the memory hub using settings:write and a versioned compare-and-swap (destructive; memory_hub_disable)
+- memory.list — List one bounded memory page (read; memory_list)
+- memory.read — Read one memory item (read; memory_read)
+- memory.read_source — Read original evidence through its owner (read; memory_read_source)
+- memory.revert_resolution — Revert a memory resolution within its deadline (destructive; memory_revert_resolution)
+- memory.search — Search memory (read; memory_search)
+- memory.settings_get — Read memory settings and the effective memory model (read; memory_settings_get)
+- memory.settings_update — Change memory generation, model, or sharing settings (write; memory_settings_update)
+- memory.sync_status — Read memory synchronization status, including disabled or unbound state (read; memory_sync_status)
+- memory.upsert — Create or update memory with an explicit memory:write grant (write; memory_upsert)
+
+## note
+
+- note.list — List the notes on this environment (read; goat_note_list)
+- note.move — Rename a note or move it to another folder (write; goat_note_move)
+- note.read — Read one note's markdown and revision (read; goat_note_read)
+- note.write — Create or replace a note's markdown (write; goat_note_write)
+
+## origin
+
+- origin.report — Report progress, a result, failure or a need for human input to the origin of this thread (write; goat_origin_report; thread only)
+- origin.reports_wait — Collect one origin correlation's reports using its read key (read; goat_origin_reports_wait)
+
+## pending_request
+
+- pending_request.list — List pending user-input questions (read; goat_pending_request_list; host-routable)
+- pending_request.read — Read a pending or resolved user question, including status, responder and resolution time when available (read; goat_pending_request_read; host-routable)
+- pending_request.respond — Answer a pending user-input question with answers and a required reason (1–2000 characters, including non-whitespace text) (destructive; goat_pending_request_respond; host-routable)
+
+## permission_profile
+
+- permission_profile.get — Read the caller's effective permission profile (read; goat_permission_profile_get)
+- permission_profile.sync — Exchange goatclaw policy with a connected GOAT (write; goat_goatclaw_sync; client only)
+
+## preview
+
+- preview.back — Go back in browser preview (write; preview_back; thread only)
+- preview.click — Click preview page (destructive; preview_click; thread only)
+- preview.close — Close one preview tab owned by this thread through the normal server/host tab lifecycle (destructive; goat_preview_close; thread only)
+- preview.dialog — Resolve browser dialog (destructive; preview_dialog; thread only)
+- preview.drag — Drag in preview page (destructive; preview_drag; thread only)
+- preview.evaluate — Evaluate JavaScript in preview (destructive; preview_evaluate; thread only)
+- preview.forward — Go forward in browser preview (write; preview_forward; thread only)
+- preview.hover — Hover preview page (write; preview_hover; thread only)
+- preview.list — List this thread's preview tabs (read; goat_preview_list; thread only)
+- preview.logs — Read browser diagnostics (read; preview_logs; thread only)
+- preview.navigate — Navigate browser preview (write; preview_navigate; thread only)
+- preview.open — Open browser preview (destructive; preview_open; thread only)
+- preview.press — Press key in preview page (destructive; preview_press; thread only)
+- preview.recording_start — Start browser recording (write; preview_recording_start; thread only)
+- preview.recording_stop — Stop browser recording (write; preview_recording_stop; thread only)
+- preview.reload — Reload browser preview (write; preview_reload; thread only)
+- preview.resize — Resize browser viewport (write; preview_resize; thread only)
+- preview.scroll — Scroll preview page (write; preview_scroll; thread only)
+- preview.select — Select preview option (destructive; preview_select; thread only)
+- preview.set_appearance — Set preview appearance (write; preview_set_appearance; thread only)
+- preview.snapshot — Inspect browser page (read; preview_snapshot; thread only)
+- preview.status — Get preview status (read; preview_status; thread only)
+- preview.type — Type into preview page (destructive; preview_type; thread only)
+- preview.upload — Upload files to preview page (destructive; preview_upload; thread only)
+- preview.wait_for — Wait for preview page condition (read; preview_wait_for; thread only)
+
+## project
+
+- project.clone — Clone a repository using the app's source-control service (destructive; goat_project_clone)
+- project.create — Register a project directory through the existing project service (destructive; goat_project_create)
+- project.delete — Delete a project using the existing project deletion lifecycle (destructive; goat_project_delete)
+- project.list — List registered projects in this environment (read; goat_project_list; host-routable)
+- project.read — Read a registered project in this environment, including its workspace and saved scripts (read; goat_project_read; host-routable)
+- project.update — Update a registered project's settings (destructive; goat_project_update)
+
+## provider
+
+- provider.addable_list — List providers that can be added, with install and sign-in state (read; goat_provider_addable_list)
+- provider.diagnose — Diagnose provider readiness (read; goat_provider_diagnose; host-routable)
+- provider.home_request — Request approval for a Codex Home route (write; goat_provider_home_request; thread only)
+- provider.host_matrix — Read which machines have each provider CLI (read; goat_provider_host_matrix)
+- provider.list — Get orchestration capabilities (read; orchestrator_capabilities)
+- provider.login_cancel — Cancel a sign-in flow this caller started (write; goat_provider_login_cancel)
+- provider.login_start — Start a provider sign-in (write; goat_provider_login_start)
+- provider.login_status — Read a sign-in flow this caller started (read; goat_provider_login_status)
+- provider.setup_open — Ask a person to add or sign in to a provider in the app (write; goat_provider_setup_open; thread only)
+- provider.sync — Install and sign in to a provider CLI on other machines (write; goat_provider_sync)
+- provider.sync_cancel — Stop a provider sync (write; goat_provider_sync_cancel)
+- provider.sync_status — Read a provider sync's per-host progress (read; goat_provider_sync_status)
+
+## pull_request
+
+- pull_request.link — Link pull request to thread (write; link_pull_request)
+- pull_request.list — List thread pull requests (read; list_thread_pull_requests)
+- pull_request.unlink — Unlink pull request from thread (destructive; unlink_pull_request)
+- pull_request.unwatch — Stop watching pull request (write; unwatch_pull_request)
+- pull_request.watch — Watch pull request (write; watch_pull_request)
+
+## pull_request_guide
+
+- pull_request_guide.read — Read pull request guide (read; read_pull_request_guide)
+- pull_request_guide.update — Write pull request guides (write; write_pull_request_guides)
+
+## queue
+
+- queue.cancel — Cancel a queued run using the existing queue command (destructive; goat_queue_cancel)
+- queue.edit — Replace a queued message's text, preserving its attachments (destructive; goat_queue_edit)
+- queue.list — List queued messages in delivery order (read; goat_queue_list)
+- queue.promote_to_steer — Deliver a queued message as steering to the specified active run (destructive; goat_queue_promote_to_steer)
+- queue.read — Read up to 16,000 characters of a queued message (read; goat_queue_read)
+- queue.reorder — Move a queued run before another queued run, or to the end with beforeRunId=null (destructive; goat_queue_reorder)
+
+## repository
+
+- repository.snapshot — Read a bounded content snapshot of explicitly named tracked files in a registered repository (read; goat_repository_snapshot; host-routable)
+
+## review_findings
+
+- review_findings.export — Export review finding history as JSONL (read; goat_review_findings_export)
+- review_findings.record — Record review finding decisions and later outcomes (write; goat_review_findings_record; thread only)
+
+## schedule
+
+- schedule.create — Schedule a recurring task (destructive; schedule_task)
+- schedule.delete — Delete a scheduled task (destructive; delete_scheduled_task)
+- schedule.list — List scheduled tasks (read; list_scheduled_tasks)
+- schedule.run — Run a scheduled task now through the existing scheduler (destructive; run_scheduled_task_now)
+- schedule.update — Update a scheduled task (destructive; update_scheduled_task)
+
+## scheduler
+
+- scheduler.status — Read fleet placement status: per host counts, limits, quota windows and why goal work would be refused, plus fallback cooldowns and recent placement decisions (read; goat_scheduler_status)
+
+## ssh
+
+- ssh.browse — Browse folders over SSH (write; goat_ssh_browse; host-routable)
+- ssh.host_add — Add an SSH host (write; goat_ssh_host_add)
+- ssh.host_forget — Forget an SSH host (destructive; goat_ssh_host_forget)
+- ssh.host_list — List SSH hosts (read; goat_ssh_host_list)
+- ssh.host_prepare — Prepare an SSH host (write; goat_ssh_host_prepare)
+- ssh.host_status — Read SSH runtime status (read; goat_ssh_host_status)
+- ssh.reports — List this thread's SSH launches and latest factual reports (read; goat_ssh_reports; thread only)
+- ssh.runtime_update — Update an SSH runtime (write; goat_ssh_runtime_update)
+- ssh.thread_handoff — Continue a thread on another machine (destructive; goat_ssh_thread_handoff; host-routable)
+- ssh.thread_launch — Start a thread on another machine (destructive; goat_ssh_thread_launch; host-routable)
+
+## task
+
+- task.cancel — Cancel delegated task (destructive; task_cancel; thread only)
+- task.create — Delegate a child task (destructive; delegate_task; thread only)
+- task.read — Get delegated task status (write; task_status; thread only)
+
+## thread
+
+- thread.checkpoint_capture — Export a completed checkpoint (write; goat_thread_checkpoint_capture)
+- thread.checkpoint_reconcile — Reconcile a checkpoint recovery (write; goat_thread_checkpoint_reconcile)
+- thread.checkpoint_restore — Restore a checkpoint (write; goat_thread_checkpoint_restore)
+- thread.configuration — Read a thread's provider/model selection and modes (read; goat_thread_configuration)
+- thread.configure — Set a thread's provider, model and options with the existing selection command (destructive; goat_thread_configure)
+- thread.create_many — Create GOAT threads (destructive; create_threads; thread only)
+- thread.fork — Fork a thread from a stable run or checkpoint using the existing fork command (destructive; goat_thread_fork)
+- thread.handoff_host — Recover a watched remote thread (write; goat_thread_handoff_host; thread only)
+- thread.interrupt — Interrupt a GOAT thread (destructive; goat_thread_interrupt; host-routable)
+- thread.launch — Create an ordinary TOP-LEVEL thread with an explicit workspace binding before its agent starts (destructive; goat_thread_launch)
+- thread.list — List GOAT threads (read; goat_thread_list; host-routable)
+- thread.merge_back — Merge context from a thread back to a related thread in the same project (destructive; goat_thread_merge_back)
+- thread.organize — Organize a thread (destructive; goat_thread_organize)
+- thread.read — Read a GOAT thread (read; goat_thread_read; host-routable)
+- thread.replication_set — Set checkpoint replication for a host (write; goat_thread_replication_set)
+- thread.report_result — Report this thread's result (write; goat_thread_report_result; thread only)
+- thread.reschedule — Move a thread to another host from its pushed branch (write; goat_thread_reschedule)
+- thread.search — Find threads whose title or finished user/assistant messages contain query (case-insensitive substring) (read; goat_thread_search; host-routable)
+- thread.send — Send to a GOAT thread (destructive; goat_thread_send; host-routable)
+- thread.send_attachments — Send uploaded attachments to this thread or any other thread in this environment (destructive; goat_thread_send_attachments)
+- thread.status — Check a GOAT thread's status (read; goat_thread_status; host-routable)
+- thread.transfers — Read context transfer status for a thread (read; goat_thread_transfers)
+- thread.unwatch — Stop watching a GOAT thread (write; goat_thread_unwatch; host-routable; thread only)
+- thread.update — Update GOAT thread metadata (destructive; goat_thread_update)
+- thread.wait — Wait for a GOAT thread (read; goat_thread_wait; host-routable)
+- thread.watch — Watch a GOAT thread (write; goat_thread_watch; host-routable; thread only)
+- thread.watch_list — List watched GOAT threads (read; goat_thread_watch_list; thread only)
+
+## workflow
+
+- workflow.stop — Stop a workflow (destructive; goat_workflow_stop)
+
+## worktree
+
+- worktree.cleanup — Clean up stale worktrees (destructive; goat_worktree_cleanup; host-routable)
+- worktree.handoff — Hand off thread to a git worktree (destructive; goat_worktree_handoff; thread only)
+- worktree.inventory — List worktrees (read; goat_worktree_inventory; host-routable)
+- worktree.list — List branch refs and their associated checkout paths for a thread's workspace (omit threadId for this thread) using the app's ref inventory (read; goat_worktree_list)
+- worktree.remove — Remove a worktree (destructive; goat_worktree_remove; host-routable)
+- worktree.status — Get thread worktree status (read; goat_worktree_status; thread only)
