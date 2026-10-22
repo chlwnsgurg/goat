@@ -136,13 +136,6 @@ async function main(): Promise<void> {
     if (existing) NodeFS.rmSync(target);
     NodeFS.symlinkSync(source, target);
   }
-
-  const warm = NodeChildProcess.spawnSync(
-    process.execPath,
-    [NodePath.join(worktree, "apps", "web", "scripts", "warm-dep-cache.ts")],
-    { cwd: worktree, stdio: "inherit" },
-  );
-  process.exit(warm.status ?? 1);
 }
 
 // pnpm cannot clone or hardlink across filesystems, so a store on another
